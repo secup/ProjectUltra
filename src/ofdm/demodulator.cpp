@@ -315,24 +315,74 @@ struct OFDMDemodulator::Impl {
         return rms >= MIN_RMS;
     }
 
-    float measureCorrelation(size_t offset, float* out_energy = nullptr) {
-        // Cross-correlation with known preamble (repeated STS pattern)
-        if (offset + symbol_samples * 2 > rx_buffer.size()) return 0.0f;
+    // Convert real signal to analytic (complex) signal using FFT-based Hilbert transform
+    // This is essential for CFO-tolerant correlation of real passband signals
+    std::vector<Complex> toAnalytic(const float* samples, size_t len) {
+        // Pad to next power of 2 for FFT efficiency
+        size_t fft_len = 1;
+        while (fft_len < len) fft_len *= 2;
 
-        // Look for repeated pattern (STS)
-        float corr = 0;
-        float energy = 0;
-        size_t len = config.fft_size + config.getCyclicPrefix();
+        // Create temporary FFT
+        FFT hilbert_fft(fft_len);
 
+        // Copy input to complex buffer (real signal, zero imag)
+        std::vector<Complex> time_in(fft_len, Complex(0, 0));
         for (size_t i = 0; i < len; ++i) {
-            float s1 = rx_buffer[offset + i];
-            float s2 = rx_buffer[offset + i + len];
-            corr += s1 * s2;
-            energy += s1 * s1 + s2 * s2;
+            time_in[i] = Complex(samples[i], 0);
         }
 
-        if (out_energy) *out_energy = energy;
-        return 2.0f * corr / (energy + 1e-10f);
+        // Forward FFT
+        std::vector<Complex> freq(fft_len);
+        hilbert_fft.forward(time_in, freq);
+
+        // Create analytic signal by zeroing negative frequencies
+        // DC: keep as-is
+        // Positive frequencies (1 to N/2-1): multiply by 2
+        // Nyquist (N/2): keep as-is
+        // Negative frequencies (N/2+1 to N-1): zero
+        for (size_t i = 1; i < fft_len / 2; ++i) {
+            freq[i] *= 2.0f;
+        }
+        for (size_t i = fft_len / 2 + 1; i < fft_len; ++i) {
+            freq[i] = Complex(0, 0);
+        }
+
+        // Inverse FFT to get analytic signal
+        std::vector<Complex> analytic(fft_len);
+        hilbert_fft.inverse(freq, analytic);
+
+        // Return only the original length
+        analytic.resize(len);
+        return analytic;
+    }
+
+    float measureCorrelation(size_t offset, float* out_energy = nullptr) {
+        // CFO-tolerant sync detection using analytic signal correlation
+        // For real passband signal s(t), we create analytic signal z(t) = s(t) + j*HT(s(t))
+        // Then correlate z(t) with z(t-L) - the magnitude is independent of carrier frequency
+        if (offset + symbol_samples * 2 > rx_buffer.size()) return 0.0f;
+
+        size_t len = config.fft_size + config.getCyclicPrefix();
+
+        // IMPORTANT: Compute analytic signal on the COMBINED window (both symbols together)
+        // This preserves the phase relationship between the two symbols
+        auto analytic = toAnalytic(&rx_buffer[offset], len * 2);
+
+        // Complex correlation between first half and second half of the analytic signal
+        // This maintains the phase relationship (delay of L samples = phase rotation)
+        Complex P(0.0f, 0.0f);
+        float R = 0.0f;
+
+        for (size_t i = 0; i < len; ++i) {
+            P += std::conj(analytic[i]) * analytic[i + len];
+            R += std::norm(analytic[i + len]);
+        }
+
+        if (out_energy) *out_energy = R;
+
+        // Return magnitude of normalized correlation
+        // For identical symbols, |P|/R ≈ 1.0 regardless of carrier frequency or CFO
+        return std::abs(P) / (R + 1e-10f);
     }
 
     bool detectSync(size_t offset) {
@@ -355,6 +405,54 @@ struct OFDMDemodulator::Impl {
         }
 
         return normalized > sync_threshold;
+    }
+
+    // Coarse CFO estimation using analytic signal correlation
+    // Uses adjacent STS symbols to estimate frequency offset from phase rotation
+    // Phase difference between symbols = 2π × (fc + δf) × L / fs
+    // Returns estimated frequency offset in Hz
+    float estimateCoarseCFO(size_t sync_offset) {
+        size_t sym_len = config.fft_size + config.getCyclicPrefix();
+
+        // Need at least 2 symbols for estimate
+        if (sync_offset + sym_len * 2 > rx_buffer.size()) {
+            return 0.0f;
+        }
+
+        // Compute analytic signal on the COMBINED window (both symbols together)
+        // This preserves the phase relationship between the two symbols
+        auto analytic = toAnalytic(&rx_buffer[sync_offset], sym_len * 2);
+
+        // Complex correlation between first symbol and second symbol
+        Complex P(0.0f, 0.0f);
+        float R = 0.0f;
+
+        for (size_t i = 0; i < sym_len; ++i) {
+            P += std::conj(analytic[i]) * analytic[i + sym_len];
+            R += std::norm(analytic[i + sym_len]);
+        }
+
+        if (R < 1e-10f) {
+            return 0.0f;
+        }
+
+        // Extract phase angle - this is the phase rotation between symbols
+        // The Hilbert transform creates an analytic signal effectively at baseband,
+        // so the phase directly represents the frequency offset (no carrier subtraction needed)
+        float phase = std::atan2(P.imag(), P.real());
+
+        // Convert phase to frequency: CFO = phase / (2π × L / fs)
+        // The phase represents the rotation over sym_len samples
+        float T_sym = static_cast<float>(sym_len) / config.sample_rate;
+        float cfo_hz = phase / (2.0f * M_PI * T_sym);
+
+        // Clamp to reasonable range
+        // Maximum unambiguous range: ±fs/(2*L) = ±42.9 Hz for our params
+        cfo_hz = std::max(-40.0f, std::min(40.0f, cfo_hz));
+
+        LOG_SYNC(INFO, "Coarse CFO estimate: %.2f Hz (phase=%.3f rad)", cfo_hz, phase);
+
+        return cfo_hz;
     }
 
     std::vector<Complex> toBaseband(SampleSpan samples) {
@@ -681,6 +779,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         size_t iterations = 0;
         size_t i = impl_->search_offset;
 
+        // Track max correlation for debugging
+        float max_corr_found = 0.0f;
+        size_t max_corr_offset = 0;
+
         while (i + preamble_total_len < impl_->rx_buffer.size() && iterations < MAX_ITERATIONS) {
             // Quick energy check - skip silent regions entirely
             if (!impl_->hasMinimumEnergy(i, correlation_window)) {
@@ -691,6 +793,13 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
             // Full correlation check
             float corr = impl_->measureCorrelation(i);
+
+            // Track maximum for debugging
+            if (corr > max_corr_found) {
+                max_corr_found = corr;
+                max_corr_offset = i;
+            }
+
             if (corr > impl_->sync_threshold) {
                 // Found first point exceeding threshold - this is preamble start
                 found_sync = true;
@@ -703,12 +812,28 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             ++iterations;
         }
 
+        // Log max correlation when sync fails to help debug
+        if (!found_sync && max_corr_found > 0.5f) {
+            LOG_SYNC(DEBUG, "Sync failed: max_corr=%.3f at offset=%zu (threshold=%.2f)",
+                    max_corr_found, max_corr_offset, impl_->sync_threshold);
+        }
+
         // Update search position for next frame (resume from here)
         impl_->search_offset = i;
 
         if (found_sync) {
             LOG_SYNC(INFO, "SYNC FOUND: offset=%zu (corr=%.3f)",
                     sync_offset, sync_corr);
+
+            // Estimate coarse CFO from preamble BEFORE discarding it
+            float coarse_cfo = impl_->estimateCoarseCFO(sync_offset);
+
+            // Initialize frequency offset with coarse estimate
+            // This gives us a head start on tracking
+            impl_->freq_offset_hz = coarse_cfo;
+            impl_->freq_offset_filtered = coarse_cfo;
+            impl_->freq_correction_phase = 0.0f;  // Reset correction phase
+
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + sync_offset + preamble_total_len);
             impl_->search_offset = 0;  // Reset for next search
