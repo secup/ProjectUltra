@@ -20,6 +20,8 @@ struct CodeParams {
 
 CodeParams getCodeParams(CodeRate rate) {
     switch (rate) {
+        case CodeRate::R1_4:
+            return {162, 486, 486};  // Most robust - for very poor conditions
         case CodeRate::R1_2:
             return {324, 324, 324};
         case CodeRate::R2_3:
@@ -75,9 +77,14 @@ struct LDPCDecoder::Impl {
         H_cols.resize(n);
 
         // Build H_data part (same algorithm as encoder)
-        int target_var_degree = 3;
+        // For low-rate codes (k < m), we need higher variable degree
+        // to ensure each check has enough connections for good decoding
+        int target_check_degree = 4;
+        int target_var_degree = std::max(3, (target_check_degree * m) / k);
+        target_var_degree = std::min(target_var_degree, m / 2);
+
         std::vector<int> check_degrees(m, 0);
-        int max_check_degree = (target_var_degree * k) / m + 4;
+        int max_check_degree = target_check_degree + 2;
 
         for (int j = 0; j < k; ++j) {
             std::vector<int> available_checks;

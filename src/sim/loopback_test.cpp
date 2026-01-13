@@ -23,6 +23,18 @@ using namespace ultra::gui;
 // LDPC block size (must match demodulator expectation)
 static constexpr size_t LDPC_BLOCK_SIZE = 648;
 
+// Get max data size (in bytes) that fits in one LDPC block for a given code rate
+size_t getMaxDataBytes(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_4: return 20;   // 162 info bits
+        case CodeRate::R1_2: return 40;   // 324 info bits
+        case CodeRate::R2_3: return 54;   // 432 info bits
+        case CodeRate::R3_4: return 60;   // 486 info bits
+        case CodeRate::R5_6: return 67;   // 540 info bits
+        default: return 40;
+    }
+}
+
 /**
  * Apply frequency shift to a real signal using FFT-based analytic signal.
  *
@@ -178,9 +190,12 @@ E2EResult runE2ETest(
     float symbol_rate = config.sample_rate / symbol_samples;
     float raw_throughput = data_carriers * bits_per_carrier * symbol_rate * code_rate_val;
 
+    // Calculate max data size for this code rate
+    size_t max_data_bytes = getMaxDataBytes(rate);
+
     for (size_t frame = 0; frame < num_frames; ++frame) {
-        // Generate test data
-        Bytes tx_data(40);
+        // Generate test data (size based on code rate's info bits capacity)
+        Bytes tx_data(max_data_bytes);
         for (size_t i = 0; i < tx_data.size(); ++i) {
             tx_data[i] = static_cast<uint8_t>((frame * 17 + i * 13 + 7) & 0xFF);
         }
@@ -285,7 +300,8 @@ E2EResult runSimplifiedTest(
 
     LDPCEncoder encoder(rate);
     LDPCDecoder decoder(rate);
-    Interleaver interleaver(32, 32);
+    // Interleaver must match LDPC block size: 648 bits = 24 x 27
+    Interleaver interleaver(24, 27);
 
     // Create channel for soft bit degradation simulation
     std::mt19937 rng(42);
@@ -338,9 +354,12 @@ E2EResult runSimplifiedTest(
     float symbol_rate = config.sample_rate / symbol_samples;
     float raw_throughput = data_carriers * bits_per_carrier * symbol_rate * code_rate_val;
 
+    // Calculate max data size for this code rate
+    size_t max_data_bytes = getMaxDataBytes(rate);
+
     for (size_t frame = 0; frame < num_frames; ++frame) {
-        // Generate test data
-        Bytes tx_data(40);
+        // Generate test data (size based on code rate's info bits capacity)
+        Bytes tx_data(max_data_bytes);
         for (size_t i = 0; i < tx_data.size(); ++i) {
             tx_data[i] = static_cast<uint8_t>((frame * 17 + i * 13 + 7) & 0xFF);
         }
@@ -420,6 +439,7 @@ void runRealisticTests(const ModemConfig& config) {
     };
 
     std::vector<TestMode> modes = {
+        {Modulation::BPSK, CodeRate::R1_4, "BPSK R1/4"},   // Most robust - for extreme conditions
         {Modulation::BPSK, CodeRate::R1_2, "BPSK R1/2"},
         {Modulation::QPSK, CodeRate::R1_2, "QPSK R1/2"},
         {Modulation::QPSK, CodeRate::R3_4, "QPSK R3/4"},
@@ -443,6 +463,7 @@ void runRealisticTests(const ModemConfig& config) {
         // Calculate raw throughput for reference
         float code_rate = 0.5f;
         switch (mode.rate) {
+            case CodeRate::R1_4: code_rate = 0.25f; break;
             case CodeRate::R1_2: code_rate = 0.5f; break;
             case CodeRate::R3_4: code_rate = 0.75f; break;
             default: break;
