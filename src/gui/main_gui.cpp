@@ -11,8 +11,13 @@
 #include <SDL_opengl.h>
 
 #include <cstdio>
+#include <ultra/logging.hpp>
 
 int main(int argc, char* argv[]) {
+    // Set log level to INFO to avoid DEBUG log spam slowing down UI
+    // (DEBUG logs every frame in pollRxAudio() cause significant lag)
+    ultra::setLogLevel(ultra::LogLevel::INFO);
+
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
         fprintf(stderr, "Error: SDL_Init failed: %s\n", SDL_GetError());

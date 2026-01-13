@@ -37,10 +37,16 @@ add_library(ultra_core STATIC
     src/dsp/filters.cpp
     src/dsp/resampler.cpp
     src/modem/modem.cpp
+    # Protocol layer (callsign addressing, connection management)
+    src/protocol/frame.cpp
+    src/protocol/arq.cpp
+    src/protocol/connection.cpp
+    src/protocol/protocol_engine.cpp
 )
 
 target_include_directories(ultra_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src  # For protocol headers
 )
 
 target_link_libraries(ultra_core PUBLIC
@@ -89,12 +95,12 @@ if(ULTRA_BUILD_GUI)
         add_executable(ultra_gui
             src/gui/main_gui.cpp
             src/gui/app.cpp
-            src/gui/simulation.cpp
             src/gui/audio_engine.cpp
             src/gui/modem_engine.cpp
             src/gui/widgets/constellation.cpp
             src/gui/widgets/controls.cpp
             src/gui/widgets/status.cpp
+            src/gui/widgets/settings.cpp
             # ImGui core
             ${IMGUI_DIR}/imgui.cpp
             ${IMGUI_DIR}/imgui_draw.cpp

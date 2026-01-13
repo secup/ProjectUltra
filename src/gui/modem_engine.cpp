@@ -182,7 +182,12 @@ void ModemEngine::processRxBuffer() {
                     // Queue the received data
                     rx_data_queue_.push(decoded);
 
-                    // Call callback if set
+                    // Call raw callback first (for protocol layer)
+                    if (raw_data_callback_) {
+                        raw_data_callback_(decoded);
+                    }
+
+                    // Call text callback (filtered for display)
                     if (data_callback_) {
                         std::string text(decoded.begin(), decoded.end());
                         // Remove null characters and non-printable

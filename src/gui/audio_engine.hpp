@@ -20,6 +20,7 @@ public:
     // Initialize SDL audio subsystem
     bool initialize();
     void shutdown();
+    bool isInitialized() const { return initialized_; }
 
     // Device enumeration
     std::vector<std::string> getOutputDevices();

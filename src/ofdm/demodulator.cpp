@@ -156,6 +156,7 @@ struct OFDMDemodulator::Impl {
     // Sync detection
     std::vector<Complex> sync_sequence;
     float sync_threshold = 0.90f;  // Threshold for valid sync region
+    size_t search_offset = 0;      // Track where we left off searching (optimization)
 
     // Pre-computed interpolation lookup (avoids O(n²) per symbol)
     struct InterpInfo {
@@ -279,6 +280,27 @@ struct OFDMDemodulator::Impl {
 
             interp_table.push_back(info);
         }
+    }
+
+    // Quick energy check - sample a few points to see if there's signal
+    // Returns true if energy is above minimum threshold for valid signal
+    bool hasMinimumEnergy(size_t offset, size_t window_len) const {
+        if (offset + window_len > rx_buffer.size()) return false;
+
+        // Sample every 16th point for speed (64 samples for 1024 window)
+        constexpr size_t SAMPLE_STEP = 16;
+        constexpr float MIN_RMS = 0.05f;  // Minimum RMS to consider as potential signal
+        float sum_sq = 0;
+        size_t count = 0;
+
+        for (size_t i = 0; i < window_len; i += SAMPLE_STEP) {
+            float s = rx_buffer[offset + i];
+            sum_sq += s * s;
+            ++count;
+        }
+
+        float rms = std::sqrt(sum_sq / count);
+        return rms >= MIN_RMS;
     }
 
     float measureCorrelation(size_t offset, float* out_energy = nullptr) {
@@ -516,28 +538,53 @@ bool OFDMDemodulator::process(SampleSpan samples) {
     // Add to buffer
     impl_->rx_buffer.insert(impl_->rx_buffer.end(), samples.begin(), samples.end());
 
-    LOG_DEMOD(TRACE, "process(): buffer has %zu samples, state=%s",
-            impl_->rx_buffer.size(),
-            impl_->state.load() == Impl::State::SEARCHING ? "SEARCHING" : "SYNCED");
-
     // State machine
     if (impl_->state.load() == Impl::State::SEARCHING) {
         // Look for sync preamble
         // Preamble symbols have NO guard interval (only fft_size + cp)
         size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
         size_t preamble_total_len = preamble_symbol_len * 6;  // 4 STS + 2 LTS
+        size_t correlation_window = preamble_symbol_len * 2;  // Window needed for correlation
 
-        LOG_DEMOD(TRACE, "Need %zu samples for sync, have %zu",
-                preamble_total_len, impl_->rx_buffer.size());
+        // OPTIMIZATION: Trim samples we've already searched (they're stale)
+        // Keep a margin of preamble_total_len in case preamble spans the boundary
+        if (impl_->search_offset > preamble_total_len * 2) {
+            size_t trim = impl_->search_offset - preamble_total_len;
+            impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
+                                   impl_->rx_buffer.begin() + trim);
+            impl_->search_offset -= trim;
+        }
 
-        // Sync detection strategy:
-        // Find FIRST point where correlation exceeds threshold (preamble start)
-        // Not the maximum - we want the beginning of the high-correlation region
+        // Hard limit on buffer size to prevent runaway memory usage
+        constexpr size_t ABSOLUTE_MAX_BUFFER = 24000;  // ~500ms at 48kHz
+        if (impl_->rx_buffer.size() > ABSOLUTE_MAX_BUFFER) {
+            size_t trim = impl_->rx_buffer.size() - ABSOLUTE_MAX_BUFFER;
+            impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
+                                   impl_->rx_buffer.begin() + trim);
+            impl_->search_offset = (impl_->search_offset > trim) ? impl_->search_offset - trim : 0;
+        }
+
+        // Sync detection: Resume from where we left off (don't re-search old samples)
+        // Step by 8 samples - plenty accurate for preamble detection
+        // Energy pre-filter: skip silent regions to save correlation work
         bool found_sync = false;
         size_t sync_offset = 0;
         float sync_corr = 0;
 
-        for (size_t i = 0; i + preamble_total_len < impl_->rx_buffer.size(); ++i) {
+        constexpr size_t STEP_SIZE = 8;  // Check every 8th sample
+        constexpr size_t MAX_ITERATIONS = 300;  // Limit work per frame (~2400 samples)
+        size_t iterations = 0;
+        size_t i = impl_->search_offset;
+
+        while (i + preamble_total_len < impl_->rx_buffer.size() && iterations < MAX_ITERATIONS) {
+            // Quick energy check - skip silent regions entirely
+            if (!impl_->hasMinimumEnergy(i, correlation_window)) {
+                i += correlation_window / 2;  // Skip ahead by half window
+                ++iterations;
+                continue;
+            }
+
+            // Full correlation check
             float corr = impl_->measureCorrelation(i);
             if (corr > impl_->sync_threshold) {
                 // Found first point exceeding threshold - this is preamble start
@@ -546,18 +593,23 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 sync_corr = corr;
                 break;
             }
+
+            i += STEP_SIZE;
+            ++iterations;
         }
+
+        // Update search position for next frame (resume from here)
+        impl_->search_offset = i;
 
         if (found_sync) {
             LOG_SYNC(INFO, "SYNC FOUND: offset=%zu (corr=%.3f)",
                     sync_offset, sync_corr);
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + sync_offset + preamble_total_len);
+            impl_->search_offset = 0;  // Reset for next search
             impl_->state.store(Impl::State::SYNCED);
             impl_->synced_symbol_count.store(0);  // Reset timeout counter
             impl_->mixer.reset();
-        } else {
-            LOG_SYNC(TRACE, "No sync found");
         }
     }
 
@@ -672,6 +724,7 @@ bool OFDMDemodulator::isSynced() const {
 void OFDMDemodulator::reset() {
     impl_->state.store(Impl::State::SEARCHING);
     impl_->synced_symbol_count.store(0);
+    impl_->search_offset = 0;
     impl_->rx_buffer.clear();
     impl_->soft_bits.clear();
     impl_->demod_data.clear();

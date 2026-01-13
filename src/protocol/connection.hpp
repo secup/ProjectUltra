@@ -1,0 +1,170 @@
+#pragma once
+
+#include "frame.hpp"
+#include "arq.hpp"
+#include <functional>
+#include <string>
+
+namespace ultra {
+namespace protocol {
+
+// Connection states
+enum class ConnectionState {
+    DISCONNECTED,   // Idle, listening for incoming calls
+    CONNECTING,     // Sent CONNECT, waiting for ACK
+    CONNECTED,      // Link established, can exchange data
+    DISCONNECTING   // Sent DISCONNECT, waiting for ACK
+};
+
+const char* connectionStateToString(ConnectionState state);
+
+// Connection configuration
+struct ConnectionConfig {
+    ARQConfig arq;
+    uint32_t connect_timeout_ms = 10000;    // Time to wait for CONNECT_ACK
+    uint32_t disconnect_timeout_ms = 5000;  // Time to wait for DISCONNECT ack
+    int connect_retries = 3;                // CONNECT retry attempts
+    bool auto_accept = true;                // Automatically accept incoming calls
+};
+
+// Connection statistics
+struct ConnectionStats {
+    ARQStats arq;                   // ARQ layer stats
+    int connects_initiated = 0;
+    int connects_received = 0;
+    int connects_failed = 0;
+    int disconnects = 0;
+    uint32_t connected_time_ms = 0; // Time in CONNECTED state
+};
+
+/**
+ * Connection Manager
+ *
+ * Handles connection establishment and teardown with callsign addressing.
+ * Wraps ARQ controller for reliable data transfer once connected.
+ *
+ * Typical flow (initiator):
+ *   1. Call connect(remote_callsign)
+ *   2. Wait for on_connected callback
+ *   3. Use sendMessage() to send data
+ *   4. Receive data via on_message_received callback
+ *   5. Call disconnect() when done
+ *
+ * Typical flow (responder):
+ *   1. Set on_incoming_call callback
+ *   2. Receive call, auto-accept or manual accept
+ *   3. Exchange data
+ *   4. Receive disconnect or call disconnect()
+ */
+class Connection {
+public:
+    // Callback types
+    using TransmitCallback = std::function<void(const Frame&)>;
+    using ConnectedCallback = std::function<void()>;
+    using DisconnectedCallback = std::function<void(const std::string& reason)>;
+    using MessageReceivedCallback = std::function<void(const std::string& text)>;
+    using MessageSentCallback = std::function<void(bool success)>;
+    using IncomingCallCallback = std::function<void(const std::string& remote_call)>;
+
+    explicit Connection(const ConnectionConfig& config = ConnectionConfig{});
+
+    // --- Configuration ---
+
+    // Set local callsign (required)
+    void setLocalCallsign(const std::string& call);
+    std::string getLocalCallsign() const { return local_call_; }
+
+    // --- Connection Control ---
+
+    // Initiate connection to remote station
+    // Returns false if already connected/connecting
+    bool connect(const std::string& remote_call);
+
+    // Accept incoming call (if auto_accept is false)
+    void acceptCall();
+
+    // Reject incoming call
+    void rejectCall();
+
+    // Disconnect from remote station
+    void disconnect();
+
+    // --- Data Transfer (only valid when CONNECTED) ---
+
+    // Send a text message
+    // Returns false if not connected or busy
+    bool sendMessage(const std::string& text);
+
+    // Check if ready to send
+    bool isReadyToSend() const;
+
+    // --- Frame Processing ---
+
+    // Process a received frame (call from modem RX callback)
+    void onFrameReceived(const Frame& frame);
+
+    // Periodic update (call from main loop)
+    // Pass elapsed milliseconds since last call
+    void tick(uint32_t elapsed_ms);
+
+    // --- Callbacks ---
+
+    void setTransmitCallback(TransmitCallback cb);
+    void setConnectedCallback(ConnectedCallback cb);
+    void setDisconnectedCallback(DisconnectedCallback cb);
+    void setMessageReceivedCallback(MessageReceivedCallback cb);
+    void setMessageSentCallback(MessageSentCallback cb);
+    void setIncomingCallCallback(IncomingCallCallback cb);
+
+    // --- State ---
+
+    ConnectionState getState() const { return state_; }
+    std::string getRemoteCallsign() const { return remote_call_; }
+    bool isConnected() const { return state_ == ConnectionState::CONNECTED; }
+    ConnectionStats getStats() const;
+    void resetStats();
+
+    // Full reset (back to DISCONNECTED)
+    void reset();
+
+private:
+    ConnectionConfig config_;
+    ConnectionState state_ = ConnectionState::DISCONNECTED;
+
+    // Callsigns
+    std::string local_call_;
+    std::string remote_call_;
+    std::string pending_remote_call_;  // For incoming calls before accept
+
+    // ARQ for reliable data transfer
+    ARQController arq_;
+
+    // Connection timing
+    uint32_t timeout_remaining_ms_ = 0;
+    int connect_retry_count_ = 0;
+    uint32_t connected_time_ms_ = 0;
+
+    // Statistics
+    ConnectionStats stats_;
+
+    // Callbacks
+    TransmitCallback on_transmit_;
+    ConnectedCallback on_connected_;
+    DisconnectedCallback on_disconnected_;
+    MessageReceivedCallback on_message_received_;
+    MessageSentCallback on_message_sent_;
+    IncomingCallCallback on_incoming_call_;
+
+    // Internal handlers
+    void handleConnect(const Frame& frame);
+    void handleConnectAck(const Frame& frame);
+    void handleConnectNak(const Frame& frame);
+    void handleDisconnect(const Frame& frame);
+
+    void transmitFrame(const Frame& frame);
+    void enterConnected();
+    void enterDisconnected(const std::string& reason);
+};
+
+} // namespace protocol
+} // namespace ultra

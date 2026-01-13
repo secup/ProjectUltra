@@ -62,9 +62,13 @@ public:
     // Get symbols for constellation display
     std::vector<std::complex<float>> getConstellationSymbols() const;
 
-    // Callback when data is received
+    // Callback when data is received (filtered text for display)
     using DataCallback = std::function<void(const std::string&)>;
     void setDataCallback(DataCallback callback) { data_callback_ = callback; }
+
+    // Callback for raw bytes (for protocol layer, not filtered)
+    using RawDataCallback = std::function<void(const Bytes&)>;
+    void setRawDataCallback(RawDataCallback callback) { raw_data_callback_ = callback; }
 
     // Reset state (e.g., when switching modes)
     void reset();
@@ -91,8 +95,9 @@ private:
     LoopbackStats stats_;
     mutable std::mutex stats_mutex_;
 
-    // Callback
+    // Callbacks
     DataCallback data_callback_;
+    RawDataCallback raw_data_callback_;
 
     // Process accumulated samples through demodulator
     void processRxBuffer();

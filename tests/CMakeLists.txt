@@ -10,3 +10,7 @@ add_test(NAME FFT COMMAND test_fft)
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
+
+add_executable(test_protocol test_protocol.cpp)
+target_link_libraries(test_protocol PRIVATE ultra_core)
+add_test(NAME Protocol COMMAND test_protocol)
