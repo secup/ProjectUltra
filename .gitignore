@@ -1,0 +1,37 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code
+.claude/
+
+# Cache
+.cache/
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+
+# Executables (in root only)
+/ultra
+/ultra_sim
+/ultra_gui
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+packaging/dist/
