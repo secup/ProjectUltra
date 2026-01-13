@@ -3,70 +3,75 @@
 #include "ultra/types.hpp"
 #include <random>
 #include <cmath>
+#include <complex>
+#include <deque>
 
 namespace ultra {
 namespace sim {
 
 /**
- * HF Channel Simulator
+ * Watterson HF Channel Model (ITU-R F.1487)
  *
- * Models realistic HF propagation effects:
- * - AWGN (Additive White Gaussian Noise)
- * - Multipath (multiple delayed copies)
- * - Rayleigh/Rician fading
- * - Doppler spread
+ * Models realistic HF ionospheric propagation:
+ * - Two independent Rayleigh-fading taps (multipath)
+ * - Gaussian Doppler spectrum on each tap
+ * - Configurable delay spread and Doppler spread
+ * - AWGN noise
  *
- * Based on ITU-R F.1487 and Watterson model
+ * This is the standard model used for HF modem testing.
  */
-class HFChannel {
+class WattersonChannel {
 public:
     struct Config {
-        // Noise
-        float snr_db = 20.0f;           // Signal-to-noise ratio
+        // SNR in dB
+        float snr_db = 15.0f;
 
-        // Multipath (Watterson model)
-        bool multipath_enabled = true;
-        float path1_delay_ms = 0.0f;    // Direct path
-        float path1_gain = 1.0f;
-        float path2_delay_ms = 2.0f;    // Reflected path
-        float path2_gain = 0.5f;
+        // Multipath delay spread (second path delay in ms)
+        float delay_spread_ms = 2.0f;
 
-        // Fading
-        bool fading_enabled = true;
-        float doppler_spread_hz = 1.0f; // Typical HF: 0.1 - 2 Hz
+        // Doppler spread in Hz (fading rate)
+        // Typical HF: 0.1 Hz (quiet) to 2 Hz (disturbed)
+        float doppler_spread_hz = 1.0f;
 
-        // Frequency offset (oscillator drift)
-        float freq_offset_hz = 0.0f;
+        // Path gains (usually equal for worst-case)
+        float path1_gain = 0.707f;  // -3dB each for equal power
+        float path2_gain = 0.707f;
 
         // Sample rate
         uint32_t sample_rate = 48000;
+
+        // Enable/disable effects for testing
+        bool fading_enabled = true;
+        bool multipath_enabled = true;
+        bool noise_enabled = true;
     };
 
-    explicit HFChannel(const Config& config, uint32_t seed = 42)
+    explicit WattersonChannel(const Config& config, uint32_t seed = 42)
         : config_(config)
         , rng_(seed)
-        , noise_dist_(0.0f, 1.0f)
-        , phase_(0.0f)
-        , fading_phase1_(0.0f)
-        , fading_phase2_(0.0f)
+        , gaussian_(0.0f, 1.0f)
     {
-        // Initialize delay line for multipath
-        size_t max_delay_samples = static_cast<size_t>(
-            std::max(config.path1_delay_ms, config.path2_delay_ms)
-            * config.sample_rate / 1000.0f + 10
+        // Calculate delay in samples
+        delay_samples_ = static_cast<size_t>(
+            config.delay_spread_ms * config.sample_rate / 1000.0f
         );
-        delay_line_.resize(max_delay_samples, 0.0f);
 
-        // Calculate noise standard deviation from SNR
-        // SNR = 10 * log10(signal_power / noise_power)
-        // Assuming signal power = 1
+        // Initialize delay line
+        delay_line_.resize(delay_samples_ + 1, 0.0f);
+
+        // Noise standard deviation from SNR
+        // SNR = 10*log10(Ps/Pn), assuming Ps = 1
         noise_std_ = std::pow(10.0f, -config.snr_db / 20.0f);
 
-        // Doppler increment per sample
-        doppler_inc_ = 2.0f * M_PI * config.doppler_spread_hz / config.sample_rate;
+        // Fading filter coefficient for Gaussian Doppler spectrum
+        // Using simple IIR lowpass to approximate Gaussian spectrum
+        // Cutoff at Doppler spread frequency
+        float normalized_doppler = config.doppler_spread_hz / config.sample_rate;
+        fading_alpha_ = 1.0f - std::exp(-2.0f * M_PI * normalized_doppler);
 
-        // Frequency offset increment
-        freq_offset_inc_ = 2.0f * M_PI * config.freq_offset_hz / config.sample_rate;
+        // Initialize fading states (complex for Rayleigh)
+        fading1_ = std::complex<float>(1.0f, 0.0f);
+        fading2_ = std::complex<float>(1.0f, 0.0f);
     }
 
     // Process samples through the channel
@@ -76,71 +81,53 @@ public:
         for (size_t i = 0; i < input.size(); ++i) {
             float sample = input[i];
 
-            // Store in delay line
-            delay_line_[delay_idx_] = sample;
+            // Update fading coefficients (Rayleigh fading)
+            if (config_.fading_enabled) {
+                updateFading();
+            }
 
             float out = 0.0f;
 
-            if (config_.multipath_enabled) {
-                // Path 1 (direct)
-                size_t delay1 = static_cast<size_t>(
-                    config_.path1_delay_ms * config_.sample_rate / 1000.0f
-                );
-                size_t idx1 = (delay_idx_ + delay_line_.size() - delay1) % delay_line_.size();
-                float gain1 = config_.path1_gain;
+            if (config_.multipath_enabled && delay_samples_ > 0) {
+                // Two-tap multipath with independent Rayleigh fading
+                // Path 1: direct path (no delay)
+                float h1_mag = config_.fading_enabled ? std::abs(fading1_) : 1.0f;
+                out += sample * config_.path1_gain * h1_mag;
 
-                if (config_.fading_enabled) {
-                    // Rayleigh fading on each path
-                    gain1 *= 0.5f + 0.5f * std::sin(fading_phase1_);
-                    fading_phase1_ += doppler_inc_ * (1.0f + 0.1f * noise_dist_(rng_));
-                }
+                // Path 2: delayed path
+                float delayed = delay_line_.front();
+                delay_line_.pop_front();
+                delay_line_.push_back(sample);
 
-                out += delay_line_[idx1] * gain1;
-
-                // Path 2 (reflected)
-                size_t delay2 = static_cast<size_t>(
-                    config_.path2_delay_ms * config_.sample_rate / 1000.0f
-                );
-                size_t idx2 = (delay_idx_ + delay_line_.size() - delay2) % delay_line_.size();
-                float gain2 = config_.path2_gain;
-
-                if (config_.fading_enabled) {
-                    gain2 *= 0.5f + 0.5f * std::sin(fading_phase2_);
-                    fading_phase2_ += doppler_inc_ * 1.3f * (1.0f + 0.1f * noise_dist_(rng_));
-                }
-
-                out += delay_line_[idx2] * gain2;
+                float h2_mag = config_.fading_enabled ? std::abs(fading2_) : 1.0f;
+                out += delayed * config_.path2_gain * h2_mag;
             } else {
-                out = sample;
-            }
-
-            // Apply frequency offset
-            if (config_.freq_offset_hz != 0.0f) {
-                float cos_p = std::cos(phase_);
-                float sin_p = std::sin(phase_);
-                // This is simplified - proper SSB frequency shift would need Hilbert transform
-                out *= cos_p;
-                phase_ += freq_offset_inc_;
-                if (phase_ > 2 * M_PI) phase_ -= 2 * M_PI;
+                // No multipath - just fading on single path
+                float h_mag = config_.fading_enabled ? std::abs(fading1_) : 1.0f;
+                out = sample * h_mag;
             }
 
             // Add AWGN
-            out += noise_std_ * noise_dist_(rng_);
+            if (config_.noise_enabled) {
+                out += noise_std_ * gaussian_(rng_);
+            }
 
             output[i] = out;
-            delay_idx_ = (delay_idx_ + 1) % delay_line_.size();
         }
 
         return output;
     }
 
+    // Get current fading magnitude (for monitoring)
+    float getFadingMagnitude() const {
+        return std::abs(fading1_);
+    }
+
     // Reset channel state
     void reset() {
         std::fill(delay_line_.begin(), delay_line_.end(), 0.0f);
-        delay_idx_ = 0;
-        phase_ = 0;
-        fading_phase1_ = 0;
-        fading_phase2_ = 0;
+        fading1_ = std::complex<float>(1.0f, 0.0f);
+        fading2_ = std::complex<float>(1.0f, 0.0f);
     }
 
     // Change SNR dynamically
@@ -149,86 +136,135 @@ public:
         noise_std_ = std::pow(10.0f, -snr_db / 20.0f);
     }
 
+    const Config& getConfig() const { return config_; }
+
 private:
+    void updateFading() {
+        // Generate complex Gaussian noise (for Rayleigh fading)
+        std::complex<float> noise1(gaussian_(rng_), gaussian_(rng_));
+        std::complex<float> noise2(gaussian_(rng_), gaussian_(rng_));
+
+        // IIR lowpass filter to shape Doppler spectrum
+        // This gives approximately Gaussian-shaped spectrum
+        fading1_ = (1.0f - fading_alpha_) * fading1_ + fading_alpha_ * noise1;
+        fading2_ = (1.0f - fading_alpha_) * fading2_ + fading_alpha_ * noise2;
+
+        // Normalize to unit mean power
+        // Rayleigh distribution has mean = sqrt(pi/2) ≈ 1.25
+        // We want mean magnitude ≈ 1
+        fading1_ *= 0.8f;
+        fading2_ *= 0.8f;
+    }
+
     Config config_;
     std::mt19937 rng_;
-    std::normal_distribution<float> noise_dist_;
+    std::normal_distribution<float> gaussian_;
 
-    std::vector<float> delay_line_;
-    size_t delay_idx_ = 0;
-
+    std::deque<float> delay_line_;
+    size_t delay_samples_;
     float noise_std_;
-    float phase_;
-    float doppler_inc_;
-    float freq_offset_inc_;
-    float fading_phase1_;
-    float fading_phase2_;
+    float fading_alpha_;
+
+    std::complex<float> fading1_;
+    std::complex<float> fading2_;
 };
 
-// Preset channel conditions
-namespace presets {
+/**
+ * ITU-R / CCIR Standard HF Channel Conditions
+ *
+ * Based on ITU-R F.1487 and MIL-STD-188-110
+ */
+namespace ccir {
 
-inline HFChannel::Config good_conditions() {
-    return {
-        .snr_db = 25.0f,
-        .multipath_enabled = true,
-        .path1_delay_ms = 0.0f,
-        .path1_gain = 1.0f,
-        .path2_delay_ms = 1.0f,
-        .path2_gain = 0.3f,
-        .fading_enabled = true,
-        .doppler_spread_hz = 0.5f,
-        .freq_offset_hz = 0.0f,
-        .sample_rate = 48000
-    };
-}
-
-inline HFChannel::Config moderate_conditions() {
-    return {
-        .snr_db = 15.0f,
-        .multipath_enabled = true,
-        .path1_delay_ms = 0.0f,
-        .path1_gain = 1.0f,
-        .path2_delay_ms = 2.0f,
-        .path2_gain = 0.5f,
-        .fading_enabled = true,
-        .doppler_spread_hz = 1.0f,
-        .freq_offset_hz = 0.5f,
-        .sample_rate = 48000
-    };
-}
-
-inline HFChannel::Config poor_conditions() {
-    return {
-        .snr_db = 8.0f,
-        .multipath_enabled = true,
-        .path1_delay_ms = 0.0f,
-        .path1_gain = 1.0f,
-        .path2_delay_ms = 4.0f,
-        .path2_gain = 0.7f,
-        .fading_enabled = true,
-        .doppler_spread_hz = 2.0f,
-        .freq_offset_hz = 1.0f,
-        .sample_rate = 48000
-    };
-}
-
-inline HFChannel::Config awgn_only(float snr_db) {
+// CCIR Good (benign mid-latitude, quiet conditions)
+// - Low delay spread, slow fading
+inline WattersonChannel::Config good(float snr_db = 25.0f) {
     return {
         .snr_db = snr_db,
-        .multipath_enabled = false,
-        .path1_delay_ms = 0.0f,
-        .path1_gain = 1.0f,
-        .path2_delay_ms = 0.0f,
-        .path2_gain = 0.0f,
-        .fading_enabled = false,
-        .doppler_spread_hz = 0.0f,
-        .freq_offset_hz = 0.0f,
-        .sample_rate = 48000
+        .delay_spread_ms = 0.5f,       // 0.5 ms multipath
+        .doppler_spread_hz = 0.1f,     // Very slow fading
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
     };
 }
 
-} // namespace presets
+// CCIR Moderate (typical mid-latitude)
+// - Moderate delay spread, moderate fading
+inline WattersonChannel::Config moderate(float snr_db = 15.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 1.0f,       // 1 ms multipath
+        .doppler_spread_hz = 0.5f,     // Moderate fading
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// CCIR Poor (disturbed conditions, high-latitude)
+// - Large delay spread, fast fading
+inline WattersonChannel::Config poor(float snr_db = 10.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 2.0f,       // 2 ms multipath
+        .doppler_spread_hz = 1.0f,     // Fast fading
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// CCIR Flutter (extreme flutter fading, polar paths)
+// - Very fast fading, severe multipath
+inline WattersonChannel::Config flutter(float snr_db = 8.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 4.0f,       // 4 ms multipath (severe)
+        .doppler_spread_hz = 2.0f,     // Very fast fading
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// AWGN only (for baseline comparison)
+inline WattersonChannel::Config awgn(float snr_db = 15.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 0.0f,
+        .doppler_spread_hz = 0.0f,
+        .path1_gain = 1.0f,
+        .path2_gain = 0.0f,
+        .sample_rate = 48000,
+        .fading_enabled = false,
+        .multipath_enabled = false,
+        .noise_enabled = true
+    };
+}
+
+// Print channel condition summary
+inline void printConfig(const WattersonChannel::Config& cfg, const char* name) {
+    printf("  %s: SNR=%.0fdB, delay=%.1fms, doppler=%.1fHz\n",
+           name, cfg.snr_db, cfg.delay_spread_ms, cfg.doppler_spread_hz);
+}
+
+} // namespace ccir
+
+// Convenience alias
+using HFChannel = WattersonChannel;
 
 } // namespace sim
 } // namespace ultra
