@@ -1,5 +1,7 @@
 # ProjectUltra
 
+> **Note:** This project is a work in progress. No official releases are available yet.
+
 A high-performance HF sound modem designed for amateur radio data transmission over voice channels. Features adaptive modulation, LDPC forward error correction, and a real-time GUI with constellation diagram.
 
 ## Features
