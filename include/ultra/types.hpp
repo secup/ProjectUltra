@@ -45,6 +45,7 @@ enum class SpeedProfile : uint8_t {
     CONSERVATIVE,  // Maximize reliability, lower speed
     BALANCED,      // Good balance for typical HF
     TURBO,         // Maximum speed for good conditions
+    ADAPTIVE,      // Auto-select based on measured SNR
 };
 
 // FEC code rates
@@ -198,14 +199,14 @@ inline ModemConfig balanced() {
 }
 
 // Turbo: Maximum speed for excellent conditions (30+ dB SNR)
-// ~16 kbps at 256-QAM R7/8
+// ~14 kbps at 256-QAM R5/6
 inline ModemConfig turbo() {
     ModemConfig cfg;
     cfg.cp_mode = CyclicPrefixMode::SHORT;     // 32 samples = 0.67ms
     cfg.symbol_guard = 0;                       // No guard - tight timing
     cfg.pilot_spacing = 8;                      // Minimal pilots
     cfg.modulation = Modulation::QAM256;
-    cfg.code_rate = CodeRate::R7_8;
+    cfg.code_rate = CodeRate::R5_6;            // Highest implemented rate
     cfg.speed_profile = SpeedProfile::TURBO;
     return cfg;
 }

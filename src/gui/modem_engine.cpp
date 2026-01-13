@@ -40,14 +40,29 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         return {};
     }
 
+    // Adaptive modulation: adjust mode based on measured SNR
+    if (config_.speed_profile == SpeedProfile::ADAPTIVE) {
+        float snr = getCurrentSNR();
+        if (adaptive_.update(snr)) {
+            // Mode changed - update config
+            config_.modulation = adaptive_.getModulation();
+            config_.code_rate = adaptive_.getCodeRate();
+            encoder_->setRate(config_.code_rate);
+            // Note: modulator uses modulation per-call, no recreation needed
+        }
+    }
+
     // Step 1: LDPC encode
     Bytes encoded = encoder_->encode(data);
+
+    // Step 1.5: Interleave (optional - spreads burst errors for LDPC decoder)
+    Bytes to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;
 
     // Step 2: Generate preamble
     Samples preamble = modulator_->generatePreamble();
 
     // Step 3: OFDM modulate
-    Samples modulated = modulator_->modulate(encoded, config_.modulation);
+    Samples modulated = modulator_->modulate(to_modulate, config_.modulation);
 
     // Step 4: Combine preamble + data
     std::vector<float> output;
@@ -146,15 +161,27 @@ void ModemEngine::processRxBuffer() {
     // Clear the samples we just passed - demodulator now owns them
     rx_sample_buffer_.clear();
 
+    // Update SNR continuously when synced (not just after decode)
+    if (demodulator_->isSynced()) {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.snr_db = demodulator_->getEstimatedSNR();
+        stats_.synced = true;
+    }
+
     if (frame_ready) {
         // Get soft bits from demodulator
         auto soft_bits = demodulator_->getSoftBits();
         LOG_MODEM(DEBUG, "RX: Frame ready, got %zu soft bits", soft_bits.size());
 
         if (!soft_bits.empty()) {
+            // Deinterleave if enabled (reverses TX interleaving)
+            auto to_decode = interleaving_enabled_ ? interleaver_.deinterleave(soft_bits) : soft_bits;
+            LOG_MODEM(DEBUG, "RX: %s %zu soft bits",
+                      interleaving_enabled_ ? "Deinterleaved" : "Processing", to_decode.size());
+
             // LDPC decode
-            LOG_MODEM(DEBUG, "RX: Attempting LDPC decode with %zu soft bits", soft_bits.size());
-            Bytes decoded = decoder_->decodeSoft(soft_bits);
+            LOG_MODEM(DEBUG, "RX: Attempting LDPC decode with %zu soft bits", to_decode.size());
+            Bytes decoded = decoder_->decodeSoft(to_decode);
             bool success = decoder_->lastDecodeSuccess();
 
             LOG_MODEM(DEBUG, "RX: LDPC decode %s, got %zu bytes",
@@ -278,6 +305,7 @@ void ModemEngine::reset() {
     std::swap(rx_data_queue_, empty);
 
     demodulator_->reset();
+    adaptive_.reset();
 
     {
         std::lock_guard<std::mutex> lock2(stats_mutex_);

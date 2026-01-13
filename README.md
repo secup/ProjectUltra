@@ -8,11 +8,12 @@ A high-performance HF sound modem designed for amateur radio data transmission o
 
 - **OFDM modulation** with 30 carriers in 2.8 kHz bandwidth
 - **Adaptive modulation**: BPSK, QPSK, 16-QAM, 64-QAM, 256-QAM
-- **LDPC FEC** with multiple code rates (1/4 to 7/8)
-- **Realistic throughput**: 2-10 kbps typical (see Performance section)
-- **Watterson HF channel simulator** for realistic testing
+- **LDPC FEC** with code rates 1/2, 2/3, 3/4, 5/6
+- **Throughput**: 1-10 kbps depending on conditions (see Performance section)
+- **Watterson HF channel simulator** for realistic testing (ITU-R F.1487)
 - **Cross-platform GUI** using Dear ImGui + SDL2 + OpenGL 2.1
 - **Real-time constellation diagram** visualization
+- **ARQ protocol layer** for reliable data transfer
 
 ## Specifications
 
@@ -45,7 +46,7 @@ A high-performance HF sound modem designed for amateur radio data transmission o
 
 - **Code**: LDPC (Low-Density Parity-Check)
 - **Block Size**: 648 bits
-- **Code Rates**: 1/4, 1/3, 1/2, 2/3, 3/4, 5/6, 7/8
+- **Code Rates**: 1/2, 2/3, 3/4, 5/6
 - **Decoder**: Belief propagation with early termination
 
 ### Speed Profiles
@@ -54,7 +55,7 @@ A high-performance HF sound modem designed for amateur radio data transmission o
 |---------|------------|-----------|---------|----------|
 | Conservative | QPSK | 1/2 | Long | Poor HF conditions |
 | Balanced | 64-QAM | 3/4 | Medium | Typical HF |
-| Turbo | 256-QAM | 7/8 | Short | Excellent conditions |
+| Turbo | 256-QAM | 5/6 | Short | Excellent conditions |
 
 ## Performance
 
@@ -72,16 +73,18 @@ Performance tested using the ITU-R F.1487 Watterson HF channel model with CCIR s
 
 ### Measured Throughput by Mode
 
-| Mode | AWGN | Good | Moderate | Poor |
-|------|------|------|----------|------|
-| BPSK R1/2 | 1.1 kbps | 1.1 kbps | 1.1 kbps | 1.0 kbps |
-| QPSK R1/2 | 2.1 kbps | 2.1 kbps | 2.1 kbps | — |
-| QPSK R3/4 | 3.2 kbps | 3.2 kbps | 3.2 kbps | — |
-| 16-QAM R3/4 | 6.4 kbps | 6.4 kbps | 6.4 kbps | — |
-| 64-QAM R3/4 | 9.6 kbps | 9.6 kbps | 9.6 kbps | — |
-| 256-QAM R3/4 | 12.8 kbps | 12.8 kbps | 4.1 kbps | — |
+| Mode | AWGN | Good | Moderate | Poor | Flutter |
+|------|------|------|----------|------|---------|
+| BPSK R1/2 | 1.1 kbps | 1.1 kbps | 1.1 kbps | 1.0 kbps | 0.2 kbps |
+| QPSK R1/2 | 2.1 kbps | 2.1 kbps | 2.1 kbps | — | — |
+| QPSK R3/4 | 3.2 kbps | 3.2 kbps | 3.2 kbps | — | — |
+| 16-QAM R1/2 | 4.3 kbps | 4.3 kbps | 4.3 kbps | — | — |
+| 16-QAM R3/4 | 6.4 kbps | 6.4 kbps | 6.4 kbps | — | — |
+| 64-QAM R3/4 | 9.6 kbps | 9.6 kbps | 9.6 kbps | — | — |
+| 256-QAM R3/4 | 12.8 kbps | 12.8 kbps | ~4 kbps* | — | — |
 
 *"—" indicates mode not viable for that condition (requires fallback to lower mode)*
+*256-QAM shows ~32% success rate under Moderate conditions*
 
 ### Expected Real-World Performance
 
@@ -89,18 +92,28 @@ Performance tested using the ITU-R F.1487 Watterson HF channel model with CCIR s
 |-------------------|------------------|---------------------|
 | Excellent (NVIS, quiet band) | 64-QAM R3/4 | 6-10 kbps |
 | Good (typical mid-latitude) | 16-QAM R3/4 | 4-6 kbps |
-| Moderate (average DX) | QPSK R3/4 | 2-4 kbps |
-| Poor (disturbed, polar) | QPSK R1/2 | 1-2 kbps |
-| Extreme (auroral flutter) | BPSK R1/2 | 0.5-1 kbps |
+| Moderate (average DX) | QPSK R1/2 | 2-3 kbps |
+| Poor (disturbed, polar) | BPSK R1/2 | ~1 kbps |
+| Extreme (auroral flutter) | BPSK R1/2 | <0.5 kbps |
 
-### Comparison with Other HF Modes
+*Note: Under Poor/Flutter conditions, only BPSK R1/2 is viable. Higher modes require Good or better conditions.*
 
-| Mode | Typical Throughput | Peak Throughput |
-|------|-------------------|-----------------|
-| VARA HF | 2-4 kbps | 8.5 kbps |
-| PACTOR IV | 3-5 kbps | 10.5 kbps |
-| ARDOP | 1-2 kbps | 2.4 kbps |
-| **ProjectUltra** | **2-6 kbps** | **~10 kbps** |
+## Known Limitations
+
+### Frequency Offset Tolerance
+- **Current tolerance**: ±5 Hz
+- The modem can decode signals with up to ±5 Hz frequency offset
+- Larger offsets (typical HF radio drift can be ±20 Hz or more) require external AFC or manual radio tuning
+- Frequency offset estimation is available via pilot tracking but has some bias
+
+### Channel Conditions
+- **Poor/Flutter conditions**: Only BPSK R1/2 is viable; higher modes fail
+- **256-QAM**: Only reliable under AWGN and Good conditions; degrades significantly under Moderate fading
+- **Recommendation**: Use adaptive modulation for automatic fallback
+
+### Implementation Notes
+- Time interleaving is disabled by default (LDPC's pseudo-random structure already handles burst errors effectively)
+- The protocol layer (ARQ) has not been extensively tested over real HF channels
 
 ## Building
 

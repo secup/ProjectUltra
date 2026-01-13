@@ -67,9 +67,11 @@ if(ULTRA_BUILD_TOOLS)
     # HF Channel Simulator / Loopback Test
     add_executable(ultra_sim
         src/sim/loopback_test.cpp
+        src/gui/adaptive_mode.cpp
     )
     target_include_directories(ultra_sim PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/sim
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
     )
     target_link_libraries(ultra_sim PRIVATE ultra_core)
 endif()
@@ -97,6 +99,7 @@ if(ULTRA_BUILD_GUI)
             src/gui/app.cpp
             src/gui/audio_engine.cpp
             src/gui/modem_engine.cpp
+            src/gui/adaptive_mode.cpp
             src/gui/widgets/constellation.cpp
             src/gui/widgets/controls.cpp
             src/gui/widgets/status.cpp

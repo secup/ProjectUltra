@@ -144,6 +144,11 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> channel_estimate;
     float noise_variance = 0.1f;
 
+    // SNR estimation (from pilots)
+    float estimated_snr_linear = 1.0f;  // Linear SNR (not dB)
+    float snr_alpha = 0.3f;             // Smoothing factor for running average
+    int snr_symbol_count = 0;           // Counts symbols for SNR warm-up
+
     // Output data
     Bytes demod_data;
     std::vector<float> soft_bits;
@@ -166,6 +171,13 @@ struct OFDMDemodulator::Impl {
         float alpha;        // Interpolation weight: estimate = (1-alpha)*lower + alpha*upper
     };
     std::vector<InterpInfo> interp_table;
+
+    // Frequency offset estimation and correction
+    float freq_offset_hz = 0.0f;           // Estimated frequency offset
+    float freq_offset_filtered = 0.0f;     // Low-pass filtered estimate
+    std::vector<Complex> prev_pilot_phases; // Previous symbol's pilot values
+    static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor
+    float freq_correction_phase = 0.0f;    // Running phase for correction
 
     Impl(const ModemConfig& cfg)
         : config(cfg)
@@ -346,12 +358,34 @@ struct OFDMDemodulator::Impl {
     }
 
     std::vector<Complex> toBaseband(SampleSpan samples) {
-        // Mix down from center frequency
+        // Mix down from center frequency, with frequency offset correction
         std::vector<Complex> baseband(samples.size());
+
+        // Phase increment per sample for frequency correction
+        // Negative because we're correcting (removing) the offset
+        float phase_increment = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
+
         for (size_t i = 0; i < samples.size(); ++i) {
+            // Mix down from center frequency
             Complex osc = mixer.next();
-            // Conjugate for mixing down
-            baseband[i] = samples[i] * std::conj(osc);
+            Complex mixed = samples[i] * std::conj(osc);
+
+            // Apply frequency offset correction
+            if (std::abs(freq_offset_hz) > 0.1f) {
+                Complex correction(std::cos(freq_correction_phase),
+                                   std::sin(freq_correction_phase));
+                mixed *= correction;
+                freq_correction_phase += phase_increment;
+
+                // Wrap phase to prevent numerical overflow
+                if (freq_correction_phase > M_PI) {
+                    freq_correction_phase -= 2.0f * M_PI;
+                } else if (freq_correction_phase < -M_PI) {
+                    freq_correction_phase += 2.0f * M_PI;
+                }
+            }
+
+            baseband[i] = mixed;
         }
         return baseband;
     }
@@ -381,32 +415,104 @@ struct OFDMDemodulator::Impl {
         // For short frames, we need fast convergence
         float alpha = 0.9f;  // Weight for new estimate (was 0.3)
 
+        // First pass: compute all LS estimates and their average
+        std::vector<Complex> h_ls_all(pilot_carrier_indices.size());
+        Complex h_sum(0, 0);
+
         for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
             int idx = pilot_carrier_indices[i];
             Complex rx = freq_domain[idx];
             Complex tx = pilot_sequence[i];
 
-            // LS estimate
-            Complex h = rx / tx;
-
-            // Smooth with previous estimate
-            channel_estimate[idx] = alpha * h + (1.0f - alpha) * channel_estimate[idx];
+            // LS estimate: H = Rx / Tx
+            h_ls_all[i] = rx / tx;
+            h_sum += h_ls_all[i];
         }
+
+        Complex h_avg = h_sum / static_cast<float>(pilot_carrier_indices.size());
+        float signal_power = std::norm(h_avg);
+
+        // Second pass: update channel estimates and measure noise
+        // Noise = deviation of each pilot's estimate from the average
+        // For flat channel: all pilots see same H, deviation = noise
+        float noise_power_sum = 0.0f;
+
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            int idx = pilot_carrier_indices[i];
+
+            // Measure deviation from average (this is the noise)
+            Complex deviation = h_ls_all[i] - h_avg;
+            noise_power_sum += std::norm(deviation);
+
+            // Update smoothed channel estimate
+            Complex h_old = channel_estimate[idx];
+            channel_estimate[idx] = alpha * h_ls_all[i] + (1.0f - alpha) * h_old;
+        }
+
+        // === Frequency offset estimation from pilot phase differences ===
+        // Compare pilot phases between consecutive symbols
+        if (!prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size()) {
+            float phase_diff_sum = 0.0f;
+            int valid_count = 0;
+
+            for (size_t i = 0; i < h_ls_all.size(); ++i) {
+                // Phase difference = arg(current * conj(previous))
+                Complex diff = h_ls_all[i] * std::conj(prev_pilot_phases[i]);
+                float phase_diff = std::atan2(diff.imag(), diff.real());
+
+                // Skip pilots with very low magnitude (unreliable)
+                if (std::norm(prev_pilot_phases[i]) > 1e-6f &&
+                    std::norm(h_ls_all[i]) > 1e-6f) {
+                    phase_diff_sum += phase_diff;
+                    valid_count++;
+                }
+            }
+
+            if (valid_count > 0) {
+                float avg_phase_diff = phase_diff_sum / valid_count;
+
+                // Convert phase difference to frequency offset
+                // Δf = Δφ / (2π * T_symbol)
+                float symbol_duration = static_cast<float>(config.getSymbolDuration()) /
+                                       static_cast<float>(config.sample_rate);
+                float instantaneous_offset = avg_phase_diff / (2.0f * M_PI * symbol_duration);
+
+                // Low-pass filter to reduce noise
+                freq_offset_filtered = FREQ_OFFSET_ALPHA * instantaneous_offset +
+                                      (1.0f - FREQ_OFFSET_ALPHA) * freq_offset_filtered;
+
+                // Clamp to reasonable range (±50 Hz for HF)
+                freq_offset_hz = std::max(-50.0f, std::min(50.0f, freq_offset_filtered));
+
+                LOG_DEMOD(TRACE, "Freq offset: instant=%.2f Hz, filtered=%.2f Hz",
+                         instantaneous_offset, freq_offset_hz);
+            }
+        }
+
+        // Store current pilots for next symbol
+        prev_pilot_phases = h_ls_all;
 
         // Interpolate between pilots for data carriers
         interpolateChannel();
 
-        // Estimate noise variance from pilot error
-        float error_sum = 0;
-        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
-            int idx = pilot_carrier_indices[i];
-            Complex expected = pilot_sequence[i] * channel_estimate[idx];
-            Complex actual = freq_domain[idx];
-            Complex error = actual - expected;
-            error_sum += std::norm(error);
+        // Update noise variance and SNR
+        // noise_power_sum = sum of |h[i] - h_avg|² over N pilots
+        // For N pilots, this measures sample variance with (N-1) degrees of freedom
+        // So average noise per pilot = noise_power_sum / (N-1)
+        size_t N = pilot_carrier_indices.size();
+        if (N > 1 && noise_power_sum > 0.0f) {
+            noise_variance = noise_power_sum / (N - 1);  // Unbiased variance estimator
+            if (noise_variance < 1e-6f) noise_variance = 1e-6f;
+
+            // SNR = signal_power / noise_variance
+            float instantaneous_snr = signal_power / noise_variance;
+
+            // Clamp to reasonable range (0.1 to 10000 linear = -10 to +40 dB)
+            instantaneous_snr = std::max(0.1f, std::min(10000.0f, instantaneous_snr));
+
+            // Smooth SNR estimate
+            estimated_snr_linear = snr_alpha * instantaneous_snr + (1.0f - snr_alpha) * estimated_snr_linear;
         }
-        noise_variance = error_sum / pilot_carrier_indices.size();
-        if (noise_variance < 1e-6f) noise_variance = 1e-6f;
     }
 
     void interpolateChannel() {
@@ -503,28 +609,27 @@ struct OFDMDemodulator::Impl {
     }
 
     void updateQuality() {
-        // Calculate channel quality metrics
-        float total_snr = 0;
-        for (int idx : data_carrier_indices) {
-            float signal_power = std::norm(channel_estimate[idx]);
-            float snr = signal_power / noise_variance;
-            total_snr += snr;
-        }
-        quality.snr_db = 10.0f * std::log10(total_snr / data_carrier_indices.size());
+        // SNR from pilot-based estimation (already computed in updateChannelEstimate)
+        quality.snr_db = 10.0f * std::log10(estimated_snr_linear);
 
-        // Simplified Doppler estimate (would need multiple symbols for real estimate)
+        // Doppler estimation would require tracking phase changes across symbols
+        // For now, estimate from noise variance rate of change (placeholder)
         quality.doppler_hz = 0;
 
-        // Estimate delay spread from channel variation
+        // Delay spread estimation would require analyzing channel impulse response
+        // For now, estimate from channel frequency selectivity (placeholder)
         quality.delay_spread_ms = 0;
 
-        // BER estimate from SNR (approximate)
-        if (quality.snr_db > 10) {
+        // BER estimate based on SNR and modulation
+        // These thresholds are approximate for QPSK with LDPC
+        if (quality.snr_db > 15) {
             quality.ber_estimate = 1e-6f;
+        } else if (quality.snr_db > 10) {
+            quality.ber_estimate = 1e-5f;
         } else if (quality.snr_db > 5) {
-            quality.ber_estimate = 1e-4f;
+            quality.ber_estimate = 1e-3f;
         } else {
-            quality.ber_estimate = 1e-2f;
+            quality.ber_estimate = 1e-1f;
         }
     }
 };
@@ -712,6 +817,14 @@ ChannelQuality OFDMDemodulator::getChannelQuality() const {
     return impl_->quality;
 }
 
+float OFDMDemodulator::getEstimatedSNR() const {
+    return 10.0f * std::log10(impl_->estimated_snr_linear);
+}
+
+float OFDMDemodulator::getFrequencyOffset() const {
+    return impl_->freq_offset_hz;
+}
+
 Symbol OFDMDemodulator::getConstellationSymbols() const {
     std::lock_guard<std::mutex> lock(impl_->constellation_mutex);
     return impl_->constellation_symbols;
@@ -729,6 +842,14 @@ void OFDMDemodulator::reset() {
     impl_->soft_bits.clear();
     impl_->demod_data.clear();
     std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
+    impl_->snr_symbol_count = 0;
+    impl_->estimated_snr_linear = 1.0f;
+
+    // Reset frequency offset tracking
+    impl_->freq_offset_hz = 0.0f;
+    impl_->freq_offset_filtered = 0.0f;
+    impl_->freq_correction_phase = 0.0f;
+    impl_->prev_pilot_phases.clear();
 }
 
 // ============ Channel Estimator ============

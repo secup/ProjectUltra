@@ -433,11 +433,11 @@ void App::render() {
     auto mstats = modem_.getStats();
     if (mode_ == AppMode::TEST) {
         ImGui::Text("Mode: TEST | SNR: %.1f dB | TX: %d frames | Throughput: %d bps",
-            snr_slider_, mstats.frames_sent, mstats.throughput_bps);
+            mstats.snr_db, mstats.frames_sent, mstats.throughput_bps);
     } else {
         const char* state = ptt_active_ ? "TX" : (radio_rx_enabled_ ? "RX" : "IDLE");
-        ImGui::Text("Mode: OPERATE [%s] | TX: %d | RX: %d | Throughput: %d bps",
-            state, mstats.frames_sent, mstats.frames_received, mstats.throughput_bps);
+        ImGui::Text("Mode: OPERATE [%s] | SNR: %.1f dB | TX: %d | RX: %d | Throughput: %d bps",
+            state, mstats.snr_db, mstats.frames_sent, mstats.frames_received, mstats.throughput_bps);
     }
 
     ImGui::End();

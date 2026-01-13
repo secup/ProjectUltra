@@ -2,7 +2,8 @@
 
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"
-#include "ultra/fec.hpp"
+#include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
+#include "adaptive_mode.hpp"
 #include <memory>
 #include <vector>
 #include <queue>
@@ -98,6 +99,15 @@ private:
     // Callbacks
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
+
+    // Adaptive modulation controller
+    AdaptiveModeController adaptive_;
+
+    // Time interleaver (24x27 block = 648 bits = matches LDPC block size)
+    // NOTE: Testing showed interleaving provides minimal benefit with LDPC's
+    // pseudo-random structure, so it's disabled by default.
+    Interleaver interleaver_{24, 27};
+    bool interleaving_enabled_ = false;  // Disabled by default per test results
 
     // Process accumulated samples through demodulator
     void processRxBuffer();

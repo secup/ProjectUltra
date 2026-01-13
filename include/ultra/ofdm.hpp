@@ -67,6 +67,12 @@ public:
     // Get current channel estimate
     ChannelQuality getChannelQuality() const;
 
+    // Get estimated SNR in dB (from pilot measurements)
+    float getEstimatedSNR() const;
+
+    // Get estimated frequency offset in Hz (from pilot phase tracking)
+    float getFrequencyOffset() const;
+
     // Get equalized symbols for constellation display
     Symbol getConstellationSymbols() const;
 
