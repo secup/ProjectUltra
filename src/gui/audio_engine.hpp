@@ -62,6 +62,10 @@ public:
     // Audio parameters
     int getSampleRate() const { return sample_rate_; }
 
+    // Audio level metering
+    float getInputLevel() const { return input_level_; }
+    float getOutputLevel() const { return output_level_; }
+
     // Callback for when RX has data ready
     using RxCallback = std::function<void(const std::vector<float>&)>;
     void setRxCallback(RxCallback callback) { rx_callback_ = callback; }
@@ -103,6 +107,10 @@ private:
 
     // Random generator for noise
     uint32_t noise_seed_ = 12345;
+
+    // Audio level metering (RMS, 0.0-1.0)
+    std::atomic<float> input_level_{0.0f};
+    std::atomic<float> output_level_{0.0f};
 };
 
 } // namespace gui

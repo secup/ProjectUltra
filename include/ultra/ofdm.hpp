@@ -67,6 +67,12 @@ public:
     // Get current channel estimate
     ChannelQuality getChannelQuality() const;
 
+    // Get equalized symbols for constellation display
+    Symbol getConstellationSymbols() const;
+
+    // Check if demodulator is currently synchronized (processing a frame)
+    bool isSynced() const;
+
     // Reset state (e.g., after sync loss)
     void reset();
 

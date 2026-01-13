@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <numeric>
 #include <random>
+#include <atomic>
+#include <mutex>
 
 // LDPC codeword size (same for all code rates in this implementation)
 static constexpr size_t LDPC_BLOCK_SIZE = 648;
@@ -128,9 +130,11 @@ struct OFDMDemodulator::Impl {
     std::vector<int> pilot_carrier_indices;
     std::vector<Complex> pilot_sequence;
 
-    // Synchronization state
+    // Synchronization state (atomic for thread-safe UI access)
     enum class State { SEARCHING, SYNCED };
-    State state = State::SEARCHING;
+    std::atomic<State> state{State::SEARCHING};
+    std::atomic<int> synced_symbol_count{0};  // Count symbols since sync, for timeout
+    static constexpr int MAX_SYMBOLS_BEFORE_TIMEOUT = 30;  // ~300ms - faster timeout
 
     // Sample buffer
     Samples rx_buffer;
@@ -144,6 +148,10 @@ struct OFDMDemodulator::Impl {
     Bytes demod_data;
     std::vector<float> soft_bits;
     ChannelQuality quality;
+
+    // Constellation display (latest equalized symbols)
+    std::vector<Complex> constellation_symbols;
+    mutable std::mutex constellation_mutex;
 
     // Sync detection
     std::vector<Complex> sync_sequence;
@@ -294,12 +302,22 @@ struct OFDMDemodulator::Impl {
     }
 
     bool detectSync(size_t offset) {
-        float normalized = measureCorrelation(offset);
+        float energy = 0;
+        float normalized = measureCorrelation(offset, &energy);
+
+        // Require minimum energy to avoid false triggers on transients/noise
+        // Energy is sum of squares over ~560 samples * 2 windows
+        // For 0.3 RMS signal: energy = 560 * 0.3^2 * 2 = 100.8
+        // Use high threshold to reject finger snaps and other transients
+        constexpr float MIN_ENERGY = 80.0f;  // Require substantial sustained signal
+        if (energy < MIN_ENERGY) {
+            return false;
+        }
 
         // Debug: print correlation at key offsets
         if (offset % 500 == 0 || normalized > 0.5f) {
-            LOG_DEMOD(TRACE, "detectSync offset=%zu normalized=%.3f threshold=%.2f",
-                    offset, normalized, sync_threshold);
+            LOG_DEMOD(TRACE, "detectSync offset=%zu normalized=%.3f energy=%.1f threshold=%.2f",
+                    offset, normalized, energy, sync_threshold);
         }
 
         return normalized > sync_threshold;
@@ -407,6 +425,17 @@ struct OFDMDemodulator::Impl {
     }
 
     void demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod) {
+        // Save symbols for constellation display
+        {
+            std::lock_guard<std::mutex> lock(constellation_mutex);
+            // Keep last ~200 symbols for display (rolling buffer)
+            constellation_symbols.insert(constellation_symbols.end(), equalized.begin(), equalized.end());
+            if (constellation_symbols.size() > 500) {
+                constellation_symbols.erase(constellation_symbols.begin(),
+                                           constellation_symbols.begin() + (constellation_symbols.size() - 500));
+            }
+        }
+
         // Log first few equalized symbols when starting a new frame
         if (soft_bits.empty() && !equalized.empty()) {
             LOG_DEMOD(DEBUG, "First equalized symbols: (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)",
@@ -487,12 +516,12 @@ bool OFDMDemodulator::process(SampleSpan samples) {
     // Add to buffer
     impl_->rx_buffer.insert(impl_->rx_buffer.end(), samples.begin(), samples.end());
 
-    LOG_DEMOD(TRACE, "Buffer has %zu samples, state=%s",
+    LOG_DEMOD(TRACE, "process(): buffer has %zu samples, state=%s",
             impl_->rx_buffer.size(),
-            impl_->state == Impl::State::SEARCHING ? "SEARCHING" : "SYNCED");
+            impl_->state.load() == Impl::State::SEARCHING ? "SEARCHING" : "SYNCED");
 
     // State machine
-    if (impl_->state == Impl::State::SEARCHING) {
+    if (impl_->state.load() == Impl::State::SEARCHING) {
         // Look for sync preamble
         // Preamble symbols have NO guard interval (only fft_size + cp)
         size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
@@ -502,75 +531,37 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 preamble_total_len, impl_->rx_buffer.size());
 
         // Sync detection strategy:
-        // 1. Find region with high correlation (indicates STS pattern)
-        // 2. Scan backwards from high-correlation point to find signal start via energy detection
-        float max_corr = 0;
-        size_t max_offset = 0;
+        // Find FIRST point where correlation exceeds threshold (preamble start)
+        // Not the maximum - we want the beginning of the high-correlation region
+        bool found_sync = false;
+        size_t sync_offset = 0;
+        float sync_corr = 0;
 
-        // Find first point with high correlation
         for (size_t i = 0; i + preamble_total_len < impl_->rx_buffer.size(); ++i) {
             float corr = impl_->measureCorrelation(i);
-            if (corr > max_corr) {
-                max_corr = corr;
-                max_offset = i;
-            }
-            // Stop once we've found a clear high-correlation region
-            if (max_corr > 0.9f && corr < max_corr - 0.15f) {
+            if (corr > impl_->sync_threshold) {
+                // Found first point exceeding threshold - this is preamble start
+                found_sync = true;
+                sync_offset = i;
+                sync_corr = corr;
                 break;
             }
         }
 
-        // Refine sync using energy detection: scan backwards to find signal start
-        size_t sync_offset = max_offset;
-        bool found_sync = max_corr > impl_->sync_threshold;
-
-        if (found_sync && max_offset > 100) {
-            // Scan backwards from correlation peak to find silence-to-signal edge
-            size_t window = 64;
-
-            // Measure signal energy at correlation peak
-            float signal_energy = 0;
-            for (size_t i = 0; i < window && max_offset + i < impl_->rx_buffer.size(); ++i) {
-                float s = impl_->rx_buffer[max_offset + i];
-                signal_energy += s * s;
-            }
-            signal_energy /= window;
-
-            // Scan backwards to find where energy first drops below 10% of signal
-            float threshold = signal_energy * 0.10f;
-
-            for (size_t back = 0; back < max_offset && back < 3000; ++back) {
-                size_t pos = max_offset - back;
-                float energy = 0;
-                for (size_t i = 0; i < window && pos + i < impl_->rx_buffer.size(); ++i) {
-                    float s = impl_->rx_buffer[pos + i];
-                    energy += s * s;
-                }
-                energy /= window;
-
-                if (energy < threshold) {
-                    // Found silence-to-signal transition
-                    // The signal starts roughly at pos + window/2
-                    // Subtract 4 samples for fine timing alignment
-                    sync_offset = pos + window / 2 - 4;
-                    break;
-                }
-            }
-        }
-
         if (found_sync) {
-            LOG_SYNC(INFO, "SYNC FOUND: offset=%zu (corr_peak=%zu, corr=%.3f)",
-                    sync_offset, max_offset, max_corr);
+            LOG_SYNC(INFO, "SYNC FOUND: offset=%zu (corr=%.3f)",
+                    sync_offset, sync_corr);
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + sync_offset + preamble_total_len);
-            impl_->state = Impl::State::SYNCED;
+            impl_->state.store(Impl::State::SYNCED);
+            impl_->synced_symbol_count.store(0);  // Reset timeout counter
             impl_->mixer.reset();
         } else {
-            LOG_SYNC(TRACE, "No sync found (max_corr=%.3f)", max_corr);
+            LOG_SYNC(TRACE, "No sync found");
         }
     }
 
-    if (impl_->state == Impl::State::SYNCED) {
+    if (impl_->state.load() == Impl::State::SYNCED) {
         // Process complete symbols (stop when we have enough for one LDPC block)
         while (impl_->rx_buffer.size() >= impl_->symbol_samples &&
                impl_->soft_bits.size() < LDPC_BLOCK_SIZE) {
@@ -595,6 +586,17 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                                    impl_->rx_buffer.begin() + impl_->symbol_samples);
 
             impl_->updateQuality();
+
+            // Timeout check: if we've processed too many symbols without completing,
+            // this was likely a false sync - reset to searching
+            int sym_count = ++impl_->synced_symbol_count;
+            if (sym_count > Impl::MAX_SYMBOLS_BEFORE_TIMEOUT) {
+                LOG_SYNC(WARN, "Sync timeout after %d symbols, resetting to SEARCHING", sym_count);
+                impl_->state.store(Impl::State::SEARCHING);
+                impl_->soft_bits.clear();
+                impl_->synced_symbol_count.store(0);
+                return false;
+            }
         }
 
         // Return true if we have enough soft bits for an LDPC codeword
@@ -658,8 +660,18 @@ ChannelQuality OFDMDemodulator::getChannelQuality() const {
     return impl_->quality;
 }
 
+Symbol OFDMDemodulator::getConstellationSymbols() const {
+    std::lock_guard<std::mutex> lock(impl_->constellation_mutex);
+    return impl_->constellation_symbols;
+}
+
+bool OFDMDemodulator::isSynced() const {
+    return impl_->state.load() == Impl::State::SYNCED;
+}
+
 void OFDMDemodulator::reset() {
-    impl_->state = Impl::State::SEARCHING;
+    impl_->state.store(Impl::State::SEARCHING);
+    impl_->synced_symbol_count.store(0);
     impl_->rx_buffer.clear();
     impl_->soft_bits.clear();
     impl_->demod_data.clear();

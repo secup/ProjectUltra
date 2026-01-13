@@ -39,9 +39,13 @@ public:
     std::vector<float> transmit(const std::string& text);
     std::vector<float> transmit(const Bytes& data);
 
-    // RX: Process incoming audio samples
+    // RX: Queue incoming audio samples (fast - safe to call from audio callback)
     // Call this with chunks of audio from the input
     void receiveAudio(const std::vector<float>& samples);
+
+    // Process queued audio samples (slow - call from main loop, NOT audio callback)
+    // Returns true if there's more data to process
+    bool pollRxAudio();
 
     // Check if we have decoded data ready
     bool hasReceivedData() const;
@@ -54,6 +58,9 @@ public:
     LoopbackStats getStats() const;
     bool isSynced() const;
     float getCurrentSNR() const;
+
+    // Get symbols for constellation display
+    std::vector<std::complex<float>> getConstellationSymbols() const;
 
     // Callback when data is received
     using DataCallback = std::function<void(const std::string&)>;
@@ -74,9 +81,11 @@ private:
     std::unique_ptr<OFDMDemodulator> demodulator_;
 
     // RX state
-    std::vector<float> rx_sample_buffer_;
+    std::vector<float> rx_sample_buffer_;      // Main processing buffer
+    std::vector<float> rx_pending_samples_;    // Pending samples from callback (fast push)
+    mutable std::mutex rx_pending_mutex_;      // Protects pending buffer only (fast lock)
     std::queue<Bytes> rx_data_queue_;
-    mutable std::mutex rx_mutex_;
+    mutable std::mutex rx_mutex_;              // Protects processing buffer and queue
 
     // Statistics
     LoopbackStats stats_;

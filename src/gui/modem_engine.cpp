@@ -53,17 +53,11 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     std::vector<float> output;
     output.reserve(preamble.size() + modulated.size());
 
-    // Add some silence at the start (helps with sync)
-    output.insert(output.end(), 2400, 0.0f);  // 50ms silence
-
     // Add preamble
     output.insert(output.end(), preamble.begin(), preamble.end());
 
     // Add modulated data
     output.insert(output.end(), modulated.begin(), modulated.end());
-
-    // Add silence at the end
-    output.insert(output.end(), 2400, 0.0f);  // 50ms silence
 
     // Scale for audio output (prevent clipping)
     float max_val = 0.0f;
@@ -95,16 +89,41 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 }
 
 void ModemEngine::receiveAudio(const std::vector<float>& samples) {
+    // FAST PATH: Only lock the pending mutex, just append samples
+    // This is safe to call from SDL audio callback
+    std::lock_guard<std::mutex> lock(rx_pending_mutex_);
+    rx_pending_samples_.insert(rx_pending_samples_.end(), samples.begin(), samples.end());
+}
+
+bool ModemEngine::pollRxAudio() {
+    // SLOW PATH: Move pending samples to main buffer and process
+    // Call this from the main loop, NOT from audio callback!
+
+    // First, quickly grab any pending samples
+    std::vector<float> new_samples;
+    {
+        std::lock_guard<std::mutex> lock(rx_pending_mutex_);
+        if (!rx_pending_samples_.empty()) {
+            new_samples = std::move(rx_pending_samples_);
+            rx_pending_samples_.clear();
+            rx_pending_samples_.reserve(4096);  // Pre-allocate for next batch
+        }
+    }
+
+    if (new_samples.empty()) {
+        return false;  // Nothing to process
+    }
+
+    // Now do the slow processing with rx_mutex_
     std::lock_guard<std::mutex> lock(rx_mutex_);
 
-    // Add to buffer
-    rx_sample_buffer_.insert(rx_sample_buffer_.end(), samples.begin(), samples.end());
+    LOG_MODEM(DEBUG, "pollRxAudio: got %zu new samples", new_samples.size());
 
-    LOG_MODEM(DEBUG, "RX: Received %zu samples, buffer now %zu",
-              samples.size(), rx_sample_buffer_.size());
+    rx_sample_buffer_.insert(rx_sample_buffer_.end(), new_samples.begin(), new_samples.end());
 
     // Process buffer if we have enough samples
     processRxBuffer();
+    return true;
 }
 
 void ModemEngine::processRxBuffer() {
@@ -130,7 +149,7 @@ void ModemEngine::processRxBuffer() {
     if (frame_ready) {
         // Get soft bits from demodulator
         auto soft_bits = demodulator_->getSoftBits();
-        LOG_MODEM(DEBUG, "RX: Got %zu soft bits", soft_bits.size());
+        LOG_MODEM(DEBUG, "RX: Frame ready, got %zu soft bits", soft_bits.size());
 
         if (!soft_bits.empty()) {
             // LDPC decode
@@ -187,6 +206,12 @@ void ModemEngine::processRxBuffer() {
 
         // Reset demodulator to search for next preamble
         demodulator_->reset();
+
+        // Clear sync indicator after reset
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.synced = false;
+        }
     }
 }
 
@@ -221,8 +246,8 @@ LoopbackStats ModemEngine::getStats() const {
 }
 
 bool ModemEngine::isSynced() const {
-    std::lock_guard<std::mutex> lock(stats_mutex_);
-    return stats_.synced;
+    // Query demodulator's actual state, not cached value
+    return demodulator_->isSynced();
 }
 
 float ModemEngine::getCurrentSNR() const {
@@ -230,7 +255,17 @@ float ModemEngine::getCurrentSNR() const {
     return stats_.snr_db;
 }
 
+std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
+    return demodulator_->getConstellationSymbols();
+}
+
 void ModemEngine::reset() {
+    // Clear pending samples first
+    {
+        std::lock_guard<std::mutex> lock(rx_pending_mutex_);
+        rx_pending_samples_.clear();
+    }
+
     std::lock_guard<std::mutex> lock(rx_mutex_);
 
     rx_sample_buffer_.clear();

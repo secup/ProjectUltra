@@ -1,33 +1,27 @@
 #pragma once
 
 #include "ultra/types.hpp"
-#include "imgui.h"
-#include <vector>
-#include <string>
+#include "../modem_engine.hpp"
 
 namespace ultra {
 namespace gui {
 
+// Channel Status panel - displays real-time modem statistics
 class ControlsWidget {
 public:
     enum class Event {
         None,
-        Connect,
-        Disconnect,
-        ProfileChanged,
-        AudioDeviceChanged
+        ProfileChanged
     };
 
-    ControlsWidget();
+    ControlsWidget() = default;
 
-    Event render(ModemConfig& config, bool connected);
+    // Render channel status panel
+    // Returns event if profile changed
+    Event render(const LoopbackStats& stats, ModemConfig& config);
 
 private:
-    std::vector<std::string> audio_devices_;
-    int selected_device_ = 0;
     int selected_profile_ = 1;  // Default to Balanced
-
-    void enumerateAudioDevices();
 };
 
 } // namespace gui

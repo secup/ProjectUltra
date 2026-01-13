@@ -216,6 +216,8 @@ void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
     float* output = reinterpret_cast<float*>(stream);
     int samples = len / sizeof(float);
 
+    float sum_sq = 0.0f;
+
     std::lock_guard<std::mutex> lock(engine->tx_mutex_);
 
     for (int i = 0; i < samples; ++i) {
@@ -225,7 +227,12 @@ void AudioEngine::outputCallback(void* userdata, Uint8* stream, int len) {
         } else {
             output[i] = 0.0f;  // Silence when no data
         }
+        sum_sq += output[i] * output[i];
     }
+
+    // Update output level (RMS)
+    float rms = std::sqrt(sum_sq / samples);
+    engine->output_level_ = rms;
 }
 
 void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
@@ -233,6 +240,14 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
 
     const float* input = reinterpret_cast<const float*>(stream);
     int samples = len / sizeof(float);
+
+    // Compute input level (RMS)
+    float sum_sq = 0.0f;
+    for (int i = 0; i < samples; ++i) {
+        sum_sq += input[i] * input[i];
+    }
+    float rms = std::sqrt(sum_sq / samples);
+    engine->input_level_ = rms;
 
     std::vector<float> captured(input, input + samples);
 

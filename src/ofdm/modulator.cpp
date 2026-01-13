@@ -201,6 +201,8 @@ size_t OFDMModulator::bitsPerSymbol(Modulation mod) const {
 }
 
 Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
+    // Note: mixer phase continues from preamble for phase coherence
+
     size_t bits_per_carrier = static_cast<size_t>(mod);
     size_t carriers_per_symbol = impl_->data_carrier_indices.size();
     size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
@@ -258,6 +260,10 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
 }
 
 Samples OFDMModulator::generatePreamble() {
+    // Reset mixer phase so each transmission starts at phase 0
+    // This ensures consistent signal polarity across transmissions
+    impl_->mixer.reset();
+
     // Preamble structure:
     // 1. Short training sequence (STS) - for AGC, coarse timing
     // 2. Long training sequence (LTS) - for fine timing, channel est
