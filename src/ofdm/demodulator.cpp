@@ -666,7 +666,7 @@ struct OFDMDemodulator::Impl {
 
         // Log first few equalized symbols when starting a new frame
         if (soft_bits.empty() && !equalized.empty()) {
-            LOG_DEMOD(DEBUG, "First equalized symbols: (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)",
+            LOG_DEMOD(TRACE, "First equalized symbols: (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)",
                     equalized[0].real(), equalized[0].imag(),
                     equalized.size() > 1 ? equalized[1].real() : 0.0f,
                     equalized.size() > 1 ? equalized[1].imag() : 0.0f,
@@ -913,8 +913,8 @@ Bytes OFDMDemodulator::getData() {
 }
 
 std::vector<float> OFDMDemodulator::getSoftBits() {
-    // Debug: print first 24 LLRs and their hard decisions
-    if (g_log_level >= LogLevel::DEBUG && g_log_categories.demod && impl_->soft_bits.size() >= 24) {
+    // Trace: print first 24 LLRs and their hard decisions
+    if (g_log_level >= LogLevel::TRACE && g_log_categories.demod && impl_->soft_bits.size() >= 24) {
         char buf[256];
         int pos = 0;
         for (size_t i = 0; i < 24 && pos < 240; ++i) {
@@ -922,7 +922,7 @@ std::vector<float> OFDMDemodulator::getSoftBits() {
             pos += snprintf(buf + pos, sizeof(buf) - pos, "%+.1f(%d) ", impl_->soft_bits[i], bit);
             if ((i + 1) % 6 == 0) pos += snprintf(buf + pos, sizeof(buf) - pos, "| ");
         }
-        LOG_DEMOD(DEBUG, "First 24 LLRs: %s", buf);
+        LOG_DEMOD(TRACE, "First 24 LLRs: %s", buf);
     }
 
     // Return exactly one LDPC block worth of soft bits

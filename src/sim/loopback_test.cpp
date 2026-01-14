@@ -529,39 +529,6 @@ void runSpeedProfileTest(const ModemConfig& config) {
     std::cout << "  Moderate channel: " << turbo_mod.effective_throughput / 1000 << " kbps (" << turbo_mod.frame_success_rate << "% success)\n\n";
 }
 
-void runSummary() {
-    std::cout << "\n";
-    std::cout << "╔════════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║                         REALISTIC ASSESSMENT                        ║\n";
-    std::cout << "╚════════════════════════════════════════════════════════════════════╝\n\n";
-
-    std::cout << "Based on Watterson channel simulation:\n\n";
-
-    std::cout << "EXPECTED REAL-WORLD PERFORMANCE:\n";
-    std::cout << "─────────────────────────────────────────────────────────────────────\n";
-    std::cout << "  Excellent conditions (NVIS, quiet band):      4-8 kbps\n";
-    std::cout << "  Good conditions (typical mid-latitude):       2-5 kbps\n";
-    std::cout << "  Moderate conditions (average DX):             1-3 kbps\n";
-    std::cout << "  Poor conditions (disturbed, polar):           0.5-1.5 kbps\n";
-    std::cout << "  Extreme flutter (auroral):                    <0.5 kbps (fallback to BPSK)\n\n";
-
-    std::cout << "COMPARISON TO OTHER HF MODES:\n";
-    std::cout << "─────────────────────────────────────────────────────────────────────\n";
-    std::cout << "  VARA HF:      typically 2-4 kbps (claims 8.5 kbps peak)\n";
-    std::cout << "  PACTOR IV:    typically 3-5 kbps (claims 10.5 kbps peak)\n";
-    std::cout << "  ARDOP:        typically 1-2 kbps (claims 2.4 kbps peak)\n";
-    std::cout << "  ProjectUltra: estimated 2-5 kbps typical, competitive with VARA\n\n";
-
-    std::cout << "KEY INSIGHTS:\n";
-    std::cout << "─────────────────────────────────────────────────────────────────────\n";
-    std::cout << "  - Original claims (16 kbps) were AWGN-only, not realistic\n";
-    std::cout << "  - Rayleigh fading reduces effective SNR by ~5-10 dB\n";
-    std::cout << "  - Multipath > 1ms causes significant ISI\n";
-    std::cout << "  - Adaptive modulation is essential for real HF\n";
-    std::cout << "  - QPSK R1/2 is the 'workhorse' mode for typical conditions\n";
-    std::cout << "  - Higher modes (64-QAM+) only useful for excellent NVIS/groundwave\n\n";
-}
-
 void runSNREstimationTest(const ModemConfig& config) {
     std::cout << "\n=== SNR Estimation Test ===\n\n";
     std::cout << "Testing demodulator's pilot-based SNR estimation.\n";
@@ -1333,7 +1300,6 @@ int main(int, char*[]) {
     runFrequencyOffsetTest(config);
     runRealisticTests(config);
     runSpeedProfileTest(config);
-    runSummary();
 
     return 0;
 }
