@@ -91,6 +91,7 @@ cmake --build .
 - **General Operation:** Day-to-day data communication between amateur stations
 - **File Exchange:** Share documents, images, or small files over HF
 - **Portable/Field Operation:** Lightweight software solution for field deployments
+- **NVIS Regional Networks:** Reliable coverage out to 300+ miles using near-vertical skywave propagation on 40m/80m bands
 - **Emergency Communication:** Reliable messaging when other infrastructure is unavailable
 
 ---
