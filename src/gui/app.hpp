@@ -5,6 +5,8 @@
 #include "widgets/controls.hpp"
 #include "widgets/status.hpp"
 #include "widgets/settings.hpp"
+#include "widgets/waterfall.hpp"
+#include "widgets/file_browser.hpp"
 #include "audio_engine.hpp"
 #include "modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
@@ -37,6 +39,8 @@ private:
     ControlsWidget controls_;
     StatusWidget status_;
     SettingsWindow settings_window_;
+    WaterfallWidget waterfall_;
+    FileBrowser file_browser_;
 
     // Persistent settings
     AppSettings settings_;
@@ -50,7 +54,7 @@ private:
     ultra::ModemStats stats_;  // From types.hpp for status widget
 
     // UI state
-    float snr_slider_ = 20.0f;
+    float snr_slider_ = 100.0f;  // SNR in dB for channel simulation (100+ = no noise)
 
     // Mode selection
     AppMode mode_ = AppMode::OPERATE;
@@ -75,7 +79,27 @@ private:
     std::string pending_incoming_call_;  // Callsign of incoming caller
     uint32_t last_tick_time_ = 0;
 
+    // File transfer state
+    char file_path_buffer_[512] = "";
+    std::string last_received_file_;  // Path of last received file
+
+    // Protocol loopback test state (two virtual stations)
+    protocol::ProtocolEngine test_local_;   // Local station in test mode
+    protocol::ProtocolEngine test_remote_;  // Remote station in test mode
+    char test_local_tx_[256] = "Hello from TEST1!";
+    char test_remote_tx_[256] = "Hello from TEST2!";
+    char test_local_file_[512] = "";
+    char test_remote_file_[512] = "";
+    std::deque<std::string> test_local_log_;
+    std::deque<std::string> test_remote_log_;
+    std::string test_local_incoming_;   // Incoming call for local
+    std::string test_remote_incoming_;  // Incoming call for remote
+    bool test_protocol_mode_ = false;   // True = protocol test, False = raw modem test
+
     void renderLoopbackControls();
+    void renderProtocolTestControls();
+    void initProtocolTest();
+    void tickProtocolTest(uint32_t elapsed_ms);
     void renderRadioControls();
     void initAudio();
     void initRadioAudio();

@@ -78,6 +78,12 @@ bool AppSettings::save(const std::string& path) const {
     file << "tx_tail_ms=" << tx_tail_ms << "\n";
     file << "tx_drive=" << tx_drive << "\n";
 
+    file << "\n[Filter]\n";
+    file << "enabled=" << (filter_enabled ? "1" : "0") << "\n";
+    file << "center=" << filter_center << "\n";
+    file << "bandwidth=" << filter_bandwidth << "\n";
+    file << "taps=" << filter_taps << "\n";
+
     return true;
 }
 
@@ -132,6 +138,16 @@ bool AppSettings::load(const std::string& path) {
             tx_tail_ms = std::atoi(value.c_str());
         } else if (key == "tx_drive") {
             tx_drive = std::strtof(value.c_str(), nullptr);
+        }
+        // Filter settings
+        else if (key == "enabled") {
+            filter_enabled = (value == "1" || value == "true");
+        } else if (key == "center") {
+            filter_center = std::strtof(value.c_str(), nullptr);
+        } else if (key == "bandwidth") {
+            filter_bandwidth = std::strtof(value.c_str(), nullptr);
+        } else if (key == "taps") {
+            filter_taps = std::atoi(value.c_str());
         }
     }
 
@@ -377,6 +393,73 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
     // Visual indicator
     ImGui::Text("TX Level Preview:");
     ImGui::ProgressBar(settings.tx_drive, ImVec2(200, 20), "");
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Audio Filter Settings
+    ImGui::Text("Audio Bandpass Filter");
+    ImGui::Spacing();
+
+    bool filter_changed = false;
+
+    // Enable/disable checkbox
+    if (ImGui::Checkbox("Enable Filter", &settings.filter_enabled)) {
+        filter_changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Bandpass filter on TX/RX audio");
+
+    ImGui::Spacing();
+
+    // Only show controls if enabled
+    ImGui::BeginDisabled(!settings.filter_enabled);
+
+    // Center frequency
+    ImGui::Text("Center Frequency");
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::SliderFloat("##filter_center", &settings.filter_center, 500.0f, 3000.0f, "%.0f Hz")) {
+        filter_changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Audio passband center");
+
+    // Bandwidth
+    ImGui::Text("Bandwidth");
+    ImGui::SetNextItemWidth(200);
+    if (ImGui::SliderFloat("##filter_bw", &settings.filter_bandwidth, 200.0f, 3000.0f, "%.0f Hz")) {
+        filter_changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("Total passband width");
+
+    // Filter taps (advanced)
+    ImGui::Text("Filter Taps");
+    ImGui::SetNextItemWidth(150);
+    if (ImGui::SliderInt("##filter_taps", &settings.filter_taps, 31, 255)) {
+        // Ensure odd number of taps
+        if (settings.filter_taps % 2 == 0) {
+            settings.filter_taps++;
+        }
+        filter_changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("More = sharper cutoff");
+
+    ImGui::EndDisabled();
+
+    // Display passband
+    ImGui::Spacing();
+    float low = settings.filter_center - settings.filter_bandwidth / 2.0f;
+    float high = settings.filter_center + settings.filter_bandwidth / 2.0f;
+    ImGui::Text("Passband: %.0f - %.0f Hz", low, high);
+
+    // Call callback if filter settings changed
+    if (filter_changed && on_filter_changed_) {
+        on_filter_changed_(settings.filter_enabled, settings.filter_center,
+                          settings.filter_bandwidth, settings.filter_taps);
+    }
 }
 
 } // namespace gui

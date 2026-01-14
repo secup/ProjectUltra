@@ -8,11 +8,16 @@
 
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame.hpp"
+#include "protocol/file_transfer.hpp"
+#include "protocol/compression.hpp"
 #include <iostream>
 #include <cassert>
 #include <chrono>
 #include <thread>
 #include <queue>
+#include <fstream>
+#include <cstdio>
+#include <filesystem>
 
 using namespace ultra::protocol;
 using ultra::Bytes;
@@ -688,6 +693,390 @@ bool test_cq_message() {
 }
 
 // ============================================================================
+// File Transfer Tests
+// ============================================================================
+
+// Helper to create a test file with known content
+std::string createTestFile(const std::string& name, size_t size) {
+    std::string path = "/tmp/" + name;
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return "";
+
+    for (size_t i = 0; i < size; i++) {
+        f.put(static_cast<char>((i * 7 + 13) & 0xFF));
+    }
+    f.close();
+    return path;
+}
+
+// Helper to verify file content matches expected pattern
+bool verifyFileContent(const std::string& path, size_t expected_size) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return false;
+
+    f.seekg(0, std::ios::end);
+    size_t actual_size = f.tellg();
+    f.seekg(0, std::ios::beg);
+
+    if (actual_size != expected_size) return false;
+
+    for (size_t i = 0; i < expected_size; i++) {
+        char c;
+        f.get(c);
+        uint8_t expected = static_cast<uint8_t>((i * 7 + 13) & 0xFF);
+        if (static_cast<uint8_t>(c) != expected) return false;
+    }
+    return true;
+}
+
+bool test_file_transfer_small() {
+    TEST("Small file transfer (100 bytes)");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 200;  // Faster for test
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    // Create test file
+    const size_t FILE_SIZE = 100;
+    std::string src_path = createTestFile("test_small.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create test file");
+
+    // Set receive directory
+    std::string rx_dir = "/tmp/ultra_rx_test";
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    // Track file reception
+    bool file_received = false;
+    std::string received_path;
+    bool receive_success = false;
+
+    stationB.setFileReceivedCallback([&](const std::string& path, bool success) {
+        file_received = true;
+        received_path = path;
+        receive_success = success;
+    });
+
+    bool file_sent = false;
+    bool send_success = false;
+
+    stationA.setFileSentCallback([&](bool success, const std::string&) {
+        file_sent = true;
+        send_success = success;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    // Connect
+    stationA.connect("K2DEF");
+    channel.run(20, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected");
+
+    // Send file
+    if (!stationA.sendFile(src_path)) FAIL("sendFile() returned false");
+
+    // Run until transfer complete (or timeout)
+    for (int i = 0; i < 200 && (!file_received || !file_sent); i++) {
+        channel.run(1, 50);
+    }
+
+    if (!file_sent) FAIL("File not sent (no callback)");
+    if (!send_success) FAIL("File send reported failure");
+    if (!file_received) FAIL("File not received (no callback)");
+    if (!receive_success) FAIL("File receive reported failure");
+
+    // Verify content
+    if (!verifyFileContent(received_path, FILE_SIZE)) FAIL("File content mismatch");
+
+    // Cleanup
+    std::remove(src_path.c_str());
+    std::remove(received_path.c_str());
+
+    PASS();
+    return true;
+}
+
+bool test_file_transfer_medium() {
+    TEST("Medium file transfer (1KB)");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 200;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    const size_t FILE_SIZE = 1024;
+    std::string src_path = createTestFile("test_medium.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create test file");
+
+    std::string rx_dir = "/tmp/ultra_rx_test";
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    bool file_received = false;
+    std::string received_path;
+    bool receive_success = false;
+
+    stationB.setFileReceivedCallback([&](const std::string& path, bool success) {
+        file_received = true;
+        received_path = path;
+        receive_success = success;
+    });
+
+    bool file_sent = false;
+
+    stationA.setFileSentCallback([&](bool success, const std::string&) {
+        file_sent = true;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(20, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected");
+
+    stationA.sendFile(src_path);
+
+    // 1KB file = ~4 chunks, need more time
+    for (int i = 0; i < 500 && !file_received; i++) {
+        channel.run(1, 50);
+    }
+
+    if (!file_received) FAIL("File not received");
+    if (!receive_success) FAIL("File receive failed");
+    if (!verifyFileContent(received_path, FILE_SIZE)) FAIL("Content mismatch");
+
+    std::remove(src_path.c_str());
+    std::remove(received_path.c_str());
+
+    PASS();
+    return true;
+}
+
+bool test_file_transfer_progress() {
+    TEST("File transfer progress tracking");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 200;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    const size_t FILE_SIZE = 750;  // 3 chunks
+    std::string src_path = createTestFile("test_progress.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create test file");
+
+    std::string rx_dir = "/tmp/ultra_rx_test";
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    // Track progress updates
+    int progress_updates = 0;
+    float last_percentage = 0;
+
+    stationA.setFileProgressCallback([&](const FileTransferProgress& p) {
+        progress_updates++;
+        last_percentage = p.percentage();
+    });
+
+    bool file_received = false;
+    std::string received_path;
+
+    stationB.setFileReceivedCallback([&](const std::string& path, bool) {
+        file_received = true;
+        received_path = path;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(20, 100);
+
+    stationA.sendFile(src_path);
+
+    for (int i = 0; i < 300 && !file_received; i++) {
+        channel.run(1, 50);
+    }
+
+    // Run a few more cycles to allow final ACK and progress update
+    channel.run(10, 50);
+
+    if (progress_updates == 0) FAIL("No progress updates received");
+    if (last_percentage < 99.0f) FAIL("Progress didn't reach 100%");
+
+    std::remove(src_path.c_str());
+    if (!received_path.empty()) std::remove(received_path.c_str());
+
+    PASS();
+    return true;
+}
+
+bool test_file_transfer_with_loss() {
+    TEST("File transfer with packet loss");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.arq.ack_timeout_ms = 300;
+    config.arq.max_retries = 5;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    const size_t FILE_SIZE = 500;
+    std::string src_path = createTestFile("test_loss.bin", FILE_SIZE);
+    if (src_path.empty()) FAIL("Could not create test file");
+
+    std::string rx_dir = "/tmp/ultra_rx_test";
+    std::filesystem::create_directories(rx_dir);
+    stationB.setReceiveDirectory(rx_dir);
+
+    bool file_received = false;
+    std::string received_path;
+    bool receive_success = false;
+
+    stationB.setFileReceivedCallback([&](const std::string& path, bool success) {
+        file_received = true;
+        received_path = path;
+        receive_success = success;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(20, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected");
+
+    stationA.sendFile(src_path);
+
+    // Simulate intermittent packet loss
+    int drop_counter = 0;
+    for (int i = 0; i < 400 && !file_received; i++) {
+        // Drop every 5th packet in one direction
+        if ((i % 10) == 5) {
+            channel.setDropBtoA(true);
+            drop_counter++;
+        } else {
+            channel.setDropBtoA(false);
+        }
+        channel.run(1, 50);
+    }
+
+    channel.setDropBtoA(false);
+    channel.run(50, 50);  // Let final packets through
+
+    if (!file_received) FAIL("File not received despite retries");
+    if (!receive_success) FAIL("File transfer failed");
+    if (!verifyFileContent(received_path, FILE_SIZE)) FAIL("Content corrupted");
+
+    std::remove(src_path.c_str());
+    std::remove(received_path.c_str());
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
+// Compression Tests
+// ============================================================================
+
+bool test_compression_basic() {
+    TEST("Basic compression/decompression");
+
+    // Create compressible data (repetitive text)
+    std::string text = "Hello World! This is a test of the compression system. ";
+    for (int i = 0; i < 10; i++) {
+        text += text;  // Double it each time
+    }
+    Bytes input(text.begin(), text.end());
+
+    // Compress
+    auto compressed = Compression::compress(input);
+    if (!compressed) FAIL("Compression failed");
+    if (compressed->size() >= input.size()) FAIL("Compression didn't reduce size");
+
+    // Decompress
+    auto decompressed = Compression::decompress(*compressed, input.size() * 2);
+    if (!decompressed) FAIL("Decompression failed");
+    if (*decompressed != input) FAIL("Decompressed data doesn't match original");
+
+    PASS();
+    return true;
+}
+
+bool test_compression_empty() {
+    TEST("Empty data compression");
+
+    Bytes empty;
+    auto compressed = Compression::compress(empty);
+    if (!compressed) FAIL("Compression of empty data failed");
+    if (!compressed->empty()) FAIL("Compressed empty data should be empty");
+
+    auto decompressed = Compression::decompress(*compressed);
+    if (!decompressed) FAIL("Decompression of empty data failed");
+    if (!decompressed->empty()) FAIL("Decompressed empty data should be empty");
+
+    PASS();
+    return true;
+}
+
+bool test_compression_random() {
+    TEST("Random data (low compressibility)");
+
+    // Random data doesn't compress well
+    Bytes random(1000);
+    for (size_t i = 0; i < random.size(); i++) {
+        random[i] = static_cast<uint8_t>(i * 17 + i / 3);  // Pseudo-random
+    }
+
+    auto compressed = Compression::compress(random);
+    if (!compressed) FAIL("Compression of random data failed");
+
+    auto decompressed = Compression::decompress(*compressed, random.size() * 2);
+    if (!decompressed) FAIL("Decompression failed");
+    if (*decompressed != random) FAIL("Decompressed data doesn't match original");
+
+    PASS();
+    return true;
+}
+
+bool test_should_compress() {
+    TEST("shouldCompress heuristic");
+
+    // Small data - should not compress
+    Bytes small(20, 'A');
+    if (Compression::shouldCompress(small)) FAIL("Small data should not be compressed");
+
+    // Repetitive data - should compress
+    std::string text = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    text += text;  // 104 bytes of 'A'
+    Bytes repetitive(text.begin(), text.end());
+    if (!Compression::shouldCompress(repetitive)) FAIL("Repetitive data should be compressed");
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -713,6 +1102,18 @@ int main() {
     test_quick_brown_fox();
     test_ryry_message();
     test_cq_message();
+
+    std::cout << "\nFile Transfer Tests:\n";
+    test_file_transfer_small();
+    test_file_transfer_medium();
+    test_file_transfer_progress();
+    test_file_transfer_with_loss();
+
+    std::cout << "\nCompression Tests:\n";
+    test_compression_basic();
+    test_compression_empty();
+    test_compression_random();
+    test_should_compress();
 
     std::cout << "\n=== Results: " << tests_passed << "/" << tests_run << " passed ===\n";
 

@@ -144,10 +144,10 @@ void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
         std::lock_guard<std::mutex> rx_lock(rx_mutex_);
         rx_buffer_.insert(rx_buffer_.end(), loopback_samples.begin(), loopback_samples.end());
 
-        // Notify via callback if set
-        if (rx_callback_) {
-            rx_callback_(loopback_samples);
-        }
+        // NOTE: Don't call rx_callback_ here - it creates a synchronous loop
+        // (TX -> loopback -> RX callback -> process -> TX -> ...)
+        // The loopback samples are in rx_buffer_ and will be processed
+        // in the next pollRxAudio() call from the main loop.
     }
 }
 
@@ -264,6 +264,12 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
 
 void AudioEngine::addChannelNoise(std::vector<float>& samples) {
     float snr_db = loopback_snr_db_.load();
+
+    // Skip noise entirely for very high SNR (clean testing mode)
+    if (snr_db >= 100.0f) {
+        return;  // No noise added - perfect loopback
+    }
+
     float noise_std = std::pow(10.0f, -snr_db / 20.0f);
 
     // Simple AWGN using Box-Muller transform

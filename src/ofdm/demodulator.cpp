@@ -509,9 +509,10 @@ struct OFDMDemodulator::Impl {
         // Use pilots to estimate channel
         // H = Rx_pilot / Tx_pilot
 
-        // Use more aggressive update (less smoothing) to converge quickly
-        // For short frames, we need fast convergence
-        float alpha = 0.9f;  // Weight for new estimate (was 0.3)
+        // For the FIRST symbol after sync, use the pilot estimate directly (no smoothing)
+        // to avoid the initial (1,0) estimate corrupting equalization.
+        // For subsequent symbols, smooth to track channel changes.
+        float alpha = soft_bits.empty() ? 1.0f : 0.9f;
 
         // First pass: compute all LS estimates and their average
         std::vector<Complex> h_ls_all(pilot_carrier_indices.size());
@@ -616,7 +617,8 @@ struct OFDMDemodulator::Impl {
     void interpolateChannel() {
         // Interpolate channel estimate from pilots to data carriers
         // Uses pre-computed lookup table for O(n) instead of O(n²)
-        for (const auto& info : interp_table) {
+        for (size_t dc = 0; dc < interp_table.size(); ++dc) {
+            const auto& info = interp_table[dc];
             if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
                 // Linear interpolate between surrounding pilots
                 channel_estimate[info.fft_idx] =
@@ -627,7 +629,6 @@ struct OFDMDemodulator::Impl {
             } else if (info.upper_pilot >= 0) {
                 channel_estimate[info.fft_idx] = channel_estimate[info.upper_pilot];
             }
-            // If no pilots found, keep initial estimate (shouldn't happen with proper pilot spacing)
         }
     }
 
@@ -645,6 +646,7 @@ struct OFDMDemodulator::Impl {
             } else {
                 equalized[i] = freq_domain[idx] / h;
             }
+
         }
 
         return equalized;
@@ -969,6 +971,7 @@ void OFDMDemodulator::reset() {
     std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
     impl_->snr_symbol_count = 0;
     impl_->estimated_snr_linear = 1.0f;
+    impl_->noise_variance = 0.1f;  // Reset to default (prevents stale state from prior frames)
 
     // Reset frequency offset tracking
     impl_->freq_offset_hz = 0.0f;

@@ -55,8 +55,17 @@ public:
     bool sendData(const Bytes& data);
     bool sendData(const std::string& text);
 
+    // Send data with specific frame flags (e.g., MORE_DATA for file chunks)
+    bool sendDataWithFlags(const Bytes& data, uint8_t flags);
+
     // Check if ready to send (not waiting for ACK)
     bool isReadyToSend() const;
+
+    // Check if MORE_DATA flag was set on last received frame
+    bool lastRxHadMoreData() const { return last_rx_more_data_; }
+
+    // Get flags from last received frame
+    uint8_t lastRxFlags() const { return last_rx_flags_; }
 
     // --- RX Side ---
 
@@ -112,6 +121,8 @@ private:
     // RX state
     uint8_t rx_expected_seq_ = 0;
     std::optional<Frame> pending_ack_;  // ACK to send after turnaround
+    bool last_rx_more_data_ = false;    // MORE_DATA flag from last received frame
+    uint8_t last_rx_flags_ = 0;         // All flags from last received frame
 
     // Statistics
     ARQStats stats_;

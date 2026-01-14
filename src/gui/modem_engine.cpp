@@ -13,6 +13,9 @@ ModemEngine::ModemEngine() {
     decoder_ = std::make_unique<LDPCDecoder>(config_.code_rate);
     modulator_ = std::make_unique<OFDMModulator>(config_);
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+    // Initialize audio filters
+    rebuildFilters();
 }
 
 ModemEngine::~ModemEngine() = default;
@@ -27,7 +30,45 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     modulator_ = std::make_unique<OFDMModulator>(config_);
     demodulator_ = std::make_unique<OFDMDemodulator>(config_);
 
+    // Rebuild filters with new sample rate
+    rebuildFilters();
+
     reset();
+}
+
+void ModemEngine::setFilterConfig(const FilterConfig& config) {
+    filter_config_ = config;
+    rebuildFilters();
+}
+
+void ModemEngine::setFilterEnabled(bool enabled) {
+    filter_config_.enabled = enabled;
+}
+
+void ModemEngine::rebuildFilters() {
+    // Create bandpass filters for TX and RX
+    // Use separate instances so they maintain independent state
+    float sample_rate = static_cast<float>(config_.sample_rate);
+    float low = filter_config_.lowFreq();
+    float high = filter_config_.highFreq();
+    int taps = filter_config_.taps;
+
+    // Ensure valid frequency range
+    low = std::max(50.0f, low);
+    high = std::min(sample_rate / 2.0f - 50.0f, high);
+
+    if (low < high) {
+        auto filter = FIRFilter::bandpass(taps, low, high, sample_rate);
+        tx_filter_ = std::make_unique<FIRFilter>(filter);
+        rx_filter_ = std::make_unique<FIRFilter>(filter);
+        LOG_MODEM(INFO, "Audio filters configured: %.0f-%.0f Hz, %d taps",
+                  low, high, taps);
+    } else {
+        LOG_MODEM(WARN, "Invalid filter range: %.0f-%.0f Hz, filters disabled",
+                  low, high);
+        tx_filter_.reset();
+        rx_filter_.reset();
+    }
 }
 
 std::vector<float> ModemEngine::transmit(const std::string& text) {
@@ -73,6 +114,12 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     // Add modulated data
     output.insert(output.end(), modulated.begin(), modulated.end());
+
+    // Apply TX bandpass filter (before scaling to maintain filter characteristics)
+    if (filter_config_.enabled && tx_filter_) {
+        SampleSpan span(output.data(), output.size());
+        output = tx_filter_->process(span);
+    }
 
     // Scale for audio output (prevent clipping)
     float max_val = 0.0f;
@@ -127,6 +174,12 @@ bool ModemEngine::pollRxAudio() {
 
     if (new_samples.empty()) {
         return false;  // Nothing to process
+    }
+
+    // Apply RX bandpass filter
+    if (filter_config_.enabled && rx_filter_) {
+        SampleSpan span(new_samples.data(), new_samples.size());
+        new_samples = rx_filter_->process(span);
     }
 
     // Now do the slow processing with rx_mutex_

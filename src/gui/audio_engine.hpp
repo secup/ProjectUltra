@@ -49,6 +49,7 @@ public:
     // Loopback channel simulation
     void setLoopbackSNR(float snr_db) { loopback_snr_db_ = snr_db; }
     float getLoopbackSNR() const { return loopback_snr_db_; }
+    void resetNoiseSeed() { noise_seed_ = 12345; }  // Reset noise to deterministic start
 
     // Playback control
     void startPlayback();

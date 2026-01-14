@@ -47,6 +47,16 @@ std::string ProtocolEngine::getLocalCallsign() const {
     return connection_.getLocalCallsign();
 }
 
+void ProtocolEngine::setAutoAccept(bool auto_accept) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setAutoAccept(auto_accept);
+}
+
+bool ProtocolEngine::getAutoAccept() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getAutoAccept();
+}
+
 void ProtocolEngine::setTxDataCallback(TxDataCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     on_tx_data_ = std::move(cb);
@@ -104,6 +114,48 @@ bool ProtocolEngine::isReadyToSend() const {
     return connection_.isReadyToSend();
 }
 
+// --- File Transfer ---
+
+bool ProtocolEngine::sendFile(const std::string& filepath) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.sendFile(filepath);
+}
+
+void ProtocolEngine::setReceiveDirectory(const std::string& dir) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setReceiveDirectory(dir);
+}
+
+void ProtocolEngine::cancelFileTransfer() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.cancelFileTransfer();
+}
+
+bool ProtocolEngine::isFileTransferInProgress() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.isFileTransferInProgress();
+}
+
+FileTransferProgress ProtocolEngine::getFileProgress() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getFileProgress();
+}
+
+void ProtocolEngine::setFileProgressCallback(FileProgressCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setFileProgressCallback(std::move(cb));
+}
+
+void ProtocolEngine::setFileReceivedCallback(FileReceivedCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setFileReceivedCallback(std::move(cb));
+}
+
+void ProtocolEngine::setFileSentCallback(FileSentCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setFileSentCallback(std::move(cb));
+}
+
 void ProtocolEngine::onRxData(const Bytes& data) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -113,8 +165,16 @@ void ProtocolEngine::onRxData(const Bytes& data) {
     // Append to RX buffer
     rx_buffer_.insert(rx_buffer_.end(), data.begin(), data.end());
 
+    // Defer TX during RX processing to avoid re-entrancy
+    // TX will be flushed during tick()
+    defer_tx_ = true;
+
     // Try to parse frames
     processRxBuffer();
+
+    defer_tx_ = false;
+    // NOTE: Don't flush TX queue here - do it in tick() to completely
+    // separate RX and TX processing paths
 }
 
 void ProtocolEngine::processRxBuffer() {
@@ -163,6 +223,16 @@ void ProtocolEngine::processRxBuffer() {
             // 1. Not enough data yet (need more bytes)
             // 2. Corrupted frame (bad CRC)
 
+            // Debug: dump entire frame buffer (up to 64 bytes)
+            if (rx_buffer_.size() >= 24) {
+                char hex[200];
+                size_t dump_len = std::min(rx_buffer_.size(), size_t(64));
+                for (size_t i = 0; i < dump_len; i++) {
+                    snprintf(hex + i*3, 4, "%02x ", rx_buffer_[i]);
+                }
+                LOG_MODEM(INFO, "RX buffer (%zu bytes): %s", rx_buffer_.size(), hex);
+            }
+
             // Check if we have enough data for the frame based on length field
             if (rx_buffer_.size() >= Frame::HEADER_SIZE) {
                 // Read length field (bytes 20-21, after callsigns)
@@ -188,6 +258,23 @@ void ProtocolEngine::processRxBuffer() {
 }
 
 void ProtocolEngine::tick(uint32_t elapsed_ms) {
+    // First, flush any pending TX (queued during RX processing)
+    // Do this OUTSIDE the mutex to avoid holding lock during TX
+    std::vector<Bytes> to_send;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        to_send = std::move(tx_queue_);
+        tx_queue_.clear();
+    }
+
+    // Send queued frames
+    for (const auto& tx_data : to_send) {
+        if (on_tx_data_) {
+            on_tx_data_(tx_data);
+        }
+    }
+
+    // Now do the regular tick (with lock)
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.tick(elapsed_ms);
 }
@@ -221,12 +308,30 @@ void ProtocolEngine::reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.reset();
     rx_buffer_.clear();
+    tx_queue_.clear();
+    defer_tx_ = false;
 }
 
 void ProtocolEngine::handleTxFrame(const Frame& frame) {
-    if (on_tx_data_) {
-        Bytes data = frame.serialize();
-        LOG_MODEM(INFO, "Protocol TX: %zu bytes -> modem", data.size());
+    Bytes data = frame.serialize();
+    LOG_MODEM(INFO, "Protocol TX: %zu bytes -> modem%s", data.size(),
+              defer_tx_ ? " (queued)" : "");
+
+    // Debug: dump entire frame (up to 64 bytes)
+    {
+        char hex[200];
+        size_t dump_len = std::min(data.size(), size_t(64));
+        for (size_t i = 0; i < dump_len; i++) {
+            snprintf(hex + i*3, 4, "%02x ", data[i]);
+        }
+        LOG_MODEM(INFO, "TX frame (%zu bytes): %s", data.size(), hex);
+    }
+
+    if (defer_tx_) {
+        // Queue for later transmission (we're inside RX processing)
+        tx_queue_.push_back(std::move(data));
+    } else if (on_tx_data_) {
+        // Send immediately
         on_tx_data_(data);
     }
 }

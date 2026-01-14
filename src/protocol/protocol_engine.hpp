@@ -38,12 +38,21 @@ public:
     using ConnectionChangedCallback = std::function<void(ConnectionState state, const std::string& remote)>;
     using IncomingCallCallback = std::function<void(const std::string& from)>;
 
+    // File transfer callbacks
+    using FileProgressCallback = Connection::FileProgressCallback;
+    using FileReceivedCallback = Connection::FileReceivedCallback;
+    using FileSentCallback = Connection::FileSentCallback;
+
     explicit ProtocolEngine(const ConnectionConfig& config = ConnectionConfig{});
 
     // --- Configuration ---
 
     void setLocalCallsign(const std::string& call);
     std::string getLocalCallsign() const;
+
+    // Set auto-accept mode (whether to auto-accept incoming calls)
+    void setAutoAccept(bool auto_accept);
+    bool getAutoAccept() const;
 
     // --- Callbacks ---
 
@@ -63,6 +72,18 @@ public:
 
     bool sendMessage(const std::string& text);
     bool isReadyToSend() const;
+
+    // --- File Transfer ---
+
+    bool sendFile(const std::string& filepath);
+    void setReceiveDirectory(const std::string& dir);
+    void cancelFileTransfer();
+    bool isFileTransferInProgress() const;
+    FileTransferProgress getFileProgress() const;
+
+    void setFileProgressCallback(FileProgressCallback cb);
+    void setFileReceivedCallback(FileReceivedCallback cb);
+    void setFileSentCallback(FileSentCallback cb);
 
     // --- Modem Interface ---
 
@@ -96,6 +117,10 @@ private:
 
     // RX frame assembly buffer
     Bytes rx_buffer_;
+
+    // TX queue for deferred transmission (avoids re-entrancy during RX processing)
+    std::vector<Bytes> tx_queue_;
+    bool defer_tx_ = false;  // When true, queue TX instead of immediate send
 
     // Handle transmit request from Connection
     void handleTxFrame(const Frame& frame);

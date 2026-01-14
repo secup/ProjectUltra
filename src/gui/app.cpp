@@ -84,6 +84,49 @@ App::App() {
         }
     });
 
+    // File transfer callbacks
+    protocol_.setFileProgressCallback([this](const protocol::FileTransferProgress& p) {
+        // Progress is displayed in renderRadioControls()
+    });
+
+    protocol_.setFileReceivedCallback([this](const std::string& path, bool success) {
+        std::string msg;
+        if (success) {
+            msg = "[FILE] Received: " + path;
+            last_received_file_ = path;
+        } else {
+            msg = "[FILE] Receive failed";
+        }
+        rx_log_.push_front(msg);
+        if (rx_log_.size() > MAX_RX_LOG) {
+            rx_log_.pop_back();
+        }
+    });
+
+    protocol_.setFileSentCallback([this](bool success, const std::string& error) {
+        std::string msg;
+        if (success) {
+            msg = "[FILE] Transfer complete";
+        } else {
+            msg = "[FILE] Transfer failed: " + error;
+        }
+        rx_log_.push_front(msg);
+        if (rx_log_.size() > MAX_RX_LOG) {
+            rx_log_.pop_back();
+        }
+    });
+
+    // Set default receive directory to user's home
+    const char* home = getenv("HOME");
+    if (home) {
+        protocol_.setReceiveDirectory(std::string(home) + "/Downloads");
+    }
+
+    // Configure waterfall display
+    waterfall_.setSampleRate(48000.0f);
+    waterfall_.setFrequencyRange(0.0f, 3000.0f);
+    waterfall_.setDynamicRange(-60.0f, 0.0f);  // Typical audio range
+
     // Settings window callback - save settings when callsign changes
     settings_window_.setCallsignChangedCallback([this](const std::string& call) {
         protocol_.setLocalCallsign(call);
@@ -147,6 +190,25 @@ App::App() {
             }
         }
     });
+
+    // Settings window callback - when filter settings change
+    settings_window_.setFilterChangedCallback([this](bool enabled, float center, float bw, int taps) {
+        FilterConfig filter_config;
+        filter_config.enabled = enabled;
+        filter_config.center_freq = center;
+        filter_config.bandwidth = bw;
+        filter_config.taps = taps;
+        modem_.setFilterConfig(filter_config);
+        settings_.save();
+    });
+
+    // Apply initial filter settings from loaded config
+    FilterConfig initial_filter;
+    initial_filter.enabled = settings_.filter_enabled;
+    initial_filter.center_freq = settings_.filter_center;
+    initial_filter.bandwidth = settings_.filter_bandwidth;
+    initial_filter.taps = settings_.filter_taps;
+    modem_.setFilterConfig(initial_filter);
 }
 
 App::~App() {
@@ -174,6 +236,7 @@ void App::initAudio() {
             // Set up RX callback
             audio_.setRxCallback([this](const std::vector<float>& samples) {
                 modem_.receiveAudio(samples);
+                waterfall_.addSamples(samples.data(), samples.size());
             });
         }
     }
@@ -212,7 +275,6 @@ void App::onDataReceived(const std::string& text) {
 
 void App::renderLoopbackControls() {
     ImGui::Text("Test Mode");
-    ImGui::TextDisabled("(Real audio - you'll hear the modem!)");
     ImGui::Separator();
     ImGui::Spacing();
 
@@ -225,9 +287,20 @@ void App::renderLoopbackControls() {
         return;
     }
 
+    // Mode toggle
+    if (ImGui::Checkbox("Protocol Test (ARQ)", &test_protocol_mode_)) {
+        if (test_protocol_mode_) {
+            initProtocolTest();
+        }
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled(test_protocol_mode_ ? "Two stations" : "Raw modem only");
+
+    ImGui::Spacing();
+
     // SNR slider for loopback channel
-    ImGui::Text("Loopback Channel");
-    if (ImGui::SliderFloat("SNR (dB)", &snr_slider_, 5.0f, 40.0f, "%.1f")) {
+    ImGui::Text("Channel SNR");
+    if (ImGui::SliderFloat("##snr", &snr_slider_, 5.0f, 40.0f, "%.1f dB")) {
         audio_.setLoopbackSNR(snr_slider_);
     }
 
@@ -235,44 +308,51 @@ void App::renderLoopbackControls() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // TX input
-    ImGui::Text("Transmit Message");
-    ImGui::SetNextItemWidth(-1);
-    bool send = ImGui::InputText("##txinput", tx_text_buffer_, sizeof(tx_text_buffer_),
-                                  ImGuiInputTextFlags_EnterReturnsTrue);
+    if (test_protocol_mode_) {
+        renderProtocolTestControls();
+    } else {
+        // Original raw modem test
+        ImGui::TextDisabled("Raw modem test (no ARQ protocol)");
+        ImGui::Spacing();
 
-    // Check if TX is done
-    if (tx_in_progress_ && audio_.isTxQueueEmpty()) {
-        tx_in_progress_ = false;
-    }
+        // TX input
+        ImGui::Text("Transmit Message");
+        ImGui::SetNextItemWidth(-1);
+        bool send = ImGui::InputText("##txinput", tx_text_buffer_, sizeof(tx_text_buffer_),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
 
-    // Send button
-    ImGui::BeginDisabled(tx_in_progress_);
-    if (ImGui::Button("Send", ImVec2(-1, 30)) || send) {
-        sendMessage();
-    }
-    ImGui::EndDisabled();
-
-    if (tx_in_progress_) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Transmitting...");
-        ImGui::ProgressBar((float)(audio_.getTxQueueSize() % 1000) / 1000.0f);
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // RX log
-    ImGui::Text("Message Log");
-    ImGui::BeginChild("RXLog", ImVec2(-1, 150), true);
-    for (const auto& msg : rx_log_) {
-        if (msg.substr(0, 4) == "[TX]") {
-            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", msg.c_str());
-        } else {
-            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s", msg.c_str());
+        // Check if TX is done
+        if (tx_in_progress_ && audio_.isTxQueueEmpty()) {
+            tx_in_progress_ = false;
         }
+
+        // Send button
+        ImGui::BeginDisabled(tx_in_progress_);
+        if (ImGui::Button("Send", ImVec2(-1, 30)) || send) {
+            sendMessage();
+        }
+        ImGui::EndDisabled();
+
+        if (tx_in_progress_) {
+            ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Transmitting...");
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        // RX log
+        ImGui::Text("Message Log");
+        ImGui::BeginChild("RXLog", ImVec2(-1, 150), true);
+        for (const auto& msg : rx_log_) {
+            if (msg.substr(0, 4) == "[TX]") {
+                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", msg.c_str());
+            } else {
+                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s", msg.c_str());
+            }
+        }
+        ImGui::EndChild();
     }
-    ImGui::EndChild();
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -280,26 +360,314 @@ void App::renderLoopbackControls() {
 
     // Stats
     auto mstats = modem_.getStats();
-    ImGui::Text("Statistics");
-    ImGui::Text("Frames TX: %d", mstats.frames_sent);
-    ImGui::Text("Frames RX: %d", mstats.frames_received);
-    ImGui::Text("Throughput: %d bps", mstats.throughput_bps);
+    ImGui::Text("Modem Stats: TX %d | RX %d | %d bps",
+        mstats.frames_sent, mstats.frames_received, mstats.throughput_bps);
+}
+
+void App::initProtocolTest() {
+    // Reset both engines
+    test_local_.reset();
+    test_remote_.reset();
+
+    // Setup local station
+    test_local_.setLocalCallsign("TEST1");
+    test_local_.setAutoAccept(false);  // Require manual accept in test mode
+
+    // Setup remote station
+    test_remote_.setLocalCallsign("TEST2");
+    test_remote_.setAutoAccept(false);  // Require manual accept in test mode
+
+    // Clear logs
+    test_local_log_.clear();
+    test_remote_log_.clear();
+    test_local_incoming_.clear();
+    test_remote_incoming_.clear();
+
+    // Connect protocol TX to modem
+    test_local_.setTxDataCallback([this](const Bytes& data) {
+        auto samples = modem_.transmit(data);
+        audio_.queueTxSamples(samples);
+    });
+
+    test_remote_.setTxDataCallback([this](const Bytes& data) {
+        auto samples = modem_.transmit(data);
+        audio_.queueTxSamples(samples);
+    });
+
+    // Connect protocol RX callbacks
+    test_local_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
+        test_local_log_.push_front("[RX from " + from + "] " + text);
+        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+    });
+
+    test_remote_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
+        test_remote_log_.push_front("[RX from " + from + "] " + text);
+        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+    });
+
+    // Connect incoming call callbacks
+    test_local_.setIncomingCallCallback([this](const std::string& caller) {
+        test_local_incoming_ = caller;
+        test_local_log_.push_front("[CALL] Incoming from " + caller);
+        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+    });
+
+    test_remote_.setIncomingCallCallback([this](const std::string& caller) {
+        test_remote_incoming_ = caller;
+        test_remote_log_.push_front("[CALL] Incoming from " + caller);
+        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+    });
+
+    // File received callbacks
+    test_local_.setFileReceivedCallback([this](const std::string& path, bool ok) {
+        test_local_log_.push_front(ok ? "[FILE] Received: " + path : "[FILE] Failed");
+        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+    });
+
+    test_remote_.setFileReceivedCallback([this](const std::string& path, bool ok) {
+        test_remote_log_.push_front(ok ? "[FILE] Received: " + path : "[FILE] Failed");
+        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+    });
+
+    // Route received modem data to both protocol engines
+    // They'll filter by destination callsign
+    modem_.setRawDataCallback([this](const Bytes& data) {
+        test_local_.onRxData(data);
+        test_remote_.onRxData(data);
+    });
+
+    test_local_log_.push_front("[SYS] Protocol test initialized - TEST1 station");
+    test_remote_log_.push_front("[SYS] Protocol test initialized - TEST2 station");
+}
+
+void App::tickProtocolTest(uint32_t elapsed_ms) {
+    test_local_.tick(elapsed_ms);
+    test_remote_.tick(elapsed_ms);
+}
+
+void App::renderProtocolTestControls() {
+    // Two columns: LOCAL and REMOTE stations
+    float col_width = (ImGui::GetContentRegionAvail().x - 10) / 2;
+
+    ImGui::BeginChild("LocalStation", ImVec2(col_width, -1), true);
+    {
+        ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "TEST1 STATION");
+        ImGui::TextDisabled("Callsign: TEST1");
+        ImGui::Separator();
+
+        // Connection state
+        auto state = test_local_.getState();
+        const char* state_str = "IDLE";
+        ImVec4 state_color(0.5f, 0.5f, 0.5f, 1.0f);
+        if (state == protocol::ConnectionState::CONNECTING) {
+            state_str = "CONNECTING...";
+            state_color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
+        } else if (state == protocol::ConnectionState::CONNECTED) {
+            state_str = "CONNECTED";
+            state_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+        }
+        ImGui::TextColored(state_color, "State: %s", state_str);
+
+        // Incoming call handling
+        if (!test_local_incoming_.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Incoming call from %s",
+                              test_local_incoming_.c_str());
+            if (ImGui::Button("Accept##local", ImVec2(60, 0))) {
+                test_local_.acceptCall();
+                test_local_incoming_.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reject##local", ImVec2(60, 0))) {
+                test_local_.rejectCall();
+                test_local_incoming_.clear();
+            }
+        }
+
+        ImGui::Spacing();
+
+        // Connect/Disconnect
+        if (state == protocol::ConnectionState::DISCONNECTED) {
+            if (ImGui::Button("Connect to TEST2", ImVec2(-1, 25))) {
+                test_local_.connect("TEST2");
+                test_local_log_.push_front("[TX] Connecting to TEST2...");
+            }
+        } else if (state == protocol::ConnectionState::CONNECTED) {
+            if (ImGui::Button("Disconnect##local", ImVec2(-1, 25))) {
+                test_local_.disconnect();
+            }
+
+            ImGui::Spacing();
+
+            // Message input
+            ImGui::SetNextItemWidth(-1);
+            bool send_local = ImGui::InputText("##localtx", test_local_tx_, sizeof(test_local_tx_),
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::Button("Send##local", ImVec2(-1, 0)) || send_local) {
+                if (test_local_.sendMessage(test_local_tx_)) {
+                    test_local_log_.push_front("[TX] " + std::string(test_local_tx_));
+                    if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+                }
+            }
+
+            // File transfer
+            ImGui::SetNextItemWidth(-50);
+            ImGui::InputText("##localfile", test_local_file_, sizeof(test_local_file_));
+            ImGui::SameLine();
+            if (ImGui::Button("...##localbrowse", ImVec2(40, 0))) {
+                file_browser_.setTitle("Select File (LOCAL)");
+                file_browser_.open();
+                // Note: need to track which station opened browser
+            }
+            if (ImGui::Button("Send File##local", ImVec2(-1, 0))) {
+                if (test_local_.sendFile(test_local_file_)) {
+                    test_local_log_.push_front("[FILE] Sending: " + std::string(test_local_file_));
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Log
+        ImGui::Text("Log");
+        ImGui::BeginChild("LocalLog", ImVec2(-1, 100), true);
+        for (const auto& msg : test_local_log_) {
+            ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
+            if (msg.substr(0, 4) == "[TX]") color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
+            else if (msg.substr(0, 4) == "[RX]") color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+            else if (msg.substr(0, 5) == "[CALL") color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
+            else if (msg.substr(0, 5) == "[FILE") color = ImVec4(1.0f, 0.5f, 1.0f, 1.0f);
+            ImGui::TextColored(color, "%s", msg.c_str());
+        }
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+
+    ImGui::BeginChild("RemoteStation", ImVec2(col_width, -1), true);
+    {
+        ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "TEST2 STATION");
+        ImGui::TextDisabled("Callsign: TEST2");
+        ImGui::Separator();
+
+        // Connection state
+        auto state = test_remote_.getState();
+        const char* state_str = "IDLE";
+        ImVec4 state_color(0.5f, 0.5f, 0.5f, 1.0f);
+        if (state == protocol::ConnectionState::CONNECTING) {
+            state_str = "CONNECTING...";
+            state_color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
+        } else if (state == protocol::ConnectionState::CONNECTED) {
+            state_str = "CONNECTED";
+            state_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+        }
+        ImGui::TextColored(state_color, "State: %s", state_str);
+
+        // Incoming call handling
+        if (!test_remote_incoming_.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), "Incoming call from %s",
+                              test_remote_incoming_.c_str());
+            if (ImGui::Button("Accept##remote", ImVec2(60, 0))) {
+                test_remote_.acceptCall();
+                test_remote_incoming_.clear();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reject##remote", ImVec2(60, 0))) {
+                test_remote_.rejectCall();
+                test_remote_incoming_.clear();
+            }
+        }
+
+        ImGui::Spacing();
+
+        // Connect/Disconnect
+        if (state == protocol::ConnectionState::DISCONNECTED) {
+            if (ImGui::Button("Connect to TEST1", ImVec2(-1, 25))) {
+                test_remote_.connect("TEST1");
+                test_remote_log_.push_front("[TX] Connecting to TEST1...");
+            }
+        } else if (state == protocol::ConnectionState::CONNECTED) {
+            if (ImGui::Button("Disconnect##remote", ImVec2(-1, 25))) {
+                test_remote_.disconnect();
+            }
+
+            ImGui::Spacing();
+
+            // Message input
+            ImGui::SetNextItemWidth(-1);
+            bool send_remote = ImGui::InputText("##remotetx", test_remote_tx_, sizeof(test_remote_tx_),
+                                                 ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::Button("Send##remote", ImVec2(-1, 0)) || send_remote) {
+                if (test_remote_.sendMessage(test_remote_tx_)) {
+                    test_remote_log_.push_front("[TX] " + std::string(test_remote_tx_));
+                    if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+                }
+            }
+
+            // File transfer
+            ImGui::SetNextItemWidth(-50);
+            ImGui::InputText("##remotefile", test_remote_file_, sizeof(test_remote_file_));
+            ImGui::SameLine();
+            if (ImGui::Button("...##remotebrowse", ImVec2(40, 0))) {
+                file_browser_.setTitle("Select File (REMOTE)");
+                file_browser_.open();
+            }
+            if (ImGui::Button("Send File##remote", ImVec2(-1, 0))) {
+                if (test_remote_.sendFile(test_remote_file_)) {
+                    test_remote_log_.push_front("[FILE] Sending: " + std::string(test_remote_file_));
+                }
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+
+        // Log
+        ImGui::Text("Log");
+        ImGui::BeginChild("RemoteLog", ImVec2(-1, 100), true);
+        for (const auto& msg : test_remote_log_) {
+            ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
+            if (msg.substr(0, 4) == "[TX]") color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
+            else if (msg.substr(0, 4) == "[RX]") color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+            else if (msg.substr(0, 5) == "[CALL") color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
+            else if (msg.substr(0, 5) == "[FILE") color = ImVec4(1.0f, 0.5f, 1.0f, 1.0f);
+            ImGui::TextColored(color, "%s", msg.c_str());
+        }
+        ImGui::EndChild();
+    }
+    ImGui::EndChild();
 }
 
 void App::render() {
+    // In loopback mode, poll audio's rx_buffer and feed to modem
+    // (Loopback samples are buffered in audio engine, not sent via callback to avoid re-entrancy)
+    if (mode_ == AppMode::TEST && audio_.isLoopbackEnabled()) {
+        auto loopback_samples = audio_.getRxSamples(48000);  // Get up to 1 second of samples
+        if (!loopback_samples.empty()) {
+            modem_.receiveAudio(loopback_samples);
+            waterfall_.addSamples(loopback_samples.data(), loopback_samples.size());
+        }
+    }
+
     // Poll for audio samples and process them (must be called from main loop, not audio callback)
     // This processes any samples that were queued by the audio callback thread
     if (mode_ == AppMode::TEST || mode_ == AppMode::OPERATE) {
         modem_.pollRxAudio();
     }
 
-    // Protocol engine tick (for ARQ timeouts) - always in Radio mode
+    // Protocol engine tick (for ARQ timeouts)
+    uint32_t now = SDL_GetTicks();
+    uint32_t elapsed = (last_tick_time_ == 0) ? 0 : (now - last_tick_time_);
+    last_tick_time_ = now;
+
     if (mode_ == AppMode::OPERATE) {
-        uint32_t now = SDL_GetTicks();
-        uint32_t elapsed = (last_tick_time_ == 0) ? 0 : (now - last_tick_time_);
-        last_tick_time_ = now;
         if (elapsed > 0 && elapsed < 1000) {  // Sanity check
             protocol_.tick(elapsed);
+        }
+    } else if (mode_ == AppMode::TEST && test_protocol_mode_) {
+        if (elapsed > 0 && elapsed < 1000) {
+            tickProtocolTest(elapsed);
         }
     }
 
@@ -394,9 +762,15 @@ void App::render() {
 
     ImGui::BeginChild("LeftPanel", ImVec2(constellation_width, 0), true);
 
-    // Use received symbols from the modem
+    // Constellation at top (fixed height)
+    ImGui::BeginChild("ConstellationArea", ImVec2(0, 200), false);
     auto symbols = modem_.getConstellationSymbols();
     constellation_.render(symbols, config_.modulation);
+    ImGui::EndChild();
+
+    // Waterfall below constellation (fills remaining space)
+    ImGui::Separator();
+    waterfall_.render();
 
     ImGui::EndChild();
     ImGui::SameLine();
@@ -453,6 +827,14 @@ void App::render() {
         settings_window_.output_devices = audio_.getOutputDevices();
     }
     settings_window_.render(settings_);
+
+    // Render file browser (if open)
+    if (file_browser_.render()) {
+        // File was selected - copy to buffer
+        strncpy(file_path_buffer_, file_browser_.getSelectedPath().c_str(),
+                sizeof(file_path_buffer_) - 1);
+        file_path_buffer_[sizeof(file_path_buffer_) - 1] = '\0';
+    }
 }
 
 void App::initRadioAudio() {
@@ -505,9 +887,10 @@ void App::startRadioRx() {
         return;
     }
 
-    // Set up RX callback - feed captured audio to modem
+    // Set up RX callback - feed captured audio to modem and waterfall
     audio_.setRxCallback([this](const std::vector<float>& samples) {
         modem_.receiveAudio(samples);
+        waterfall_.addSamples(samples.data(), samples.size());
     });
 
     // Disable loopback for real radio mode
@@ -751,6 +1134,72 @@ void App::renderRadioControls() {
     }
 
     ImGui::EndDisabled();  // End TX input disabled state
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // File Transfer Section
+    ImGui::Text("File Transfer");
+
+    // Show progress if transfer in progress
+    if (protocol_.isFileTransferInProgress()) {
+        auto progress = protocol_.getFileProgress();
+
+        ImVec4 color = progress.is_sending
+            ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)   // Blue for sending
+            : ImVec4(0.5f, 1.0f, 0.5f, 1.0f);  // Green for receiving
+
+        ImGui::TextColored(color, "%s: %s",
+            progress.is_sending ? "Sending" : "Receiving",
+            progress.filename.c_str());
+
+        ImGui::ProgressBar(progress.percentage() / 100.0f, ImVec2(-1, 20));
+
+        ImGui::Text("%u / %u bytes (%.1f%%)",
+            progress.transferred_bytes,
+            progress.total_bytes,
+            progress.percentage());
+
+        if (ImGui::Button("Cancel Transfer", ImVec2(-1, 25))) {
+            protocol_.cancelFileTransfer();
+        }
+    } else {
+        // File path input with Browse button
+        ImGui::SetNextItemWidth(-80);  // Leave room for Browse button
+        ImGui::InputText("##filepath", file_path_buffer_, sizeof(file_path_buffer_));
+        ImGui::SameLine();
+        if (ImGui::Button("Browse", ImVec2(70, 0))) {
+            file_browser_.setTitle("Select File to Send");
+            file_browser_.open();
+        }
+
+        // Send button
+        bool can_send_file = protocol_.isConnected() &&
+                             protocol_.isReadyToSend() &&
+                             strlen(file_path_buffer_) > 0 &&
+                             !protocol_.isFileTransferInProgress();
+
+        ImGui::BeginDisabled(!can_send_file);
+        if (ImGui::Button("Send File", ImVec2(-1, 30))) {
+            if (protocol_.sendFile(file_path_buffer_)) {
+                rx_log_.push_front("[FILE] Sending: " + std::string(file_path_buffer_));
+                if (rx_log_.size() > MAX_RX_LOG) {
+                    rx_log_.pop_back();
+                }
+            } else {
+                rx_log_.push_front("[FILE] Failed to start transfer");
+                if (rx_log_.size() > MAX_RX_LOG) {
+                    rx_log_.pop_back();
+                }
+            }
+        }
+        ImGui::EndDisabled();
+
+        if (!protocol_.isConnected()) {
+            ImGui::TextDisabled("Connect to send files");
+        }
+    }
 
     ImGui::Spacing();
     ImGui::Separator();

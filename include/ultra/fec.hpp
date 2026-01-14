@@ -90,6 +90,11 @@ public:
     std::vector<float> interleave(std::span<const float> soft_bits);
     std::vector<float> deinterleave(std::span<const float> soft_bits);
 
+    // Debug access
+    size_t getPermutation(size_t i) const { return i < permutation_.size() ? permutation_[i] : 0; }
+    size_t getRows() const { return rows_; }
+    size_t getCols() const { return cols_; }
+
 private:
     size_t rows_, cols_;
     std::vector<size_t> permutation_;

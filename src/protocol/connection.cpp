@@ -24,16 +24,31 @@ Connection::Connection(const ConnectionConfig& config)
     });
 
     arq_.setDataReceivedCallback([this](const Bytes& data) {
-        if (on_message_received_) {
-            std::string text(data.begin(), data.end());
-            on_message_received_(text);
-        }
+        // Route through data payload handler for file/text discrimination
+        handleDataPayload(data, arq_.lastRxHadMoreData());
     });
 
     arq_.setSendCompleteCallback([this](bool success) {
-        if (on_message_sent_) {
-            on_message_sent_(success);
+        // Check if this was a file transfer chunk
+        if (file_transfer_.getState() == FileTransferState::SENDING) {
+            if (success) {
+                file_transfer_.onChunkAcked();
+                // Send next chunk if available
+                sendNextFileChunk();
+            } else {
+                file_transfer_.onSendFailed();
+            }
+        } else {
+            // Regular message
+            if (on_message_sent_) {
+                on_message_sent_(success);
+            }
         }
+    });
+
+    // Wire up file transfer callbacks (forward to our callbacks)
+    file_transfer_.setProgressCallback([this](const FileTransferProgress& p) {
+        // Progress callbacks are set directly on file_transfer_
     });
 }
 
@@ -140,7 +155,110 @@ bool Connection::sendMessage(const std::string& text) {
 }
 
 bool Connection::isReadyToSend() const {
-    return state_ == ConnectionState::CONNECTED && arq_.isReadyToSend();
+    return state_ == ConnectionState::CONNECTED && arq_.isReadyToSend() &&
+           !file_transfer_.isBusy();
+}
+
+// --- File Transfer ---
+
+bool Connection::sendFile(const std::string& filepath) {
+    if (state_ != ConnectionState::CONNECTED) {
+        LOG_MODEM(WARN, "Connection: Cannot send file, not connected");
+        return false;
+    }
+
+    if (file_transfer_.isBusy()) {
+        LOG_MODEM(WARN, "Connection: File transfer already in progress");
+        return false;
+    }
+
+    if (!arq_.isReadyToSend()) {
+        LOG_MODEM(WARN, "Connection: ARQ busy, cannot start file transfer");
+        return false;
+    }
+
+    LOG_MODEM(INFO, "Connection: Starting file transfer: %s", filepath.c_str());
+
+    if (!file_transfer_.startSend(filepath)) {
+        LOG_MODEM(ERROR, "Connection: Failed to start file transfer");
+        return false;
+    }
+
+    // Send first chunk
+    sendNextFileChunk();
+    return true;
+}
+
+void Connection::setReceiveDirectory(const std::string& dir) {
+    file_transfer_.setReceiveDirectory(dir);
+}
+
+void Connection::cancelFileTransfer() {
+    file_transfer_.cancel();
+}
+
+bool Connection::isFileTransferInProgress() const {
+    return file_transfer_.isBusy();
+}
+
+FileTransferProgress Connection::getFileProgress() const {
+    return file_transfer_.getProgress();
+}
+
+void Connection::sendNextFileChunk() {
+    if (file_transfer_.getState() != FileTransferState::SENDING) {
+        return;
+    }
+
+    if (!arq_.isReadyToSend()) {
+        return;
+    }
+
+    Bytes chunk = file_transfer_.getNextChunk();
+    if (chunk.empty()) {
+        return;
+    }
+
+    // Set MORE_DATA flag if more chunks follow
+    uint8_t flags = file_transfer_.hasMoreChunks() ? FrameFlags::MORE_DATA : FrameFlags::NONE;
+
+    arq_.sendDataWithFlags(chunk, flags);
+}
+
+void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
+    if (payload.empty()) {
+        return;
+    }
+
+    // Check if this is a file transfer frame
+    if (file_transfer_.processPayload(payload, more_data)) {
+        // Was a file transfer frame, already handled
+        LOG_MODEM(DEBUG, "Connection: Processed file transfer payload (%zu bytes)",
+                  payload.size());
+
+        // Also notify raw data callback if set
+        if (on_data_received_) {
+            on_data_received_(payload, more_data);
+        }
+        return;
+    }
+
+    // Regular text message (starts with TEXT_MESSAGE type or is legacy)
+    // Skip type byte if present
+    size_t start = 0;
+    if (!payload.empty() && payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
+        start = 1;
+    }
+
+    std::string text(payload.begin() + start, payload.end());
+
+    if (on_message_received_) {
+        on_message_received_(text);
+    }
+
+    if (on_data_received_) {
+        on_data_received_(payload, more_data);
+    }
 }
 
 void Connection::onFrameReceived(const Frame& frame) {
@@ -334,6 +452,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     remote_call_.clear();
     pending_remote_call_.clear();
     arq_.reset();
+    file_transfer_.cancel();
 
     LOG_MODEM(INFO, "Connection: Disconnected from %s (%s)",
               old_remote.c_str(), reason.c_str());
@@ -367,6 +486,22 @@ void Connection::setIncomingCallCallback(IncomingCallCallback cb) {
     on_incoming_call_ = std::move(cb);
 }
 
+void Connection::setDataReceivedCallback(DataReceivedCallback cb) {
+    on_data_received_ = std::move(cb);
+}
+
+void Connection::setFileProgressCallback(FileProgressCallback cb) {
+    file_transfer_.setProgressCallback(std::move(cb));
+}
+
+void Connection::setFileReceivedCallback(FileReceivedCallback cb) {
+    file_transfer_.setReceivedCallback(std::move(cb));
+}
+
+void Connection::setFileSentCallback(FileSentCallback cb) {
+    file_transfer_.setSentCallback(std::move(cb));
+}
+
 ConnectionStats Connection::getStats() const {
     ConnectionStats s = stats_;
     s.arq = arq_.getStats();
@@ -386,6 +521,7 @@ void Connection::reset() {
     connect_retry_count_ = 0;
     connected_time_ms_ = 0;
     arq_.reset();
+    file_transfer_.cancel();
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 

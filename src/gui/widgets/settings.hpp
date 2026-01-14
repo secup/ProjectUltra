@@ -33,6 +33,12 @@ struct AppSettings {
     int tx_delay_ms = 50;      // Delay before TX after PTT
     int tx_tail_ms = 50;       // Delay after TX before releasing PTT
     float tx_drive = 0.8f;     // TX audio level (0-1)
+
+    // Audio Filter Settings
+    bool filter_enabled = false;      // Disabled by default (radio's SSB filter sufficient)
+    float filter_center = 1500.0f;    // Center frequency in Hz
+    float filter_bandwidth = 2900.0f; // Total bandwidth in Hz (covers 2.8 kHz modem)
+    int filter_taps = 101;            // FIR filter taps
 };
 
 class SettingsWindow {
@@ -65,6 +71,10 @@ public:
     using ClosedCallback = std::function<void()>;
     void setClosedCallback(ClosedCallback cb) { on_closed_ = cb; }
 
+    // Callback when filter settings change
+    using FilterChangedCallback = std::function<void(bool enabled, float center, float bw, int taps)>;
+    void setFilterChangedCallback(FilterChangedCallback cb) { on_filter_changed_ = cb; }
+
 private:
     bool visible_ = false;
     bool was_visible_ = false;  // Track previous frame visibility
@@ -74,6 +84,7 @@ private:
     CallsignChangedCallback on_callsign_changed_;
     AudioResetCallback on_audio_reset_;
     ClosedCallback on_closed_;
+    FilterChangedCallback on_filter_changed_;
 
     void renderStationTab(AppSettings& settings);
     void renderRadioTab(AppSettings& settings);

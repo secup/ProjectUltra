@@ -45,6 +45,34 @@ bool ARQController::sendData(const std::string& text) {
     return sendData(data);
 }
 
+bool ARQController::sendDataWithFlags(const Bytes& data, uint8_t flags) {
+    if (state_ != State::IDLE) {
+        LOG_MODEM(WARN, "ARQ: Cannot send, state=%d (busy)", static_cast<int>(state_));
+        return false;
+    }
+
+    if (local_call_.empty() || remote_call_.empty()) {
+        LOG_MODEM(ERROR, "ARQ: Callsigns not set");
+        return false;
+    }
+
+    // Create DATA frame with custom flags
+    pending_frame_ = Frame::makeData(local_call_, remote_call_, tx_seq_, data);
+    pending_frame_.flags = flags;
+    retry_count_ = 0;
+
+    // Transmit
+    transmitFrame(pending_frame_);
+    state_ = State::WAIT_ACK;
+    timeout_remaining_ms_ = config_.ack_timeout_ms;
+
+    stats_.frames_sent++;
+    LOG_MODEM(DEBUG, "ARQ: Sent DATA seq=%d, %zu bytes, flags=0x%02x",
+              tx_seq_, data.size(), flags);
+
+    return true;
+}
+
 bool ARQController::isReadyToSend() const {
     return state_ == State::IDLE;
 }
@@ -77,10 +105,14 @@ void ARQController::onFrameReceived(const Frame& frame) {
 }
 
 void ARQController::handleDataFrame(const Frame& frame) {
+    // Track flags from this frame
+    last_rx_flags_ = frame.flags;
+    last_rx_more_data_ = (frame.flags & FrameFlags::MORE_DATA) != 0;
+
     if (frame.sequence == rx_expected_seq_) {
         // In-order frame, deliver data
-        LOG_MODEM(DEBUG, "ARQ: DATA seq=%d accepted, delivering %zu bytes",
-                  frame.sequence, frame.payload.size());
+        LOG_MODEM(DEBUG, "ARQ: DATA seq=%d accepted, delivering %zu bytes, flags=0x%02x",
+                  frame.sequence, frame.payload.size(), frame.flags);
 
         stats_.frames_received++;
 
@@ -130,13 +162,13 @@ void ARQController::handleAckFrame(const Frame& frame) {
         // Advance TX sequence
         tx_seq_ = (tx_seq_ + 1) & 0xFF;
 
-        // Notify success
+        // Return to idle BEFORE callback so isReadyToSend() is true
+        state_ = State::IDLE;
+
+        // Notify success (callback may want to send next chunk)
         if (on_send_complete_) {
             on_send_complete_(true);
         }
-
-        // Return to idle
-        state_ = State::IDLE;
 
     } else {
         LOG_MODEM(WARN, "ARQ: ACK seq=%d doesn't match pending seq=%d",

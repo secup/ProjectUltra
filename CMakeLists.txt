@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ProjectUltra VERSION 0.1.0 LANGUAGES CXX)
+project(ProjectUltra VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -42,11 +42,19 @@ add_library(ultra_core STATIC
     src/protocol/arq.cpp
     src/protocol/connection.cpp
     src/protocol/protocol_engine.cpp
+    src/protocol/file_transfer.cpp
+    src/protocol/compression.cpp
+    # miniz compression library (public domain)
+    thirdparty/miniz/miniz.c
+    thirdparty/miniz/miniz_tdef.c
+    thirdparty/miniz/miniz_tinfl.c
+    thirdparty/miniz/miniz_zip.c
 )
 
 target_include_directories(ultra_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src  # For protocol headers
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty  # For miniz
 )
 
 target_link_libraries(ultra_core PUBLIC
@@ -104,6 +112,8 @@ if(ULTRA_BUILD_GUI)
             src/gui/widgets/controls.cpp
             src/gui/widgets/status.cpp
             src/gui/widgets/settings.cpp
+            src/gui/widgets/waterfall.cpp
+            src/gui/widgets/file_browser.cpp
             # ImGui core
             ${IMGUI_DIR}/imgui.cpp
             ${IMGUI_DIR}/imgui_draw.cpp

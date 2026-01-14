@@ -3,6 +3,7 @@
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"
 #include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
+#include "ultra/dsp.hpp"  // FIRFilter
 #include "adaptive_mode.hpp"
 #include <memory>
 #include <vector>
@@ -25,6 +26,18 @@ struct LoopbackStats {
     int throughput_bps = 0;
 };
 
+// Audio filter configuration
+struct FilterConfig {
+    bool enabled = false;          // Disabled by default (radio's SSB filter sufficient)
+    float center_freq = 1500.0f;   // Center frequency in Hz
+    float bandwidth = 2900.0f;     // Bandwidth in Hz (covers 2.8 kHz modem + margin)
+    int taps = 101;                // FIR filter taps (more = sharper cutoff)
+
+    // Computed passband edges
+    float lowFreq() const { return center_freq - bandwidth / 2.0f; }
+    float highFreq() const { return center_freq + bandwidth / 2.0f; }
+};
+
 // Real modem engine using OFDM modulator/demodulator and LDPC codec
 class ModemEngine {
 public:
@@ -34,6 +47,12 @@ public:
     // Configuration
     void setConfig(const ModemConfig& config);
     const ModemConfig& getConfig() const { return config_; }
+
+    // Filter configuration
+    void setFilterConfig(const FilterConfig& config);
+    const FilterConfig& getFilterConfig() const { return filter_config_; }
+    void setFilterEnabled(bool enabled);
+    bool isFilterEnabled() const { return filter_config_.enabled; }
 
     // TX: Convert data to audio samples
     // Returns samples ready to play (includes preamble)
@@ -108,6 +127,14 @@ private:
     // pseudo-random structure, so it's disabled by default.
     Interleaver interleaver_{24, 27};
     bool interleaving_enabled_ = false;  // Disabled by default per test results
+
+    // Audio filters (TX and RX share same settings but separate state)
+    FilterConfig filter_config_;
+    std::unique_ptr<FIRFilter> tx_filter_;
+    std::unique_ptr<FIRFilter> rx_filter_;
+
+    // Rebuild filters when config changes
+    void rebuildFilters();
 
     // Process accumulated samples through demodulator
     void processRxBuffer();

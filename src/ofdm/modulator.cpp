@@ -249,8 +249,12 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
         auto real_symbol = impl_->complexToReal(complex_symbol);
 
         // Add guard interval (zeros)
+        // IMPORTANT: Also advance mixer phase to match RX processing
+        // RX's toBaseband() processes symbol_samples which includes guard,
+        // so TX mixer must advance the same amount for phase coherence
         for (uint32_t i = 0; i < impl_->config.symbol_guard; ++i) {
             real_symbol.push_back(0);
+            impl_->mixer.next();  // Keep mixer in sync with RX
         }
 
         output.insert(output.end(), real_symbol.begin(), real_symbol.end());

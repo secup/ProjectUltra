@@ -2,6 +2,7 @@
 
 #include "frame.hpp"
 #include "arq.hpp"
+#include "file_transfer.hpp"
 #include <functional>
 #include <string>
 
@@ -65,6 +66,12 @@ public:
     using MessageReceivedCallback = std::function<void(const std::string& text)>;
     using MessageSentCallback = std::function<void(bool success)>;
     using IncomingCallCallback = std::function<void(const std::string& remote_call)>;
+    using DataReceivedCallback = std::function<void(const Bytes& data, bool more_data)>;
+
+    // File transfer callbacks
+    using FileProgressCallback = FileTransferController::ProgressCallback;
+    using FileReceivedCallback = FileTransferController::ReceivedCallback;
+    using FileSentCallback = FileTransferController::SentCallback;
 
     explicit Connection(const ConnectionConfig& config = ConnectionConfig{});
 
@@ -73,6 +80,10 @@ public:
     // Set local callsign (required)
     void setLocalCallsign(const std::string& call);
     std::string getLocalCallsign() const { return local_call_; }
+
+    // Set auto-accept mode
+    void setAutoAccept(bool auto_accept) { config_.auto_accept = auto_accept; }
+    bool getAutoAccept() const { return config_.auto_accept; }
 
     // --- Connection Control ---
 
@@ -98,6 +109,23 @@ public:
     // Check if ready to send
     bool isReadyToSend() const;
 
+    // --- File Transfer (only valid when CONNECTED) ---
+
+    // Send a file. Returns false if not connected, busy, or file not found.
+    bool sendFile(const std::string& filepath);
+
+    // Set directory for received files
+    void setReceiveDirectory(const std::string& dir);
+
+    // Cancel ongoing file transfer
+    void cancelFileTransfer();
+
+    // Check if file transfer is in progress
+    bool isFileTransferInProgress() const;
+
+    // Get file transfer progress
+    FileTransferProgress getFileProgress() const;
+
     // --- Frame Processing ---
 
     // Process a received frame (call from modem RX callback)
@@ -115,6 +143,12 @@ public:
     void setMessageReceivedCallback(MessageReceivedCallback cb);
     void setMessageSentCallback(MessageSentCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
+    void setDataReceivedCallback(DataReceivedCallback cb);
+
+    // File transfer callbacks
+    void setFileProgressCallback(FileProgressCallback cb);
+    void setFileReceivedCallback(FileReceivedCallback cb);
+    void setFileSentCallback(FileSentCallback cb);
 
     // --- State ---
 
@@ -139,6 +173,9 @@ private:
     // ARQ for reliable data transfer
     ARQController arq_;
 
+    // File transfer controller
+    FileTransferController file_transfer_;
+
     // Connection timing
     uint32_t timeout_remaining_ms_ = 0;
     int connect_retry_count_ = 0;
@@ -154,16 +191,21 @@ private:
     MessageReceivedCallback on_message_received_;
     MessageSentCallback on_message_sent_;
     IncomingCallCallback on_incoming_call_;
+    DataReceivedCallback on_data_received_;
 
     // Internal handlers
     void handleConnect(const Frame& frame);
     void handleConnectAck(const Frame& frame);
     void handleConnectNak(const Frame& frame);
     void handleDisconnect(const Frame& frame);
+    void handleDataPayload(const Bytes& payload, bool more_data);
 
     void transmitFrame(const Frame& frame);
     void enterConnected();
     void enterDisconnected(const std::string& reason);
+
+    // File transfer helpers
+    void sendNextFileChunk();
 };
 
 } // namespace protocol
