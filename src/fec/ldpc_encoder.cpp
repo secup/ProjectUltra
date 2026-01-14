@@ -184,7 +184,69 @@ LDPCEncoder::LDPCEncoder(CodeRate rate)
 LDPCEncoder::~LDPCEncoder() = default;
 
 Bytes LDPCEncoder::encode(ByteSpan data) {
-    return impl_->encodeSystematic(data);
+    // Handle multi-block encoding for data larger than one LDPC block
+    // IMPORTANT: We work at bit-level to avoid losing bits at block boundaries
+    // when k is not a multiple of 8 (e.g., k=486 bits = 60.75 bytes)
+
+    int k = impl_->params.info_bits;
+    int n = k + impl_->params.parity_bits;
+
+    // Convert entire input to bits
+    std::vector<uint8_t> all_bits;
+    all_bits.reserve(data.size() * 8);
+    for (uint8_t byte : data) {
+        for (int b = 7; b >= 0; --b) {
+            all_bits.push_back((byte >> b) & 1);
+        }
+    }
+
+    // Encode k bits at a time
+    Bytes output;
+    size_t bit_offset = 0;
+
+    while (bit_offset < all_bits.size()) {
+        // Extract k info bits for this block (pad with zeros if needed at the end)
+        std::vector<uint8_t> info_bits(k, 0);
+        for (int j = 0; j < k && bit_offset + j < all_bits.size(); ++j) {
+            info_bits[j] = all_bits[bit_offset + j];
+        }
+
+        // Calculate parity bits: parity[i] = XOR of info bits connected to check i
+        int m = impl_->params.parity_bits;
+        std::vector<uint8_t> parity(m, 0);
+        for (int i = 0; i < m; ++i) {
+            uint8_t sum = 0;
+            for (int j : impl_->H_data_rows[i]) {
+                sum ^= info_bits[j];
+            }
+            parity[i] = sum;
+        }
+
+        // Combine info + parity into codeword bits
+        std::vector<uint8_t> codeword(n);
+        std::copy(info_bits.begin(), info_bits.end(), codeword.begin());
+        std::copy(parity.begin(), parity.end(), codeword.begin() + k);
+
+        // Convert codeword bits to bytes
+        uint8_t byte = 0;
+        int bit_count = 0;
+        for (uint8_t bit : codeword) {
+            byte = (byte << 1) | bit;
+            ++bit_count;
+            if (bit_count == 8) {
+                output.push_back(byte);
+                byte = 0;
+                bit_count = 0;
+            }
+        }
+        if (bit_count > 0) {
+            output.push_back(byte << (8 - bit_count));
+        }
+
+        bit_offset += k;  // Advance by exactly k bits (not k_bytes)
+    }
+
+    return output;
 }
 
 size_t LDPCEncoder::getCodedSize(size_t input_size) const {

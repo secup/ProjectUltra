@@ -22,3 +22,14 @@ add_test(NAME Interleaver COMMAND test_interleaver)
 add_executable(test_freq_offset test_freq_offset.cpp)
 target_link_libraries(test_freq_offset PRIVATE ultra_core)
 add_test(NAME FreqOffset COMMAND test_freq_offset)
+
+# Multi-codeword LDPC test (file transfer reliability)
+add_executable(test_multiblock_ldpc test_multiblock_ldpc.cpp)
+target_link_libraries(test_multiblock_ldpc PRIVATE ultra_core)
+add_test(NAME MultiblockLDPC COMMAND test_multiblock_ldpc)
+
+# Protocol + Modem integration test (two-modem architecture - CRITICAL)
+# Tests protocol through full modem pipeline, same as GUI Test Mode
+add_executable(test_protocol_modem test_protocol_modem.cpp)
+target_link_libraries(test_protocol_modem PRIVATE ultra_core)
+add_test(NAME ProtocolModem COMMAND test_protocol_modem)

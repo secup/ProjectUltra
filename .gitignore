@@ -13,6 +13,7 @@ cmake-build-*/
 
 # Claude Code
 .claude/
+CLAUDE.md
 
 # Cache
 .cache/

@@ -39,6 +39,15 @@ struct AppSettings {
     float filter_center = 1500.0f;    // Center frequency in Hz
     float filter_bandwidth = 2900.0f; // Total bandwidth in Hz (covers 2.8 kHz modem)
     int filter_taps = 101;            // FIR filter taps
+
+    // File Transfer Settings
+    char receive_directory[512] = ""; // Empty = use default (Downloads folder)
+
+    // Get the effective receive directory (uses default if empty)
+    std::string getReceiveDirectory() const;
+
+    // Get platform-specific Downloads folder
+    static std::string getDefaultDownloadsPath();
 };
 
 class SettingsWindow {
@@ -75,6 +84,10 @@ public:
     using FilterChangedCallback = std::function<void(bool enabled, float center, float bw, int taps)>;
     void setFilterChangedCallback(FilterChangedCallback cb) { on_filter_changed_ = cb; }
 
+    // Callback when receive directory changes
+    using ReceiveDirChangedCallback = std::function<void(const std::string&)>;
+    void setReceiveDirChangedCallback(ReceiveDirChangedCallback cb) { on_receive_dir_changed_ = cb; }
+
 private:
     bool visible_ = false;
     bool was_visible_ = false;  // Track previous frame visibility
@@ -85,6 +98,7 @@ private:
     AudioResetCallback on_audio_reset_;
     ClosedCallback on_closed_;
     FilterChangedCallback on_filter_changed_;
+    ReceiveDirChangedCallback on_receive_dir_changed_;
 
     void renderStationTab(AppSettings& settings);
     void renderRadioTab(AppSettings& settings);

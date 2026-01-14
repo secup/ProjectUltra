@@ -16,6 +16,7 @@
 #include <random>
 #include <string>
 #include <deque>
+#include <memory>
 
 namespace ultra {
 namespace gui {
@@ -82,10 +83,19 @@ private:
     // File transfer state
     char file_path_buffer_[512] = "";
     std::string last_received_file_;  // Path of last received file
+    enum class FileBrowserTarget { OPERATE, TEST_LOCAL, TEST_REMOTE } file_browser_target_ = FileBrowserTarget::OPERATE;
 
     // Protocol loopback test state (two virtual stations)
+    // Each station has its own protocol engine AND modem engine
     protocol::ProtocolEngine test_local_;   // Local station in test mode
     protocol::ProtocolEngine test_remote_;  // Remote station in test mode
+    std::unique_ptr<ModemEngine> test_modem_1_;  // Modem for TEST1 station
+    std::unique_ptr<ModemEngine> test_modem_2_;  // Modem for TEST2 station
+
+    // TX sample queues for cross-wiring (TEST1 TX → TEST2 RX, TEST2 TX → TEST1 RX)
+    std::vector<float> test_tx_queue_1_;  // TEST1's pending TX samples
+    std::vector<float> test_tx_queue_2_;  // TEST2's pending TX samples
+
     char test_local_tx_[256] = "Hello from TEST1!";
     char test_remote_tx_[256] = "Hello from TEST2!";
     char test_local_file_[512] = "";
@@ -100,6 +110,7 @@ private:
     void renderProtocolTestControls();
     void initProtocolTest();
     void tickProtocolTest(uint32_t elapsed_ms);
+    void processTestChannel(std::vector<float>& samples);  // Add noise to test channel
     void renderRadioControls();
     void initAudio();
     void initRadioAudio();

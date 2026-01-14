@@ -47,9 +47,9 @@ App::App() {
     protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
         // Received a message via ARQ
         std::string msg = "[RX " + from + "] " + text;
-        rx_log_.push_front(msg);
+        rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     });
 
@@ -69,18 +69,18 @@ App::App() {
                 msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
                 break;
         }
-        rx_log_.push_front(msg);
+        rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     });
 
     protocol_.setIncomingCallCallback([this](const std::string& from) {
         pending_incoming_call_ = from;
         std::string msg = "[SYS] Incoming call from " + from;
-        rx_log_.push_front(msg);
+        rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     });
 
@@ -97,9 +97,9 @@ App::App() {
         } else {
             msg = "[FILE] Receive failed";
         }
-        rx_log_.push_front(msg);
+        rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     });
 
@@ -110,17 +110,14 @@ App::App() {
         } else {
             msg = "[FILE] Transfer failed: " + error;
         }
-        rx_log_.push_front(msg);
+        rx_log_.push_back(msg);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     });
 
-    // Set default receive directory to user's home
-    const char* home = getenv("HOME");
-    if (home) {
-        protocol_.setReceiveDirectory(std::string(home) + "/Downloads");
-    }
+    // Set receive directory from settings (defaults to Downloads folder)
+    protocol_.setReceiveDirectory(settings_.getReceiveDirectory());
 
     // Configure waterfall display
     waterfall_.setSampleRate(48000.0f);
@@ -202,6 +199,12 @@ App::App() {
         settings_.save();
     });
 
+    // Settings window callback - update receive directory
+    settings_window_.setReceiveDirChangedCallback([this](const std::string& dir) {
+        protocol_.setReceiveDirectory(dir);
+        settings_.save();
+    });
+
     // Apply initial filter settings from loaded config
     FilterConfig initial_filter;
     initial_filter.enabled = settings_.filter_enabled;
@@ -257,18 +260,18 @@ void App::sendMessage() {
         tx_in_progress_ = true;
 
         // Log what we sent
-        rx_log_.push_front("[TX] " + text);
+        rx_log_.push_back("[TX] " + text);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     }
 }
 
 void App::onDataReceived(const std::string& text) {
     if (!text.empty()) {
-        rx_log_.push_front("[RX] " + text);
+        rx_log_.push_back("[RX] " + text);
         if (rx_log_.size() > MAX_RX_LOG) {
-            rx_log_.pop_back();
+            rx_log_.pop_front();
         }
     }
 }
@@ -345,12 +348,14 @@ void App::renderLoopbackControls() {
         ImGui::Text("Message Log");
         ImGui::BeginChild("RXLog", ImVec2(-1, 150), true);
         for (const auto& msg : rx_log_) {
-            if (msg.substr(0, 4) == "[TX]") {
-                ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", msg.c_str());
-            } else {
-                ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s", msg.c_str());
-            }
+            ImVec4 color = (msg.size() >= 4 && msg.substr(0, 4) == "[TX]")
+                ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)
+                : ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("%s", msg.c_str());
+            ImGui::PopStyleColor();
         }
+        if (!rx_log_.empty()) ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
     }
 
@@ -365,17 +370,26 @@ void App::renderLoopbackControls() {
 }
 
 void App::initProtocolTest() {
-    // Reset both engines
+    // Reset both protocol engines
     test_local_.reset();
     test_remote_.reset();
 
-    // Setup local station
-    test_local_.setLocalCallsign("TEST1");
-    test_local_.setAutoAccept(false);  // Require manual accept in test mode
+    // Create two separate modem instances - each station gets its own modem
+    // This properly simulates two radios communicating
+    test_modem_1_ = std::make_unique<ModemEngine>();
+    test_modem_2_ = std::make_unique<ModemEngine>();
 
-    // Setup remote station
+    // Clear TX queues
+    test_tx_queue_1_.clear();
+    test_tx_queue_2_.clear();
+
+    // Setup local station (TEST1)
+    test_local_.setLocalCallsign("TEST1");
+    test_local_.setAutoAccept(true);  // Auto-accept in test mode for convenience
+
+    // Setup remote station (TEST2)
     test_remote_.setLocalCallsign("TEST2");
-    test_remote_.setAutoAccept(false);  // Require manual accept in test mode
+    test_remote_.setAutoAccept(true);  // Auto-accept in test mode for convenience
 
     // Clear logs
     test_local_log_.clear();
@@ -383,64 +397,129 @@ void App::initProtocolTest() {
     test_local_incoming_.clear();
     test_remote_incoming_.clear();
 
-    // Connect protocol TX to modem
+    // === Cross-wired TX/RX Architecture ===
+    // TEST1 TX → Channel → TEST2 RX (via test_modem_2_)
+    // TEST2 TX → Channel → TEST1 RX (via test_modem_1_)
+    // Note: No carrier sense in test mode - each station has dedicated RX path,
+    // there's no shared medium where collisions could occur.
+
+    // TEST1's protocol TX → TEST1's modem TX → queue for TEST2's RX
     test_local_.setTxDataCallback([this](const Bytes& data) {
-        auto samples = modem_.transmit(data);
-        audio_.queueTxSamples(samples);
+        auto samples = test_modem_1_->transmit(data);
+        // Queue samples for delivery to TEST2's demodulator
+        test_tx_queue_1_.insert(test_tx_queue_1_.end(), samples.begin(), samples.end());
     });
 
+    // TEST2's protocol TX → TEST2's modem TX → queue for TEST1's RX
     test_remote_.setTxDataCallback([this](const Bytes& data) {
-        auto samples = modem_.transmit(data);
-        audio_.queueTxSamples(samples);
+        auto samples = test_modem_2_->transmit(data);
+        // Queue samples for delivery to TEST1's demodulator
+        test_tx_queue_2_.insert(test_tx_queue_2_.end(), samples.begin(), samples.end());
     });
 
-    // Connect protocol RX callbacks
+    // TEST1's modem RX → TEST1's protocol RX
+    test_modem_1_->setRawDataCallback([this](const Bytes& data) {
+        test_local_.onRxData(data);
+    });
+
+    // TEST2's modem RX → TEST2's protocol RX
+    test_modem_2_->setRawDataCallback([this](const Bytes& data) {
+        test_remote_.onRxData(data);
+    });
+
+    // Connect protocol RX callbacks (for message display)
     test_local_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
-        test_local_log_.push_front("[RX from " + from + "] " + text);
-        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+        test_local_log_.push_back("[RX from " + from + "] " + text);
+        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_front();
     });
 
     test_remote_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
-        test_remote_log_.push_front("[RX from " + from + "] " + text);
-        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+        test_remote_log_.push_back("[RX from " + from + "] " + text);
+        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_front();
     });
 
     // Connect incoming call callbacks
     test_local_.setIncomingCallCallback([this](const std::string& caller) {
         test_local_incoming_ = caller;
-        test_local_log_.push_front("[CALL] Incoming from " + caller);
-        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+        test_local_log_.push_back("[CALL] Incoming from " + caller);
+        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_front();
     });
 
     test_remote_.setIncomingCallCallback([this](const std::string& caller) {
         test_remote_incoming_ = caller;
-        test_remote_log_.push_front("[CALL] Incoming from " + caller);
-        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+        test_remote_log_.push_back("[CALL] Incoming from " + caller);
+        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_front();
     });
 
     // File received callbacks
     test_local_.setFileReceivedCallback([this](const std::string& path, bool ok) {
-        test_local_log_.push_front(ok ? "[FILE] Received: " + path : "[FILE] Failed");
-        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+        test_local_log_.push_back(ok ? "[FILE] Received: " + path : "[FILE] Failed");
+        if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_front();
     });
 
     test_remote_.setFileReceivedCallback([this](const std::string& path, bool ok) {
-        test_remote_log_.push_front(ok ? "[FILE] Received: " + path : "[FILE] Failed");
-        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+        test_remote_log_.push_back(ok ? "[FILE] Received: " + path : "[FILE] Failed");
+        if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_front();
     });
 
-    // Route received modem data to both protocol engines
-    // They'll filter by destination callsign
-    modem_.setRawDataCallback([this](const Bytes& data) {
-        test_local_.onRxData(data);
-        test_remote_.onRxData(data);
-    });
+    test_local_log_.push_back("[SYS] Protocol test initialized - TEST1 station (dedicated modem)");
+    test_remote_log_.push_back("[SYS] Protocol test initialized - TEST2 station (dedicated modem)");
+}
 
-    test_local_log_.push_front("[SYS] Protocol test initialized - TEST1 station");
-    test_remote_log_.push_front("[SYS] Protocol test initialized - TEST2 station");
+void App::processTestChannel(std::vector<float>& samples) {
+    // Add AWGN noise based on SNR slider
+    if (snr_slider_ >= 50.0f) {
+        return;  // SNR >= 50 dB means essentially no noise
+    }
+
+    // Calculate noise amplitude from SNR
+    // SNR = 10 * log10(signal_power / noise_power)
+    // Assume signal power = 0.5 (normalized)
+    float signal_power = 0.5f;
+    float snr_linear = std::pow(10.0f, snr_slider_ / 10.0f);
+    float noise_power = signal_power / snr_linear;
+    float noise_stddev = std::sqrt(noise_power);
+
+    // Use deterministic seed for reproducibility
+    static std::mt19937 rng(42);
+    std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+
+    for (float& sample : samples) {
+        sample += noise_dist(rng);
+    }
 }
 
 void App::tickProtocolTest(uint32_t elapsed_ms) {
+    // === Process TX queues through simulated channel ===
+    // TEST1's TX → Channel simulation → TEST2's RX
+    if (!test_tx_queue_1_.empty()) {
+        auto samples = std::move(test_tx_queue_1_);
+        test_tx_queue_1_.clear();
+
+        // Apply channel effects (noise)
+        processTestChannel(samples);
+
+        // Feed to TEST2's demodulator
+        test_modem_2_->receiveAudio(samples);
+    }
+
+    // TEST2's TX → Channel simulation → TEST1's RX
+    if (!test_tx_queue_2_.empty()) {
+        auto samples = std::move(test_tx_queue_2_);
+        test_tx_queue_2_.clear();
+
+        // Apply channel effects (noise)
+        processTestChannel(samples);
+
+        // Feed to TEST1's demodulator
+        test_modem_1_->receiveAudio(samples);
+    }
+
+    // Poll both modems for received data (triggers RX callbacks)
+    test_modem_1_->pollRxAudio();
+    test_modem_2_->pollRxAudio();
+
+    // Tick both protocol engines (handles ARQ timeouts, retransmissions)
     test_local_.tick(elapsed_ms);
     test_remote_.tick(elapsed_ms);
 }
@@ -489,7 +568,7 @@ void App::renderProtocolTestControls() {
         if (state == protocol::ConnectionState::DISCONNECTED) {
             if (ImGui::Button("Connect to TEST2", ImVec2(-1, 25))) {
                 test_local_.connect("TEST2");
-                test_local_log_.push_front("[TX] Connecting to TEST2...");
+                test_local_log_.push_back("[TX] Connecting to TEST2...");
             }
         } else if (state == protocol::ConnectionState::CONNECTED) {
             if (ImGui::Button("Disconnect##local", ImVec2(-1, 25))) {
@@ -504,8 +583,8 @@ void App::renderProtocolTestControls() {
                                                 ImGuiInputTextFlags_EnterReturnsTrue);
             if (ImGui::Button("Send##local", ImVec2(-1, 0)) || send_local) {
                 if (test_local_.sendMessage(test_local_tx_)) {
-                    test_local_log_.push_front("[TX] " + std::string(test_local_tx_));
-                    if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_back();
+                    test_local_log_.push_back("[TX] " + std::string(test_local_tx_));
+                    if (test_local_log_.size() > MAX_RX_LOG) test_local_log_.pop_front();
                 }
             }
 
@@ -516,11 +595,12 @@ void App::renderProtocolTestControls() {
             if (ImGui::Button("...##localbrowse", ImVec2(40, 0))) {
                 file_browser_.setTitle("Select File (LOCAL)");
                 file_browser_.open();
-                // Note: need to track which station opened browser
+                file_browser_target_ = FileBrowserTarget::TEST_LOCAL;
             }
             if (ImGui::Button("Send File##local", ImVec2(-1, 0))) {
+                LOG_MODEM(INFO, "Send File clicked, path='%s'", test_local_file_);
                 if (test_local_.sendFile(test_local_file_)) {
-                    test_local_log_.push_front("[FILE] Sending: " + std::string(test_local_file_));
+                    test_local_log_.push_back("[FILE] Sending: " + std::string(test_local_file_));
                 }
             }
         }
@@ -530,15 +610,18 @@ void App::renderProtocolTestControls() {
 
         // Log
         ImGui::Text("Log");
-        ImGui::BeginChild("LocalLog", ImVec2(-1, 100), true);
+        ImGui::BeginChild("LocalLog", ImVec2(-1, 150), true);
         for (const auto& msg : test_local_log_) {
             ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
-            if (msg.substr(0, 4) == "[TX]") color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
-            else if (msg.substr(0, 4) == "[RX]") color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
-            else if (msg.substr(0, 5) == "[CALL") color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
-            else if (msg.substr(0, 5) == "[FILE") color = ImVec4(1.0f, 0.5f, 1.0f, 1.0f);
-            ImGui::TextColored(color, "%s", msg.c_str());
+            if (msg.size() >= 4 && msg.substr(0, 4) == "[TX]") color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
+            else if (msg.size() >= 4 && msg.substr(0, 4) == "[RX]") color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+            else if (msg.size() >= 5 && msg.substr(0, 5) == "[CALL") color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
+            else if (msg.size() >= 5 && msg.substr(0, 5) == "[FILE") color = ImVec4(1.0f, 0.5f, 1.0f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("%s", msg.c_str());
+            ImGui::PopStyleColor();
         }
+        if (!test_local_log_.empty()) ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
     }
     ImGui::EndChild();
@@ -585,7 +668,7 @@ void App::renderProtocolTestControls() {
         if (state == protocol::ConnectionState::DISCONNECTED) {
             if (ImGui::Button("Connect to TEST1", ImVec2(-1, 25))) {
                 test_remote_.connect("TEST1");
-                test_remote_log_.push_front("[TX] Connecting to TEST1...");
+                test_remote_log_.push_back("[TX] Connecting to TEST1...");
             }
         } else if (state == protocol::ConnectionState::CONNECTED) {
             if (ImGui::Button("Disconnect##remote", ImVec2(-1, 25))) {
@@ -600,8 +683,8 @@ void App::renderProtocolTestControls() {
                                                  ImGuiInputTextFlags_EnterReturnsTrue);
             if (ImGui::Button("Send##remote", ImVec2(-1, 0)) || send_remote) {
                 if (test_remote_.sendMessage(test_remote_tx_)) {
-                    test_remote_log_.push_front("[TX] " + std::string(test_remote_tx_));
-                    if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_back();
+                    test_remote_log_.push_back("[TX] " + std::string(test_remote_tx_));
+                    if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_front();
                 }
             }
 
@@ -612,10 +695,11 @@ void App::renderProtocolTestControls() {
             if (ImGui::Button("...##remotebrowse", ImVec2(40, 0))) {
                 file_browser_.setTitle("Select File (REMOTE)");
                 file_browser_.open();
+                file_browser_target_ = FileBrowserTarget::TEST_REMOTE;
             }
             if (ImGui::Button("Send File##remote", ImVec2(-1, 0))) {
                 if (test_remote_.sendFile(test_remote_file_)) {
-                    test_remote_log_.push_front("[FILE] Sending: " + std::string(test_remote_file_));
+                    test_remote_log_.push_back("[FILE] Sending: " + std::string(test_remote_file_));
                 }
             }
         }
@@ -625,15 +709,18 @@ void App::renderProtocolTestControls() {
 
         // Log
         ImGui::Text("Log");
-        ImGui::BeginChild("RemoteLog", ImVec2(-1, 100), true);
+        ImGui::BeginChild("RemoteLog", ImVec2(-1, 150), true);
         for (const auto& msg : test_remote_log_) {
             ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
-            if (msg.substr(0, 4) == "[TX]") color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
-            else if (msg.substr(0, 4) == "[RX]") color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
-            else if (msg.substr(0, 5) == "[CALL") color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
-            else if (msg.substr(0, 5) == "[FILE") color = ImVec4(1.0f, 0.5f, 1.0f, 1.0f);
-            ImGui::TextColored(color, "%s", msg.c_str());
+            if (msg.size() >= 4 && msg.substr(0, 4) == "[TX]") color = ImVec4(0.5f, 0.8f, 1.0f, 1.0f);
+            else if (msg.size() >= 4 && msg.substr(0, 4) == "[RX]") color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+            else if (msg.size() >= 5 && msg.substr(0, 5) == "[CALL") color = ImVec4(1.0f, 1.0f, 0.0f, 1.0f);
+            else if (msg.size() >= 5 && msg.substr(0, 5) == "[FILE") color = ImVec4(1.0f, 0.5f, 1.0f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, color);
+            ImGui::TextWrapped("%s", msg.c_str());
+            ImGui::PopStyleColor();
         }
+        if (!test_remote_log_.empty()) ImGui::SetScrollHereY(1.0f);
         ImGui::EndChild();
     }
     ImGui::EndChild();
@@ -830,10 +917,26 @@ void App::render() {
 
     // Render file browser (if open)
     if (file_browser_.render()) {
-        // File was selected - copy to buffer
-        strncpy(file_path_buffer_, file_browser_.getSelectedPath().c_str(),
-                sizeof(file_path_buffer_) - 1);
-        file_path_buffer_[sizeof(file_path_buffer_) - 1] = '\0';
+        // File was selected - copy to the appropriate buffer
+        const std::string& path = file_browser_.getSelectedPath();
+        LOG_MODEM(INFO, "File browser selected: '%s' (target=%d)",
+                  path.c_str(), static_cast<int>(file_browser_target_));
+        switch (file_browser_target_) {
+            case FileBrowserTarget::OPERATE:
+                strncpy(file_path_buffer_, path.c_str(), sizeof(file_path_buffer_) - 1);
+                file_path_buffer_[sizeof(file_path_buffer_) - 1] = '\0';
+                break;
+            case FileBrowserTarget::TEST_LOCAL:
+                strncpy(test_local_file_, path.c_str(), sizeof(test_local_file_) - 1);
+                test_local_file_[sizeof(test_local_file_) - 1] = '\0';
+                LOG_MODEM(INFO, "Copied to test_local_file_: '%s'", test_local_file_);
+                break;
+            case FileBrowserTarget::TEST_REMOTE:
+                strncpy(test_remote_file_, path.c_str(), sizeof(test_remote_file_) - 1);
+                test_remote_file_[sizeof(test_remote_file_) - 1] = '\0';
+                LOG_MODEM(INFO, "Copied to test_remote_file_: '%s'", test_remote_file_);
+                break;
+        }
     }
 }
 
@@ -1119,9 +1222,9 @@ void App::renderRadioControls() {
 
         // Send via ARQ protocol
         if (protocol_.sendMessage(text)) {
-            rx_log_.push_front("[TX] " + text);
+            rx_log_.push_back("[TX] " + text);
             if (rx_log_.size() > MAX_RX_LOG) {
-                rx_log_.pop_back();
+                rx_log_.pop_front();
             }
             tx_text_buffer_[0] = '\0';
         }
@@ -1172,6 +1275,7 @@ void App::renderRadioControls() {
         if (ImGui::Button("Browse", ImVec2(70, 0))) {
             file_browser_.setTitle("Select File to Send");
             file_browser_.open();
+            file_browser_target_ = FileBrowserTarget::OPERATE;
         }
 
         // Send button
@@ -1183,14 +1287,14 @@ void App::renderRadioControls() {
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send File", ImVec2(-1, 30))) {
             if (protocol_.sendFile(file_path_buffer_)) {
-                rx_log_.push_front("[FILE] Sending: " + std::string(file_path_buffer_));
+                rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
                 if (rx_log_.size() > MAX_RX_LOG) {
-                    rx_log_.pop_back();
+                    rx_log_.pop_front();
                 }
             } else {
-                rx_log_.push_front("[FILE] Failed to start transfer");
+                rx_log_.push_back("[FILE] Failed to start transfer");
                 if (rx_log_.size() > MAX_RX_LOG) {
-                    rx_log_.pop_back();
+                    rx_log_.pop_front();
                 }
             }
         }
@@ -1207,14 +1311,16 @@ void App::renderRadioControls() {
 
     // RX log
     ImGui::Text("Message Log");
-    ImGui::BeginChild("RXLogRadio", ImVec2(-1, 120), true);
+    ImGui::BeginChild("RXLogRadio", ImVec2(-1, 150), true);
     for (const auto& msg : rx_log_) {
-        if (msg.substr(0, 4) == "[TX]") {
-            ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", msg.c_str());
-        } else {
-            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%s", msg.c_str());
-        }
+        ImVec4 color = (msg.size() >= 4 && msg.substr(0, 4) == "[TX]")
+            ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)
+            : ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_Text, color);
+        ImGui::TextWrapped("%s", msg.c_str());
+        ImGui::PopStyleColor();
     }
+    if (!rx_log_.empty()) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
     ImGui::Spacing();

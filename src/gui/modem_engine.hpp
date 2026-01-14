@@ -79,6 +79,12 @@ public:
     bool isSynced() const;
     float getCurrentSNR() const;
 
+    // Carrier Sense - Listen Before Talk (LBT)
+    bool isChannelBusy() const;           // True if signal energy detected above threshold
+    float getChannelEnergy() const;       // Current RMS energy level (0.0 - 1.0)
+    void setCarrierSenseThreshold(float threshold);  // Set energy threshold (default 0.05)
+    float getCarrierSenseThreshold() const;
+
     // Get symbols for constellation display
     std::vector<std::complex<float>> getConstellationSymbols() const;
 
@@ -133,8 +139,16 @@ private:
     std::unique_ptr<FIRFilter> tx_filter_;
     std::unique_ptr<FIRFilter> rx_filter_;
 
+    // Carrier sense state
+    std::atomic<float> channel_energy_{0.0f};      // Current RMS energy (0.0 - 1.0)
+    float carrier_sense_threshold_ = 0.02f;        // Energy threshold for "busy"
+    static constexpr float ENERGY_SMOOTHING = 0.3f; // Smoothing factor for energy calculation
+
     // Rebuild filters when config changes
     void rebuildFilters();
+
+    // Update channel energy from samples
+    void updateChannelEnergy(const std::vector<float>& samples);
 
     // Process accumulated samples through demodulator
     void processRxBuffer();

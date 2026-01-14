@@ -32,6 +32,31 @@ std::string AppSettings::getDefaultPath() {
 #endif
 }
 
+// Get platform-specific Downloads folder
+std::string AppSettings::getDefaultDownloadsPath() {
+#ifdef _WIN32
+    const char* userprofile = std::getenv("USERPROFILE");
+    if (userprofile) {
+        return std::string(userprofile) + "\\Downloads";
+    }
+    return ".";
+#else
+    const char* home = std::getenv("HOME");
+    if (home) {
+        return std::string(home) + "/Downloads";
+    }
+    return ".";
+#endif
+}
+
+// Get effective receive directory (default to Downloads if not set)
+std::string AppSettings::getReceiveDirectory() const {
+    if (receive_directory[0] != '\0') {
+        return std::string(receive_directory);
+    }
+    return getDefaultDownloadsPath();
+}
+
 // Helper to create directory if it doesn't exist
 static void ensureDirectory(const std::string& path) {
     size_t pos = path.find_last_of("/\\");
@@ -83,6 +108,9 @@ bool AppSettings::save(const std::string& path) const {
     file << "center=" << filter_center << "\n";
     file << "bandwidth=" << filter_bandwidth << "\n";
     file << "taps=" << filter_taps << "\n";
+
+    file << "\n[FileTransfer]\n";
+    file << "receive_directory=" << receive_directory << "\n";
 
     return true;
 }
@@ -148,6 +176,11 @@ bool AppSettings::load(const std::string& path) {
             filter_bandwidth = std::strtof(value.c_str(), nullptr);
         } else if (key == "taps") {
             filter_taps = std::atoi(value.c_str());
+        }
+        // File transfer settings
+        else if (key == "receive_directory") {
+            strncpy(receive_directory, value.c_str(), sizeof(receive_directory) - 1);
+            receive_directory[sizeof(receive_directory) - 1] = '\0';
         }
     }
 
@@ -253,6 +286,49 @@ void SettingsWindow::renderStationTab(AppSettings& settings) {
     } else {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "Enter your callsign to use ARQ mode");
     }
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // File Transfer Settings
+    ImGui::Text("File Transfer");
+    ImGui::Spacing();
+
+    ImGui::Text("Receive Directory");
+    ImGui::SetNextItemWidth(-80);
+
+    // Show placeholder with default path if empty
+    std::string default_path = AppSettings::getDefaultDownloadsPath();
+    std::string placeholder = "Default: " + default_path;
+
+    char old_dir[512];
+    strncpy(old_dir, settings.receive_directory, sizeof(old_dir));
+
+    if (ImGui::InputTextWithHint("##receive_dir", placeholder.c_str(),
+                                  settings.receive_directory, sizeof(settings.receive_directory))) {
+        // Notify if changed
+        if (strcmp(old_dir, settings.receive_directory) != 0 && on_receive_dir_changed_) {
+            on_receive_dir_changed_(settings.getReceiveDirectory());
+        }
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button("Reset")) {
+        settings.receive_directory[0] = '\0';  // Clear to use default
+        if (on_receive_dir_changed_) {
+            on_receive_dir_changed_(settings.getReceiveDirectory());
+        }
+    }
+
+    ImGui::TextDisabled("Leave empty to use Downloads folder");
+
+    // Show effective path
+    ImGui::Spacing();
+    std::string effective = settings.getReceiveDirectory();
+    ImGui::Text("Files will be saved to:");
+    ImGui::TextColored(ImVec4(0.5f, 0.8f, 1.0f, 1.0f), "%s", effective.c_str());
 }
 
 void SettingsWindow::renderRadioTab(AppSettings& settings) {

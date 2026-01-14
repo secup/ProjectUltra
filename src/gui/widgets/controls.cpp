@@ -72,11 +72,24 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
 
     ImGui::Spacing();
 
-    // BER display
+    // BER display - show in human-readable format
     ImGui::Text("BER");
     ImGui::SameLine(80);
-    if (stats.ber > 0.0f) {
-        ImGui::Text("%.2e", stats.ber);
+    if (stats.ber > 0.0f && stats.ber < 1.0f) {
+        // Format BER nicely: "1 in 1,000,000" style or percentage
+        if (stats.ber < 0.0001f) {
+            // Very low BER - show as "< 0.01%"
+            ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "< 0.01%%");
+        } else if (stats.ber < 0.01f) {
+            // Low BER - show as percentage with 2 decimals
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "%.2f%%", stats.ber * 100.0f);
+        } else if (stats.ber < 0.1f) {
+            // Medium BER
+            ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.2f, 1.0f), "%.1f%%", stats.ber * 100.0f);
+        } else {
+            // High BER
+            ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "%.0f%%", stats.ber * 100.0f);
+        }
     } else {
         ImGui::TextDisabled("--");
     }
@@ -126,7 +139,7 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
     if (total_rx > 0) {
         float success_rate = 100.0f * stats.frames_received / total_rx;
         ImGui::TextDisabled("Success:");
-        ImGui::SameLine(50);
+        ImGui::SameLine(70);
         ImVec4 rate_color = (success_rate >= 90.0f) ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) :
                            (success_rate >= 70.0f) ? ImVec4(1.0f, 1.0f, 0.2f, 1.0f) :
                                                      ImVec4(1.0f, 0.3f, 0.3f, 1.0f);

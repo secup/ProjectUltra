@@ -271,11 +271,154 @@ Bytes LDPCDecoder::decode(ByteSpan coded_data) {
         }
     }
 
-    return impl_->decodeBP(llrs);
+    return decodeSoft(llrs);
 }
 
 Bytes LDPCDecoder::decodeSoft(std::span<const float> llrs) {
-    return impl_->decodeBP(llrs);
+    // Safety check for empty input
+    if (llrs.empty()) {
+        impl_->last_success = false;
+        return {};
+    }
+
+    // Handle multi-block decoding
+    // IMPORTANT: We work at bit-level to avoid padding errors at block boundaries
+    // when k is not a multiple of 8 (e.g., k=486 bits = 60.75 bytes)
+    int n = impl_->params.info_bits + impl_->params.parity_bits;  // bits per codeword
+    int k = impl_->params.info_bits;  // info bits per block
+
+    if (llrs.size() <= static_cast<size_t>(n)) {
+        // Single block - use existing function
+        return impl_->decodeBP(llrs);
+    }
+
+    // Multi-block: decode each n-bit codeword and collect decoded BITS (not bytes)
+    // This avoids introducing padding zeros at each block boundary
+    std::vector<uint8_t> all_decoded_bits;
+    size_t offset = 0;
+    impl_->last_success = true;  // Will be set false if any block fails
+
+    while (offset + n <= llrs.size()) {
+        std::span<const float> block_llrs(llrs.data() + offset, n);
+
+        // Decode this block using BP algorithm
+        // But instead of converting to bytes, we extract the k decoded bits directly
+        impl_->llr_in.assign(n, 0);
+        impl_->llr_total.assign(n, 0);
+
+        for (int j = 0; j < n; ++j) {
+            impl_->llr_in[j] = block_llrs[j];
+            impl_->llr_total[j] = block_llrs[j];
+        }
+
+        // Initialize variable-to-check messages
+        int m = impl_->params.parity_bits;
+        for (int i = 0; i < m; ++i) {
+            for (size_t e = 0; e < impl_->H_rows[i].size(); ++e) {
+                int j = impl_->H_rows[i][e];
+                impl_->var_to_check[i][e] = impl_->llr_in[j];
+            }
+            std::fill(impl_->check_to_var[i].begin(), impl_->check_to_var[i].end(), 0);
+        }
+
+        // Iterative decoding
+        bool block_success = false;
+        for (impl_->last_iters = 0; impl_->last_iters < impl_->max_iterations; ++impl_->last_iters) {
+            // Check-to-variable messages (min-sum)
+            for (int i = 0; i < m; ++i) {
+                const auto& row = impl_->H_rows[i];
+                size_t degree = row.size();
+
+                for (size_t e = 0; e < degree; ++e) {
+                    float sign = 1.0f;
+                    float min_abs = std::numeric_limits<float>::max();
+
+                    for (size_t e2 = 0; e2 < degree; ++e2) {
+                        if (e2 != e) {
+                            float msg = impl_->var_to_check[i][e2];
+                            if (msg < 0) sign = -sign;
+                            float abs_msg = std::abs(msg);
+                            if (abs_msg < min_abs) min_abs = abs_msg;
+                        }
+                    }
+                    impl_->check_to_var[i][e] = sign * min_abs * 0.75f;
+                }
+            }
+
+            // Variable-to-check messages and total LLRs
+            impl_->llr_total = impl_->llr_in;
+            for (int i = 0; i < m; ++i) {
+                for (size_t e = 0; e < impl_->H_rows[i].size(); ++e) {
+                    int j = impl_->H_rows[i][e];
+                    impl_->llr_total[j] += impl_->check_to_var[i][e];
+                }
+            }
+
+            for (int i = 0; i < m; ++i) {
+                for (size_t e = 0; e < impl_->H_rows[i].size(); ++e) {
+                    int j = impl_->H_rows[i][e];
+                    impl_->var_to_check[i][e] = impl_->llr_total[j] - impl_->check_to_var[i][e];
+                    impl_->var_to_check[i][e] = std::max(-50.0f, std::min(50.0f, impl_->var_to_check[i][e]));
+                }
+            }
+
+            // Check parity
+            std::vector<uint8_t> hard_bits(n);
+            for (int j = 0; j < n; ++j) {
+                hard_bits[j] = (impl_->llr_total[j] < 0) ? 1 : 0;
+            }
+            if (impl_->checkParity(hard_bits)) {
+                block_success = true;
+                break;
+            }
+        }
+
+        if (!block_success) {
+            impl_->last_success = false;
+        }
+
+        // Extract exactly k info BITS (not bytes) from this block
+        for (int j = 0; j < k; ++j) {
+            uint8_t bit = (impl_->llr_total[j] < 0) ? 1 : 0;
+            all_decoded_bits.push_back(bit);
+        }
+
+        offset += n;
+    }
+
+    // Handle any remaining partial block
+    if (offset < llrs.size()) {
+        std::span<const float> remaining(llrs.data() + offset, llrs.size() - offset);
+        std::vector<float> padded(n, 0.0f);
+        std::copy(remaining.begin(), remaining.end(), padded.begin());
+        Bytes decoded_block = impl_->decodeBP(padded);
+        // For partial blocks, we can just append the bytes since it's the last block
+        // Actually, let's extract bits here too for consistency
+        for (int j = 0; j < k; ++j) {
+            uint8_t bit = (impl_->llr_total[j] < 0) ? 1 : 0;
+            all_decoded_bits.push_back(bit);
+        }
+    }
+
+    // NOW convert all decoded bits to bytes (padding only happens once at the very end)
+    Bytes output;
+    output.reserve((all_decoded_bits.size() + 7) / 8);
+    uint8_t byte = 0;
+    int bit_count = 0;
+    for (uint8_t bit : all_decoded_bits) {
+        byte = (byte << 1) | bit;
+        ++bit_count;
+        if (bit_count == 8) {
+            output.push_back(byte);
+            byte = 0;
+            bit_count = 0;
+        }
+    }
+    if (bit_count > 0) {
+        output.push_back(byte << (8 - bit_count));
+    }
+
+    return output;
 }
 
 bool LDPCDecoder::lastDecodeSuccess() const {

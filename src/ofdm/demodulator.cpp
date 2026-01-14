@@ -134,7 +134,9 @@ struct OFDMDemodulator::Impl {
     enum class State { SEARCHING, SYNCED };
     std::atomic<State> state{State::SEARCHING};
     std::atomic<int> synced_symbol_count{0};  // Count symbols since sync, for timeout
-    static constexpr int MAX_SYMBOLS_BEFORE_TIMEOUT = 30;  // ~300ms - faster timeout
+    std::atomic<int> idle_call_count{0};      // Count process() calls with no progress
+    static constexpr int MAX_SYMBOLS_BEFORE_TIMEOUT = 250;  // Support larger frames (up to ~1KB)
+    static constexpr int MAX_IDLE_CALLS_BEFORE_RESET = 10; // Reset after 10 calls with no new soft bits
 
     // Sample buffer
     Samples rx_buffer;
@@ -761,7 +763,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         }
 
         // Hard limit on buffer size to prevent runaway memory usage
-        constexpr size_t ABSOLUTE_MAX_BUFFER = 24000;  // ~500ms at 48kHz
+        // Must be large enough for biggest expected frame + preamble (~5s for large files)
+        constexpr size_t ABSOLUTE_MAX_BUFFER = 240000;  // ~5s at 48kHz
         if (impl_->rx_buffer.size() > ABSOLUTE_MAX_BUFFER) {
             size_t trim = impl_->rx_buffer.size() - ABSOLUTE_MAX_BUFFER;
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
@@ -846,9 +849,67 @@ bool OFDMDemodulator::process(SampleSpan samples) {
     }
 
     if (impl_->state.load() == Impl::State::SYNCED) {
-        // Process complete symbols (stop when we have enough for one LDPC block)
-        while (impl_->rx_buffer.size() >= impl_->symbol_samples &&
-               impl_->soft_bits.size() < LDPC_BLOCK_SIZE) {
+        // === Preamble detection while synced ===
+        // Check if a new transmission's preamble has arrived. This happens when:
+        // 1. Previous transmission ended (we finished decoding or timed out)
+        // 2. New transmission started with fresh preamble
+        //
+        // If we detect a preamble, sync directly to it (don't defer to SEARCHING).
+        // This is critical for test mode where we can't wait for another process() call.
+        //
+        // Note: The preamble might not be at offset 0 - there could be trailing
+        // garbage from the previous transmission. Search a reasonable window.
+        size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
+        size_t preamble_total_len = preamble_symbol_len * 6;  // 4 STS + 2 LTS
+
+        if (impl_->rx_buffer.size() >= preamble_total_len) {
+            // Search for preamble in the first portion of buffer
+            // Limit search to avoid wasting CPU on every call
+            size_t search_limit = std::min(impl_->rx_buffer.size() - preamble_total_len,
+                                           impl_->symbol_samples * 2);  // Max 2 symbols worth
+            constexpr size_t STEP = 8;
+
+            for (size_t offset = 0; offset <= search_limit; offset += STEP) {
+                float corr = impl_->measureCorrelation(offset);
+                if (corr > impl_->sync_threshold) {
+                    LOG_SYNC(INFO, "New preamble detected while synced at offset=%zu (corr=%.3f), re-syncing",
+                             offset, corr);
+
+                    // Sync directly to the new preamble (same as SEARCHING state does)
+                    // Estimate coarse CFO from preamble
+                    float coarse_cfo = impl_->estimateCoarseCFO(offset);
+                    impl_->freq_offset_hz = coarse_cfo;
+                    impl_->freq_offset_filtered = coarse_cfo;
+                    impl_->freq_correction_phase = 0.0f;
+
+                    // Remove preamble and any garbage before it
+                    impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
+                                           impl_->rx_buffer.begin() + offset + preamble_total_len);
+
+                    // Reset ALL state for new transmission (critical for correct decode!)
+                    impl_->soft_bits.clear();
+                    impl_->synced_symbol_count.store(0);
+                    impl_->idle_call_count.store(0);
+                    impl_->mixer.reset();
+
+                    // Reset channel estimation state (must start fresh for new transmission)
+                    std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
+                    impl_->snr_symbol_count = 0;
+                    impl_->estimated_snr_linear = 1.0f;
+                    impl_->noise_variance = 0.1f;
+                    impl_->prev_pilot_phases.clear();
+
+                    // Continue processing in SYNCED state (don't return!)
+                    break;
+                }
+            }
+        }
+
+        size_t soft_bits_before = impl_->soft_bits.size();
+
+        // Process ALL complete symbols in the buffer (multi-codeword support)
+        // Don't stop at LDPC_BLOCK_SIZE - keep processing to handle large frames
+        while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
             // Convert to baseband
             SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
             auto baseband = impl_->toBaseband(sym_samples);
@@ -879,8 +940,26 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->state.store(Impl::State::SEARCHING);
                 impl_->soft_bits.clear();
                 impl_->synced_symbol_count.store(0);
+                impl_->idle_call_count.store(0);
                 return false;
             }
+        }
+
+        // Track idle calls: if we're synced but not accumulating soft bits,
+        // the transmission might have ended
+        if (impl_->soft_bits.size() == soft_bits_before) {
+            int idle = ++impl_->idle_call_count;
+            if (idle > Impl::MAX_IDLE_CALLS_BEFORE_RESET) {
+                LOG_SYNC(DEBUG, "Idle timeout after %d calls, resetting to SEARCHING", idle);
+                impl_->state.store(Impl::State::SEARCHING);
+                impl_->soft_bits.clear();
+                impl_->synced_symbol_count.store(0);
+                impl_->idle_call_count.store(0);
+                return false;
+            }
+        } else {
+            // Made progress - reset idle counter
+            impl_->idle_call_count.store(0);
         }
 
         // Return true if we have enough soft bits for an LDPC codeword
@@ -925,13 +1004,15 @@ std::vector<float> OFDMDemodulator::getSoftBits() {
         LOG_DEMOD(TRACE, "First 24 LLRs: %s", buf);
     }
 
-    // Return exactly one LDPC block worth of soft bits
+    // Return exactly LDPC_BLOCK_SIZE soft bits for one codeword
+    // Keep any extras in the buffer (can happen with higher-order modulations
+    // like QAM16/QAM64 where we might overshoot by a few bits)
     if (impl_->soft_bits.size() <= LDPC_BLOCK_SIZE) {
         auto bits = std::move(impl_->soft_bits);
         impl_->soft_bits.clear();
         return bits;
     } else {
-        // Return first block, keep remainder
+        // Extract exactly one codeword, preserve extras
         std::vector<float> bits(impl_->soft_bits.begin(),
                                 impl_->soft_bits.begin() + LDPC_BLOCK_SIZE);
         impl_->soft_bits.erase(impl_->soft_bits.begin(),
@@ -961,9 +1042,25 @@ bool OFDMDemodulator::isSynced() const {
     return impl_->state.load() == Impl::State::SYNCED;
 }
 
+bool OFDMDemodulator::hasPendingData() const {
+    // Has pending data if:
+    // 1. We're synced and have accumulated soft bits (partial codeword), OR
+    // 2. We're synced and have samples in buffer (more symbols to process)
+    if (impl_->state.load() != Impl::State::SYNCED) {
+        return false;
+    }
+    // Check for accumulated soft bits
+    if (!impl_->soft_bits.empty()) {
+        return true;
+    }
+    // Check for enough samples for at least one more symbol
+    return impl_->rx_buffer.size() >= impl_->symbol_samples;
+}
+
 void OFDMDemodulator::reset() {
     impl_->state.store(Impl::State::SEARCHING);
     impl_->synced_symbol_count.store(0);
+    impl_->idle_call_count.store(0);
     impl_->search_offset = 0;
     impl_->rx_buffer.clear();
     impl_->soft_bits.clear();

@@ -79,6 +79,10 @@ public:
     // Check if demodulator is currently synchronized (processing a frame)
     bool isSynced() const;
 
+    // Check if demodulator has pending data (samples in buffer or accumulated soft bits)
+    // Used to avoid premature reset between codewords of multi-codeword frames
+    bool hasPendingData() const;
+
     // Reset state (e.g., after sync loss)
     void reset();
 

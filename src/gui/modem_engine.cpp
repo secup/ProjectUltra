@@ -182,6 +182,9 @@ bool ModemEngine::pollRxAudio() {
         new_samples = rx_filter_->process(span);
     }
 
+    // Update carrier sense energy detection
+    updateChannelEnergy(new_samples);
+
     // Now do the slow processing with rx_mutex_
     std::lock_guard<std::mutex> lock(rx_mutex_);
 
@@ -195,9 +198,9 @@ bool ModemEngine::pollRxAudio() {
 }
 
 void ModemEngine::processRxBuffer() {
-    // Need at least one symbol worth of samples
+    // Need at least one symbol worth of samples (or demodulator has pending data)
     size_t symbol_samples = config_.getSymbolDuration();
-    if (rx_sample_buffer_.size() < symbol_samples * 2) {
+    if (rx_sample_buffer_.size() < symbol_samples * 2 && !demodulator_->hasPendingData()) {
         LOG_MODEM(TRACE, "RX: Not enough samples: %zu < %zu",
                   rx_sample_buffer_.size(), symbol_samples * 2);
         return;
@@ -207,12 +210,12 @@ void ModemEngine::processRxBuffer() {
 
     // Feed samples to demodulator (it maintains its own buffer)
     SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());
-    bool frame_ready = demodulator_->process(span);
 
-    LOG_MODEM(DEBUG, "RX: Demodulator returned frame_ready=%d", frame_ready);
-
-    // Clear the samples we just passed - demodulator now owns them
+    // Clear now - demodulator takes ownership
     rx_sample_buffer_.clear();
+
+    // Loop to process all available codewords (multi-codeword frames)
+    bool frame_ready = demodulator_->process(span);
 
     // Update SNR continuously when synced (not just after decode)
     if (demodulator_->isSynced()) {
@@ -221,82 +224,96 @@ void ModemEngine::processRxBuffer() {
         stats_.synced = true;
     }
 
-    if (frame_ready) {
-        // Get soft bits from demodulator
+    // CRITICAL: Accumulate ALL soft bits from all codewords of this frame FIRST,
+    // then decode once. This is necessary because k=486 info bits per codeword
+    // doesn't align on byte boundaries (486 bits = 60.75 bytes). Decoding
+    // codeword-by-codeword and concatenating bytes causes corruption at boundaries.
+    std::vector<float> accumulated_soft_bits;
+    int codewords_collected = 0;
+
+    while (frame_ready) {
+        // Get soft bits from demodulator (one codeword worth = n bits)
         auto soft_bits = demodulator_->getSoftBits();
-        LOG_MODEM(DEBUG, "RX: Frame ready, got %zu soft bits", soft_bits.size());
+        LOG_MODEM(DEBUG, "RX: Codeword ready, got %zu soft bits", soft_bits.size());
 
         if (!soft_bits.empty()) {
-            // Deinterleave if enabled (reverses TX interleaving)
-            auto to_decode = interleaving_enabled_ ? interleaver_.deinterleave(soft_bits) : soft_bits;
-            LOG_MODEM(DEBUG, "RX: %s %zu soft bits",
-                      interleaving_enabled_ ? "Deinterleaved" : "Processing", to_decode.size());
+            codewords_collected++;
+            // Deinterleave if enabled (reverses TX interleaving) - per codeword
+            auto to_accumulate = interleaving_enabled_ ? interleaver_.deinterleave(soft_bits) : soft_bits;
 
-            // LDPC decode
-            LOG_MODEM(DEBUG, "RX: Attempting LDPC decode with %zu soft bits", to_decode.size());
-            Bytes decoded = decoder_->decodeSoft(to_decode);
-            bool success = decoder_->lastDecodeSuccess();
-
-            LOG_MODEM(DEBUG, "RX: LDPC decode %s, got %zu bytes",
-                      success ? "SUCCESS" : "FAILED", decoded.size());
-            // Debug: print first few bytes as hex and text
-            if (g_log_level >= LogLevel::DEBUG && g_log_categories.modem && !decoded.empty()) {
-                char hex_buf[80], text_buf[32];
-                size_t n = std::min(decoded.size(), size_t(24));
-                for (size_t i = 0; i < n; i++) {
-                    snprintf(hex_buf + i*3, 4, "%02x ", decoded[i]);
-                    char c = decoded[i];
-                    text_buf[i] = (c >= 32 && c < 127) ? c : '.';
-                }
-                text_buf[n] = '\0';
-                LOG_MODEM(DEBUG, "RX: First %zu bytes hex: %s", n, hex_buf);
-                LOG_MODEM(DEBUG, "RX: As text: '%s'", text_buf);
-            }
-
-            // Update stats
-            {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                if (success) {
-                    stats_.frames_received++;
-
-                    // Queue the received data
-                    rx_data_queue_.push(decoded);
-
-                    // Call raw callback first (for protocol layer)
-                    if (raw_data_callback_) {
-                        raw_data_callback_(decoded);
-                    }
-
-                    // Call text callback (filtered for display)
-                    if (data_callback_) {
-                        std::string text(decoded.begin(), decoded.end());
-                        // Remove null characters and non-printable
-                        text.erase(std::remove_if(text.begin(), text.end(),
-                            [](char c) { return c == '\0' || !isprint(c); }), text.end());
-                        if (!text.empty()) {
-                            data_callback_(text);
-                        }
-                    }
-                } else {
-                    stats_.frames_failed++;
-                }
-
-                // Update channel quality
-                ChannelQuality quality = demodulator_->getChannelQuality();
-                stats_.snr_db = quality.snr_db;
-                stats_.ber = quality.ber_estimate;
-                stats_.synced = true;
-            }
+            // Accumulate soft bits
+            accumulated_soft_bits.insert(accumulated_soft_bits.end(),
+                                         to_accumulate.begin(), to_accumulate.end());
+            LOG_MODEM(DEBUG, "RX: Accumulated %zu soft bits (total: %zu)",
+                      to_accumulate.size(), accumulated_soft_bits.size());
         }
 
-        // Reset demodulator to search for next preamble
-        demodulator_->reset();
+        // Try to get next codeword from demodulator's internal buffer
+        SampleSpan empty_span;
+        frame_ready = demodulator_->process(empty_span);
+    }
 
-        // Clear sync indicator after reset
+    // Now decode all accumulated soft bits at once (handles bit-level boundaries correctly)
+    if (!accumulated_soft_bits.empty()) {
+        LOG_MODEM(DEBUG, "RX: Decoding %d codewords (%zu soft bits total)",
+                  codewords_collected, accumulated_soft_bits.size());
+
+        Bytes decoded = decoder_->decodeSoft(accumulated_soft_bits);
+        bool success = decoder_->lastDecodeSuccess();
+
+        LOG_MODEM(DEBUG, "RX: LDPC decode %s, got %zu bytes",
+                  success ? "SUCCESS" : "FAILED", decoded.size());
+
+        // Debug: print first few bytes as hex and text
+        if (g_log_level >= LogLevel::DEBUG && g_log_categories.modem && !decoded.empty()) {
+            char hex_buf[80], text_buf[32];
+            size_t n = std::min(decoded.size(), size_t(24));
+            for (size_t i = 0; i < n; i++) {
+                snprintf(hex_buf + i*3, 4, "%02x ", decoded[i]);
+                char c = decoded[i];
+                text_buf[i] = (c >= 32 && c < 127) ? c : '.';
+            }
+            text_buf[n] = '\0';
+            LOG_MODEM(DEBUG, "RX: First %zu bytes hex: %s", n, hex_buf);
+            LOG_MODEM(DEBUG, "RX: As text: '%s'", text_buf);
+        }
+
+        // Update stats
         {
             std::lock_guard<std::mutex> lock(stats_mutex_);
-            stats_.synced = false;
+            if (success) {
+                stats_.frames_received++;
+
+                // Queue the received data
+                rx_data_queue_.push(decoded);
+
+                // Call raw callback first (for protocol layer)
+                if (raw_data_callback_) {
+                    raw_data_callback_(decoded);
+                }
+
+                // Call text callback (filtered for display)
+                if (data_callback_) {
+                    std::string text(decoded.begin(), decoded.end());
+                    // Remove null characters and non-printable
+                    text.erase(std::remove_if(text.begin(), text.end(),
+                        [](char c) { return c == '\0' || !isprint(c); }), text.end());
+                    if (!text.empty()) {
+                        data_callback_(text);
+                    }
+                }
+            } else {
+                stats_.frames_failed++;
+            }
+
+            // Update channel quality
+            ChannelQuality quality = demodulator_->getChannelQuality();
+            stats_.snr_db = quality.snr_db;
+            stats_.ber = quality.ber_estimate;
+            stats_.synced = true;
         }
+
+        LOG_MODEM(DEBUG, "RX: Decoded %d codewords -> %zu bytes", codewords_collected, decoded.size());
     }
 }
 
@@ -360,10 +377,52 @@ void ModemEngine::reset() {
     demodulator_->reset();
     adaptive_.reset();
 
+    // Reset carrier sense
+    channel_energy_.store(0.0f);
+
     {
         std::lock_guard<std::mutex> lock2(stats_mutex_);
         stats_ = LoopbackStats{};
     }
+}
+
+// === Carrier Sense (Listen Before Talk) ===
+
+void ModemEngine::updateChannelEnergy(const std::vector<float>& samples) {
+    if (samples.empty()) return;
+
+    // Calculate RMS energy of samples
+    float sum_sq = 0.0f;
+    for (float s : samples) {
+        sum_sq += s * s;
+    }
+    float rms = std::sqrt(sum_sq / samples.size());
+
+    // Smooth the energy estimate (exponential moving average)
+    float current = channel_energy_.load();
+    float smoothed = ENERGY_SMOOTHING * rms + (1.0f - ENERGY_SMOOTHING) * current;
+    channel_energy_.store(smoothed);
+}
+
+bool ModemEngine::isChannelBusy() const {
+    // Channel is busy if energy is above threshold (someone is transmitting)
+    // Note: We don't check isSynced() here because:
+    // 1. Sync state persists after decode (would block response TX)
+    // 2. Energy detection is the true carrier sense - if there's RF energy, channel is busy
+    // 3. Protocol layer handles half-duplex timing separately
+    return channel_energy_.load() > carrier_sense_threshold_;
+}
+
+float ModemEngine::getChannelEnergy() const {
+    return channel_energy_.load();
+}
+
+void ModemEngine::setCarrierSenseThreshold(float threshold) {
+    carrier_sense_threshold_ = std::max(0.0f, std::min(1.0f, threshold));
+}
+
+float ModemEngine::getCarrierSenseThreshold() const {
+    return carrier_sense_threshold_;
 }
 
 } // namespace gui
