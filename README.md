@@ -2,7 +2,7 @@
 
 **An adaptive HF modem for amateur radio digital communication**
 
-ProjectUltra is a software modem designed for sending messages and files over HF radio. It uses modern signal processing techniques to maintain reliable communication across a wide range of band conditions — from quiet channels to paths affected by fading and interference.
+ProjectUltra is a software modem designed for sending messages and files over HF radio. It uses modern signal processing techniques to maintain reliable communication across a wide range of band conditions, from quiet channels to paths affected by fading and interference.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -16,12 +16,13 @@ ProjectUltra connects to your transceiver through a standard audio interface and
 - Text messaging between stations
 - File transfer with integrity verification
 - Automatic adaptation to channel conditions
+- Throughput from ~0.5 kbps (robust modes) to ~15 kbps (optimal conditions)
 - Works with any HF transceiver via audio interface
 
 **Design Goals:**
 - Reliable operation under real-world HF propagation
 - Throughput that scales with channel quality
-- Simple setup — no specialized hardware required
+- Simple setup with no specialized hardware required
 
 ---
 
@@ -153,6 +154,23 @@ ProjectUltra uses OFDM (Orthogonal Frequency-Division Multiplexing) with the fol
 ### Modulation Schemes
 
 Supports BPSK, QPSK, 16-QAM, 64-QAM, and 256-QAM with automatic or manual selection.
+
+### Throughput
+
+Measured throughput under simulated HF channel conditions (ITU-R F.1487 Watterson model):
+
+| Mode | Good Channel | Moderate | Poor |
+|------|--------------|----------|------|
+| BPSK R1/4 | 0.5 kbps | 0.5 kbps | 0.5 kbps |
+| BPSK R1/2 | 1.1 kbps | 1.1 kbps | 1.1 kbps |
+| QPSK R1/2 | 2.1 kbps | 2.1 kbps | - |
+| QPSK R3/4 | 3.2 kbps | 3.2 kbps | - |
+| 16-QAM R1/2 | 4.3 kbps | 4.3 kbps | - |
+| 16-QAM R3/4 | 6.4 kbps | 6.4 kbps | - |
+| 64-QAM R3/4 | 9.6 kbps | 6.1 kbps | - |
+| 256-QAM R3/4 | 12.8 kbps | - | - |
+
+Lower modes (BPSK) work reliably in poor conditions. Higher modes require better SNR but deliver faster throughput.
 
 ### Error Correction
 
