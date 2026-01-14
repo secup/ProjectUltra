@@ -187,10 +187,10 @@ ProjectUltra/
 │   ├── fec/            # LDPC encoder and decoder
 │   ├── dsp/            # FFT, NCO, Hilbert transform
 │   ├── gui/            # ImGui-based application
-│   ├── protocol/       # ARQ engine
+│   ├── protocol/       # ARQ, connection management, file transfer
 │   └── sim/            # Watterson channel model, test harness
 ├── tests/              # Unit tests
-└── thirdparty/         # Dear ImGui (bundled)
+└── thirdparty/         # Dear ImGui, miniz compression (bundled)
 ```
 
 ---
@@ -204,11 +204,13 @@ ProjectUltra/
 - Block interleaver matched to LDPC frame size
 - Watterson HF channel simulator
 - GUI with constellation display and loopback testing
+- Waterfall spectrum display
+- File transfer protocol with chunked ARQ delivery
+- Compression support (zlib-compatible)
+- ARQ with selective repeat and connection management
 
 **In Progress:**
 - Soundcard loopback validation
-- Waterfall/spectrum display
-- File transfer protocol
 - Over-the-air testing
 
 ---
