@@ -16,8 +16,14 @@ ProjectUltra connects to your transceiver through a standard audio interface and
 - Text messaging between stations
 - File transfer with integrity verification
 - Automatic adaptation to channel conditions
-- Throughput from ~0.5 kbps (robust modes) to ~15 kbps (optimal conditions)
 - Works with any HF transceiver via audio interface
+
+**Speed:**
+| Conditions | Throughput | Example |
+|------------|------------|---------|
+| Poor (fading/interference) | ~1 kbps | 10 KB file in ~1.5 min |
+| Typical | ~3-6 kbps | 10 KB file in ~15-30 sec |
+| Good (clear channel) | ~10+ kbps | 10 KB file in ~8 sec |
 
 **Design Goals:**
 - Reliable operation under real-world HF propagation
