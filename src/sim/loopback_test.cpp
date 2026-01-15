@@ -6,6 +6,9 @@
  * test conditions (Good, Moderate, Poor, Flutter).
  */
 
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
+#include <cmath>
+
 #include "hf_channel.hpp"
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"

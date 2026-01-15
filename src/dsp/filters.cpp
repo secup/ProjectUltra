@@ -1,6 +1,12 @@
 #include "ultra/dsp.hpp"
+#define _USE_MATH_DEFINES
 #include <cmath>
 #include <numeric>
+
+// M_PI may not be defined on MSVC even with _USE_MATH_DEFINES if cmath was included earlier
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 namespace ultra {
 
