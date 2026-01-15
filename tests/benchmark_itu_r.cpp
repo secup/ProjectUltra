@@ -88,6 +88,80 @@ struct BenchmarkResult {
  *   Channel: Audio → WattersonChannel → Audio
  *   RX: Audio → OFDM Demodulate → Deinterleave → LDPC Decode → Data
  */
+// Measure Frame Success Rate (more meaningful for ARQ systems)
+float measureFSR(
+    const ModemConfig& config,
+    Modulation mod,
+    CodeRate rate,
+    WattersonChannel::Config channel_cfg,
+    size_t num_frames
+) {
+    OFDMModulator modulator(config);
+    LDPCEncoder encoder(rate);
+    LDPCDecoder decoder(rate);
+    Interleaver interleaver(24, 27);
+
+    WattersonChannel channel(channel_cfg);
+
+    size_t max_data_bytes = getMaxDataBytes(rate);
+    size_t successful_frames = 0;
+
+    for (size_t frame = 0; frame < num_frames; ++frame) {
+        OFDMDemodulator demodulator(config);  // Fresh demod per frame
+
+        Bytes tx_data(max_data_bytes);
+        for (size_t i = 0; i < tx_data.size(); ++i) {
+            tx_data[i] = static_cast<uint8_t>((frame * 17 + i * 13 + 7) & 0xFF);
+        }
+
+        Bytes encoded = encoder.encode(tx_data);
+        Bytes interleaved = interleaver.interleave(encoded);
+
+        Samples preamble = modulator.generatePreamble();
+        Samples data_audio = modulator.modulate(interleaved, mod);
+
+        Samples tx_audio;
+        tx_audio.reserve(preamble.size() + data_audio.size());
+        tx_audio.insert(tx_audio.end(), preamble.begin(), preamble.end());
+        tx_audio.insert(tx_audio.end(), data_audio.begin(), data_audio.end());
+
+        float max_val = 0;
+        for (float s : tx_audio) max_val = std::max(max_val, std::abs(s));
+        if (max_val > 0) {
+            float scale = 0.5f / max_val;
+            for (float& s : tx_audio) s *= scale;
+        }
+
+        SampleSpan tx_span(tx_audio.data(), tx_audio.size());
+        Samples rx_audio = channel.process(tx_span);
+
+        bool frame_ready = false;
+        size_t chunk_size = 1024;
+        for (size_t offset = 0; offset < rx_audio.size() && !frame_ready; offset += chunk_size) {
+            size_t remaining = std::min(chunk_size, rx_audio.size() - offset);
+            SampleSpan rx_span(rx_audio.data() + offset, remaining);
+            frame_ready = demodulator.process(rx_span);
+        }
+
+        if (frame_ready) {
+            std::vector<float> soft_bits = demodulator.getSoftBits();
+            if (soft_bits.size() >= LDPC_BLOCK_SIZE) {
+                std::vector<float> deinterleaved = interleaver.deinterleave(soft_bits);
+                Bytes rx_data = decoder.decodeSoft(deinterleaved);
+
+                if (decoder.lastDecodeSuccess()) {
+                    rx_data.resize(tx_data.size());
+                    if (rx_data == tx_data) {
+                        successful_frames++;
+                    }
+                }
+            }
+        }
+    }
+
+    return static_cast<float>(successful_frames) / static_cast<float>(num_frames);
+}
+
 float measureBER(
     const ModemConfig& config,
     Modulation mod,
@@ -268,49 +342,61 @@ void printBanner() {
     std::cout << "================================================================================\n\n";
 }
 
-void runQuickBenchmark(const ModemConfig& config) {
-    std::cout << "Quick benchmark (QPSK R1/2 only, 50 frames/point)...\n";
-    std::cout << "This uses the REAL modem pipeline - may take a minute.\n\n";
+void runQuickBenchmark(ModemConfig config) {
+    std::cout << "Quick benchmark (QPSK R1/2, 100 frames/channel at 25 dB SNR)...\n";
+    std::cout << "Frame Success Rate (FSR) = correctly decoded frames / total frames\n";
+    std::cout << "With ARQ, FSR>80% means reliable delivery (just needs occasional retries)\n\n";
 
     std::cout << std::setw(12) << "Channel"
-              << std::setw(16) << "SNR@BER<1e-3"
-              << std::setw(16) << "SNR@BER<1e-5"
+              << std::setw(10) << "Pilots"
+              << std::setw(12) << "FSR@25dB"
+              << std::setw(14) << "Effective"
               << "\n";
-    std::cout << std::string(44, '-') << "\n";
+    std::cout << std::string(48, '-') << "\n";
 
+    // Channel conditions with appropriate pilot spacing
+    // Pilot spacing must be < coherence_bandwidth / carrier_spacing
+    // Carrier spacing = 93.75 Hz, coherence BW ≈ 1 / (2π × delay_spread)
     struct {
         const char* name;
         WattersonChannel::Config (*getConfig)(float);
+        int pilot_spacing;  // Optimized for channel's coherence bandwidth
     } channels[] = {
-        {"AWGN",     itu_r_f1487::awgn},
-        {"Good",     itu_r_f1487::good},
-        {"Moderate", itu_r_f1487::moderate},
-        {"Poor",     itu_r_f1487::poor},
-        {"Flutter",  itu_r_f1487::flutter},
+        {"AWGN",     itu_r_f1487::awgn,     6},  // No frequency selectivity
+        {"Good",     itu_r_f1487::good,     4},  // 0.5ms delay → ~320 Hz coherence BW
+        {"Moderate", itu_r_f1487::moderate, 2},  // 1.0ms delay → ~160 Hz coherence BW
+        {"Poor",     itu_r_f1487::poor,     2},  // 2.0ms delay → ~80 Hz - challenging!
+        {"Flutter",  itu_r_f1487::flutter,  4},  // 0.5ms delay, fast Doppler - needs time tracking
     };
 
     for (const auto& ch : channels) {
         std::cout << std::setw(12) << ch.name << std::flush;
 
-        auto cfg = ch.getConfig(20.0f);
+        // Set appropriate pilot spacing for this channel
+        config.pilot_spacing = ch.pilot_spacing;
+        auto cfg = ch.getConfig(25.0f);  // Test at 25 dB SNR
 
-        float snr_1e3 = findSNRThreshold(config, Modulation::QPSK, CodeRate::R1_2, cfg, 1e-3f, 30);
-        if (snr_1e3 >= 0) {
-            std::cout << std::setw(12) << std::fixed << std::setprecision(1) << snr_1e3 << " dB";
-        } else {
-            std::cout << std::setw(16) << "FAILED";
-        }
+        // Measure Frame Success Rate
+        float fsr = measureFSR(config, Modulation::QPSK, CodeRate::R1_2, cfg, 100);
 
-        float snr_1e5 = findSNRThreshold(config, Modulation::QPSK, CodeRate::R1_2, cfg, 1e-5f, 50);
-        if (snr_1e5 >= 0) {
-            std::cout << std::setw(12) << std::fixed << std::setprecision(1) << snr_1e5 << " dB";
+        std::cout << std::setw(10) << ("1/" + std::to_string(ch.pilot_spacing));
+        std::cout << std::setw(11) << std::fixed << std::setprecision(0) << (fsr * 100) << "%";
+
+        // Rate effectiveness
+        if (fsr >= 0.95f) {
+            std::cout << std::setw(14) << "EXCELLENT";
+        } else if (fsr >= 0.80f) {
+            std::cout << std::setw(14) << "GOOD (ARQ)";
+        } else if (fsr >= 0.50f) {
+            std::cout << std::setw(14) << "MARGINAL";
         } else {
-            std::cout << std::setw(16) << "FAILED";
+            std::cout << std::setw(14) << "POOR";
         }
         std::cout << "\n";
     }
 
-    std::cout << "\nNote: These are REAL modem measurements, not simplified simulations.\n";
+    std::cout << "\nNote: This modem uses ARQ for reliable delivery. FSR>80% is usable.\n";
+    std::cout << "For challenging channels (Poor/Flutter), lower data rates recommended.\n";
 }
 
 void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string& csv_output) {
