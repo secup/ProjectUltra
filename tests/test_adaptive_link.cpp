@@ -27,6 +27,7 @@
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame.hpp"
 #include <iostream>
+#include <iomanip>  // For std::setw
 #include <queue>
 #include <vector>
 #include <cstring>
