@@ -252,7 +252,7 @@ bool ModemEngine::pollRxAudio() {
     // Now do the slow processing with rx_mutex_
     std::lock_guard<std::mutex> lock(rx_mutex_);
 
-    LOG_MODEM(INFO, "pollRxAudio: got %zu new samples, buffer=%zu", new_samples.size(), rx_sample_buffer_.size());
+    LOG_MODEM(DEBUG, "pollRxAudio: got %zu new samples, buffer=%zu", new_samples.size(), rx_sample_buffer_.size());
 
     rx_sample_buffer_.insert(rx_sample_buffer_.end(), new_samples.begin(), new_samples.end());
 
@@ -270,7 +270,7 @@ void ModemEngine::processRxBuffer() {
         return;
     }
 
-    LOG_MODEM(INFO, "RX: Processing %zu samples (synced=%d)...", rx_sample_buffer_.size(), ofdm_demodulator_->isSynced());
+    LOG_MODEM(DEBUG, "RX: Processing %zu samples (synced=%d)...", rx_sample_buffer_.size(), ofdm_demodulator_->isSynced());
 
     // Feed samples to demodulator (it maintains its own buffer)
     SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());

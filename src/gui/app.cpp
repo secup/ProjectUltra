@@ -565,6 +565,9 @@ void App::tickProtocolTest(uint32_t elapsed_ms) {
         // Apply channel effects (noise)
         processTestChannel(samples);
 
+        // Feed to waterfall (shows channel with noise)
+        waterfall_.addSamples(samples.data(), samples.size());
+
         // Feed to TEST2's demodulator
         test_modem_2_->receiveAudio(samples);
     }
@@ -576,6 +579,9 @@ void App::tickProtocolTest(uint32_t elapsed_ms) {
 
         // Apply channel effects (noise)
         processTestChannel(samples);
+
+        // Feed to waterfall (shows channel with noise)
+        waterfall_.addSamples(samples.data(), samples.size());
 
         // Feed to TEST1's demodulator
         test_modem_1_->receiveAudio(samples);
@@ -1274,8 +1280,8 @@ void App::renderRadioControls() {
             ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "LISTENING...");
         }
 
-        // Small stop button (not prominent since auto-start is the norm)
-        if (ImGui::SmallButton("Stop")) {
+        // Stop listening button
+        if (ImGui::Button("Stop Listening", ImVec2(-1, 25))) {
             stopRadioRx();
             audio_.stopPlayback();
             audio_.closeOutput();

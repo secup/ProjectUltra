@@ -55,7 +55,7 @@ private:
     ultra::ModemStats stats_;  // From types.hpp for status widget
 
     // UI state
-    float snr_slider_ = 100.0f;  // SNR in dB for channel simulation (100+ = no noise)
+    float snr_slider_ = 20.0f;  // SNR in dB for channel simulation (default: moderate conditions)
 
     // Mode selection
     AppMode mode_ = AppMode::OPERATE;

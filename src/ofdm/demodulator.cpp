@@ -962,8 +962,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             ++iterations;
         }
 
-        // Log max correlation to help debug (always log at INFO level)
-        LOG_SYNC(INFO, "Sync search: %zu iter (%zu energy skips), max_corr=%.3f @ %zu (thresh=%.2f), buf=%zu",
+        // Log max correlation to help debug (DEBUG level to avoid spam during idle RX)
+        LOG_SYNC(DEBUG, "Sync search: %zu iter (%zu energy skips), max_corr=%.3f @ %zu (thresh=%.2f), buf=%zu",
                 iterations, energy_skips, max_corr_found, max_corr_offset, impl_->sync_threshold, impl_->rx_buffer.size());
         if (!found_sync && max_corr_found > 0.5f) {
             LOG_SYNC(DEBUG, "Sync failed: max_corr=%.3f at offset=%zu (threshold=%.2f)",
