@@ -571,32 +571,23 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
 }
 
 void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Use same thresholds as AdaptiveModeController for consistency
-    // Thresholds calibrated for pilot-based SNR measurement
-    if (snr_db > 38.0f) {
+    // Thresholds based on README performance targets (actual channel SNR)
+    // These match the Speed table in documentation
+    if (snr_db >= 25.0f) {
         mod = Modulation::QAM64;
-        rate = CodeRate::R5_6;
-    } else if (snr_db > 34.0f) {
-        mod = Modulation::QAM64;
-        rate = CodeRate::R3_4;
-    } else if (snr_db > 30.0f) {
+        rate = CodeRate::R5_6;  // Excellent: ~10 kbps
+    } else if (snr_db >= 20.0f) {
         mod = Modulation::QAM16;
-        rate = CodeRate::R3_4;
-    } else if (snr_db > 26.0f) {
-        mod = Modulation::QAM16;
-        rate = CodeRate::R2_3;
-    } else if (snr_db > 24.0f) {
+        rate = CodeRate::R3_4;  // Good: ~6 kbps
+    } else if (snr_db >= 15.0f) {
         mod = Modulation::QPSK;
-        rate = CodeRate::R2_3;
-    } else if (snr_db > 22.0f) {
-        mod = Modulation::QPSK;
-        rate = CodeRate::R1_2;
-    } else if (snr_db > 18.0f) {
+        rate = CodeRate::R1_2;  // Moderate: ~2 kbps
+    } else if (snr_db >= 10.0f) {
         mod = Modulation::BPSK;
-        rate = CodeRate::R1_2;
+        rate = CodeRate::R1_2;  // Poor: ~1 kbps
     } else {
         mod = Modulation::BPSK;
-        rate = CodeRate::R1_4;
+        rate = CodeRate::R1_4;  // Flutter: ~0.5 kbps
     }
 }
 

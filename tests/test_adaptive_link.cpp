@@ -348,22 +348,22 @@ void runExchangeWithChannel(AdaptiveTestStation& a, AdaptiveTestStation& b,
 
 // Recommend data mode based on SNR (matches ModemEngine::recommendDataMode)
 void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Thresholds based on AdaptiveModeController
+    // Thresholds based on README performance targets (actual channel SNR)
     if (snr_db >= 25.0f) {
         mod = Modulation::QAM64;
-        rate = CodeRate::R3_4;
+        rate = CodeRate::R5_6;  // Excellent: ~10 kbps
     } else if (snr_db >= 20.0f) {
         mod = Modulation::QAM16;
-        rate = CodeRate::R3_4;
+        rate = CodeRate::R3_4;  // Good: ~6 kbps
     } else if (snr_db >= 15.0f) {
         mod = Modulation::QPSK;
-        rate = CodeRate::R1_2;
+        rate = CodeRate::R1_2;  // Moderate: ~2 kbps
     } else if (snr_db >= 10.0f) {
-        mod = Modulation::QPSK;
-        rate = CodeRate::R1_4;
+        mod = Modulation::BPSK;
+        rate = CodeRate::R1_2;  // Poor: ~1 kbps
     } else {
         mod = Modulation::BPSK;
-        rate = CodeRate::R1_4;
+        rate = CodeRate::R1_4;  // Flutter: ~0.5 kbps
     }
 }
 
