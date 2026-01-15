@@ -2,9 +2,12 @@
 
 **A high-performance adaptive HF modem for amateur radio digital communication**
 
+> ⚠️ **Work in Progress** — This project is under active development. No official release yet. APIs and protocols may change. Use for experimentation and testing only.
+
 ProjectUltra is a software modem designed for reliable data transfer over HF radio. It combines modern signal processing techniques—OFDM, OTFS, LDPC codes, and adaptive equalization—to maintain communication across challenging ionospheric conditions including multipath fading, Doppler spread, and interference.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Status: WIP](https://img.shields.io/badge/Status-Work%20in%20Progress-yellow.svg)]()
 
 ---
 
@@ -268,6 +271,29 @@ Testing uses ITU-R F.1487 Watterson model:
 - Schmidl & Cox: Robust frequency and timing synchronization for OFDM
 
 </details>
+
+---
+
+## Current Status
+
+**What Works:**
+- OFDM and OTFS modulation/demodulation
+- LDPC encoding/decoding (all rates)
+- Selective Repeat ARQ protocol
+- File transfer with compression
+- GUI with waterfall and constellation displays
+- Channel simulation (ITU-R F.1487 Watterson model)
+- Two-modem test mode
+
+**In Progress:**
+- On-air testing and validation
+- Adaptive mode selection (auto OFDM/OTFS switching)
+- RLS equalizer tuning for flutter channels
+- Documentation and tutorials
+
+**Not Yet Implemented:**
+- Multi-carrier bonding
+- Automatic frequency control (AFC) beyond ±20 Hz
 
 ---
 
