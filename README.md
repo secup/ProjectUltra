@@ -145,7 +145,7 @@ This eliminates dedicated probe frames while maintaining accurate channel awaren
 # macOS: brew install sdl2 cmake
 # Linux: sudo apt install libsdl2-dev cmake build-essential
 
-git clone https://github.com/yourusername/ProjectUltra.git
+git clone https://github.com/secup/ProjectUltra.git
 cd ProjectUltra
 mkdir build && cd build
 cmake ..
