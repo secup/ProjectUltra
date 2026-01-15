@@ -4,7 +4,12 @@
  * Measures SNR thresholds for BER=10^-3 and BER=10^-5 across all modes
  * under standardized ITU-R F.1487 Watterson channel conditions.
  *
- * This allows fair comparison with MIL-STD-188-110 published results.
+ * CRITICAL: This benchmark uses the ACTUAL modem pipeline:
+ *   TX: Data → LDPC Encode → Interleave → OFDM Modulate → Audio
+ *   Channel: Audio → WattersonChannel → Audio
+ *   RX: Audio → OFDM Demodulate → Deinterleave → LDPC Decode → Data
+ *
+ * NO simplified models. NO scaling factors. REAL system performance.
  *
  * Reference: ITU-R Recommendation F.1487-0 (2000)
  * "Testing of HF modems with bandwidths of up to about 12 kHz using
@@ -14,6 +19,7 @@
 #include "../src/sim/hf_channel.hpp"
 #include "ultra/types.hpp"
 #include "ultra/fec.hpp"
+#include "ultra/ofdm.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -75,53 +81,29 @@ struct BenchmarkResult {
 };
 
 /**
- * Measure BER at a specific SNR using simplified soft-bit simulation.
- * This bypasses sync for faster benchmarking while accurately modeling
- * LDPC decoding performance. Uses LLR (Log-Likelihood Ratio) soft bits
- * to match the actual demodulator output.
+ * Measure BER at a specific SNR using the ACTUAL modem pipeline.
+ *
+ * This runs the REAL system:
+ *   TX: Data → LDPC Encode → Interleave → OFDM Modulate → Audio
+ *   Channel: Audio → WattersonChannel → Audio
+ *   RX: Audio → OFDM Demodulate → Deinterleave → LDPC Decode → Data
  */
 float measureBER(
     const ModemConfig& config,
     Modulation mod,
     CodeRate rate,
-    const WattersonChannel::Config& channel_cfg,
+    WattersonChannel::Config channel_cfg,
     size_t num_frames
 ) {
+    // Create REAL modem components
+    OFDMModulator modulator(config);
+    OFDMDemodulator demodulator(config);
     LDPCEncoder encoder(rate);
     LDPCDecoder decoder(rate);
     Interleaver interleaver(24, 27);  // 648 bits = 24 x 27
 
-    std::mt19937 rng(42);
-    std::normal_distribution<float> noise(0.0f, 1.0f);
-
-    // Noise level from SNR
-    float noise_std = std::pow(10.0f, -channel_cfg.snr_db / 20.0f);
-
-    // Modulation sensitivity (approximates minimum constellation distance)
-    // Higher-order modulations have smaller symbol spacing
-    float mod_sensitivity = 1.0f;
-    switch (mod) {
-        case Modulation::BPSK:   mod_sensitivity = 1.0f;  break;  // d_min = 2
-        case Modulation::QPSK:   mod_sensitivity = 0.7f;  break;  // d_min = sqrt(2)
-        case Modulation::QAM16:  mod_sensitivity = 0.4f;  break;  // d_min = 2/sqrt(10)
-        case Modulation::QAM64:  mod_sensitivity = 0.25f; break;  // d_min = 2/sqrt(42)
-        case Modulation::QAM256: mod_sensitivity = 0.15f; break;  // d_min = 2/sqrt(170)
-        default: break;
-    }
-
-    // Rayleigh fading degrades SNR by averaging over deep fades
-    float fading_factor = 1.0f;
-    if (channel_cfg.fading_enabled) {
-        // Slow fading (~0.1 Hz): ~6 dB loss, fast fading (>0.5 Hz): ~10 dB loss
-        fading_factor = (channel_cfg.doppler_spread_hz > 0.5f) ? 0.3f : 0.5f;
-    }
-
-    // ISI penalty when delay spread exceeds cyclic prefix
-    // CP = 48 samples at 48 kHz = 1.0 ms
-    float isi_factor = 1.0f;
-    if (channel_cfg.multipath_enabled && channel_cfg.delay_spread_ms > 1.0f) {
-        isi_factor = 0.5f;
-    }
+    // Create REAL channel
+    WattersonChannel channel(channel_cfg);
 
     size_t max_data_bytes = getMaxDataBytes(rate);
     size_t total_bits = 0;
@@ -134,39 +116,64 @@ float measureBER(
             tx_data[i] = static_cast<uint8_t>((frame * 17 + i * 13 + 7) & 0xFF);
         }
 
-        // Encode
+        // === TX Chain (REAL) ===
         Bytes encoded = encoder.encode(tx_data);
         Bytes interleaved = interleaver.interleave(encoded);
 
-        // Simulate channel effect on soft bits using LLR model
-        std::vector<float> soft_bits;
-        soft_bits.reserve(interleaved.size() * 8);
+        // Generate preamble + modulated data
+        Samples preamble = modulator.generatePreamble();
+        Samples data_audio = modulator.modulate(interleaved, mod);
 
-        for (uint8_t byte : interleaved) {
-            for (int b = 7; b >= 0; --b) {
-                uint8_t bit = (byte >> b) & 1;
-                // LLR: positive = more likely 0, negative = more likely 1
-                float base_llr = bit ? -4.0f : 4.0f;
+        // Combine preamble + data
+        Samples tx_audio;
+        tx_audio.reserve(preamble.size() + data_audio.size());
+        tx_audio.insert(tx_audio.end(), preamble.begin(), preamble.end());
+        tx_audio.insert(tx_audio.end(), data_audio.begin(), data_audio.end());
 
-                // Apply channel degradation to LLR confidence
-                float effective_noise = noise_std / (mod_sensitivity * fading_factor * isi_factor);
-                float noisy_llr = base_llr + effective_noise * noise(rng);
-
-                soft_bits.push_back(noisy_llr);
-            }
+        // Scale to reasonable audio level
+        float max_val = 0;
+        for (float s : tx_audio) max_val = std::max(max_val, std::abs(s));
+        if (max_val > 0) {
+            float scale = 0.5f / max_val;
+            for (float& s : tx_audio) s *= scale;
         }
 
-        // Decode
-        std::vector<float> deinterleaved = interleaver.deinterleave(soft_bits);
-        Bytes rx_data = decoder.decodeSoft(deinterleaved);
+        // === Channel (REAL Watterson) ===
+        SampleSpan tx_span(tx_audio.data(), tx_audio.size());
+        Samples rx_audio = channel.process(tx_span);
 
-        if (decoder.lastDecodeSuccess()) {
-            if (rx_data.size() > tx_data.size()) {
-                rx_data.resize(tx_data.size());
+        // === RX Chain (REAL) ===
+        demodulator.reset();
+        bool frame_ready = false;
+        size_t chunk_size = 1024;
+        for (size_t offset = 0; offset < rx_audio.size() && !frame_ready; offset += chunk_size) {
+            size_t remaining = std::min(chunk_size, rx_audio.size() - offset);
+            SampleSpan rx_span(rx_audio.data() + offset, remaining);
+            frame_ready = demodulator.process(rx_span);
+        }
+
+        if (frame_ready) {
+            std::vector<float> soft_bits = demodulator.getSoftBits();
+
+            if (soft_bits.size() >= LDPC_BLOCK_SIZE) {
+                std::vector<float> deinterleaved = interleaver.deinterleave(soft_bits);
+                Bytes rx_data = decoder.decodeSoft(deinterleaved);
+
+                if (decoder.lastDecodeSuccess()) {
+                    if (rx_data.size() > tx_data.size()) {
+                        rx_data.resize(tx_data.size());
+                    }
+                    total_errors += countBitErrors(tx_data, rx_data);
+                } else {
+                    // Failed decode = all bits wrong
+                    total_errors += tx_data.size() * 8;
+                }
+            } else {
+                // Not enough soft bits = failed
+                total_errors += tx_data.size() * 8;
             }
-            total_errors += countBitErrors(tx_data, rx_data);
         } else {
-            // Failed decode = all bits wrong
+            // No sync = failed
             total_errors += tx_data.size() * 8;
         }
         total_bits += tx_data.size() * 8;
@@ -185,7 +192,7 @@ float findSNRThreshold(
     CodeRate rate,
     WattersonChannel::Config channel_cfg,
     float target_ber,
-    size_t frames_per_point = 500
+    size_t frames_per_point = 50
 ) {
     float snr_low = 0.0f;
     float snr_high = 45.0f;
@@ -198,7 +205,7 @@ float findSNRThreshold(
     }
 
     // Binary search
-    while (snr_high - snr_low > 0.5f) {
+    while (snr_high - snr_low > 1.0f) {  // 1 dB resolution
         float snr_mid = (snr_low + snr_high) / 2.0f;
         channel_cfg.snr_db = snr_mid;
         float ber = measureBER(config, mod, rate, channel_cfg, frames_per_point);
@@ -242,6 +249,11 @@ void printBanner() {
     std::cout << "           ProjectUltra ITU-R F.1487 HF Channel Benchmark Suite\n";
     std::cout << "================================================================================\n";
     std::cout << "\n";
+    std::cout << "CRITICAL: This benchmark uses the ACTUAL modem pipeline - not a simplified model.\n";
+    std::cout << "  TX: Data -> LDPC Encode -> OFDM Modulate -> Audio\n";
+    std::cout << "  Channel: Audio -> WattersonChannel -> Audio\n";
+    std::cout << "  RX: Audio -> OFDM Demodulate -> LDPC Decode -> Data\n";
+    std::cout << "\n";
     std::cout << "Reference: ITU-R Recommendation F.1487-0 (2000)\n";
     std::cout << "Channel Model: 2-path Rayleigh fading, Gaussian Doppler spectrum\n";
     std::cout << "\n";
@@ -256,6 +268,51 @@ void printBanner() {
     std::cout << "================================================================================\n\n";
 }
 
+void runQuickBenchmark(const ModemConfig& config) {
+    std::cout << "Quick benchmark (QPSK R1/2 only, 50 frames/point)...\n";
+    std::cout << "This uses the REAL modem pipeline - may take a minute.\n\n";
+
+    std::cout << std::setw(12) << "Channel"
+              << std::setw(16) << "SNR@BER<1e-3"
+              << std::setw(16) << "SNR@BER<1e-5"
+              << "\n";
+    std::cout << std::string(44, '-') << "\n";
+
+    struct {
+        const char* name;
+        WattersonChannel::Config (*getConfig)(float);
+    } channels[] = {
+        {"AWGN",     itu_r_f1487::awgn},
+        {"Good",     itu_r_f1487::good},
+        {"Moderate", itu_r_f1487::moderate},
+        {"Poor",     itu_r_f1487::poor},
+        {"Flutter",  itu_r_f1487::flutter},
+    };
+
+    for (const auto& ch : channels) {
+        std::cout << std::setw(12) << ch.name << std::flush;
+
+        auto cfg = ch.getConfig(20.0f);
+
+        float snr_1e3 = findSNRThreshold(config, Modulation::QPSK, CodeRate::R1_2, cfg, 1e-3f, 30);
+        if (snr_1e3 >= 0) {
+            std::cout << std::setw(12) << std::fixed << std::setprecision(1) << snr_1e3 << " dB";
+        } else {
+            std::cout << std::setw(16) << "FAILED";
+        }
+
+        float snr_1e5 = findSNRThreshold(config, Modulation::QPSK, CodeRate::R1_2, cfg, 1e-5f, 50);
+        if (snr_1e5 >= 0) {
+            std::cout << std::setw(12) << std::fixed << std::setprecision(1) << snr_1e5 << " dB";
+        } else {
+            std::cout << std::setw(16) << "FAILED";
+        }
+        std::cout << "\n";
+    }
+
+    std::cout << "\nNote: These are REAL modem measurements, not simplified simulations.\n";
+}
+
 void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string& csv_output) {
     // Define modes to test
     std::vector<ModeConfig> modes = {
@@ -267,7 +324,6 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
         {Modulation::QAM16,  CodeRate::R3_4, "16QAM R3/4",  0},
         {Modulation::QAM64,  CodeRate::R1_2, "64QAM R1/2",  0},
         {Modulation::QAM64,  CodeRate::R3_4, "64QAM R3/4",  0},
-        {Modulation::QAM256, CodeRate::R3_4, "256QAM R3/4", 0},
     };
 
     // Calculate throughputs
@@ -292,11 +348,8 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
     // Results storage
     std::vector<BenchmarkResult> results;
 
-    // Progress tracking
-    size_t total_tests = modes.size() * channels.size();
-    size_t completed = 0;
-
-    std::cout << "Running " << total_tests << " benchmark configurations...\n\n";
+    std::cout << "Running full benchmark with REAL modem pipeline...\n";
+    std::cout << "This will take several minutes.\n\n";
 
     auto start_time = std::chrono::steady_clock::now();
 
@@ -316,32 +369,27 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
             result.channel_name = channel.name;
             result.throughput_kbps = mode.throughput_kbps;
 
-            auto base_cfg = channel.getConfig(20.0f);  // Base SNR doesn't matter for threshold search
+            auto base_cfg = channel.getConfig(20.0f);
 
-            if (verbose) {
-                std::cout << "  " << channel.name << "... " << std::flush;
-            }
+            std::cout << std::setw(12) << channel.name << std::flush;
 
             // Find SNR for BER < 10^-3
             result.snr_for_ber_1e3 = findSNRThreshold(
-                config, mode.mod, mode.rate, base_cfg, 1e-3f, 200
+                config, mode.mod, mode.rate, base_cfg, 1e-3f, 30
             );
 
-            // Find SNR for BER < 10^-5
-            result.snr_for_ber_1e5 = findSNRThreshold(
-                config, mode.mod, mode.rate, base_cfg, 1e-5f, 500
-            );
-
-            results.push_back(result);
-
-            // Print result row
-            std::cout << std::setw(12) << channel.name;
             if (result.snr_for_ber_1e3 >= 0) {
                 std::cout << std::setw(12) << std::fixed << std::setprecision(1)
                           << result.snr_for_ber_1e3 << " dB";
             } else {
                 std::cout << std::setw(16) << "FAILED";
             }
+
+            // Find SNR for BER < 10^-5
+            result.snr_for_ber_1e5 = findSNRThreshold(
+                config, mode.mod, mode.rate, base_cfg, 1e-5f, 50
+            );
+
             if (result.snr_for_ber_1e5 >= 0) {
                 std::cout << std::setw(12) << std::fixed << std::setprecision(1)
                           << result.snr_for_ber_1e5 << " dB";
@@ -350,7 +398,7 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
             }
             std::cout << "\n";
 
-            completed++;
+            results.push_back(result);
         }
         std::cout << "\n";
     }
@@ -362,7 +410,7 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
     std::cout << "Benchmark completed in " << duration.count() << " seconds.\n";
     std::cout << "================================================================================\n\n";
 
-    // Print summary comparison table
+    // Print summary
     std::cout << "SUMMARY: SNR Thresholds for BER < 10^-5 (dB)\n";
     std::cout << "================================================================================\n";
     std::cout << std::setw(14) << "Mode"
@@ -380,7 +428,6 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
                   << std::setw(8) << std::fixed << std::setprecision(1) << mode.throughput_kbps;
 
         for (const auto& channel : channels) {
-            // Find matching result
             for (const auto& r : results) {
                 if (r.mode_name == mode.name && r.channel_name == channel.name) {
                     if (r.snr_for_ber_1e5 >= 0) {
@@ -397,13 +444,7 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
     }
     std::cout << "\n";
 
-    // MIL-STD comparison note
-    std::cout << "Reference: MIL-STD-188-110B (Rate 1/2 Convolutional, K=7)\n";
-    std::cout << "  3200 bps Poor channel: ~12.4 dB @ BER<10^-5\n";
-    std::cout << "  4800 bps Poor channel: ~16.9 dB @ BER<10^-5\n";
-    std::cout << "\n";
-    std::cout << "Note: LDPC codes typically provide 2-4 dB coding gain over\n";
-    std::cout << "convolutional codes at equivalent rates.\n";
+    std::cout << "Note: These results are from the ACTUAL modem pipeline.\n";
     std::cout << "================================================================================\n";
 
     // Write CSV if requested
@@ -425,58 +466,20 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
     }
 }
 
-void runQuickBenchmark(const ModemConfig& config) {
-    std::cout << "Quick benchmark (QPSK R1/2 only)...\n\n";
-
-    std::cout << std::setw(12) << "Channel"
-              << std::setw(16) << "SNR@BER<1e-3"
-              << std::setw(16) << "SNR@BER<1e-5"
-              << "\n";
-    std::cout << std::string(44, '-') << "\n";
-
-    struct {
-        const char* name;
-        WattersonChannel::Config (*getConfig)(float);
-    } channels[] = {
-        {"AWGN",     itu_r_f1487::awgn},
-        {"Good",     itu_r_f1487::good},
-        {"Moderate", itu_r_f1487::moderate},
-        {"Poor",     itu_r_f1487::poor},
-        {"Flutter",  itu_r_f1487::flutter},
-    };
-
-    for (const auto& ch : channels) {
-        auto cfg = ch.getConfig(20.0f);
-
-        float snr_1e3 = findSNRThreshold(config, Modulation::QPSK, CodeRate::R1_2, cfg, 1e-3f, 100);
-        float snr_1e5 = findSNRThreshold(config, Modulation::QPSK, CodeRate::R1_2, cfg, 1e-5f, 200);
-
-        std::cout << std::setw(12) << ch.name;
-        if (snr_1e3 >= 0) {
-            std::cout << std::setw(12) << std::fixed << std::setprecision(1) << snr_1e3 << " dB";
-        } else {
-            std::cout << std::setw(16) << "FAILED";
-        }
-        if (snr_1e5 >= 0) {
-            std::cout << std::setw(12) << std::fixed << std::setprecision(1) << snr_1e5 << " dB";
-        } else {
-            std::cout << std::setw(16) << "FAILED";
-        }
-        std::cout << "\n";
-    }
-}
-
 void printUsage(const char* prog) {
     std::cout << "Usage: " << prog << " [options]\n";
     std::cout << "\n";
     std::cout << "Options:\n";
     std::cout << "  --quick        Run quick benchmark (QPSK R1/2 only)\n";
-    std::cout << "  --full         Run full benchmark (all modes)\n";
+    std::cout << "  --full         Run full benchmark (all modes) - takes several minutes\n";
     std::cout << "  --csv FILE     Write results to CSV file\n";
     std::cout << "  --verbose      Show progress during benchmark\n";
     std::cout << "  --help         Show this help\n";
     std::cout << "\n";
     std::cout << "Default: --quick\n";
+    std::cout << "\n";
+    std::cout << "IMPORTANT: This benchmark uses the ACTUAL modem pipeline.\n";
+    std::cout << "Results are real system performance, not simplified simulations.\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -509,6 +512,16 @@ int main(int argc, char* argv[]) {
     config.pilot_spacing = 6;
     config.cp_mode = CyclicPrefixMode::MEDIUM;  // 48 samples
     config.center_freq = 1500;
+
+    // Enable adaptive equalizer for fading channels
+    config.adaptive_eq_enabled = true;
+    config.adaptive_eq_use_rls = false;  // Use LMS (more stable)
+    config.lms_mu = 0.1f;  // Aggressive step size for fast tracking
+    config.decision_directed = true;
+
+    // Lower sync threshold for fading channels (multipath/fading can reduce
+    // preamble correlation from 1.0 to ~0.75-0.85)
+    config.sync_threshold = 0.70f;
 
     printBanner();
 

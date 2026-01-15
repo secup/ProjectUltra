@@ -9,6 +9,9 @@
 namespace ultra {
 namespace sim {
 
+// Complex type for fading calculations
+using Complex = std::complex<float>;
+
 /**
  * Watterson HF Channel Model (ITU-R F.1487)
  *
@@ -75,8 +78,21 @@ public:
     }
 
     // Process samples through the channel
+    // CRITICAL: Input signal should be normalized to unit RMS for correct SNR
     Samples process(SampleSpan input) {
         Samples output(input.size());
+
+        // Calculate input RMS for SNR normalization
+        float input_power = 0.0f;
+        for (size_t i = 0; i < input.size(); ++i) {
+            input_power += input[i] * input[i];
+        }
+        float input_rms = std::sqrt(input_power / input.size());
+
+        // Normalize noise to achieve correct SNR relative to actual signal power
+        // SNR = 10*log10(Ps/Pn), so Pn = Ps * 10^(-SNR/10)
+        // noise_std = sqrt(Pn) = input_rms * 10^(-SNR/20)
+        float effective_noise_std = input_rms * std::pow(10.0f, -config_.snr_db / 20.0f);
 
         for (size_t i = 0; i < input.size(); ++i) {
             float sample = input[i];
@@ -90,8 +106,12 @@ public:
 
             if (config_.multipath_enabled && delay_samples_ > 0) {
                 // Two-tap multipath with independent Rayleigh fading
-                // Path 1: direct path (no delay)
+                // For real-valued signal, apply fading MAGNITUDE (Rayleigh envelope)
+                // Phase effects are captured by OFDM pilot-based channel estimation
                 float h1_mag = config_.fading_enabled ? std::abs(fading1_) : 1.0f;
+                float h2_mag = config_.fading_enabled ? std::abs(fading2_) : 1.0f;
+
+                // Path 1: direct path (no delay)
                 out += sample * config_.path1_gain * h1_mag;
 
                 // Path 2: delayed path
@@ -99,7 +119,6 @@ public:
                 delay_line_.pop_front();
                 delay_line_.push_back(sample);
 
-                float h2_mag = config_.fading_enabled ? std::abs(fading2_) : 1.0f;
                 out += delayed * config_.path2_gain * h2_mag;
             } else {
                 // No multipath - just fading on single path
@@ -107,9 +126,9 @@ public:
                 out = sample * h_mag;
             }
 
-            // Add AWGN
+            // Add AWGN with SNR relative to actual signal power
             if (config_.noise_enabled) {
-                out += noise_std_ * gaussian_(rng_);
+                out += effective_noise_std * gaussian_(rng_);
             }
 
             output[i] = out;
@@ -141,19 +160,21 @@ public:
 private:
     void updateFading() {
         // Generate complex Gaussian noise (for Rayleigh fading)
-        std::complex<float> noise1(gaussian_(rng_), gaussian_(rng_));
-        std::complex<float> noise2(gaussian_(rng_), gaussian_(rng_));
+        // For IIR lowpass: y[n] = (1-α)·y[n-1] + α·x[n]
+        // Output power ≈ (α/2) × input_power for α << 1
+        // For unit output power, we need input_variance = 2/α
+        // Each complex component needs variance = 1/α, so std = sqrt(1/α)
+        float noise_scale = std::sqrt(1.0f / fading_alpha_);
+        std::complex<float> noise1(noise_scale * gaussian_(rng_), noise_scale * gaussian_(rng_));
+        std::complex<float> noise2(noise_scale * gaussian_(rng_), noise_scale * gaussian_(rng_));
 
         // IIR lowpass filter to shape Doppler spectrum
         // This gives approximately Gaussian-shaped spectrum
+        // Output is complex Gaussian with Rayleigh magnitude distribution
         fading1_ = (1.0f - fading_alpha_) * fading1_ + fading_alpha_ * noise1;
         fading2_ = (1.0f - fading_alpha_) * fading2_ + fading_alpha_ * noise2;
 
-        // Normalize to unit mean power
-        // Rayleigh distribution has mean = sqrt(pi/2) ≈ 1.25
-        // We want mean magnitude ≈ 1
-        fading1_ *= 0.8f;
-        fading2_ *= 0.8f;
+        // No per-sample normalization! The noise scaling above ensures proper power
     }
 
     Config config_;

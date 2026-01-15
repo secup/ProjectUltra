@@ -162,7 +162,7 @@ struct OFDMDemodulator::Impl {
 
     // Sync detection
     std::vector<Complex> sync_sequence;
-    float sync_threshold = 0.90f;  // Threshold for valid sync region
+    float sync_threshold;  // Threshold for valid sync region (from config)
     size_t search_offset = 0;      // Track where we left off searching (optimization)
 
     // Pre-computed interpolation lookup (avoids O(n²) per symbol)
@@ -190,6 +190,7 @@ struct OFDMDemodulator::Impl {
         : config(cfg)
         , fft(cfg.fft_size)
         , mixer(cfg.center_freq, cfg.sample_rate)
+        , sync_threshold(cfg.sync_threshold)
     {
         symbol_samples = cfg.getSymbolDuration();
         channel_estimate.resize(cfg.fft_size, Complex(1, 0));
@@ -605,6 +606,24 @@ struct OFDMDemodulator::Impl {
 
         // Interpolate between pilots for data carriers
         interpolateChannel();
+
+        // Initialize adaptive equalizer weights from pilot-based channel estimate
+        // This gives the adaptive filter a good starting point for fading channels
+        if (config.adaptive_eq_enabled) {
+            for (int idx : data_carrier_indices) {
+                // Only initialize if weights are at default (1,0) or significantly different
+                // This allows LMS/RLS to track once initialized
+                if (snr_symbol_count < 3) {  // First few symbols - seed from pilots
+                    lms_weights[idx] = channel_estimate[idx];
+                }
+            }
+            // Also initialize pilot carriers
+            for (int idx : pilot_carrier_indices) {
+                if (snr_symbol_count < 3) {
+                    lms_weights[idx] = channel_estimate[idx];
+                }
+            }
+        }
 
         // Update noise variance and SNR
         // noise_power_sum = sum of |h[i] - h_avg|² over N pilots
