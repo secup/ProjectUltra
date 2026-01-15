@@ -242,15 +242,20 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
     const float* input = reinterpret_cast<const float*>(stream);
     int samples = len / sizeof(float);
 
-    // Compute input level (RMS)
+    // Apply input gain
+    float gain = engine->input_gain_.load();
+    std::vector<float> captured(samples);
+    for (int i = 0; i < samples; ++i) {
+        captured[i] = input[i] * gain;
+    }
+
+    // Compute input level (RMS) after gain
     float sum_sq = 0.0f;
     for (int i = 0; i < samples; ++i) {
-        sum_sq += input[i] * input[i];
+        sum_sq += captured[i] * captured[i];
     }
     float rms = std::sqrt(sum_sq / samples);
     engine->input_level_ = rms;
-
-    std::vector<float> captured(input, input + samples);
 
     {
         std::lock_guard<std::mutex> lock(engine->rx_mutex_);

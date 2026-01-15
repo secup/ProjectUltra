@@ -68,6 +68,10 @@ public:
     float getInputLevel() const { return input_level_; }
     float getOutputLevel() const { return output_level_; }
 
+    // Input gain control (0.0 to 2.0, default 1.0)
+    void setInputGain(float gain) { input_gain_ = gain; }
+    float getInputGain() const { return input_gain_; }
+
     // Callback for when RX has data ready
     using RxCallback = std::function<void(const std::vector<float>&)>;
     void setRxCallback(RxCallback callback) { rx_callback_ = callback; }
@@ -113,6 +117,9 @@ private:
     // Audio level metering (RMS, 0.0-1.0)
     std::atomic<float> input_level_{0.0f};
     std::atomic<float> output_level_{0.0f};
+
+    // Input gain (0.0 to 2.0, default 1.0)
+    std::atomic<float> input_gain_{1.0f};
 };
 
 } // namespace gui
