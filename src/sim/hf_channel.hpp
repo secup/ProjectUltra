@@ -224,13 +224,14 @@ inline WattersonChannel::Config poor(float snr_db = 10.0f) {
     };
 }
 
-// CCIR Flutter (extreme flutter fading, polar paths)
-// - Very fast fading, severe multipath
+// CCIR Flutter (extreme flutter fading, auroral/polar paths)
+// - Low delay spread, VERY fast fading (ITU-R F.1487)
+// Note: Flutter is characterized by rapid fading, not large delay spread
 inline WattersonChannel::Config flutter(float snr_db = 8.0f) {
     return {
         .snr_db = snr_db,
-        .delay_spread_ms = 4.0f,       // 4 ms multipath (severe)
-        .doppler_spread_hz = 2.0f,     // Very fast fading
+        .delay_spread_ms = 0.5f,       // 0.5 ms multipath (same as Good)
+        .doppler_spread_hz = 10.0f,    // 10 Hz - very fast fading (auroral)
         .path1_gain = 0.707f,
         .path2_gain = 0.707f,
         .sample_rate = 48000,
@@ -262,6 +263,104 @@ inline void printConfig(const WattersonChannel::Config& cfg, const char* name) {
 }
 
 } // namespace ccir
+
+/**
+ * ITU-R F.1487 Standard Channel Conditions
+ *
+ * These are the exact parameters specified in ITU-R Recommendation F.1487
+ * "Testing of HF modems with bandwidths of up to about 12 kHz using
+ * ionospheric channel simulators"
+ *
+ * Used by MIL-STD-188-110 and STANAG for standardized modem testing.
+ *
+ * Reference: ITU-R F.1487-0 (2000)
+ */
+namespace itu_r_f1487 {
+
+// ITU-R F.1487 Good (mid-latitude, quiet conditions)
+// 2-path Rayleigh, equal power, Gaussian Doppler spectrum
+inline WattersonChannel::Config good(float snr_db = 20.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 0.5f,       // 0.5 ms differential delay
+        .doppler_spread_hz = 0.1f,     // 0.1 Hz Doppler spread (2σ)
+        .path1_gain = 0.707f,          // Equal power paths (-3dB each)
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// ITU-R F.1487 Moderate (mid-latitude, normal conditions)
+inline WattersonChannel::Config moderate(float snr_db = 20.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 1.0f,       // 1.0 ms differential delay
+        .doppler_spread_hz = 0.5f,     // 0.5 Hz Doppler spread
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// ITU-R F.1487 Poor (disturbed, high-latitude)
+inline WattersonChannel::Config poor(float snr_db = 20.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 2.0f,       // 2.0 ms differential delay
+        .doppler_spread_hz = 1.0f,     // 1.0 Hz Doppler spread
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// ITU-R F.1487 Flutter (auroral/polar paths)
+// Characterized by rapid fading, NOT large delay spread
+inline WattersonChannel::Config flutter(float snr_db = 20.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 0.5f,       // 0.5 ms (same as Good)
+        .doppler_spread_hz = 10.0f,    // 10 Hz - very rapid fading
+        .path1_gain = 0.707f,
+        .path2_gain = 0.707f,
+        .sample_rate = 48000,
+        .fading_enabled = true,
+        .multipath_enabled = true,
+        .noise_enabled = true
+    };
+}
+
+// AWGN only (baseline reference)
+inline WattersonChannel::Config awgn(float snr_db = 20.0f) {
+    return {
+        .snr_db = snr_db,
+        .delay_spread_ms = 0.0f,
+        .doppler_spread_hz = 0.0f,
+        .path1_gain = 1.0f,
+        .path2_gain = 0.0f,
+        .sample_rate = 48000,
+        .fading_enabled = false,
+        .multipath_enabled = false,
+        .noise_enabled = true
+    };
+}
+
+// Channel condition names for reporting
+inline const char* getConditionName(int idx) {
+    static const char* names[] = {"AWGN", "Good", "Moderate", "Poor", "Flutter"};
+    return (idx >= 0 && idx < 5) ? names[idx] : "Unknown";
+}
+
+} // namespace itu_r_f1487
 
 // Convenience alias
 using HFChannel = WattersonChannel;

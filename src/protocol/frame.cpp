@@ -16,6 +16,7 @@ const char* frameTypeToString(FrameType type) {
         case FrameType::ACK:         return "ACK";
         case FrameType::NAK:         return "NAK";
         case FrameType::BEACON:      return "BEACON";
+        case FrameType::SACK:        return "SACK";
         default:                     return "UNKNOWN";
     }
 }
@@ -122,6 +123,19 @@ Frame Frame::makeNak(const std::string& src, const std::string& dst, uint8_t seq
     f.sequence = seq;
     f.src_call = sanitizeCallsign(src);
     f.dst_call = sanitizeCallsign(dst);
+    return f;
+}
+
+Frame Frame::makeSack(const std::string& src, const std::string& dst,
+                      uint8_t base_seq, uint8_t bitmap) {
+    Frame f;
+    f.type = FrameType::SACK;
+    f.flags = FrameFlags::NONE;
+    f.sequence = base_seq;  // Cumulative ACK point
+    f.src_call = sanitizeCallsign(src);
+    f.dst_call = sanitizeCallsign(dst);
+    // Payload: 1-byte bitmap indicating which frames after base_seq were received
+    f.payload.push_back(bitmap);
     return f;
 }
 

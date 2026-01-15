@@ -106,6 +106,13 @@ struct ModemConfig {
     CodeRate code_rate = CodeRate::R1_2;
     SpeedProfile speed_profile = SpeedProfile::BALANCED;
 
+    // Adaptive equalizer settings
+    bool adaptive_eq_enabled = false;   // Enable LMS/RLS adaptive equalizer
+    bool adaptive_eq_use_rls = false;   // true=RLS, false=LMS
+    float lms_mu = 0.05f;               // LMS step size (0.01-0.1 typical)
+    float rls_lambda = 0.99f;           // RLS forgetting factor (0.95-0.999)
+    bool decision_directed = true;      // Use past decisions as reference
+
     // ARQ settings
     uint32_t frame_size = 256;         // Bytes per frame
     uint32_t max_retries = 8;          // Max retransmissions

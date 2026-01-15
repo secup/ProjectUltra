@@ -39,7 +39,9 @@ add_library(ultra_core STATIC
     src/modem/modem.cpp
     # Protocol layer (callsign addressing, connection management)
     src/protocol/frame.cpp
+    src/protocol/arq_interface.cpp
     src/protocol/arq.cpp
+    src/protocol/selective_repeat_arq.cpp
     src/protocol/connection.cpp
     src/protocol/protocol_engine.cpp
     src/protocol/file_transfer.cpp

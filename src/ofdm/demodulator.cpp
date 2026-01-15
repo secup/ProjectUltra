@@ -181,6 +181,11 @@ struct OFDMDemodulator::Impl {
     static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor
     float freq_correction_phase = 0.0f;    // Running phase for correction
 
+    // LMS/RLS Adaptive equalizer state
+    std::vector<Complex> lms_weights;      // Per-carrier LMS weights
+    std::vector<Complex> last_decisions;   // Last equalized symbols (for decision-directed)
+    std::vector<float> rls_P;              // RLS inverse correlation (diagonal approx)
+
     Impl(const ModemConfig& cfg)
         : config(cfg)
         , fft(cfg.fft_size)
@@ -188,6 +193,11 @@ struct OFDMDemodulator::Impl {
     {
         symbol_samples = cfg.getSymbolDuration();
         channel_estimate.resize(cfg.fft_size, Complex(1, 0));
+
+        // Initialize adaptive equalizer state
+        lms_weights.resize(cfg.fft_size, Complex(1, 0));
+        last_decisions.resize(cfg.fft_size, Complex(0, 0));
+        rls_P.resize(cfg.fft_size, 1.0f);
 
         setupCarriers();
         generateSequences();
@@ -634,24 +644,137 @@ struct OFDMDemodulator::Impl {
         }
     }
 
-    std::vector<Complex> equalize(const std::vector<Complex>& freq_domain) {
-        // Zero-forcing equalization: divide by channel estimate
+    // Hard decision slicer for decision-directed mode
+    // Returns nearest constellation point for the given modulation
+    Complex hardDecision(Complex sym, Modulation mod) const {
+        switch (mod) {
+            case Modulation::BPSK:
+                return Complex(sym.real() > 0 ? 1.0f : -1.0f, 0);
+
+            case Modulation::QPSK: {
+                float I = sym.real() > 0 ? 0.7071f : -0.7071f;
+                float Q = sym.imag() > 0 ? 0.7071f : -0.7071f;
+                return Complex(I, Q);
+            }
+
+            case Modulation::QAM16: {
+                // Levels: -3, -1, 1, 3 normalized by sqrt(10)
+                auto slice = [](float x) -> float {
+                    if (x < -0.4f) return -0.9487f;       // -3/sqrt(10)
+                    if (x < 0.0f) return -0.3162f;        // -1/sqrt(10)
+                    if (x < 0.4f) return 0.3162f;         //  1/sqrt(10)
+                    return 0.9487f;                        //  3/sqrt(10)
+                };
+                return Complex(slice(sym.real()), slice(sym.imag()));
+            }
+
+            case Modulation::QAM64: {
+                // Levels: -7,-5,-3,-1,1,3,5,7 normalized by sqrt(42)
+                auto slice = [](float x) -> float {
+                    constexpr float d = 0.1543f;  // 1/sqrt(42)
+                    if (x < -6*d) return -7*d;
+                    if (x < -4*d) return -5*d;
+                    if (x < -2*d) return -3*d;
+                    if (x < 0) return -d;
+                    if (x < 2*d) return d;
+                    if (x < 4*d) return 3*d;
+                    if (x < 6*d) return 5*d;
+                    return 7*d;
+                };
+                return Complex(slice(sym.real()), slice(sym.imag()));
+            }
+
+            default:
+                return Complex(sym.real() > 0 ? 0.7071f : -0.7071f,
+                              sym.imag() > 0 ? 0.7071f : -0.7071f);
+        }
+    }
+
+    // LMS adaptive equalizer update
+    void lmsUpdate(int idx, Complex received, Complex reference) {
+        float mu = config.lms_mu;
+
+        // Error = received - weight * reference (assumes weight ≈ channel)
+        Complex error = received - lms_weights[idx] * reference;
+
+        // Weight update: w = w + mu * conj(reference) * error
+        lms_weights[idx] += mu * std::conj(reference) * error;
+    }
+
+    // RLS adaptive equalizer update
+    void rlsUpdate(int idx, Complex received, Complex reference) {
+        float lambda = config.rls_lambda;
+
+        // Simplified diagonal RLS (scalar P per carrier)
+        float P = rls_P[idx];
+        float ref_norm = std::norm(reference);
+
+        // Gain: k = P * ref / (lambda + P * |ref|^2)
+        float k = P / (lambda + P * ref_norm);
+
+        // Error
+        Complex error = received - lms_weights[idx] * reference;
+
+        // Weight update
+        lms_weights[idx] += k * std::conj(reference) * error;
+
+        // P update: P = (P - k * |ref|^2 * P) / lambda
+        rls_P[idx] = (P - k * ref_norm * P) / lambda;
+
+        // Prevent P from getting too small or too large
+        rls_P[idx] = std::max(0.001f, std::min(1000.0f, rls_P[idx]));
+    }
+
+    std::vector<Complex> equalize(const std::vector<Complex>& freq_domain, Modulation mod) {
         std::vector<Complex> equalized(data_carrier_indices.size());
+
+        bool use_adaptive = config.adaptive_eq_enabled;
 
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             int idx = data_carrier_indices[i];
-            Complex h = channel_estimate[idx];
+            Complex received = freq_domain[idx];
 
-            // Avoid division by zero
-            if (std::norm(h) < 1e-10f) {
-                equalized[i] = Complex(0, 0);
+            if (use_adaptive) {
+                // Adaptive equalization using LMS/RLS weights
+                Complex h = lms_weights[idx];
+
+                // Avoid division by zero
+                if (std::norm(h) < 1e-10f) {
+                    equalized[i] = Complex(0, 0);
+                } else {
+                    equalized[i] = received / h;
+                }
+
+                // Update weights using decision-directed mode
+                if (config.decision_directed) {
+                    Complex decision = hardDecision(equalized[i], mod);
+
+                    if (config.adaptive_eq_use_rls) {
+                        rlsUpdate(idx, received, decision);
+                    } else {
+                        lmsUpdate(idx, received, decision);
+                    }
+
+                    last_decisions[idx] = decision;
+                }
             } else {
-                equalized[i] = freq_domain[idx] / h;
-            }
+                // Standard zero-forcing equalization
+                Complex h = channel_estimate[idx];
 
+                if (std::norm(h) < 1e-10f) {
+                    equalized[i] = Complex(0, 0);
+                } else {
+                    equalized[i] = received / h;
+                }
+            }
         }
 
         return equalized;
+    }
+
+    // Legacy interface for backwards compatibility
+    std::vector<Complex> equalize(const std::vector<Complex>& freq_domain) {
+        return equalize(freq_domain, config.modulation);
     }
 
     void demodulateSymbol(const std::vector<Complex>& equalized, Modulation mod) {
@@ -899,6 +1022,11 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->noise_variance = 0.1f;
                     impl_->prev_pilot_phases.clear();
 
+                    // Reset adaptive equalizer state
+                    std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
+                    std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
+                    std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
+
                     // Continue processing in SYNCED state (don't return!)
                     break;
                 }
@@ -1075,6 +1203,11 @@ void OFDMDemodulator::reset() {
     impl_->freq_offset_filtered = 0.0f;
     impl_->freq_correction_phase = 0.0f;
     impl_->prev_pilot_phases.clear();
+
+    // Reset adaptive equalizer state
+    std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
+    std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
+    std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
 }
 
 // ============ Channel Estimator ============

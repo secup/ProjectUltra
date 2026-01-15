@@ -18,6 +18,7 @@ enum class FrameType : uint8_t {
     ACK         = 0x06,  // Acknowledge received frame
     NAK         = 0x07,  // Request retransmission
     BEACON      = 0x08,  // CQ broadcast
+    SACK        = 0x09,  // Selective ACK (for Selective Repeat ARQ)
 };
 
 // Convert frame type to string for debugging
@@ -85,6 +86,12 @@ struct Frame {
 
     // Create a NAK frame
     static Frame makeNak(const std::string& src, const std::string& dst, uint8_t seq);
+
+    // Create a SACK frame (Selective ACK with bitmap)
+    // base_seq: cumulative ACK point (all frames up to and including this are ACKed)
+    // bitmap: bit i = (base_seq + 1 + i) received
+    static Frame makeSack(const std::string& src, const std::string& dst,
+                          uint8_t base_seq, uint8_t bitmap);
 
     // Create a CONNECT frame
     static Frame makeConnect(const std::string& src, const std::string& dst);

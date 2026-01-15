@@ -33,3 +33,16 @@ add_test(NAME MultiblockLDPC COMMAND test_multiblock_ldpc)
 add_executable(test_protocol_modem test_protocol_modem.cpp)
 target_link_libraries(test_protocol_modem PRIVATE ultra_core)
 add_test(NAME ProtocolModem COMMAND test_protocol_modem)
+
+# ITU-R F.1487 HF Channel Benchmark Suite
+# Measures SNR thresholds for BER targets under standard channel conditions
+add_executable(benchmark_itu_r benchmark_itu_r.cpp)
+target_include_directories(benchmark_itu_r PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
+)
+target_link_libraries(benchmark_itu_r PRIVATE ultra_core)
+
+# Selective Repeat ARQ tests
+add_executable(test_selective_repeat test_selective_repeat.cpp)
+target_link_libraries(test_selective_repeat PRIVATE ultra_core)
+add_test(NAME SelectiveRepeatARQ COMMAND test_selective_repeat)

@@ -4,17 +4,17 @@
 namespace ultra {
 namespace protocol {
 
-ARQController::ARQController(const ARQConfig& config)
+StopAndWaitARQ::StopAndWaitARQ(const ARQConfig& config)
     : config_(config)
 {
 }
 
-void ARQController::setCallsigns(const std::string& local, const std::string& remote) {
+void StopAndWaitARQ::setCallsigns(const std::string& local, const std::string& remote) {
     local_call_ = Frame::sanitizeCallsign(local);
     remote_call_ = Frame::sanitizeCallsign(remote);
 }
 
-bool ARQController::sendData(const Bytes& data) {
+bool StopAndWaitARQ::sendData(const Bytes& data) {
     if (state_ != State::IDLE) {
         LOG_MODEM(WARN, "ARQ: Cannot send, state=%d (busy)", static_cast<int>(state_));
         return false;
@@ -40,12 +40,12 @@ bool ARQController::sendData(const Bytes& data) {
     return true;
 }
 
-bool ARQController::sendData(const std::string& text) {
+bool StopAndWaitARQ::sendData(const std::string& text) {
     Bytes data(text.begin(), text.end());
     return sendData(data);
 }
 
-bool ARQController::sendDataWithFlags(const Bytes& data, uint8_t flags) {
+bool StopAndWaitARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     if (state_ != State::IDLE) {
         LOG_MODEM(WARN, "ARQ: Cannot send, state=%d (busy)", static_cast<int>(state_));
         return false;
@@ -73,11 +73,11 @@ bool ARQController::sendDataWithFlags(const Bytes& data, uint8_t flags) {
     return true;
 }
 
-bool ARQController::isReadyToSend() const {
+bool StopAndWaitARQ::isReadyToSend() const {
     return state_ == State::IDLE;
 }
 
-void ARQController::onFrameReceived(const Frame& frame) {
+void StopAndWaitARQ::onFrameReceived(const Frame& frame) {
     // Check if frame is for us
     if (!frame.isForCallsign(local_call_)) {
         LOG_MODEM(TRACE, "ARQ: Ignoring frame for %s (we are %s)",
@@ -104,7 +104,7 @@ void ARQController::onFrameReceived(const Frame& frame) {
     }
 }
 
-void ARQController::handleDataFrame(const Frame& frame) {
+void StopAndWaitARQ::handleDataFrame(const Frame& frame) {
     // Track flags from this frame
     last_rx_flags_ = frame.flags;
     last_rx_more_data_ = (frame.flags & FrameFlags::MORE_DATA) != 0;
@@ -148,7 +148,7 @@ void ARQController::handleDataFrame(const Frame& frame) {
     }
 }
 
-void ARQController::handleAckFrame(const Frame& frame) {
+void StopAndWaitARQ::handleAckFrame(const Frame& frame) {
     if (state_ != State::WAIT_ACK) {
         LOG_MODEM(DEBUG, "ARQ: Ignoring ACK, not waiting for one");
         return;
@@ -176,7 +176,7 @@ void ARQController::handleAckFrame(const Frame& frame) {
     }
 }
 
-void ARQController::handleNakFrame(const Frame& frame) {
+void StopAndWaitARQ::handleNakFrame(const Frame& frame) {
     if (state_ != State::WAIT_ACK) {
         LOG_MODEM(DEBUG, "ARQ: Ignoring NAK, not waiting for ACK");
         return;
@@ -188,7 +188,7 @@ void ARQController::handleNakFrame(const Frame& frame) {
     retransmit();
 }
 
-void ARQController::tick(uint32_t elapsed_ms) {
+void StopAndWaitARQ::tick(uint32_t elapsed_ms) {
     if (state_ == State::WAIT_ACK) {
         if (elapsed_ms >= timeout_remaining_ms_) {
             // Timeout!
@@ -201,7 +201,7 @@ void ARQController::tick(uint32_t elapsed_ms) {
     }
 }
 
-void ARQController::retransmit() {
+void StopAndWaitARQ::retransmit() {
     retry_count_++;
 
     if (retry_count_ >= config_.max_retries) {
@@ -217,7 +217,7 @@ void ARQController::retransmit() {
     timeout_remaining_ms_ = config_.ack_timeout_ms;
 }
 
-void ARQController::sendFailed() {
+void StopAndWaitARQ::sendFailed() {
     LOG_MODEM(ERROR, "ARQ: Send failed after %d retries for seq=%d",
               config_.max_retries, tx_seq_);
 
@@ -233,25 +233,25 @@ void ARQController::sendFailed() {
     tx_seq_ = (tx_seq_ + 1) & 0xFF;  // Still advance seq to avoid confusion
 }
 
-void ARQController::transmitFrame(const Frame& frame) {
+void StopAndWaitARQ::transmitFrame(const Frame& frame) {
     if (on_transmit_) {
         on_transmit_(frame);
     }
 }
 
-void ARQController::setTransmitCallback(TransmitCallback cb) {
+void StopAndWaitARQ::setTransmitCallback(TransmitCallback cb) {
     on_transmit_ = std::move(cb);
 }
 
-void ARQController::setDataReceivedCallback(DataReceivedCallback cb) {
+void StopAndWaitARQ::setDataReceivedCallback(DataReceivedCallback cb) {
     on_data_received_ = std::move(cb);
 }
 
-void ARQController::setSendCompleteCallback(SendCompleteCallback cb) {
+void StopAndWaitARQ::setSendCompleteCallback(SendCompleteCallback cb) {
     on_send_complete_ = std::move(cb);
 }
 
-void ARQController::reset() {
+void StopAndWaitARQ::reset() {
     state_ = State::IDLE;
     tx_seq_ = 0;
     rx_expected_seq_ = 0;

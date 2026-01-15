@@ -1,5 +1,6 @@
 #pragma once
 
+#include "arq_interface.hpp"
 #include "frame.hpp"
 #include <functional>
 #include <optional>
@@ -7,96 +8,50 @@
 namespace ultra {
 namespace protocol {
 
-// ARQ configuration
-struct ARQConfig {
-    uint32_t ack_timeout_ms = 5000;     // Time to wait for ACK
-    uint32_t turnaround_ms = 100;       // TX to RX switch time
-    int max_retries = 5;                // Max retransmission attempts
-};
-
-// ARQ statistics
-struct ARQStats {
-    int frames_sent = 0;
-    int frames_received = 0;
-    int acks_sent = 0;
-    int acks_received = 0;
-    int retransmissions = 0;
-    int timeouts = 0;
-    int failed = 0;                     // Exceeded max retries
-};
-
 /**
- * Simple Stop-and-Wait ARQ Controller
+ * Stop-and-Wait ARQ Controller
  *
- * Half-duplex operation suitable for HF:
+ * Simple half-duplex ARQ suitable for HF:
  * 1. Send frame, wait for ACK
  * 2. If ACK received, send next frame
  * 3. If timeout, retransmit (up to max_retries)
  * 4. If max retries exceeded, report failure
  *
- * Also handles incoming frames and generates ACKs.
+ * This is the simplest ARQ mode - one frame at a time.
+ * Use Selective Repeat for higher throughput.
  */
-class ARQController {
+class StopAndWaitARQ : public IARQController {
 public:
-    // Callback types
-    using TransmitCallback = std::function<void(const Frame&)>;
-    using DataReceivedCallback = std::function<void(const Bytes& data)>;
-    using SendCompleteCallback = std::function<void(bool success)>;
+    explicit StopAndWaitARQ(const ARQConfig& config = ARQConfig{});
 
-    explicit ARQController(const ARQConfig& config = ARQConfig{});
+    // --- IARQController Interface ---
 
-    // Set local and remote callsigns (must be set before use)
-    void setCallsigns(const std::string& local, const std::string& remote);
+    ARQMode getMode() const override { return ARQMode::STOP_AND_WAIT; }
 
-    // --- TX Side ---
+    void setCallsigns(const std::string& local, const std::string& remote) override;
 
-    // Queue data for transmission (will be sent as DATA frame)
-    // Returns false if already waiting for ACK (busy)
-    bool sendData(const Bytes& data);
-    bool sendData(const std::string& text);
+    bool sendData(const Bytes& data) override;
+    bool sendData(const std::string& text) override;
+    bool sendDataWithFlags(const Bytes& data, uint8_t flags) override;
 
-    // Send data with specific frame flags (e.g., MORE_DATA for file chunks)
-    bool sendDataWithFlags(const Bytes& data, uint8_t flags);
+    bool isReadyToSend() const override;
+    size_t getAvailableSlots() const override { return isReadyToSend() ? 1 : 0; }
 
-    // Check if ready to send (not waiting for ACK)
-    bool isReadyToSend() const;
+    bool lastRxHadMoreData() const override { return last_rx_more_data_; }
+    uint8_t lastRxFlags() const override { return last_rx_flags_; }
 
-    // Check if MORE_DATA flag was set on last received frame
-    bool lastRxHadMoreData() const { return last_rx_more_data_; }
+    void onFrameReceived(const Frame& frame) override;
 
-    // Get flags from last received frame
-    uint8_t lastRxFlags() const { return last_rx_flags_; }
+    void tick(uint32_t elapsed_ms) override;
 
-    // --- RX Side ---
+    void setTransmitCallback(TransmitCallback cb) override;
+    void setDataReceivedCallback(DataReceivedCallback cb) override;
+    void setSendCompleteCallback(SendCompleteCallback cb) override;
 
-    // Process a received frame (could be DATA, ACK, NAK, etc.)
-    // Returns true if an ACK should be transmitted
-    void onFrameReceived(const Frame& frame);
+    ARQStats getStats() const override { return stats_; }
+    void resetStats() override { stats_ = ARQStats{}; }
 
-    // --- Timing ---
-
-    // Call periodically (from main loop) to handle timeouts
-    // Pass elapsed milliseconds since last call
-    void tick(uint32_t elapsed_ms);
-
-    // --- Callbacks ---
-
-    // Set callback for frames that need to be transmitted
-    void setTransmitCallback(TransmitCallback cb);
-
-    // Set callback for received data (after ACK is queued)
-    void setDataReceivedCallback(DataReceivedCallback cb);
-
-    // Set callback for send completion (success/failure)
-    void setSendCompleteCallback(SendCompleteCallback cb);
-
-    // --- State ---
-
-    ARQStats getStats() const { return stats_; }
-    void resetStats() { stats_ = ARQStats{}; }
-
-    // Reset ARQ state (on disconnect, etc.)
-    void reset();
+    void reset() override;
 
 private:
     enum class State {
@@ -140,6 +95,9 @@ private:
     void retransmit();
     void sendFailed();
 };
+
+// Backward-compatible alias
+using ARQController = StopAndWaitARQ;
 
 } // namespace protocol
 } // namespace ultra

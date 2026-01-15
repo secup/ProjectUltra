@@ -286,6 +286,7 @@ void Connection::onFrameReceived(const Frame& frame) {
         case FrameType::DATA:
         case FrameType::ACK:
         case FrameType::NAK:
+        case FrameType::SACK:
             // Pass to ARQ layer
             if (state_ == ConnectionState::CONNECTED) {
                 arq_.onFrameReceived(frame);
