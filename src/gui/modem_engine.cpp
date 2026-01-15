@@ -10,11 +10,17 @@ ModemEngine::ModemEngine() {
     config_ = presets::balanced();
 
     encoder_ = std::make_unique<LDPCEncoder>(config_.code_rate);
-    decoder_ = std::make_unique<LDPCDecoder>(config_.code_rate);
 
-    // OFDM modulator/demodulator (always available - used for control frames)
+    // OFDM modulator uses config (TX modulation is determined per-frame)
     ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
-    ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+    // RX starts in disconnected state, so use BPSK R1/4 for link establishment
+    // This will be switched to negotiated mode when setConnected(true) is called
+    ModemConfig rx_config = config_;
+    rx_config.modulation = Modulation::BPSK;
+    rx_config.code_rate = CodeRate::R1_4;
+    decoder_ = std::make_unique<LDPCDecoder>(rx_config.code_rate);
+    ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
     // OTFS modulator/demodulator (used for data frames when negotiated)
     otfs_config_.M = config_.num_carriers;
@@ -102,19 +108,56 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         return {};
     }
 
-    // Adaptive modulation: adjust mode based on measured SNR
-    if (config_.speed_profile == SpeedProfile::ADAPTIVE) {
+    // Determine if this is a link establishment frame
+    // These must use robust modulation (BPSK R1/4) to get through at any SNR
+    // Frame format: [MAGIC:1][TYPE:1][...]
+    bool is_link_frame = false;
+    if (data.size() >= 2 && data[0] == protocol::Frame::MAGIC) {
+        uint8_t frame_type = data[1];
+        // Link establishment frames that must work in poor conditions
+        is_link_frame = (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
+                         frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
+                         frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
+                         frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK) ||
+                         frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_NAK) ||
+                         frame_type == static_cast<uint8_t>(protocol::FrameType::BEACON));
+    }
+
+    // Select modulation and code rate
+    Modulation tx_modulation;
+    CodeRate tx_code_rate;
+
+    if (is_link_frame) {
+        // Link establishment: Always use most robust mode (works down to ~5 dB SNR)
+        tx_modulation = Modulation::BPSK;
+        tx_code_rate = CodeRate::R1_4;
+    } else if (connected_) {
+        // Connected: Use negotiated mode (from probing/adaptive)
+        tx_modulation = data_modulation_;
+        tx_code_rate = data_code_rate_;
+    } else {
+        // Fallback: Use robust mode
+        tx_modulation = Modulation::BPSK;
+        tx_code_rate = CodeRate::R1_4;
+    }
+
+    // Adaptive modulation: update data mode based on measured SNR
+    // (Only affects data frames, not link establishment)
+    if (connected_ && config_.speed_profile == SpeedProfile::ADAPTIVE) {
         float snr = getCurrentSNR();
         if (adaptive_.update(snr)) {
-            // Mode changed - update config
-            config_.modulation = adaptive_.getModulation();
-            config_.code_rate = adaptive_.getCodeRate();
-            encoder_->setRate(config_.code_rate);
-            // Note: modulator uses modulation per-call, no recreation needed
+            // Mode changed - update data mode
+            data_modulation_ = adaptive_.getModulation();
+            data_code_rate_ = adaptive_.getCodeRate();
+            if (!is_link_frame) {
+                tx_modulation = data_modulation_;
+                tx_code_rate = data_code_rate_;
+            }
         }
     }
 
-    // Step 1: LDPC encode
+    // Step 1: LDPC encode with appropriate code rate
+    encoder_->setRate(tx_code_rate);
     Bytes encoded = encoder_->encode(data);
 
     // Step 1.5: Interleave (optional - spreads burst errors for LDPC decoder)
@@ -123,8 +166,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     // Step 2: Generate preamble
     Samples preamble = ofdm_modulator_->generatePreamble();
 
-    // Step 3: OFDM modulate
-    Samples modulated = ofdm_modulator_->modulate(to_modulate, config_.modulation);
+    // Step 3: OFDM modulate with appropriate modulation
+    Samples modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
 
     // Step 4: Combine preamble + data
     std::vector<float> output;
@@ -209,7 +252,7 @@ bool ModemEngine::pollRxAudio() {
     // Now do the slow processing with rx_mutex_
     std::lock_guard<std::mutex> lock(rx_mutex_);
 
-    LOG_MODEM(DEBUG, "pollRxAudio: got %zu new samples", new_samples.size());
+    LOG_MODEM(INFO, "pollRxAudio: got %zu new samples, buffer=%zu", new_samples.size(), rx_sample_buffer_.size());
 
     rx_sample_buffer_.insert(rx_sample_buffer_.end(), new_samples.begin(), new_samples.end());
 
@@ -227,7 +270,7 @@ void ModemEngine::processRxBuffer() {
         return;
     }
 
-    LOG_MODEM(DEBUG, "RX: Processing %zu samples...", rx_sample_buffer_.size());
+    LOG_MODEM(INFO, "RX: Processing %zu samples (synced=%d)...", rx_sample_buffer_.size(), ofdm_demodulator_->isSynced());
 
     // Feed samples to demodulator (it maintains its own buffer)
     SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());
@@ -450,6 +493,111 @@ void ModemEngine::setCarrierSenseThreshold(float threshold) {
 
 float ModemEngine::getCarrierSenseThreshold() const {
     return carrier_sense_threshold_;
+}
+
+// === Waveform Mode Control ===
+
+// Helper to get mode description string
+static const char* getModeDescription(Modulation mod, CodeRate rate) {
+    switch (mod) {
+        case Modulation::BPSK:
+            return rate == CodeRate::R1_4 ? "BPSK R1/4" : "BPSK R1/2";
+        case Modulation::QPSK:
+            return rate == CodeRate::R1_2 ? "QPSK R1/2" : "QPSK R2/3";
+        case Modulation::QAM16:
+            return rate == CodeRate::R2_3 ? "16-QAM R2/3" : "16-QAM R3/4";
+        case Modulation::QAM64:
+            return rate == CodeRate::R3_4 ? "64-QAM R3/4" : "64-QAM R5/6";
+        default:
+            return "Unknown";
+    }
+}
+
+void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
+    waveform_mode_ = mode;
+    // Future: Switch between OFDM and OTFS modulator/demodulator here
+}
+
+void ModemEngine::setConnected(bool connected) {
+    if (connected_ == connected) return;
+
+    connected_ = connected;
+
+    if (connected) {
+        // Switching to connected state - use negotiated data mode for RX
+        // Create new config with data mode settings
+        ModemConfig rx_config = config_;
+        rx_config.modulation = data_modulation_;
+        rx_config.code_rate = data_code_rate_;
+
+        // Update decoder rate
+        decoder_->setRate(data_code_rate_);
+
+        // Recreate demodulator with new config (resets sync state)
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+
+        LOG_MODEM(INFO, "Switched to connected mode: %s (RX: %d-ary, R%d)",
+                  getModeDescription(data_modulation_, data_code_rate_),
+                  1 << static_cast<int>(data_modulation_),
+                  static_cast<int>(data_code_rate_));
+    } else {
+        // Switching to disconnected state - use robust mode for RX
+        ModemConfig rx_config = config_;
+        rx_config.modulation = Modulation::BPSK;
+        rx_config.code_rate = CodeRate::R1_4;
+
+        decoder_->setRate(CodeRate::R1_4);
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+
+        LOG_MODEM(INFO, "Switched to disconnected mode (RX: BPSK R1/4)");
+    }
+}
+
+void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
+    data_modulation_ = mod;
+    data_code_rate_ = rate;
+
+    // If already connected, update RX immediately
+    if (connected_) {
+        ModemConfig rx_config = config_;
+        rx_config.modulation = mod;
+        rx_config.code_rate = rate;
+
+        decoder_->setRate(rate);
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+    }
+
+    LOG_MODEM(INFO, "Data mode set to: %s", getModeDescription(mod, rate));
+}
+
+void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
+    // Use same thresholds as AdaptiveModeController for consistency
+    // Thresholds calibrated for pilot-based SNR measurement
+    if (snr_db > 38.0f) {
+        mod = Modulation::QAM64;
+        rate = CodeRate::R5_6;
+    } else if (snr_db > 34.0f) {
+        mod = Modulation::QAM64;
+        rate = CodeRate::R3_4;
+    } else if (snr_db > 30.0f) {
+        mod = Modulation::QAM16;
+        rate = CodeRate::R3_4;
+    } else if (snr_db > 26.0f) {
+        mod = Modulation::QAM16;
+        rate = CodeRate::R2_3;
+    } else if (snr_db > 24.0f) {
+        mod = Modulation::QPSK;
+        rate = CodeRate::R2_3;
+    } else if (snr_db > 22.0f) {
+        mod = Modulation::QPSK;
+        rate = CodeRate::R1_2;
+    } else if (snr_db > 18.0f) {
+        mod = Modulation::BPSK;
+        rate = CodeRate::R1_2;
+    } else {
+        mod = Modulation::BPSK;
+        rate = CodeRate::R1_4;
+    }
 }
 
 } // namespace gui

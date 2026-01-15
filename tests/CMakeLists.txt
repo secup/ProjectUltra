@@ -66,3 +66,17 @@ target_include_directories(test_adaptive_mode PRIVATE
 )
 target_link_libraries(test_adaptive_mode PRIVATE ultra_core)
 add_test(NAME AdaptiveMode COMMAND test_adaptive_mode)
+
+# MIL-STD-188-110B Comparison Benchmark
+# Measures SNR thresholds for BER < 10^-3 and 10^-5 to compare with MIL-STD
+add_executable(benchmark_milstd benchmark_milstd.cpp)
+target_include_directories(benchmark_milstd PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
+)
+target_link_libraries(benchmark_milstd PRIVATE ultra_core)
+
+# Adaptive Link Establishment Test (PROBE/CONNECT through full modem - CRITICAL)
+# Tests adaptive modulation selection and link establishment at various SNR levels
+add_executable(test_adaptive_link test_adaptive_link.cpp)
+target_link_libraries(test_adaptive_link PRIVATE ultra_core)
+add_test(NAME AdaptiveLink COMMAND test_adaptive_link)

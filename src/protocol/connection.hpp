@@ -243,6 +243,7 @@ private:
     // Channel probing state
     ChannelReport last_channel_report_;  // Last received channel report
     bool probe_complete_ = false;        // True if we have a valid channel report
+    bool connect_after_probe_ = false;   // If true, auto-connect after probe completes
 
     // Statistics
     ConnectionStats stats_;

@@ -13,6 +13,7 @@
 #include <mutex>
 #include <functional>
 #include <string>
+#include <atomic>  // For std::atomic<float>
 
 namespace ultra {
 namespace gui {
@@ -116,12 +117,26 @@ public:
     void setConnected(bool connected);
     bool isConnected() const { return connected_; }
 
+    // Set negotiated data modulation (called after probing determines channel quality)
+    // Both TX and RX will use this mode for DATA frames after connection
+    void setDataMode(Modulation mod, CodeRate rate);
+    Modulation getDataModulation() const { return data_modulation_; }
+    CodeRate getDataCodeRate() const { return data_code_rate_; }
+
+    // Compute recommended data mode from SNR (uses AdaptiveModeController thresholds)
+    static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate);
+
 private:
     ModemConfig config_;
 
     // Waveform mode state
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM;
     bool connected_ = false;
+
+    // Data frame modulation (negotiated after probing)
+    // Link establishment frames always use BPSK R1/4
+    Modulation data_modulation_ = Modulation::QPSK;
+    CodeRate data_code_rate_ = CodeRate::R1_2;
 
     // TX chain - OFDM (always available, used for control frames)
     std::unique_ptr<LDPCEncoder> encoder_;

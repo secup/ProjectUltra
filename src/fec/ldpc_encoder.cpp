@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <bitset>
 #include <random>
+#include <algorithm>  // For std::shuffle
 
 namespace ultra {
 

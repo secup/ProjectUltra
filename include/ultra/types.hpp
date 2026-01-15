@@ -114,7 +114,7 @@ struct ModemConfig {
     bool decision_directed = true;      // Use past decisions as reference
 
     // Synchronization settings
-    float sync_threshold = 0.90f;       // Correlation threshold for sync (0.7-0.95)
+    float sync_threshold = 0.75f;       // Correlation threshold for sync (0.7-0.95)
 
     // ARQ settings
     uint32_t frame_size = 256;         // Bytes per frame

@@ -76,19 +76,19 @@ bool Connection::connect(const std::string& remote_call) {
         return false;
     }
 
-    LOG_MODEM(INFO, "Connection: Connecting to %s (caps=0x%02X, pref=%s)",
-              remote_call_.c_str(), config_.mode_capabilities,
-              waveformModeToString(config_.preferred_mode));
+    LOG_MODEM(INFO, "Connection: Connecting to %s (probing first for optimal mode)",
+              remote_call_.c_str());
 
-    // Send CONNECT frame with our mode capabilities and preference
-    Frame connect_frame = Frame::makeConnect(local_call_, remote_call_,
-                                             config_.mode_capabilities,
-                                             config_.preferred_mode);
-    transmitFrame(connect_frame);
+    // Start with PROBE to measure channel quality, then auto-connect with optimal mode
+    // This ensures we always use the best modulation for current channel conditions
+    Frame probe_frame = Frame::makeProbe(local_call_, remote_call_, config_.mode_capabilities);
+    transmitFrame(probe_frame);
 
-    state_ = ConnectionState::CONNECTING;
-    connect_retry_count_ = 0;
-    timeout_remaining_ms_ = config_.connect_timeout_ms;
+    state_ = ConnectionState::PROBING;
+    probe_retry_count_ = 0;
+    probe_complete_ = false;
+    connect_after_probe_ = true;  // Auto-connect after probe completes
+    timeout_remaining_ms_ = config_.probe_timeout_ms;
     stats_.connects_initiated++;
 
     return true;
@@ -162,6 +162,7 @@ bool Connection::probe(const std::string& remote_call) {
     state_ = ConnectionState::PROBING;
     probe_retry_count_ = 0;
     probe_complete_ = false;
+    connect_after_probe_ = false;  // Standalone probe - don't auto-connect
     timeout_remaining_ms_ = config_.probe_timeout_ms;
 
     return true;
@@ -652,12 +653,33 @@ void Connection::handleProbeAck(const Frame& frame) {
     // Store remote capabilities for later negotiation
     remote_capabilities_ = report.capabilities;
 
-    // Return to DISCONNECTED state - user can now call connectAfterProbe()
-    state_ = ConnectionState::DISCONNECTED;
-
-    // Notify callback
+    // Notify callback (before potentially transitioning to CONNECTING)
     if (on_probe_complete_) {
         on_probe_complete_(report);
+    }
+
+    // Auto-connect if this was initiated via connect() (not standalone probe())
+    if (connect_after_probe_) {
+        connect_after_probe_ = false;
+
+        // Use recommended mode from channel report as our preference
+        config_.preferred_mode = report.recommended_mode;
+
+        LOG_MODEM(INFO, "Connection: Auto-connecting to %s (recommended mode: %s)",
+                  remote_call_.c_str(), waveformModeToString(config_.preferred_mode));
+
+        // Send CONNECT frame with optimal mode
+        Frame connect_frame = Frame::makeConnect(local_call_, remote_call_,
+                                                 config_.mode_capabilities,
+                                                 config_.preferred_mode);
+        transmitFrame(connect_frame);
+
+        state_ = ConnectionState::CONNECTING;
+        connect_retry_count_ = 0;
+        timeout_remaining_ms_ = config_.connect_timeout_ms;
+    } else {
+        // Standalone probe - return to DISCONNECTED, user can call connectAfterProbe()
+        state_ = ConnectionState::DISCONNECTED;
     }
 }
 
@@ -834,10 +856,13 @@ void Connection::reset() {
     pending_remote_call_.clear();
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
+    probe_retry_count_ = 0;
     connected_time_ms_ = 0;
     negotiated_mode_ = WaveformMode::OFDM;
     remote_capabilities_ = ModeCapabilities::OFDM;
     remote_preferred_ = WaveformMode::OFDM;
+    probe_complete_ = false;
+    connect_after_probe_ = false;
     arq_.reset();
     file_transfer_.cancel();
     LOG_MODEM(DEBUG, "Connection: Full reset");

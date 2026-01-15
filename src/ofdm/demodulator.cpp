@@ -925,6 +925,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         constexpr size_t STEP_SIZE = 8;  // Check every 8th sample
         constexpr size_t MAX_ITERATIONS = 300;  // Limit work per frame (~2400 samples)
         size_t iterations = 0;
+        size_t energy_skips = 0;
         size_t i = impl_->search_offset;
 
         // Track max correlation for debugging
@@ -936,6 +937,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             if (!impl_->hasMinimumEnergy(i, correlation_window)) {
                 i += correlation_window / 2;  // Skip ahead by half window
                 ++iterations;
+                ++energy_skips;
                 continue;
             }
 
@@ -960,7 +962,9 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             ++iterations;
         }
 
-        // Log max correlation when sync fails to help debug
+        // Log max correlation to help debug (always log at INFO level)
+        LOG_SYNC(INFO, "Sync search: %zu iter (%zu energy skips), max_corr=%.3f @ %zu (thresh=%.2f), buf=%zu",
+                iterations, energy_skips, max_corr_found, max_corr_offset, impl_->sync_threshold, impl_->rx_buffer.size());
         if (!found_sync && max_corr_found > 0.5f) {
             LOG_SYNC(DEBUG, "Sync failed: max_corr=%.3f at offset=%zu (threshold=%.2f)",
                     max_corr_found, max_corr_offset, impl_->sync_threshold);

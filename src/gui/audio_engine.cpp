@@ -267,11 +267,17 @@ void AudioEngine::addChannelNoise(std::vector<float>& samples) {
     float snr_db = loopback_snr_db_.load();
 
     // Skip noise entirely for very high SNR (clean testing mode)
-    if (snr_db >= 100.0f) {
+    if (snr_db >= 50.0f) {
         return;  // No noise added - perfect loopback
     }
 
-    float noise_std = std::pow(10.0f, -snr_db / 20.0f);
+    // Calculate noise stddev from SNR (power ratio)
+    // SNR = 10 * log10(signal_power / noise_power)
+    // Assume signal power = 0.5 (normalized audio)
+    float signal_power = 0.5f;
+    float snr_linear = std::pow(10.0f, snr_db / 10.0f);
+    float noise_power = signal_power / snr_linear;
+    float noise_stddev = std::sqrt(noise_power);
 
     // Simple AWGN using Box-Muller transform
     for (size_t i = 0; i < samples.size(); ++i) {
@@ -285,7 +291,7 @@ void AudioEngine::addChannelNoise(std::vector<float>& samples) {
         if (u1 < 1e-10f) u1 = 1e-10f;
         float noise = std::sqrt(-2.0f * std::log(u1)) * std::cos(2.0f * M_PI * u2);
 
-        samples[i] += noise * noise_std * 0.1f;  // Scale noise to signal level
+        samples[i] += noise * noise_stddev;
     }
 }
 
