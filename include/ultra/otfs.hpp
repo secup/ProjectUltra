@@ -36,6 +36,7 @@ struct OTFSConfig {
     uint32_t cp_length = 64;   // Cyclic prefix length
     uint32_t sample_rate = 48000;
     float center_freq = 1500.0f;
+    Modulation modulation = Modulation::QPSK;  // Modulation for soft demapping
 
     // TF-domain pilot configuration (OFDM-style channel estimation)
     // Pilots are inserted in the TF grid for per-symbol channel estimation

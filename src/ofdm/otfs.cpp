@@ -641,7 +641,7 @@ bool OTFSDemodulator::process(SampleSpan samples) {
             // Step 4: Generate soft bits from DD symbols
             impl_->soft_bits.clear();
             for (const auto& sym : impl_->dd_symbols) {
-                softDemap(sym, Modulation::QPSK, impl_->estimated_noise_var, impl_->soft_bits);
+                softDemap(sym, impl_->config.modulation, impl_->estimated_noise_var, impl_->soft_bits);
             }
 
             impl_->state = Impl::State::SEARCHING;
