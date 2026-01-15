@@ -22,6 +22,23 @@ ProjectUltra is a software modem designed for reliable data transfer over HF rad
 
 ---
 
+## Speed
+
+| Mode | Code Rate | Raw Rate | Typical Use |
+|------|-----------|----------|-------------|
+| BPSK | R1/4 | 540 bps | Polar flutter, worst conditions |
+| BPSK | R1/2 | 1.1 kbps | Poor/disturbed paths |
+| QPSK | R1/2 | 2.1 kbps | Moderate conditions, reliable |
+| QPSK | R3/4 | 3.2 kbps | Good conditions |
+| 16-QAM | R1/2 | 4.3 kbps | Good SNR |
+| 16-QAM | R3/4 | 6.4 kbps | Very good conditions |
+| 64-QAM | R3/4 | 9.6 kbps | Excellent SNR |
+| 64-QAM | R5/6 | 10.7 kbps | Near-ideal channel |
+
+*Rates are theoretical maximums. Actual throughput depends on ARQ retransmissions and channel conditions.*
+
+---
+
 ## Performance
 
 Tested against **ITU-R F.1487** Watterson HF channel model at 15 dB SNR:
