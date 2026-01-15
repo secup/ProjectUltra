@@ -135,6 +135,7 @@ This eliminates dedicated probe frames while maintaining accurate channel awaren
 
 - macOS, Linux, or Windows
 - HF transceiver with audio I/O
+- **SSB filter width: 2.8 kHz or wider** (signal bandwidth is ~2.8 kHz)
 - Sound card interface (SignaLink, RigBlaster, etc.) or direct connection
 
 ### Building
@@ -211,12 +212,16 @@ Two virtual stations (TEST1, TEST2) with cross-wired audio for development:
 |-----------|-------|
 | Sample Rate | 48 kHz |
 | FFT Size | 512 |
-| Bandwidth | ~2.8 kHz |
-| Center Frequency | 1500 Hz |
+| Subcarrier Spacing | 93.75 Hz |
+| Total Subcarriers | 30 |
 | Data Subcarriers | 25 |
 | Pilot Subcarriers | 5 (every 6th) |
+| **Signal Bandwidth** | **~2.8 kHz** |
+| Center Frequency | 1500 Hz |
 | Symbol Duration | ~11 ms |
 | Cyclic Prefix | Adaptive (SHORT/MEDIUM/LONG) |
+
+> **Note:** Requires SSB filter set to 2.8 kHz or wider. Standard 2.4 kHz filters will attenuate upper subcarriers.
 
 ### OTFS Parameters
 
