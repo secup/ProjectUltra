@@ -519,15 +519,27 @@ void App::initProtocolTest() {
 
 void App::processTestChannel(std::vector<float>& samples) {
     // Add AWGN noise based on SNR slider
-    if (snr_slider_ >= 50.0f) {
+    if (snr_slider_ >= 50.0f || samples.empty()) {
         return;  // SNR >= 50 dB means essentially no noise
     }
 
-    // Calculate noise amplitude from SNR
+    // Calculate actual signal RMS (like test suite does)
+    float sum_sq = 0.0f;
+    for (float s : samples) {
+        sum_sq += s * s;
+    }
+    float signal_rms = std::sqrt(sum_sq / samples.size());
+
+    // Avoid division by zero for silent buffers
+    if (signal_rms < 1e-6f) {
+        return;
+    }
+
+    // Calculate noise stddev for target SNR
     // SNR = 10 * log10(signal_power / noise_power)
-    // Assume signal power = 0.5 (normalized)
-    float signal_power = 0.5f;
+    // noise_power = signal_power / 10^(SNR/10)
     float snr_linear = std::pow(10.0f, snr_slider_ / 10.0f);
+    float signal_power = signal_rms * signal_rms;
     float noise_power = signal_power / snr_linear;
     float noise_stddev = std::sqrt(noise_power);
 
