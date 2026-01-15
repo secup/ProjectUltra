@@ -58,3 +58,11 @@ target_include_directories(benchmark_otfs PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
 )
 target_link_libraries(benchmark_otfs PRIVATE ultra_core)
+
+# Adaptive Mode Selection Tests
+add_executable(test_adaptive_mode test_adaptive_mode.cpp)
+target_include_directories(test_adaptive_mode PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
+)
+target_link_libraries(test_adaptive_mode PRIVATE ultra_core)
+add_test(NAME AdaptiveMode COMMAND test_adaptive_mode)

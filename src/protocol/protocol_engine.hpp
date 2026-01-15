@@ -43,6 +43,12 @@ public:
     using FileReceivedCallback = Connection::FileReceivedCallback;
     using FileSentCallback = Connection::FileSentCallback;
 
+    // Mode negotiation callback
+    using ModeNegotiatedCallback = Connection::ModeNegotiatedCallback;
+
+    // Channel probing callback
+    using ProbeCompleteCallback = Connection::ProbeCompleteCallback;
+
     explicit ProtocolEngine(const ConnectionConfig& config = ConnectionConfig{});
 
     // --- Configuration ---
@@ -67,6 +73,28 @@ public:
     void acceptCall();
     void rejectCall();
     void disconnect();
+
+    // --- Channel Probing (Link Establishment) ---
+
+    // Probe channel to remote station (measures SNR, delay/Doppler spread)
+    // After probe completes, call connectAfterProbe() to connect
+    bool probe(const std::string& remote_call);
+
+    // Connect using probe results (uses recommended mode from channel report)
+    bool connectAfterProbe();
+
+    // Check if probing is in progress
+    bool isProbing() const;
+
+    // Get last channel report (valid after probe completes)
+    const ChannelReport& getLastChannelReport() const;
+
+    // Set callback for when probe completes
+    void setProbeCompleteCallback(ProbeCompleteCallback cb);
+
+    // Set channel measurement provider (modem provides channel quality)
+    using ChannelMeasurementCallback = Connection::ChannelMeasurementCallback;
+    void setChannelMeasurementCallback(ChannelMeasurementCallback cb);
 
     // --- Data Transfer ---
 
@@ -102,6 +130,20 @@ public:
     ConnectionStats getStats() const;
     void resetStats();
     void reset();
+
+    // --- Waveform Mode ---
+
+    // Get the negotiated waveform mode (valid after connection established)
+    WaveformMode getNegotiatedMode() const;
+
+    // Set preferred mode for outgoing connections
+    void setPreferredMode(WaveformMode mode);
+
+    // Set which modes this station supports
+    void setModeCapabilities(uint8_t caps);
+
+    // Callback when mode is negotiated
+    void setModeNegotiatedCallback(ModeNegotiatedCallback cb);
 
 private:
     Connection connection_;

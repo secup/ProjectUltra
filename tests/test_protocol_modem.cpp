@@ -505,6 +505,134 @@ bool test_various_frame_sizes() {
 }
 
 // ============================================================================
+// Mode Negotiation Tests
+// ============================================================================
+
+bool test_mode_negotiation_default() {
+    TEST("Mode negotiation (default OFDM)");
+
+    TestStation alice("Alice", "TEST1");
+    TestStation bob("Bob", "TEST2");
+
+    // Track negotiated modes
+    WaveformMode alice_mode = WaveformMode::AUTO;
+    WaveformMode bob_mode = WaveformMode::AUTO;
+
+    alice.protocol->setModeNegotiatedCallback([&](WaveformMode m) {
+        alice_mode = m;
+        std::cout << "\n      Alice negotiated: " << waveformModeToString(m);
+    });
+    bob.protocol->setModeNegotiatedCallback([&](WaveformMode m) {
+        bob_mode = m;
+        std::cout << "\n      Bob negotiated: " << waveformModeToString(m);
+    });
+
+    // Both stations support all modes, no preference (AUTO)
+    // Should default to OFDM as most compatible
+    alice.protocol->setModeCapabilities(ModeCapabilities::ALL);
+    bob.protocol->setModeCapabilities(ModeCapabilities::ALL);
+    alice.protocol->setPreferredMode(WaveformMode::AUTO);
+    bob.protocol->setPreferredMode(WaveformMode::AUTO);
+
+    // Alice connects to Bob
+    alice.protocol->connect("TEST2");
+
+    // Run exchange until connected
+    for (int i = 0; i < 20 && !alice.connected; i++) {
+        runExchange(alice, bob, 1, 100);
+    }
+
+    if (!alice.connected) FAIL("Connection failed");
+
+    // Both should have negotiated to OFDM (default)
+    std::cout << "\n";
+    if (alice.protocol->getNegotiatedMode() != WaveformMode::OFDM) {
+        FAIL("Alice didn't negotiate to OFDM");
+    }
+    if (bob.protocol->getNegotiatedMode() != WaveformMode::OFDM) {
+        FAIL("Bob didn't negotiate to OFDM");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_mode_negotiation_otfs_eq_preference() {
+    TEST("Mode negotiation (OTFS-EQ preference)");
+
+    TestStation alice("Alice", "TEST1");
+    TestStation bob("Bob", "TEST2");
+
+    // Alice prefers OTFS-EQ, Bob has no preference
+    alice.protocol->setModeCapabilities(ModeCapabilities::ALL);
+    bob.protocol->setModeCapabilities(ModeCapabilities::ALL);
+    alice.protocol->setPreferredMode(WaveformMode::OTFS_EQ);
+    bob.protocol->setPreferredMode(WaveformMode::AUTO);
+
+    alice.protocol->connect("TEST2");
+
+    for (int i = 0; i < 20 && !alice.connected; i++) {
+        runExchange(alice, bob, 1, 100);
+    }
+
+    if (!alice.connected) FAIL("Connection failed");
+
+    // Bob (responder) should honor Alice's preference
+    WaveformMode alice_mode = alice.protocol->getNegotiatedMode();
+    WaveformMode bob_mode = bob.protocol->getNegotiatedMode();
+
+    std::cout << "\n      Modes: Alice=" << waveformModeToString(alice_mode)
+              << ", Bob=" << waveformModeToString(bob_mode) << "\n";
+
+    if (alice_mode != bob_mode) FAIL("Modes don't match!");
+
+    // Responder should have chosen based on initiator's preference
+    if (bob_mode != WaveformMode::OTFS_EQ) {
+        FAIL("Bob didn't honor Alice's OTFS-EQ preference");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_mode_negotiation_capability_fallback() {
+    TEST("Mode negotiation (capability fallback)");
+
+    TestStation alice("Alice", "TEST1");
+    TestStation bob("Bob", "TEST2");
+
+    // Alice prefers OTFS-RAW but Bob only supports OFDM
+    alice.protocol->setModeCapabilities(ModeCapabilities::ALL);
+    bob.protocol->setModeCapabilities(ModeCapabilities::OFDM);  // Only OFDM
+    alice.protocol->setPreferredMode(WaveformMode::OTFS_RAW);
+    bob.protocol->setPreferredMode(WaveformMode::AUTO);
+
+    alice.protocol->connect("TEST2");
+
+    for (int i = 0; i < 20 && !alice.connected; i++) {
+        runExchange(alice, bob, 1, 100);
+    }
+
+    if (!alice.connected) FAIL("Connection failed");
+
+    WaveformMode alice_mode = alice.protocol->getNegotiatedMode();
+    WaveformMode bob_mode = bob.protocol->getNegotiatedMode();
+
+    std::cout << "\n      Modes: Alice=" << waveformModeToString(alice_mode)
+              << ", Bob=" << waveformModeToString(bob_mode) << "\n";
+
+    if (alice_mode != bob_mode) FAIL("Modes don't match!");
+
+    // Should fall back to OFDM (Bob's only supported mode)
+    if (alice_mode != WaveformMode::OFDM) {
+        FAIL("Didn't fall back to OFDM");
+    }
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
 // Reconnection Tests
 // ============================================================================
 
@@ -597,6 +725,11 @@ int main() {
 
     std::cout << "\nFrame Size Tests:\n";
     test_various_frame_sizes();
+
+    std::cout << "\nMode Negotiation Tests:\n";
+    test_mode_negotiation_default();
+    test_mode_negotiation_otfs_eq_preference();
+    test_mode_negotiation_capability_fallback();
 
     std::cout << "\nReconnection Tests:\n";
     test_reconnect_after_disconnect();

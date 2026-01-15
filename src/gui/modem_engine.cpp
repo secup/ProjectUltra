@@ -11,8 +11,20 @@ ModemEngine::ModemEngine() {
 
     encoder_ = std::make_unique<LDPCEncoder>(config_.code_rate);
     decoder_ = std::make_unique<LDPCDecoder>(config_.code_rate);
-    modulator_ = std::make_unique<OFDMModulator>(config_);
-    demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+    // OFDM modulator/demodulator (always available - used for control frames)
+    ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
+    ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+    // OTFS modulator/demodulator (used for data frames when negotiated)
+    otfs_config_.M = config_.num_carriers;
+    otfs_config_.N = 16;  // 16 OFDM symbols per OTFS frame
+    otfs_config_.fft_size = config_.fft_size;
+    otfs_config_.cp_length = config_.getCyclicPrefix();
+    otfs_config_.sample_rate = config_.sample_rate;
+    otfs_config_.center_freq = config_.center_freq;
+    otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
+    otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
     // Initialize audio filters
     rebuildFilters();
@@ -26,9 +38,18 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     encoder_->setRate(config.code_rate);
     decoder_->setRate(config.code_rate);
 
-    // Recreate modulator/demodulator with new config
-    modulator_ = std::make_unique<OFDMModulator>(config_);
-    demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+    // Recreate OFDM modulator/demodulator with new config
+    ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
+    ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+    // Recreate OTFS modulator/demodulator with new config
+    otfs_config_.M = config_.num_carriers;
+    otfs_config_.fft_size = config_.fft_size;
+    otfs_config_.cp_length = config_.getCyclicPrefix();
+    otfs_config_.sample_rate = config_.sample_rate;
+    otfs_config_.center_freq = config_.center_freq;
+    otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
+    otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
     // Rebuild filters with new sample rate
     rebuildFilters();
@@ -100,10 +121,10 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     Bytes to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;
 
     // Step 2: Generate preamble
-    Samples preamble = modulator_->generatePreamble();
+    Samples preamble = ofdm_modulator_->generatePreamble();
 
     // Step 3: OFDM modulate
-    Samples modulated = modulator_->modulate(to_modulate, config_.modulation);
+    Samples modulated = ofdm_modulator_->modulate(to_modulate, config_.modulation);
 
     // Step 4: Combine preamble + data
     std::vector<float> output;
@@ -200,7 +221,7 @@ bool ModemEngine::pollRxAudio() {
 void ModemEngine::processRxBuffer() {
     // Need at least one symbol worth of samples (or demodulator has pending data)
     size_t symbol_samples = config_.getSymbolDuration();
-    if (rx_sample_buffer_.size() < symbol_samples * 2 && !demodulator_->hasPendingData()) {
+    if (rx_sample_buffer_.size() < symbol_samples * 2 && !ofdm_demodulator_->hasPendingData()) {
         LOG_MODEM(TRACE, "RX: Not enough samples: %zu < %zu",
                   rx_sample_buffer_.size(), symbol_samples * 2);
         return;
@@ -215,12 +236,12 @@ void ModemEngine::processRxBuffer() {
     rx_sample_buffer_.clear();
 
     // Loop to process all available codewords (multi-codeword frames)
-    bool frame_ready = demodulator_->process(span);
+    bool frame_ready = ofdm_demodulator_->process(span);
 
     // Update SNR continuously when synced (not just after decode)
-    if (demodulator_->isSynced()) {
+    if (ofdm_demodulator_->isSynced()) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.snr_db = demodulator_->getEstimatedSNR();
+        stats_.snr_db = ofdm_demodulator_->getEstimatedSNR();
         stats_.synced = true;
     }
 
@@ -233,7 +254,7 @@ void ModemEngine::processRxBuffer() {
 
     while (frame_ready) {
         // Get soft bits from demodulator (one codeword worth = n bits)
-        auto soft_bits = demodulator_->getSoftBits();
+        auto soft_bits = ofdm_demodulator_->getSoftBits();
         LOG_MODEM(DEBUG, "RX: Codeword ready, got %zu soft bits", soft_bits.size());
 
         if (!soft_bits.empty()) {
@@ -250,7 +271,7 @@ void ModemEngine::processRxBuffer() {
 
         // Try to get next codeword from demodulator's internal buffer
         SampleSpan empty_span;
-        frame_ready = demodulator_->process(empty_span);
+        frame_ready = ofdm_demodulator_->process(empty_span);
     }
 
     // Now decode all accumulated soft bits at once (handles bit-level boundaries correctly)
@@ -307,7 +328,7 @@ void ModemEngine::processRxBuffer() {
             }
 
             // Update channel quality
-            ChannelQuality quality = demodulator_->getChannelQuality();
+            ChannelQuality quality = ofdm_demodulator_->getChannelQuality();
             stats_.snr_db = quality.snr_db;
             stats_.ber = quality.ber_estimate;
             stats_.synced = true;
@@ -349,7 +370,7 @@ LoopbackStats ModemEngine::getStats() const {
 
 bool ModemEngine::isSynced() const {
     // Query demodulator's actual state, not cached value
-    return demodulator_->isSynced();
+    return ofdm_demodulator_->isSynced();
 }
 
 float ModemEngine::getCurrentSNR() const {
@@ -357,8 +378,14 @@ float ModemEngine::getCurrentSNR() const {
     return stats_.snr_db;
 }
 
+ChannelQuality ModemEngine::getChannelQuality() const {
+    // Get channel quality from the demodulator
+    // This provides SNR, delay spread, Doppler spread, and BER estimate
+    return ofdm_demodulator_->getChannelQuality();
+}
+
 std::vector<std::complex<float>> ModemEngine::getConstellationSymbols() const {
-    return demodulator_->getConstellationSymbols();
+    return ofdm_demodulator_->getConstellationSymbols();
 }
 
 void ModemEngine::reset() {
@@ -374,7 +401,7 @@ void ModemEngine::reset() {
     std::queue<Bytes> empty;
     std::swap(rx_data_queue_, empty);
 
-    demodulator_->reset();
+    ofdm_demodulator_->reset();
     adaptive_.reset();
 
     // Reset carrier sense

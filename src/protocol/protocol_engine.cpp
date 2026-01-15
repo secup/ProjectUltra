@@ -104,6 +104,46 @@ void ProtocolEngine::disconnect() {
     }
 }
 
+// --- Channel Probing ---
+
+bool ProtocolEngine::probe(const std::string& remote_call) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool result = connection_.probe(remote_call);
+    if (result && on_connection_changed_) {
+        on_connection_changed_(ConnectionState::PROBING, remote_call);
+    }
+    return result;
+}
+
+bool ProtocolEngine::connectAfterProbe() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    bool result = connection_.connectAfterProbe();
+    if (result && on_connection_changed_) {
+        on_connection_changed_(ConnectionState::CONNECTING, connection_.getRemoteCallsign());
+    }
+    return result;
+}
+
+bool ProtocolEngine::isProbing() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.isProbing();
+}
+
+const ChannelReport& ProtocolEngine::getLastChannelReport() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getLastChannelReport();
+}
+
+void ProtocolEngine::setProbeCompleteCallback(ProbeCompleteCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setProbeCompleteCallback(std::move(cb));
+}
+
+void ProtocolEngine::setChannelMeasurementCallback(ChannelMeasurementCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setChannelMeasurementCallback(std::move(cb));
+}
+
 bool ProtocolEngine::sendMessage(const std::string& text) {
     std::lock_guard<std::mutex> lock(mutex_);
     return connection_.sendMessage(text);
@@ -334,6 +374,28 @@ void ProtocolEngine::handleTxFrame(const Frame& frame) {
         // Send immediately
         on_tx_data_(data);
     }
+}
+
+// --- Waveform Mode ---
+
+WaveformMode ProtocolEngine::getNegotiatedMode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getNegotiatedMode();
+}
+
+void ProtocolEngine::setPreferredMode(WaveformMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setPreferredMode(mode);
+}
+
+void ProtocolEngine::setModeCapabilities(uint8_t caps) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setModeCapabilities(caps);
+}
+
+void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setModeNegotiatedCallback(std::move(cb));
 }
 
 } // namespace protocol

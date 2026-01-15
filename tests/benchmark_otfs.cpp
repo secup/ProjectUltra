@@ -5,8 +5,11 @@
  * channel conditions, particularly focusing on doubly-selective channels
  * (Poor: 2ms delay, Flutter: 10Hz Doppler) where OTFS should excel.
  *
- * OTFS advantage: Works in delay-Doppler domain where channel is sparse
- * and quasi-static, even for severely time/frequency selective channels.
+ * OTFS has two modes:
+ *   tf_equalization=true:  Better for stable channels (Good), uses preamble estimate
+ *   tf_equalization=false: Better for challenging channels (Poor), leverages diversity
+ *
+ * This benchmark tests both modes to show when each is appropriate.
  */
 
 #include "../src/sim/hf_channel.hpp"
@@ -199,11 +202,13 @@ int main() {
     std::cout << "================================================================\n\n";
 
     std::cout << "OTFS (Orthogonal Time Frequency Space) is a 2D modulation\n";
-    std::cout << "designed for doubly-selective (delay + Doppler) channels.\n";
-    std::cout << "It works in the delay-Doppler domain where the channel is\n";
-    std::cout << "SPARSE and QUASI-STATIC, even for severe fading.\n\n";
+    std::cout << "designed for doubly-selective (delay + Doppler) channels.\n\n";
 
-    std::cout << "Test: QPSK R1/2 at 25 dB SNR, 50 frames per condition\n";
+    std::cout << "OTFS modes:\n";
+    std::cout << "  TF-EQ ON:  Uses preamble channel estimate (better for stable channels)\n";
+    std::cout << "  TF-EQ OFF: Raw SFFT provides diversity (better for severe fading)\n\n";
+
+    std::cout << "Test: QPSK R1/2 at 15 dB SNR (realistic HF), 50 frames per condition\n";
     std::cout << "================================================================\n\n";
 
     // OFDM configuration
@@ -217,13 +222,10 @@ int main() {
     ofdm_config.adaptive_eq_enabled = true;
     ofdm_config.lms_mu = 0.1f;
 
-    // OTFS configuration
-    // M and N must be powers of 2 for FFT
-    // M=32, N=16 = 512 symbols = 1024 bits (QPSK)
-    // LDPC R1/2 needs 648 bits, so we truncate soft bits
+    // OTFS base configuration
     OTFSConfig otfs_config;
-    otfs_config.M = 32;           // 32 delay bins (subcarriers)
-    otfs_config.N = 16;           // 16 Doppler bins (OFDM symbols)
+    otfs_config.M = 32;
+    otfs_config.N = 16;
     otfs_config.fft_size = 512;
     otfs_config.cp_length = 64;
     otfs_config.sample_rate = 48000;
@@ -236,53 +238,54 @@ int main() {
         int ofdm_pilot_spacing;
         const char* description;
     } channels[] = {
-        {"AWGN",     itu_r_f1487::awgn,     6, "No fading (baseline)"},
-        {"Good",     itu_r_f1487::good,     4, "0.5ms delay, 0.1Hz Doppler"},
-        {"Moderate", itu_r_f1487::moderate, 2, "1.0ms delay, 0.5Hz Doppler"},
-        {"Poor",     itu_r_f1487::poor,     2, "2.0ms delay, 1.0Hz Doppler"},
-        {"Flutter",  itu_r_f1487::flutter,  4, "0.5ms delay, 10Hz Doppler"},
+        {"AWGN",     itu_r_f1487::awgn,     6, "No fading"},
+        {"Good",     itu_r_f1487::good,     4, "0.5ms, 0.1Hz"},
+        {"Moderate", itu_r_f1487::moderate, 2, "1.0ms, 0.5Hz"},
+        {"Poor",     itu_r_f1487::poor,     2, "2.0ms, 1.0Hz"},
+        {"Flutter",  itu_r_f1487::flutter,  4, "0.5ms, 10Hz"},
     };
 
-    std::cout << std::setw(12) << "Channel"
-              << std::setw(10) << "OFDM"
-              << std::setw(10) << "OTFS"
-              << std::setw(12) << "Winner"
+    std::cout << std::setw(10) << "Channel"
+              << std::setw(8) << "OFDM"
+              << std::setw(10) << "OTFS-EQ"
+              << std::setw(10) << "OTFS-RAW"
+              << std::setw(10) << "Best"
               << "  Description\n";
     std::cout << std::string(70, '-') << "\n";
 
-    int ofdm_wins = 0;
-    int otfs_wins = 0;
-    int ties = 0;
-
     for (const auto& ch : channels) {
-        std::cout << std::setw(12) << ch.name << std::flush;
+        std::cout << std::setw(10) << ch.name << std::flush;
 
-        // Configure OFDM pilot spacing
         ofdm_config.pilot_spacing = ch.ofdm_pilot_spacing;
-
-        // Get channel config at 25 dB SNR
-        auto cfg = ch.getConfig(25.0f);
+        auto cfg = ch.getConfig(15.0f);  // 15 dB - realistic HF SNR
 
         // Measure OFDM FSR
         float ofdm_fsr = measureOFDM_FSR(ofdm_config, CodeRate::R1_2, cfg, 50);
-        std::cout << std::setw(9) << std::fixed << std::setprecision(0)
+        std::cout << std::setw(7) << std::fixed << std::setprecision(0)
                   << (ofdm_fsr * 100) << "%" << std::flush;
 
-        // Measure OTFS FSR
-        float otfs_fsr = measureOTFS_FSR(otfs_config, CodeRate::R1_2, cfg, 50);
+        // Measure OTFS with TF equalization
+        otfs_config.tf_equalization = true;
+        float otfs_eq_fsr = measureOTFS_FSR(otfs_config, CodeRate::R1_2, cfg, 50);
         std::cout << std::setw(9) << std::fixed << std::setprecision(0)
-                  << (otfs_fsr * 100) << "%";
+                  << (otfs_eq_fsr * 100) << "%" << std::flush;
 
-        // Determine winner
-        if (otfs_fsr > ofdm_fsr + 0.05f) {
-            std::cout << std::setw(12) << "OTFS";
-            otfs_wins++;
-        } else if (ofdm_fsr > otfs_fsr + 0.05f) {
-            std::cout << std::setw(12) << "OFDM";
-            ofdm_wins++;
+        // Measure OTFS without TF equalization (raw SFFT)
+        otfs_config.tf_equalization = false;
+        float otfs_raw_fsr = measureOTFS_FSR(otfs_config, CodeRate::R1_2, cfg, 50);
+        std::cout << std::setw(9) << std::fixed << std::setprecision(0)
+                  << (otfs_raw_fsr * 100) << "%";
+
+        // Determine best
+        float best_fsr = std::max({ofdm_fsr, otfs_eq_fsr, otfs_raw_fsr});
+        if (best_fsr == ofdm_fsr && ofdm_fsr > otfs_eq_fsr + 0.05f && ofdm_fsr > otfs_raw_fsr + 0.05f) {
+            std::cout << std::setw(10) << "OFDM";
+        } else if (best_fsr == otfs_eq_fsr && otfs_eq_fsr > ofdm_fsr + 0.05f) {
+            std::cout << std::setw(10) << "OTFS-EQ";
+        } else if (best_fsr == otfs_raw_fsr && otfs_raw_fsr > ofdm_fsr + 0.05f) {
+            std::cout << std::setw(10) << "OTFS-RAW";
         } else {
-            std::cout << std::setw(12) << "TIE";
-            ties++;
+            std::cout << std::setw(10) << "TIE";
         }
 
         std::cout << "  " << ch.description << "\n";
@@ -290,18 +293,10 @@ int main() {
 
     std::cout << std::string(70, '-') << "\n\n";
 
-    std::cout << "Summary:\n";
-    std::cout << "  OFDM wins: " << ofdm_wins << "\n";
-    std::cout << "  OTFS wins: " << otfs_wins << "\n";
-    std::cout << "  Ties: " << ties << "\n\n";
-
-    if (otfs_wins > ofdm_wins) {
-        std::cout << "OTFS shows improvement on challenging channels!\n";
-    } else if (ofdm_wins > otfs_wins) {
-        std::cout << "OFDM performs better - OTFS implementation may need tuning.\n";
-    } else {
-        std::cout << "Both perform similarly - may need different test conditions.\n";
-    }
+    std::cout << "Recommendation:\n";
+    std::cout << "  - Stable propagation (Good): Use OTFS with TF equalization\n";
+    std::cout << "  - Severe fading (Poor): Use OTFS without TF equalization\n";
+    std::cout << "  - Very fast fading (Flutter): Neither modulation works well\n";
 
     std::cout << "\n================================================================\n";
 

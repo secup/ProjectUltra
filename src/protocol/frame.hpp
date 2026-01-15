@@ -19,6 +19,8 @@ enum class FrameType : uint8_t {
     NAK         = 0x07,  // Request retransmission
     BEACON      = 0x08,  // CQ broadcast
     SACK        = 0x09,  // Selective ACK (for Selective Repeat ARQ)
+    PROBE       = 0x0A,  // Channel probing request (link establishment)
+    PROBE_ACK   = 0x0B,  // Channel report response
 };
 
 // Convert frame type to string for debugging
@@ -32,6 +34,43 @@ namespace FrameFlags {
     constexpr uint8_t COMPRESSED    = 0x04;  // Payload is compressed
     constexpr uint8_t ENCRYPTED     = 0x08;  // Payload is encrypted (future)
 }
+
+// Modulation modes for adaptive selection (negotiated in CONNECT)
+enum class WaveformMode : uint8_t {
+    OFDM     = 0x00,  // Standard OFDM (best for Moderate channels)
+    OTFS_EQ  = 0x01,  // OTFS with TF equalization (best for Good channels)
+    OTFS_RAW = 0x02,  // OTFS without TF eq (best for Poor channels)
+    AUTO     = 0xFF,  // Automatic selection (let receiver decide)
+};
+
+// Mode capabilities bitmap (for CONNECT payload)
+namespace ModeCapabilities {
+    constexpr uint8_t OFDM     = 0x01;
+    constexpr uint8_t OTFS_EQ  = 0x02;
+    constexpr uint8_t OTFS_RAW = 0x04;
+    constexpr uint8_t ALL      = OFDM | OTFS_EQ | OTFS_RAW;
+}
+
+const char* waveformModeToString(WaveformMode mode);
+
+// Channel report from PROBE_ACK (link establishment)
+// Contains measured channel parameters for mode selection
+struct ChannelReport {
+    float snr_db = 0.0f;           // Measured SNR (dB)
+    float delay_spread_ms = 0.0f;  // RMS delay spread (ms)
+    float doppler_spread_hz = 0.0f; // Doppler spread (Hz)
+    WaveformMode recommended_mode = WaveformMode::OFDM;
+    uint8_t capabilities = ModeCapabilities::ALL;
+
+    // Encode to bytes for transmission (5 bytes)
+    Bytes encode() const;
+
+    // Decode from bytes
+    static ChannelReport decode(const Bytes& data);
+
+    // Get human-readable channel condition
+    const char* getConditionName() const;
+};
 
 // Protocol frame structure
 //
@@ -93,20 +132,57 @@ struct Frame {
     static Frame makeSack(const std::string& src, const std::string& dst,
                           uint8_t base_seq, uint8_t bitmap);
 
-    // Create a CONNECT frame
-    static Frame makeConnect(const std::string& src, const std::string& dst);
+    // Create a CONNECT frame (with optional mode capabilities)
+    // Payload format: [capabilities:1B, preferred_mode:1B]
+    static Frame makeConnect(const std::string& src, const std::string& dst,
+                             uint8_t capabilities = ModeCapabilities::ALL,
+                             WaveformMode preferred = WaveformMode::AUTO);
 
-    // Create a CONNECT_ACK frame
-    static Frame makeConnectAck(const std::string& src, const std::string& dst);
+    // Create a CONNECT_ACK frame (with negotiated mode)
+    // Payload format: [negotiated_mode:1B]
+    static Frame makeConnectAck(const std::string& src, const std::string& dst,
+                                WaveformMode negotiated_mode = WaveformMode::OFDM);
+
+    // Create a CONNECT_ACK frame with channel report (for CQ responses / implicit probing)
+    // Payload format: [negotiated_mode:1B, channel_report:5B]
+    // The channel report contains the responder's measured channel conditions
+    static Frame makeConnectAckWithReport(const std::string& src, const std::string& dst,
+                                          WaveformMode negotiated_mode,
+                                          const ChannelReport& report);
 
     // Create a CONNECT_NAK frame
     static Frame makeConnectNak(const std::string& src, const std::string& dst);
+
+    // Parse mode info from CONNECT payload
+    static bool parseConnectPayload(const Bytes& payload,
+                                    uint8_t& capabilities, WaveformMode& preferred);
+
+    // Parse mode info from CONNECT_ACK payload
+    static bool parseConnectAckPayload(const Bytes& payload, WaveformMode& mode);
+
+    // Parse mode and channel report from CONNECT_ACK payload
+    // Returns true if channel report was present
+    static bool parseConnectAckPayload(const Bytes& payload, WaveformMode& mode,
+                                       ChannelReport& report, bool& has_report);
 
     // Create a DISCONNECT frame
     static Frame makeDisconnect(const std::string& src, const std::string& dst);
 
     // Create a BEACON frame (CQ)
     static Frame makeBeacon(const std::string& src, const std::string& info = "");
+
+    // Create a PROBE frame (channel sounding for link establishment)
+    // Payload contains probe sequence identifier and capabilities
+    static Frame makeProbe(const std::string& src, const std::string& dst,
+                           uint8_t capabilities = ModeCapabilities::ALL);
+
+    // Create a PROBE_ACK frame (channel report response)
+    // Payload contains measured channel parameters
+    static Frame makeProbeAck(const std::string& src, const std::string& dst,
+                              const ChannelReport& report);
+
+    // Parse channel report from PROBE_ACK payload
+    static bool parseProbeAckPayload(const Bytes& payload, ChannelReport& report);
 
     // Serialize frame to bytes (includes CRC)
     Bytes serialize() const;

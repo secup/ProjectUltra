@@ -17,6 +17,18 @@ const char* frameTypeToString(FrameType type) {
         case FrameType::NAK:         return "NAK";
         case FrameType::BEACON:      return "BEACON";
         case FrameType::SACK:        return "SACK";
+        case FrameType::PROBE:       return "PROBE";
+        case FrameType::PROBE_ACK:   return "PROBE_ACK";
+        default:                     return "UNKNOWN";
+    }
+}
+
+const char* waveformModeToString(WaveformMode mode) {
+    switch (mode) {
+        case WaveformMode::OFDM:     return "OFDM";
+        case WaveformMode::OTFS_EQ:  return "OTFS-EQ";
+        case WaveformMode::OTFS_RAW: return "OTFS-RAW";
+        case WaveformMode::AUTO:     return "AUTO";
         default:                     return "UNKNOWN";
     }
 }
@@ -139,24 +151,94 @@ Frame Frame::makeSack(const std::string& src, const std::string& dst,
     return f;
 }
 
-Frame Frame::makeConnect(const std::string& src, const std::string& dst) {
+Frame Frame::makeConnect(const std::string& src, const std::string& dst,
+                         uint8_t capabilities, WaveformMode preferred) {
     Frame f;
     f.type = FrameType::CONNECT;
     f.flags = FrameFlags::NONE;
     f.sequence = 0;
     f.src_call = sanitizeCallsign(src);
     f.dst_call = sanitizeCallsign(dst);
+    // Payload: [capabilities:1B, preferred_mode:1B]
+    f.payload.push_back(capabilities);
+    f.payload.push_back(static_cast<uint8_t>(preferred));
     return f;
 }
 
-Frame Frame::makeConnectAck(const std::string& src, const std::string& dst) {
+Frame Frame::makeConnectAck(const std::string& src, const std::string& dst,
+                            WaveformMode negotiated_mode) {
     Frame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = FrameFlags::NONE;
     f.sequence = 0;
     f.src_call = sanitizeCallsign(src);
     f.dst_call = sanitizeCallsign(dst);
+    // Payload: [negotiated_mode:1B]
+    f.payload.push_back(static_cast<uint8_t>(negotiated_mode));
     return f;
+}
+
+Frame Frame::makeConnectAckWithReport(const std::string& src, const std::string& dst,
+                                      WaveformMode negotiated_mode,
+                                      const ChannelReport& report) {
+    Frame f;
+    f.type = FrameType::CONNECT_ACK;
+    f.flags = FrameFlags::NONE;
+    f.sequence = 0;
+    f.src_call = sanitizeCallsign(src);
+    f.dst_call = sanitizeCallsign(dst);
+    // Payload: [negotiated_mode:1B, channel_report:5B]
+    f.payload.push_back(static_cast<uint8_t>(negotiated_mode));
+    Bytes report_bytes = report.encode();
+    f.payload.insert(f.payload.end(), report_bytes.begin(), report_bytes.end());
+    return f;
+}
+
+bool Frame::parseConnectPayload(const Bytes& payload,
+                                uint8_t& capabilities, WaveformMode& preferred) {
+    if (payload.size() >= 2) {
+        capabilities = payload[0];
+        preferred = static_cast<WaveformMode>(payload[1]);
+        return true;
+    } else if (payload.size() == 0) {
+        // Backwards compatibility: no payload = defaults
+        capabilities = ModeCapabilities::OFDM;  // OFDM only (old protocol)
+        preferred = WaveformMode::OFDM;
+        return true;
+    }
+    return false;
+}
+
+bool Frame::parseConnectAckPayload(const Bytes& payload, WaveformMode& mode) {
+    if (payload.size() >= 1) {
+        mode = static_cast<WaveformMode>(payload[0]);
+        return true;
+    } else {
+        // Backwards compatibility: no payload = OFDM
+        mode = WaveformMode::OFDM;
+        return true;
+    }
+}
+
+bool Frame::parseConnectAckPayload(const Bytes& payload, WaveformMode& mode,
+                                   ChannelReport& report, bool& has_report) {
+    has_report = false;
+
+    if (payload.size() >= 1) {
+        mode = static_cast<WaveformMode>(payload[0]);
+
+        // Check if channel report is present (6 bytes total: 1 mode + 5 report)
+        if (payload.size() >= 6) {
+            Bytes report_bytes(payload.begin() + 1, payload.end());
+            report = ChannelReport::decode(report_bytes);
+            has_report = true;
+        }
+        return true;
+    } else {
+        // Backwards compatibility: no payload = OFDM
+        mode = WaveformMode::OFDM;
+        return true;
+    }
 }
 
 Frame Frame::makeConnectNak(const std::string& src, const std::string& dst) {
@@ -253,7 +335,7 @@ std::optional<Frame> Frame::deserialize(ByteSpan data) {
     // TYPE
     uint8_t type_byte = data[pos++];
     if (type_byte < static_cast<uint8_t>(FrameType::CONNECT) ||
-        type_byte > static_cast<uint8_t>(FrameType::BEACON)) {
+        type_byte > static_cast<uint8_t>(FrameType::PROBE_ACK)) {
         return std::nullopt;
     }
 
@@ -358,6 +440,107 @@ std::string frameToString(const Frame& frame) {
              frame.dst_call.c_str(),
              frame.payload.size());
     return buf;
+}
+
+// === ChannelReport ===
+
+Bytes ChannelReport::encode() const {
+    Bytes data;
+    data.reserve(5);
+
+    // SNR: 0-50 dB in 0.5 dB steps (0-100 maps to 0-50 dB)
+    uint8_t snr_byte = static_cast<uint8_t>(std::min(100.0f, std::max(0.0f, snr_db * 2.0f)));
+    data.push_back(snr_byte);
+
+    // Delay spread: 0-25.5 ms in 0.1 ms steps
+    uint8_t delay_byte = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, delay_spread_ms * 10.0f)));
+    data.push_back(delay_byte);
+
+    // Doppler spread: 0-25.5 Hz in 0.1 Hz steps
+    uint8_t doppler_byte = static_cast<uint8_t>(std::min(255.0f, std::max(0.0f, doppler_spread_hz * 10.0f)));
+    data.push_back(doppler_byte);
+
+    // Recommended mode
+    data.push_back(static_cast<uint8_t>(recommended_mode));
+
+    // Capabilities
+    data.push_back(capabilities);
+
+    return data;
+}
+
+ChannelReport ChannelReport::decode(const Bytes& data) {
+    ChannelReport report;
+
+    if (data.size() >= 1) {
+        report.snr_db = data[0] * 0.5f;  // 0.5 dB steps
+    }
+    if (data.size() >= 2) {
+        report.delay_spread_ms = data[1] * 0.1f;  // 0.1 ms steps
+    }
+    if (data.size() >= 3) {
+        report.doppler_spread_hz = data[2] * 0.1f;  // 0.1 Hz steps
+    }
+    if (data.size() >= 4) {
+        report.recommended_mode = static_cast<WaveformMode>(data[3]);
+    }
+    if (data.size() >= 5) {
+        report.capabilities = data[4];
+    }
+
+    return report;
+}
+
+const char* ChannelReport::getConditionName() const {
+    // Based on ITU-R F.1487 channel classifications
+    if (doppler_spread_hz > 5.0f) {
+        return "Flutter";
+    } else if (delay_spread_ms > 1.5f && doppler_spread_hz > 0.5f) {
+        return "Poor";
+    } else if (delay_spread_ms > 0.7f || doppler_spread_hz > 0.3f) {
+        return "Moderate";
+    } else {
+        return "Good";
+    }
+}
+
+// === PROBE Frame ===
+
+Frame Frame::makeProbe(const std::string& src, const std::string& dst,
+                       uint8_t capabilities) {
+    Frame f;
+    f.type = FrameType::PROBE;
+    f.flags = FrameFlags::NONE;
+    f.sequence = 0;
+    f.src_call = sanitizeCallsign(src);
+    f.dst_call = sanitizeCallsign(dst);
+    // Payload: [capabilities:1B]
+    f.payload.push_back(capabilities);
+    return f;
+}
+
+Frame Frame::makeProbeAck(const std::string& src, const std::string& dst,
+                          const ChannelReport& report) {
+    Frame f;
+    f.type = FrameType::PROBE_ACK;
+    f.flags = FrameFlags::NONE;
+    f.sequence = 0;
+    f.src_call = sanitizeCallsign(src);
+    f.dst_call = sanitizeCallsign(dst);
+    f.payload = report.encode();
+    return f;
+}
+
+bool Frame::parseProbeAckPayload(const Bytes& payload, ChannelReport& report) {
+    if (payload.size() >= 5) {
+        report = ChannelReport::decode(payload);
+        return true;
+    } else if (payload.size() > 0) {
+        // Partial decode
+        report = ChannelReport::decode(payload);
+        return true;
+    }
+    return false;
 }
 
 } // namespace protocol

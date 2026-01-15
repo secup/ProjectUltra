@@ -31,16 +31,29 @@ namespace ultra {
 
 struct OTFSConfig {
     uint32_t M = 32;           // Delay bins (subcarriers per symbol)
-    uint32_t N = 8;            // Doppler bins (OFDM symbols per frame)
+    uint32_t N = 16;           // Doppler bins (OFDM symbols per frame)
     uint32_t fft_size = 512;   // FFT size for OFDM
     uint32_t cp_length = 64;   // Cyclic prefix length
     uint32_t sample_rate = 48000;
     float center_freq = 1500.0f;
 
+    // TF-domain pilot configuration (OFDM-style channel estimation)
+    // Pilots are inserted in the TF grid for per-symbol channel estimation
+    uint32_t tf_pilot_spacing = 4;    // Pilot every N subcarriers in TF domain
+    bool tf_equalization = true;      // Enable TF-domain equalization before SFFT
+
     // Derived parameters
     uint32_t frame_symbols() const { return N; }
     uint32_t subcarriers() const { return M; }
-    uint32_t total_data_symbols() const { return M * N; }
+    uint32_t total_grid_symbols() const { return M * N; }
+    uint32_t pilots_per_symbol() const { return (M + tf_pilot_spacing - 1) / tf_pilot_spacing; }
+    uint32_t data_subcarriers() const { return M - pilots_per_symbol(); }
+    uint32_t total_data_symbols() const { return data_subcarriers() * N; }
+
+    // Check if subcarrier index is a pilot position
+    bool isTFPilot(uint32_t m) const {
+        return (m % tf_pilot_spacing) == 0;
+    }
 };
 
 class OTFSModulator {

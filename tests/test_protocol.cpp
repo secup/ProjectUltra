@@ -561,6 +561,70 @@ bool test_multiple_messages() {
     return true;
 }
 
+bool test_channel_probing() {
+    TEST("Channel probing (link establishment)");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    bool probe_complete = false;
+    ChannelReport received_report;
+
+    stationA.setProbeCompleteCallback([&](const ChannelReport& report) {
+        probe_complete = true;
+        received_report = report;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    // Send probe
+    if (!stationA.probe("K2DEF")) FAIL("probe() returned false");
+
+    // Should be in PROBING state
+    if (stationA.getState() != ConnectionState::PROBING) FAIL("Not in PROBING state");
+
+    // Run simulation to exchange PROBE/PROBE_ACK
+    channel.run(30, 100);
+
+    // Probe should complete and return to DISCONNECTED
+    if (stationA.getState() != ConnectionState::DISCONNECTED) {
+        std::cout << "(state=" << connectionStateToString(stationA.getState()) << ") ";
+        FAIL("Not back to DISCONNECTED after probe");
+    }
+
+    if (!probe_complete) FAIL("Probe callback not called");
+
+    // Verify channel report has reasonable values
+    if (received_report.snr_db <= 0) FAIL("Invalid SNR in channel report");
+
+    // Now connect using probe results
+    if (!stationA.connectAfterProbe()) FAIL("connectAfterProbe() returned false");
+
+    channel.run(20, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected after probe");
+
+    // Verify we can still exchange data
+    std::string received_msg;
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_msg = text;
+    });
+
+    stationA.sendMessage("Hello after probe");
+    channel.run(30, 100);
+
+    if (received_msg != "Hello after probe") FAIL("Message not received after probe+connect");
+
+    PASS();
+    return true;
+}
+
 bool test_quick_brown_fox() {
     TEST("Quick Brown Fox test message");
 
@@ -1097,6 +1161,9 @@ int main() {
     test_disconnect();
     test_manual_accept();
     test_multiple_messages();
+
+    std::cout << "\nChannel Probing:\n";
+    test_channel_probing();
 
     std::cout << "\nRadio Test Messages:\n";
     test_quick_brown_fox();

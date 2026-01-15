@@ -2,8 +2,10 @@
 
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"
+#include "ultra/otfs.hpp"
 #include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
 #include "ultra/dsp.hpp"  // FIRFilter
+#include "protocol/frame.hpp"  // WaveformMode, FrameType
 #include "adaptive_mode.hpp"
 #include <memory>
 #include <vector>
@@ -79,6 +81,9 @@ public:
     bool isSynced() const;
     float getCurrentSNR() const;
 
+    // Get full channel quality (for link establishment/probing)
+    ChannelQuality getChannelQuality() const;
+
     // Carrier Sense - Listen Before Talk (LBT)
     bool isChannelBusy() const;           // True if signal energy detected above threshold
     float getChannelEnergy() const;       // Current RMS energy level (0.0 - 1.0)
@@ -99,16 +104,39 @@ public:
     // Reset state (e.g., when switching modes)
     void reset();
 
+    // === Waveform Mode Control ===
+    // Control frames (CONNECT, CONNECT_ACK, etc.) always use OFDM
+    // Data frames use the negotiated waveform mode
+
+    // Set the waveform mode for data frames (called when connection negotiates mode)
+    void setWaveformMode(protocol::WaveformMode mode);
+    protocol::WaveformMode getWaveformMode() const { return waveform_mode_; }
+
+    // Set connection state (affects which demodulator is used for RX)
+    void setConnected(bool connected);
+    bool isConnected() const { return connected_; }
+
 private:
     ModemConfig config_;
 
-    // TX chain
-    std::unique_ptr<LDPCEncoder> encoder_;
-    std::unique_ptr<OFDMModulator> modulator_;
+    // Waveform mode state
+    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM;
+    bool connected_ = false;
 
-    // RX chain
+    // TX chain - OFDM (always available, used for control frames)
+    std::unique_ptr<LDPCEncoder> encoder_;
+    std::unique_ptr<OFDMModulator> ofdm_modulator_;
+
+    // TX chain - OTFS (used for data frames when negotiated)
+    std::unique_ptr<OTFSModulator> otfs_modulator_;
+    OTFSConfig otfs_config_;
+
+    // RX chain - OFDM (always available)
     std::unique_ptr<LDPCDecoder> decoder_;
-    std::unique_ptr<OFDMDemodulator> demodulator_;
+    std::unique_ptr<OFDMDemodulator> ofdm_demodulator_;
+
+    // RX chain - OTFS (used when negotiated)
+    std::unique_ptr<OTFSDemodulator> otfs_demodulator_;
 
     // RX state
     std::vector<float> rx_sample_buffer_;      // Main processing buffer
