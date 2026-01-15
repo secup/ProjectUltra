@@ -1,8 +1,9 @@
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
+#include <cmath>
 #include "ultra/adaptive_modem.hpp"
 #include "ultra/ofdm.hpp"
 #include "ultra/otfs.hpp"
 #include "ultra/dsp.hpp"
-#include <cmath>
 #include <algorithm>
 #include <numeric>
 

@@ -1,7 +1,8 @@
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
+#include <cmath>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
-#include <cmath>
 #include <algorithm>
 #include <numeric>
 #include <random>

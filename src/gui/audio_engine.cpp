@@ -1,5 +1,6 @@
-#include "audio_engine.hpp"
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
+#include "audio_engine.hpp"
 #include <cstring>
 #include <algorithm>
 

@@ -3,12 +3,12 @@
 #include <cstring>
 #include <fstream>
 #include <cstdlib>
-#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <direct.h>
 #define MKDIR(path) _mkdir(path)
 #else
+#include <sys/stat.h>
 #define MKDIR(path) mkdir(path, 0755)
 #endif
 

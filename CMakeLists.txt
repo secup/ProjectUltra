@@ -5,6 +5,17 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# MSVC-specific settings
+if(MSVC)
+    # Enable parallel builds
+    add_compile_options(/MP)
+    # Suppress some common warnings
+    add_compile_options(/wd4244)  # Conversion warnings (double to float)
+    add_compile_options(/wd4267)  # size_t to int conversion
+    # Treat source files as UTF-8
+    add_compile_options(/utf-8)
+endif()
+
 # Build options
 option(ULTRA_BUILD_TESTS "Build test suite" ON)
 option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
@@ -15,10 +26,14 @@ option(ULTRA_USE_FFTW "Use FFTW3 for FFT (faster)" ON)
 find_package(Threads REQUIRED)
 
 if(ULTRA_USE_FFTW)
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(FFTW3 IMPORTED_TARGET fftw3)
-    if(FFTW3_FOUND)
-        add_compile_definitions(ULTRA_HAS_FFTW)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(FFTW3 IMPORTED_TARGET fftw3)
+        if(FFTW3_FOUND)
+            add_compile_definitions(ULTRA_HAS_FFTW)
+        endif()
+    else()
+        message(STATUS "PkgConfig not found - FFTW3 detection skipped (will use built-in FFT)")
     endif()
 endif()
 
@@ -147,6 +162,11 @@ if(ULTRA_BUILD_GUI)
                 "-framework Cocoa"
                 "-framework IOKit"
                 "-framework CoreVideo"
+            )
+        elseif(WIN32)
+            target_link_libraries(ultra_gui PRIVATE
+                opengl32
+                imm32
             )
         elseif(UNIX)
             target_link_libraries(ultra_gui PRIVATE dl)

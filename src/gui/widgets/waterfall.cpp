@@ -1,5 +1,6 @@
-#include "waterfall.hpp"
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
+#include "waterfall.hpp"
 #include <algorithm>
 #include <cstring>
 

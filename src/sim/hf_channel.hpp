@@ -1,8 +1,9 @@
 #pragma once
 
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
+#include <cmath>
 #include "ultra/types.hpp"
 #include <random>
-#include <cmath>
 #include <complex>
 #include <deque>
 

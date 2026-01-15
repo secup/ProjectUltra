@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <cstdarg>
 
+// Windows headers define ERROR as a macro - undefine it
+#ifdef ERROR
+#undef ERROR
+#endif
+
 namespace ultra {
 
 // Log levels
