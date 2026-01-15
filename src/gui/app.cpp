@@ -1316,15 +1316,15 @@ void App::renderRadioControls() {
         ImGui::Text("RX: %.0f dB", input_db);
 
         // Input gain slider (useful for hot mic inputs)
+        // Range 0.01x (-40dB) to 2.0x (+6dB) for handling very hot inputs
         static float input_gain = 1.0f;
-        ImGui::SetNextItemWidth(100);
-        if (ImGui::SliderFloat("Input Gain", &input_gain, 0.0f, 2.0f, "%.1fx")) {
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::SliderFloat("Input Gain", &input_gain, 0.01f, 2.0f, "%.2fx", ImGuiSliderFlags_Logarithmic)) {
             audio_.setInputGain(input_gain);
         }
-        if (input_gain < 1.0f) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%.0f dB)", 20.0f * log10f(input_gain));
-        }
+        ImGui::SameLine();
+        float gain_db = 20.0f * log10f(input_gain + 0.0001f);
+        ImGui::TextDisabled("(%.0f dB)", gain_db);
 
         // Sync indicator
         bool synced = modem_.isSynced();
