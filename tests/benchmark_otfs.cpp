@@ -17,6 +17,7 @@
 #include "ultra/fec.hpp"
 #include "ultra/ofdm.hpp"
 #include "ultra/otfs.hpp"
+#include <algorithm>  // For std::max with initializer list
 
 #include <iostream>
 #include <iomanip>
