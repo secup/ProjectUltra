@@ -27,6 +27,7 @@ add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
     src/ofdm/demodulator.cpp
     src/ofdm/channel_estimator.cpp
+    src/ofdm/otfs.cpp
     src/fec/ldpc_encoder.cpp
     src/fec/ldpc_decoder.cpp
     src/framing/frame_builder.cpp

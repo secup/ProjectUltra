@@ -171,7 +171,6 @@ float measureBER(
 ) {
     // Create REAL modem components
     OFDMModulator modulator(config);
-    OFDMDemodulator demodulator(config);
     LDPCEncoder encoder(rate);
     LDPCDecoder decoder(rate);
     Interleaver interleaver(24, 27);  // 648 bits = 24 x 27
@@ -184,6 +183,9 @@ float measureBER(
     size_t total_errors = 0;
 
     for (size_t frame = 0; frame < num_frames; ++frame) {
+        // Fresh demodulator per frame (no state bleed between frames)
+        OFDMDemodulator demodulator(config);
+
         // Generate test data
         Bytes tx_data(max_data_bytes);
         for (size_t i = 0; i < tx_data.size(); ++i) {
@@ -217,7 +219,6 @@ float measureBER(
         Samples rx_audio = channel.process(tx_span);
 
         // === RX Chain (REAL) ===
-        demodulator.reset();
         bool frame_ready = false;
         size_t chunk_size = 1024;
         for (size_t offset = 0; offset < rx_audio.size() && !frame_ready; offset += chunk_size) {
@@ -417,18 +418,21 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
         m.throughput_kbps = calcThroughput(config, m.mod, m.rate);
     }
 
-    // Define channel conditions
+    // Define channel conditions with appropriate pilot spacing
+    // Pilot spacing must be < coherence_bandwidth / carrier_spacing
+    // Carrier spacing = 93.75 Hz, coherence BW ≈ 1 / (2π × delay_spread)
     struct ChannelCondition {
         const char* name;
         WattersonChannel::Config (*getConfig)(float);
+        int pilot_spacing;  // Optimized for channel's coherence bandwidth
     };
 
     std::vector<ChannelCondition> channels = {
-        {"AWGN",     itu_r_f1487::awgn},
-        {"Good",     itu_r_f1487::good},
-        {"Moderate", itu_r_f1487::moderate},
-        {"Poor",     itu_r_f1487::poor},
-        {"Flutter",  itu_r_f1487::flutter},
+        {"AWGN",     itu_r_f1487::awgn,     6},  // No frequency selectivity
+        {"Good",     itu_r_f1487::good,     4},  // 0.5ms delay → ~320 Hz coherence BW
+        {"Moderate", itu_r_f1487::moderate, 2},  // 1.0ms delay → ~160 Hz coherence BW
+        {"Poor",     itu_r_f1487::poor,     2},  // 2.0ms delay → ~80 Hz - challenging!
+        {"Flutter",  itu_r_f1487::flutter,  4},  // 0.5ms delay, fast Doppler
     };
 
     // Results storage
@@ -455,13 +459,17 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
             result.channel_name = channel.name;
             result.throughput_kbps = mode.throughput_kbps;
 
+            // Use per-channel optimized pilot spacing
+            ModemConfig channel_config = config;
+            channel_config.pilot_spacing = channel.pilot_spacing;
+
             auto base_cfg = channel.getConfig(20.0f);
 
             std::cout << std::setw(12) << channel.name << std::flush;
 
             // Find SNR for BER < 10^-3
             result.snr_for_ber_1e3 = findSNRThreshold(
-                config, mode.mod, mode.rate, base_cfg, 1e-3f, 30
+                channel_config, mode.mod, mode.rate, base_cfg, 1e-3f, 30
             );
 
             if (result.snr_for_ber_1e3 >= 0) {
@@ -473,7 +481,7 @@ void runFullBenchmark(const ModemConfig& config, bool verbose, const std::string
 
             // Find SNR for BER < 10^-5
             result.snr_for_ber_1e5 = findSNRThreshold(
-                config, mode.mod, mode.rate, base_cfg, 1e-5f, 50
+                channel_config, mode.mod, mode.rate, base_cfg, 1e-5f, 50
             );
 
             if (result.snr_for_ber_1e5 >= 0) {

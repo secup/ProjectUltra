@@ -46,3 +46,10 @@ target_link_libraries(benchmark_itu_r PRIVATE ultra_core)
 add_executable(test_selective_repeat test_selective_repeat.cpp)
 target_link_libraries(test_selective_repeat PRIVATE ultra_core)
 add_test(NAME SelectiveRepeatARQ COMMAND test_selective_repeat)
+
+# OFDM vs OTFS Comparison Benchmark
+add_executable(benchmark_otfs benchmark_otfs.cpp)
+target_include_directories(benchmark_otfs PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
+)
+target_link_libraries(benchmark_otfs PRIVATE ultra_core)
