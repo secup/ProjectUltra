@@ -242,11 +242,21 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
     const float* input = reinterpret_cast<const float*>(stream);
     int samples = len / sizeof(float);
 
-    // Apply input gain
+    // Apply input gain and DC blocking filter
+    // DC blocker: y[n] = x[n] - x[n-1] + alpha * y[n-1]
+    // This removes DC offset that can cause false sync detection
+    static float dc_x_prev = 0.0f;
+    static float dc_y_prev = 0.0f;
+    constexpr float DC_ALPHA = 0.995f;
+
     float gain = engine->input_gain_.load();
     std::vector<float> captured(samples);
     for (int i = 0; i < samples; ++i) {
-        captured[i] = input[i] * gain;
+        float x = input[i] * gain;
+        float y = x - dc_x_prev + DC_ALPHA * dc_y_prev;
+        dc_x_prev = x;
+        dc_y_prev = y;
+        captured[i] = y;
     }
 
     // Compute input level (RMS) after gain
