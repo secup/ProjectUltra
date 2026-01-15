@@ -2,6 +2,12 @@
 
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
+
+// M_PI fallback for MSVC (in case cmath was included earlier without _USE_MATH_DEFINES)
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "ultra/types.hpp"
 #include <random>
 #include <complex>

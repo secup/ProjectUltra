@@ -9,6 +9,9 @@
 
 #ifdef __APPLE__
 #include <OpenGL/gl.h>
+#elif defined(_WIN32)
+#include <windows.h>  // Must come before GL/gl.h on Windows
+#include <GL/gl.h>
 #else
 #include <GL/gl.h>
 #endif

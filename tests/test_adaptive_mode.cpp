@@ -11,6 +11,12 @@
  *   - Flutter (0.5ms, 10Hz): OFDM fallback
  */
 
+#define _USE_MATH_DEFINES  // For M_PI on MSVC
+#include <cmath>
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 #include "ultra/adaptive_modem.hpp"
 #include "ultra/otfs.hpp"
 #include "../src/sim/hf_channel.hpp"

@@ -1241,6 +1241,15 @@ void App::renderRadioControls() {
     ImGui::BeginDisabled(conn_state != protocol::ConnectionState::DISCONNECTED ||
                          !has_callsign || strlen(remote_callsign_) < 3);
     if (ImGui::Button("Connect", ImVec2(btn_width, 30))) {
+        // Auto-start audio if not already running
+        if (!radio_rx_enabled_) {
+            if (!audio_initialized_) {
+                initRadioAudio();
+            }
+            audio_.openOutput(getOutputDeviceName());
+            audio_.startPlayback();
+            startRadioRx();
+        }
         protocol_.connect(remote_callsign_);
     }
     ImGui::EndDisabled();
