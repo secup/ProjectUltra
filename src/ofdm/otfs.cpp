@@ -52,9 +52,7 @@ static void fft1d(std::vector<Complex>& x, bool inverse, bool scale_inverse = tr
     }
 }
 
-// ISFFT: Delay-Doppler → Time-Frequency
-// Converts DD grid to TF grid for OFDM modulation
-// Uses unscaled transforms; scaling handled by SFFT for proper roundtrip
+// ISFFT: Delay-Doppler → Time-Frequency (for modulation)
 void isfft(const std::vector<Complex>& dd_grid,
            std::vector<Complex>& tf_grid,
            uint32_t M, uint32_t N) {
@@ -95,9 +93,7 @@ void isfft(const std::vector<Complex>& dd_grid,
     // No scaling here - SFFT will handle the 1/MN scaling for roundtrip
 }
 
-// SFFT: Time-Frequency → Delay-Doppler
-// Inverse of ISFFT - converts TF grid back to DD grid
-// Includes 1/MN scaling to ensure SFFT(ISFFT(x)) = x
+// SFFT: Time-Frequency → Delay-Doppler (for demodulation)
 void sfft(const std::vector<Complex>& tf_grid,
           std::vector<Complex>& dd_grid,
           uint32_t M, uint32_t N) {
@@ -134,11 +130,7 @@ void sfft(const std::vector<Complex>& tf_grid,
         }
     }
 
-    // Scale by 1/MN to ensure SFFT(ISFFT(x)) = x
-    // ISFFT does: IFFT_col * FFT_row (unscaled, so multiplies by MN)
-    // SFFT does: FFT_col * IFFT_row (unscaled, so multiplies by MN)
-    // Combined unscaled: MN * MN = M²N²
-    // We need to divide by M²N² to get identity, so scale by 1/(MN)
+    // Scale by 1/MN to ensure SFFT(ISFFT(x)) = x (roundtrip identity)
     float scale = 1.0f / static_cast<float>(M * N);
     for (auto& val : dd_grid) {
         val *= scale;
@@ -151,13 +143,19 @@ void sfft(const std::vector<Complex>& tf_grid,
 
 namespace {
 
-constexpr float QPSK_SCALE = 0.7071067811865476f;
+// Constellation constants
+constexpr float QPSK_SCALE = 0.7071067811865476f;  // 1/sqrt(2)
 const Complex QPSK_MAP[] = {
-    Complex(-QPSK_SCALE, -QPSK_SCALE),
-    Complex(-QPSK_SCALE,  QPSK_SCALE),
-    Complex( QPSK_SCALE, -QPSK_SCALE),
-    Complex( QPSK_SCALE,  QPSK_SCALE),
+    Complex(-QPSK_SCALE, -QPSK_SCALE),  // 00
+    Complex(-QPSK_SCALE,  QPSK_SCALE),  // 01
+    Complex( QPSK_SCALE, -QPSK_SCALE),  // 10
+    Complex( QPSK_SCALE,  QPSK_SCALE),  // 11
 };
+
+// Demodulator constants
+constexpr float REAL_TO_COMPLEX_SCALE = 2.4f;  // Compensates for single-sideband extraction
+constexpr float DEFAULT_NOISE_VAR = 0.1f;      // Default noise variance for soft demapping
+constexpr float PREAMBLE_TARGET_RMS = 0.1f;    // Target RMS for preamble amplitude
 
 Complex mapBits(uint32_t bits, Modulation mod) {
     switch (mod) {
@@ -238,17 +236,14 @@ struct OTFSModulator::Impl {
         }
     }
 
-    // Create one OFDM symbol from frequency-domain data
-    // Uses only positive frequency subcarriers (bins 1 to M) to avoid
-    // conjugate mirror distortion from real-to-complex conversion
+    // Create OFDM symbol: map to positive frequencies only (avoids mirror distortion)
     std::vector<Complex> createOFDMSymbol(const std::vector<Complex>& freq_data) {
         std::vector<Complex> freq_domain(config.fft_size, Complex(0, 0));
 
-        // Map data to positive frequency subcarriers only (bins 1 to M)
-        // Skip DC (bin 0) and don't use negative frequencies to avoid mirror distortion
+        // Map to bins 1..M (skip DC, positive frequencies only)
         for (size_t i = 0; i < config.M && i < freq_data.size(); ++i) {
-            size_t idx = i + 1;  // Start at bin 1, skip DC
-            if (idx < config.fft_size / 2) {  // Only positive frequencies
+            size_t idx = i + 1;
+            if (idx < config.fft_size / 2) {
                 freq_domain[idx] = freq_data[i];
             }
         }
@@ -368,14 +363,12 @@ Samples OTFSModulator::generatePreamble() {
     auto sync_symbol = impl_->createOFDMSymbol(impl_->sync_sequence);
     auto sync_real = impl_->complexToReal(sync_symbol);
 
-    // Scale preamble to have similar amplitude to modulated data
-    // (prevents SNR degradation in preamble relative to data)
+    // Scale preamble to match data amplitude (prevents SNR degradation during sync)
     float preamble_rms = 0;
     for (float s : sync_real) preamble_rms += s * s;
     preamble_rms = std::sqrt(preamble_rms / sync_real.size());
-    float target_rms = 0.1f;  // Target RMS to match typical OTFS data
     if (preamble_rms > 0) {
-        float scale = target_rms / preamble_rms;
+        float scale = PREAMBLE_TARGET_RMS / preamble_rms;
         for (float& s : sync_real) s *= scale;
     }
 
@@ -437,15 +430,12 @@ struct OTFSDemodulator::Impl {
 
     std::vector<Complex> toBaseband(const float* samples, size_t count, size_t sample_offset = 0) {
         std::vector<Complex> baseband(count);
-        // Create a temporary NCO at the given offset for downconversion
-        // This avoids advancing the main mixer during sync search
+        // Temporary NCO at given offset (avoids corrupting main mixer during sync search)
         NCO temp_mixer(config.center_freq, config.sample_rate);
         for (size_t i = 0; i < sample_offset; ++i) temp_mixer.next();
 
         for (size_t i = 0; i < count; ++i) {
             Complex carrier = temp_mixer.next();
-            // Real-to-complex conversion: real signal times complex carrier
-            // The 2x compensation is applied after FFT in demodulateSymbol
             baseband[i] = Complex(samples[i], 0) * std::conj(carrier);
         }
         return baseband;
@@ -456,7 +446,7 @@ struct OTFSDemodulator::Impl {
         size_t sym_len = config.fft_size + config.cp_length;
         if (count < 2 * sym_len) return false;
 
-        // Real-valued autocorrelation at lag sym_len
+        // Schmidl-Cox autocorrelation: detect repeated preamble symbols
         float P = 0, R = 0;
         for (size_t i = 0; i < sym_len; ++i) {
             P += samples[i] * samples[i + sym_len];
@@ -465,11 +455,6 @@ struct OTFSDemodulator::Impl {
 
         float metric = std::abs(P) / (R + 1e-10f);
         return metric > sync_threshold;
-    }
-
-    bool detectSync(const std::vector<Complex>& baseband) {
-        // This is now deprecated - use detectSyncReal instead
-        return false;
     }
 
     void demodulateSymbol(const std::vector<Complex>& baseband, uint32_t symbol_idx) {
@@ -485,12 +470,10 @@ struct OTFSDemodulator::Impl {
         fft.forward(time_domain, freq_domain);
 
         // Extract positive frequency subcarriers (bins 1 to M)
-        // Scale by 2.4 to compensate for real-to-complex + FFT normalization
-        // (empirically determined: 2.0 for real→complex, 1.2 for FFT scaling)
         for (size_t i = 0; i < config.M; ++i) {
-            size_t idx = i + 1;  // Start at bin 1, skip DC
+            size_t idx = i + 1;  // Skip DC
             if (idx < config.fft_size / 2) {
-                tf_buffer[symbol_idx * config.M + i] = freq_domain[idx] * 2.4f;
+                tf_buffer[symbol_idx * config.M + i] = freq_domain[idx] * REAL_TO_COMPLEX_SCALE;
             } else {
                 tf_buffer[symbol_idx * config.M + i] = Complex(0, 0);
             }
@@ -561,14 +544,13 @@ bool OTFSDemodulator::process(SampleSpan samples) {
             }
         }
         else if (impl_->state == Impl::State::FRAME_READY) {
-            // SFFT to convert TF → DD
+            // SFFT: convert TF grid back to DD symbols
             sfft(impl_->tf_buffer, impl_->dd_symbols, impl_->config.M, impl_->config.N);
 
-            // Generate soft bits
+            // Generate soft bits (LLRs) for LDPC decoder
             impl_->soft_bits.clear();
-            float noise_var = 0.1f;  // Estimate from channel
             for (const auto& sym : impl_->dd_symbols) {
-                softDemap(sym, Modulation::QPSK, noise_var, impl_->soft_bits);
+                softDemap(sym, Modulation::QPSK, DEFAULT_NOISE_VAR, impl_->soft_bits);
             }
 
             impl_->state = Impl::State::SEARCHING;
