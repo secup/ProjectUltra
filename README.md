@@ -181,8 +181,8 @@ Two virtual stations (TEST1, TEST2) with cross-wired audio for development:
 | FFT Size | 512 |
 | Subcarrier Spacing | 93.75 Hz |
 | Total Subcarriers | 30 |
-| Data Subcarriers | 25 |
-| Pilot Subcarriers | 5 (every 6th) |
+| Data Subcarriers | 15 |
+| Pilot Subcarriers | 15 (every 2nd) |
 | **Signal Bandwidth** | **~2.8 kHz** |
 | Center Frequency | 1500 Hz |
 | Symbol Duration | ~11 ms |
@@ -224,13 +224,13 @@ Decoder: Min-sum belief propagation with early termination (max 50 iterations).
 Schmidl-Cox preamble correlation with:
 - Coarse CFO estimation (±20 Hz tolerance)
 - Fine timing recovery
-- Adaptive threshold (0.7 default)
+- Adaptive threshold (0.75 default)
 
 ### Protocol Frames
 
 | Field | Size | Description |
 |-------|------|-------------|
-| Magic | 2 bytes | Frame identifier (0x55AA) |
+| Magic | 1 byte | Frame identifier (0x55) |
 | Type | 1 byte | CONNECT, DATA, ACK, etc. |
 | Flags | 1 byte | MORE_DATA, COMPRESSED, etc. |
 | Sequence | 1 byte | ARQ sequence number |
