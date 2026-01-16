@@ -464,8 +464,6 @@ struct OFDMDemodulator::Impl {
         // Maximum unambiguous range: ±fs/(2*L) = ±42.9 Hz for our params
         cfo_hz = std::max(-40.0f, std::min(40.0f, cfo_hz));
 
-        LOG_SYNC(INFO, "Coarse CFO estimate: %.2f Hz (phase=%.3f rad)", cfo_hz, phase);
-
         return cfo_hz;
     }
 
@@ -542,24 +540,53 @@ struct OFDMDemodulator::Impl {
             h_sum += h_ls_all[i];
         }
 
-        Complex h_avg = h_sum / static_cast<float>(pilot_carrier_indices.size());
-        float signal_power = std::norm(h_avg);
+        // Compute average signal power from pilots
+        float signal_power_sum = 0.0f;
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            signal_power_sum += std::norm(h_ls_all[i]);
+        }
+        float signal_power = signal_power_sum / pilot_carrier_indices.size();
 
-        // Second pass: update channel estimates and measure noise
-        // Noise = deviation of each pilot's estimate from the average
-        // For flat channel: all pilots see same H, deviation = noise
+        // Measure noise using TEMPORAL comparison (not frequency average!)
+        // On frequency-selective channels, H varies across frequency legitimately.
+        // But H should be nearly constant across TIME for slow fading.
+        // So we compare each pilot to its previous value - the difference is noise.
         float noise_power_sum = 0.0f;
+        size_t noise_count = 0;
 
         for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
             int idx = pilot_carrier_indices[i];
 
-            // Measure deviation from average (this is the noise)
-            Complex deviation = h_ls_all[i] - h_avg;
-            noise_power_sum += std::norm(deviation);
+            // If we have previous pilot values, use temporal noise estimation
+            if (!prev_pilot_phases.empty() && i < prev_pilot_phases.size()) {
+                // Noise = change in pilot estimate from previous symbol
+                // For slow fading (< 1 Hz Doppler), this is mostly noise
+                Complex prev_h = prev_pilot_phases[i];
+                Complex curr_h = h_ls_all[i];
+
+                // Normalize by magnitude to measure phase/amplitude noise
+                // relative to signal strength
+                if (std::norm(prev_h) > 1e-6f && std::norm(curr_h) > 1e-6f) {
+                    Complex diff = curr_h - prev_h;
+                    noise_power_sum += std::norm(diff);
+                    noise_count++;
+                }
+            }
 
             // Update smoothed channel estimate
             Complex h_old = channel_estimate[idx];
             channel_estimate[idx] = alpha * h_ls_all[i] + (1.0f - alpha) * h_old;
+        }
+
+        // Fallback: if no previous pilots, use frequency-domain estimation
+        // (less accurate on frequency-selective channels but better than nothing)
+        if (noise_count == 0) {
+            Complex h_avg = h_sum / static_cast<float>(pilot_carrier_indices.size());
+            for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+                Complex deviation = h_ls_all[i] - h_avg;
+                noise_power_sum += std::norm(deviation);
+            }
+            noise_count = pilot_carrier_indices.size();
         }
 
         // === Frequency offset estimation from pilot phase differences ===
@@ -630,9 +657,8 @@ struct OFDMDemodulator::Impl {
         // noise_power_sum = sum of |h[i] - h_avg|² over N pilots
         // For N pilots, this measures sample variance with (N-1) degrees of freedom
         // So average noise per pilot = noise_power_sum / (N-1)
-        size_t N = pilot_carrier_indices.size();
-        if (N > 1 && noise_power_sum > 0.0f) {
-            noise_variance = noise_power_sum / (N - 1);  // Unbiased variance estimator
+        if (noise_count > 1 && noise_power_sum > 0.0f) {
+            noise_variance = noise_power_sum / (noise_count - 1);  // Unbiased variance estimator
             if (noise_variance < 1e-6f) noise_variance = 1e-6f;
 
             // SNR = signal_power / noise_variance
@@ -649,13 +675,21 @@ struct OFDMDemodulator::Impl {
     void interpolateChannel() {
         // Interpolate channel estimate from pilots to data carriers
         // Uses pre-computed lookup table for O(n) instead of O(n²)
+        //
+        // NOTE: Use complex interpolation, NOT magnitude/phase interpolation!
+        // While mag/phase interpolation seems intuitive, it assumes smooth phase
+        // variation across frequency - which is WRONG for multipath HF channels.
+        // In Watterson/multipath channels, phase can jump rapidly between carriers
+        // due to frequency-selective fading. Complex interpolation handles this
+        // correctly by not forcing artificial phase continuity.
         for (size_t dc = 0; dc < interp_table.size(); ++dc) {
             const auto& info = interp_table[dc];
             if (info.lower_pilot >= 0 && info.upper_pilot >= 0) {
-                // Linear interpolate between surrounding pilots
-                channel_estimate[info.fft_idx] =
-                    (1.0f - info.alpha) * channel_estimate[info.lower_pilot] +
-                    info.alpha * channel_estimate[info.upper_pilot];
+                Complex H1 = channel_estimate[info.lower_pilot];
+                Complex H2 = channel_estimate[info.upper_pilot];
+
+                // Simple linear interpolation of complex channel estimate
+                channel_estimate[info.fft_idx] = (1.0f - info.alpha) * H1 + info.alpha * H2;
             } else if (info.lower_pilot >= 0) {
                 channel_estimate[info.fft_idx] = channel_estimate[info.lower_pilot];
             } else if (info.upper_pilot >= 0) {
@@ -745,8 +779,12 @@ struct OFDMDemodulator::Impl {
         rls_P[idx] = std::max(0.001f, std::min(1000.0f, rls_P[idx]));
     }
 
+    // Per-carrier noise variance after equalization (for soft demapping)
+    std::vector<float> carrier_noise_var;
+
     std::vector<Complex> equalize(const std::vector<Complex>& freq_domain, Modulation mod) {
         std::vector<Complex> equalized(data_carrier_indices.size());
+        carrier_noise_var.resize(data_carrier_indices.size());
 
         bool use_adaptive = config.adaptive_eq_enabled;
 
@@ -757,12 +795,16 @@ struct OFDMDemodulator::Impl {
             if (use_adaptive) {
                 // Adaptive equalization using LMS/RLS weights
                 Complex h = lms_weights[idx];
+                float h_power = std::norm(h);
 
                 // Avoid division by zero
-                if (std::norm(h) < 1e-10f) {
+                if (h_power < 1e-10f) {
                     equalized[i] = Complex(0, 0);
+                    carrier_noise_var[i] = 1.0f;  // High uncertainty
                 } else {
                     equalized[i] = received / h;
+                    // After ZF: noise variance = σ² / |H|²
+                    carrier_noise_var[i] = noise_variance / h_power;
                 }
 
                 // Update weights using decision-directed mode
@@ -778,13 +820,25 @@ struct OFDMDemodulator::Impl {
                     last_decisions[idx] = decision;
                 }
             } else {
-                // Standard zero-forcing equalization
+                // Zero-Forcing equalization with per-carrier noise tracking
+                // ZF gives unbiased estimate: y_eq = y/H = x + n/H
+                // The noise variance after ZF is: σ²_eq = σ² / |H|²
+                // This per-carrier variance is CRITICAL for soft demapping!
                 Complex h = channel_estimate[idx];
+                float h_power = std::norm(h);
 
-                if (std::norm(h) < 1e-10f) {
+                if (h_power < 1e-10f) {
+                    // Deep fade - output zero with high uncertainty
                     equalized[i] = Complex(0, 0);
+                    carrier_noise_var[i] = 1.0f;  // Max uncertainty → soft bits near 0
                 } else {
+                    // Standard ZF equalization
                     equalized[i] = received / h;
+                    // Per-carrier noise variance after ZF
+                    // This makes deeply faded carriers give low-confidence LLRs
+                    carrier_noise_var[i] = noise_variance / h_power;
+                    // Clamp to reasonable range
+                    carrier_noise_var[i] = std::max(1e-6f, std::min(10.0f, carrier_noise_var[i]));
                 }
             }
         }
@@ -820,33 +874,40 @@ struct OFDMDemodulator::Impl {
         }
 
         // Convert symbols to soft bits (LLRs)
-        for (const auto& sym : equalized) {
+        // CRITICAL: Use per-carrier noise variance for accurate LLRs!
+        // On frequency-selective channels, deeply faded carriers have high noise variance
+        // after ZF equalization, so their LLRs should have low confidence.
+        for (size_t i = 0; i < equalized.size(); ++i) {
+            const auto& sym = equalized[i];
+            // Use per-carrier noise variance (computed in equalize())
+            float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
+
             switch (mod) {
                 case Modulation::BPSK:
-                    soft_bits.push_back(softDemapBPSK(sym, noise_variance));
+                    soft_bits.push_back(softDemapBPSK(sym, nv));
                     break;
                 case Modulation::QPSK: {
-                    auto llrs = softDemapQPSK(sym, noise_variance);
+                    auto llrs = softDemapQPSK(sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM16: {
-                    auto llrs = softDemapQAM16(sym, noise_variance);
+                    auto llrs = softDemapQAM16(sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM64: {
-                    auto llrs = softDemapQAM64(sym, noise_variance);
+                    auto llrs = softDemapQAM64(sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM256: {
-                    auto llrs = softDemapQAM256(sym, noise_variance);
+                    auto llrs = softDemapQAM256(sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 default: {
-                    auto llrs = softDemapQPSK(sym, noise_variance);
+                    auto llrs = softDemapQPSK(sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                 }
             }
@@ -951,7 +1012,11 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             }
 
             if (corr > impl_->sync_threshold) {
-                // Found first point exceeding threshold - this is preamble start
+                // Found sync point - use this offset
+                // NOTE: We previously had "fine timing refinement" that searched ±16
+                // samples for the peak, but this caused problems: in clean channels,
+                // tiny numerical noise (0.999 vs 1.001) led to choosing wrong offsets.
+                // The first-above-threshold approach is more robust.
                 found_sync = true;
                 sync_offset = i;
                 sync_corr = corr;
@@ -962,21 +1027,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             ++iterations;
         }
 
-        // Log max correlation to help debug (DEBUG level to avoid spam during idle RX)
-        LOG_SYNC(DEBUG, "Sync search: %zu iter (%zu energy skips), max_corr=%.3f @ %zu (thresh=%.2f), buf=%zu",
-                iterations, energy_skips, max_corr_found, max_corr_offset, impl_->sync_threshold, impl_->rx_buffer.size());
-        if (!found_sync && max_corr_found > 0.5f) {
-            LOG_SYNC(DEBUG, "Sync failed: max_corr=%.3f at offset=%zu (threshold=%.2f)",
-                    max_corr_found, max_corr_offset, impl_->sync_threshold);
-        }
-
         // Update search position for next frame (resume from here)
         impl_->search_offset = i;
 
         if (found_sync) {
-            LOG_SYNC(INFO, "SYNC FOUND: offset=%zu (corr=%.3f)",
-                    sync_offset, sync_corr);
-
             // Estimate coarse CFO from preamble BEFORE discarding it
             float coarse_cfo = impl_->estimateCoarseCFO(sync_offset);
 
@@ -1019,19 +1073,20 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             for (size_t offset = 0; offset <= search_limit; offset += STEP) {
                 float corr = impl_->measureCorrelation(offset);
                 if (corr > impl_->sync_threshold) {
-                    LOG_SYNC(INFO, "New preamble detected while synced at offset=%zu (corr=%.3f), re-syncing",
-                             offset, corr);
+                    // Found new preamble - use this offset directly
+                    // (No fine timing refinement - see note in SEARCHING state)
+                    size_t best_offset = offset;
 
                     // Sync directly to the new preamble (same as SEARCHING state does)
                     // Estimate coarse CFO from preamble
-                    float coarse_cfo = impl_->estimateCoarseCFO(offset);
+                    float coarse_cfo = impl_->estimateCoarseCFO(best_offset);
                     impl_->freq_offset_hz = coarse_cfo;
                     impl_->freq_offset_filtered = coarse_cfo;
                     impl_->freq_correction_phase = 0.0f;
 
                     // Remove preamble and any garbage before it
                     impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
-                                           impl_->rx_buffer.begin() + offset + preamble_total_len);
+                                           impl_->rx_buffer.begin() + best_offset + preamble_total_len);
 
                     // Reset ALL state for new transmission (critical for correct decode!)
                     impl_->soft_bits.clear();
@@ -1088,12 +1143,15 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             // this was likely a false sync - reset to searching
             int sym_count = ++impl_->synced_symbol_count;
             if (sym_count > Impl::MAX_SYMBOLS_BEFORE_TIMEOUT) {
-                LOG_SYNC(WARN, "Sync timeout after %d symbols, resetting to SEARCHING", sym_count);
+                LOG_SYNC(WARN, "Sync timeout after %d symbols (%zu soft bits accumulated), resetting to SEARCHING",
+                         sym_count, impl_->soft_bits.size());
                 impl_->state.store(Impl::State::SEARCHING);
-                impl_->soft_bits.clear();
+                // DON'T clear soft bits here - let caller extract whatever we have
+                // The caller can try to decode partial data
                 impl_->synced_symbol_count.store(0);
                 impl_->idle_call_count.store(0);
-                return false;
+                // Return true if we have any codewords worth of data - give caller a chance to decode
+                return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
             }
         }
 
@@ -1102,12 +1160,14 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         if (impl_->soft_bits.size() == soft_bits_before) {
             int idle = ++impl_->idle_call_count;
             if (idle > Impl::MAX_IDLE_CALLS_BEFORE_RESET) {
-                LOG_SYNC(DEBUG, "Idle timeout after %d calls, resetting to SEARCHING", idle);
+                LOG_SYNC(DEBUG, "Idle timeout after %d calls (%zu soft bits), resetting to SEARCHING",
+                         idle, impl_->soft_bits.size());
                 impl_->state.store(Impl::State::SEARCHING);
-                impl_->soft_bits.clear();
+                // DON'T clear soft bits - let caller extract whatever we have
                 impl_->synced_symbol_count.store(0);
                 impl_->idle_call_count.store(0);
-                return false;
+                // Return true if we have data worth decoding
+                return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
             }
         } else {
             // Made progress - reset idle counter

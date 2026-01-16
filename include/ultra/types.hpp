@@ -86,6 +86,8 @@ struct ModemConfig {
     // Audio parameters
     uint32_t sample_rate = 48000;      // Audio sample rate
     uint32_t center_freq = 1500;       // Center frequency in audio passband
+    // With 30 carriers @ 93.75 Hz spacing, bandwidth = ±1406 Hz from center
+    // At 1500 Hz: carriers span 94-2906 Hz (fits 2.8 kHz SSB filter)
 
     // OFDM parameters - optimized for 2.8 kHz HF channel
     // 512 FFT at 48kHz = 93.75 Hz bin spacing
@@ -97,8 +99,10 @@ struct ModemConfig {
     CyclicPrefixMode cp_mode = CyclicPrefixMode::MEDIUM;
     uint32_t symbol_guard = 4;         // Guard samples (reduced from 8)
 
-    // Pilot configuration - scattered pilots for efficiency
-    uint32_t pilot_spacing = 6;        // Pilot every N carriers (5 pilots, 25 data = 17% overhead)
+    // Pilot configuration for frequency-selective channel estimation
+    // Coherence BW for 1ms delay ≈ 159 Hz, carrier spacing = 93.75 Hz
+    // pilot_spacing=2 gives 15 pilots, 15 data (50% overhead) - best fading performance
+    uint32_t pilot_spacing = 2;        // Pilot every 2 carriers (15 pilots, 15 data)
     bool scattered_pilots = true;      // Rotate pilot positions each symbol
 
     // Initial modulation/coding (will adapt)
@@ -183,12 +187,11 @@ struct ModemStats {
 namespace presets {
 
 // Conservative: Maximum reliability for poor HF conditions
-// ~4.8 kbps at QPSK R1/2
 inline ModemConfig conservative() {
     ModemConfig cfg;
     cfg.cp_mode = CyclicPrefixMode::LONG;      // Handle heavy multipath
     cfg.symbol_guard = 8;
-    cfg.pilot_spacing = 5;                      // More pilots for tracking
+    cfg.pilot_spacing = 2;                      // Dense pilots required for HF fading
     cfg.modulation = Modulation::QPSK;
     cfg.code_rate = CodeRate::R1_2;
     cfg.speed_profile = SpeedProfile::CONSERVATIVE;
@@ -196,12 +199,11 @@ inline ModemConfig conservative() {
 }
 
 // Balanced: Good trade-off for typical HF conditions
-// ~9.2 kbps at 64-QAM R3/4
 inline ModemConfig balanced() {
     ModemConfig cfg;
     cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 48 samples = 1ms
     cfg.symbol_guard = 4;
-    cfg.pilot_spacing = 6;                      // 5 pilots, 25 data
+    cfg.pilot_spacing = 2;                      // Dense pilots required for HF fading
     cfg.modulation = Modulation::QAM64;
     cfg.code_rate = CodeRate::R3_4;
     cfg.speed_profile = SpeedProfile::BALANCED;
@@ -209,12 +211,11 @@ inline ModemConfig balanced() {
 }
 
 // Turbo: Maximum speed for excellent conditions (30+ dB SNR)
-// ~14 kbps at 256-QAM R5/6
 inline ModemConfig turbo() {
     ModemConfig cfg;
     cfg.cp_mode = CyclicPrefixMode::SHORT;     // 32 samples = 0.67ms
     cfg.symbol_guard = 0;                       // No guard - tight timing
-    cfg.pilot_spacing = 8;                      // Minimal pilots
+    cfg.pilot_spacing = 2;                      // Dense pilots required for HF fading
     cfg.modulation = Modulation::QAM256;
     cfg.code_rate = CodeRate::R5_6;            // Highest implemented rate
     cfg.speed_profile = SpeedProfile::TURBO;

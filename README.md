@@ -1,6 +1,6 @@
 # ProjectUltra
 
-**A high-performance adaptive HF modem for amateur radio digital communication**
+**An adaptive HF modem for amateur radio digital communication**
 
 > ⚠️ **Work in Progress** — This project is under active development. No official release yet. APIs and protocols may change. Use for experimentation and testing only.
 
@@ -15,66 +15,18 @@ ProjectUltra is a software modem designed for reliable data transfer over HF rad
 
 - **Dual Waveform Support:** OFDM for stable channels, OTFS for harsh conditions
 - **Strong Error Correction:** LDPC codes with rates from 1/4 to 5/6
-- **Selective Repeat ARQ:** 2-4x throughput improvement over stop-and-wait
+- **Selective Repeat ARQ:** Improved efficiency over stop-and-wait
 - **Adaptive Equalization:** LMS/RLS tracking for time-varying channels
 - **Implicit Channel Probing:** Automatic link adaptation without overhead
 - **File Transfer:** Compressed transfers with integrity verification
 
 ---
 
-## Speed
-
-| Mode | Code Rate | Raw Rate | Typical Use |
-|------|-----------|----------|-------------|
-| BPSK | R1/4 | 540 bps | Polar flutter, worst conditions |
-| BPSK | R1/2 | 1.1 kbps | Poor/disturbed paths |
-| QPSK | R1/2 | 2.1 kbps | Moderate conditions, reliable |
-| QPSK | R3/4 | 3.2 kbps | Good conditions |
-| 16-QAM | R1/2 | 4.3 kbps | Good SNR |
-| 16-QAM | R3/4 | 6.4 kbps | Very good conditions |
-| 64-QAM | R3/4 | 9.6 kbps | Excellent SNR |
-| 64-QAM | R5/6 | 10.7 kbps | Near-ideal channel |
-
-*Rates are theoretical maximums. Actual throughput depends on ARQ retransmissions and channel conditions.*
-
----
-
 ## Performance
 
-Tested against **ITU-R F.1487** Watterson HF channel model at 15 dB SNR:
+> **Under Validation** — Performance metrics are currently being validated through rigorous testing with the full modem pipeline. Preliminary results show reliable operation on AWGN channels; fading channel performance (Watterson model) is under active optimization.
 
-### Frame Success Rate by Channel Condition
-
-| Channel | Delay | Doppler | OFDM QPSK | OTFS-RAW | Best Choice |
-|---------|-------|---------|-----------|----------|-------------|
-| AWGN | - | - | 100% | 100% | Either |
-| Good | 0.5 ms | 0.1 Hz | 66% | 90% | OTFS |
-| Moderate | 1.0 ms | 0.5 Hz | 82% | 42% | OFDM |
-| Poor | 2.0 ms | 1.0 Hz | 10% | 20% | OTFS |
-| Flutter | 0.5 ms | 10 Hz | 0% | 0% | BPSK mode |
-
-### Harsh Channel Performance (Poor & Flutter)
-
-BPSK with R1/4 coding provides reliable operation where higher-order modulation fails:
-
-| Channel | Mode | OFDM | OTFS-RAW | Winner |
-|---------|------|------|----------|--------|
-| Poor | BPSK R1/4 | 54% | **72%** | OTFS |
-| Poor | BPSK R1/2 | 6% | **66%** | OTFS |
-| Flutter | BPSK R1/4 | 30% | **58%** | OTFS |
-| Flutter | BPSK R1/2 | 0% | **14%** | OTFS |
-
-**OTFS significantly outperforms OFDM on doubly-selective channels.**
-
-### Throughput
-
-| Conditions | Mode | Effective Rate |
-|------------|------|----------------|
-| Excellent (>25 dB) | 64-QAM R5/6 | ~10 kbps |
-| Good (20-25 dB) | 16-QAM R3/4 | ~6 kbps |
-| Moderate (15-20 dB) | QPSK R1/2 | ~2 kbps |
-| Poor (10-15 dB) | BPSK R1/2 | ~1 kbps |
-| Flutter (<10 dB) | BPSK R1/4 | ~0.5 kbps |
+Supports modulation from BPSK to 256-QAM with LDPC code rates from R1/4 to R5/6. Actual throughput depends on channel conditions and will be published after validation is complete.
 
 ---
 
@@ -97,11 +49,10 @@ The protocol supports both Stop-and-Wait and Selective Repeat ARQ modes:
 | Metric | Stop-and-Wait | Selective Repeat |
 |--------|---------------|------------------|
 | Window Size | 1 | 4-8 configurable |
-| Throughput | Baseline | 2-4x improvement |
-| Latency (10 frames) | 20-30 sec | 5-10 sec |
+| Efficiency | Baseline | Improved |
 | Complexity | Simple | Moderate |
 
-Selective Repeat uses a sliding window with per-frame acknowledgments, dramatically improving throughput on paths with long round-trip times.
+Selective Repeat uses a sliding window with per-frame acknowledgments, improving efficiency on paths with long round-trip times.
 
 ### Adaptive Equalization
 
