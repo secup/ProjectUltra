@@ -16,6 +16,7 @@
 #include "ultra/dsp.hpp"  // For HilbertTransform, NCO
 #include "../gui/adaptive_mode.hpp"
 
+#include <algorithm>
 #include <iostream>
 #include <iomanip>
 
