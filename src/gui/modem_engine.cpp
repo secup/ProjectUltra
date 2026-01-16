@@ -343,6 +343,26 @@ void ModemEngine::processRxBuffer() {
 
     // Now decode all accumulated soft bits at once (handles bit-level boundaries correctly)
     if (!accumulated_soft_bits.empty()) {
+        // Log first few soft bits to check sign convention and magnitudes
+        // Positive LLR = bit 0 likely, Negative LLR = bit 1 likely
+        // Magnitude indicates confidence (typical range: 1-10 for good SNR)
+        if (accumulated_soft_bits.size() >= 16) {
+            int pos_count = 0, neg_count = 0;
+            float sum_abs = 0;
+            for (size_t i = 0; i < std::min(size_t(100), accumulated_soft_bits.size()); i++) {
+                if (accumulated_soft_bits[i] > 0) pos_count++;
+                else neg_count++;
+                sum_abs += std::abs(accumulated_soft_bits[i]);
+            }
+            float avg_magnitude = sum_abs / std::min(size_t(100), accumulated_soft_bits.size());
+            LOG_MODEM(INFO, "RX: First 100 LLRs: %d positive (bit 0), %d negative (bit 1), avg |LLR|=%.2f",
+                      pos_count, neg_count, avg_magnitude);
+            LOG_MODEM(INFO, "RX: First 8 LLRs: %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
+                      accumulated_soft_bits[0], accumulated_soft_bits[1],
+                      accumulated_soft_bits[2], accumulated_soft_bits[3],
+                      accumulated_soft_bits[4], accumulated_soft_bits[5],
+                      accumulated_soft_bits[6], accumulated_soft_bits[7]);
+        }
         LOG_MODEM(INFO, "RX: Decoding %d codewords (%zu soft bits total), decoder_rate=%d",
                   codewords_collected, accumulated_soft_bits.size(),
                   static_cast<int>(decoder_->getRate()));

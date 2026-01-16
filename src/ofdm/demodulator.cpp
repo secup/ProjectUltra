@@ -1008,7 +1008,15 @@ struct OFDMDemodulator::Impl {
 
         // Log first few equalized symbols when starting a new frame
         if (soft_bits.empty() && !equalized.empty()) {
-            LOG_DEMOD(TRACE, "First equalized symbols: (%.3f,%.3f) (%.3f,%.3f) (%.3f,%.3f)",
+            // For BPSK, symbols should be near +1 or -1 on real axis
+            // Count how many are positive vs negative to detect phase inversion
+            int pos_count = 0, neg_count = 0;
+            for (const auto& s : equalized) {
+                if (s.real() > 0) pos_count++;
+                else neg_count++;
+            }
+            LOG_DEMOD(INFO, "First symbol stats: %zu carriers, %d positive, %d negative, first 3: (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f)",
+                    equalized.size(), pos_count, neg_count,
                     equalized[0].real(), equalized[0].imag(),
                     equalized.size() > 1 ? equalized[1].real() : 0.0f,
                     equalized.size() > 1 ? equalized[1].imag() : 0.0f,
