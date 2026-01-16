@@ -39,14 +39,31 @@ ModemEngine::ModemEngine() {
 ModemEngine::~ModemEngine() = default;
 
 void ModemEngine::setConfig(const ModemConfig& config) {
+    LOG_MODEM(INFO, "setConfig called: new code_rate=%d, modulation=%d",
+              static_cast<int>(config.code_rate), static_cast<int>(config.modulation));
     config_ = config;
 
     encoder_->setRate(config.code_rate);
-    decoder_->setRate(config.code_rate);
+    // BUG FIX: Don't change decoder rate here - it should stay at R1_4 for disconnected mode
+    // The decoder rate should only change when setConnected(true) is called
+    // decoder_->setRate(config.code_rate);  // DISABLED - causes rate mismatch!
+    LOG_MODEM(INFO, "setConfig: encoder_rate=%d, decoder_rate=%d (decoder unchanged for disconnected)",
+              static_cast<int>(config.code_rate), static_cast<int>(decoder_->getRate()));
 
-    // Recreate OFDM modulator/demodulator with new config
+    // Recreate OFDM modulator with new config (TX uses config directly)
     ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
-    ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+    // For RX: if disconnected, use BPSK R1/4 (robust mode), not config's mode
+    if (!connected_) {
+        ModemConfig rx_config = config_;
+        rx_config.modulation = Modulation::BPSK;
+        rx_config.code_rate = CodeRate::R1_4;
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+        LOG_MODEM(INFO, "setConfig: RX using disconnected mode (BPSK R1/4)");
+    } else {
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+        LOG_MODEM(INFO, "setConfig: RX using connected mode (config settings)");
+    }
 
     // Recreate OTFS modulator/demodulator with new config
     otfs_config_.M = config_.num_carriers;
@@ -158,6 +175,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     // Step 1: LDPC encode with appropriate code rate
     encoder_->setRate(tx_code_rate);
+    LOG_MODEM(INFO, "TX: Using code_rate=%d, modulation=%d, is_link=%d, connected=%d",
+              static_cast<int>(tx_code_rate), static_cast<int>(tx_modulation),
+              is_link_frame, connected_);
     Bytes encoded = encoder_->encode(data);
 
     // Step 1.5: Interleave (optional - spreads burst errors for LDPC decoder)
@@ -323,17 +343,18 @@ void ModemEngine::processRxBuffer() {
 
     // Now decode all accumulated soft bits at once (handles bit-level boundaries correctly)
     if (!accumulated_soft_bits.empty()) {
-        LOG_MODEM(DEBUG, "RX: Decoding %d codewords (%zu soft bits total)",
-                  codewords_collected, accumulated_soft_bits.size());
+        LOG_MODEM(INFO, "RX: Decoding %d codewords (%zu soft bits total), decoder_rate=%d",
+                  codewords_collected, accumulated_soft_bits.size(),
+                  static_cast<int>(decoder_->getRate()));
 
         Bytes decoded = decoder_->decodeSoft(accumulated_soft_bits);
         bool success = decoder_->lastDecodeSuccess();
 
-        LOG_MODEM(DEBUG, "RX: LDPC decode %s, got %zu bytes",
+        LOG_MODEM(INFO, "RX: LDPC decode %s, got %zu bytes",
                   success ? "SUCCESS" : "FAILED", decoded.size());
 
-        // Debug: print first few bytes as hex and text
-        if (g_log_level >= LogLevel::DEBUG && g_log_categories.modem && !decoded.empty()) {
+        // Print first few bytes as hex (always at INFO for debugging)
+        if (!decoded.empty()) {
             char hex_buf[80], text_buf[32];
             size_t n = std::min(decoded.size(), size_t(24));
             for (size_t i = 0; i < n; i++) {
@@ -342,8 +363,8 @@ void ModemEngine::processRxBuffer() {
                 text_buf[i] = (c >= 32 && c < 127) ? c : '.';
             }
             text_buf[n] = '\0';
-            LOG_MODEM(DEBUG, "RX: First %zu bytes hex: %s", n, hex_buf);
-            LOG_MODEM(DEBUG, "RX: As text: '%s'", text_buf);
+            LOG_MODEM(INFO, "RX: First %zu bytes hex: %s", n, hex_buf);
+            LOG_MODEM(INFO, "RX: As text: '%s'", text_buf);
         }
 
         // Update stats

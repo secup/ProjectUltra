@@ -435,6 +435,10 @@ void LDPCDecoder::setRate(CodeRate rate) {
     impl_->buildMatrix();
 }
 
+CodeRate LDPCDecoder::getRate() const {
+    return impl_->rate;
+}
+
 void LDPCDecoder::setMaxIterations(int max_iter) {
     impl_->max_iterations = max_iter;
 }

@@ -1216,6 +1216,9 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->freq_offset_filtered = coarse_cfo;
             impl_->freq_correction_phase = 0.0f;  // Reset correction phase
 
+            LOG_SYNC(INFO, "SYNC FOUND: corr=%.3f at offset %zu, CFO=%.1f Hz, buffer=%zu samples",
+                     sync_corr, sync_offset, coarse_cfo, impl_->rx_buffer.size());
+
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + sync_offset + preamble_total_len);
             impl_->search_offset = 0;  // Reset for next search
@@ -1346,9 +1349,14 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             }
         }
 
-        LOG_DEMOD(DEBUG, "Processed %zu symbols, soft_bits now %zu (added %zu)",
-                  symbols_processed, impl_->soft_bits.size(),
-                  impl_->soft_bits.size() - soft_bits_before);
+        if (symbols_processed > 0) {
+            float snr_db = (impl_->estimated_snr_linear > 0)
+                ? 10.0f * std::log10(impl_->estimated_snr_linear) : 0.0f;
+            LOG_DEMOD(INFO, "Processed %zu symbols, soft_bits=%zu (+%zu), SNR=%.1f dB, CFO=%.1f Hz",
+                      symbols_processed, impl_->soft_bits.size(),
+                      impl_->soft_bits.size() - soft_bits_before,
+                      snr_db, impl_->freq_offset_hz);
+        }
 
         // Track idle calls: if we're synced but not accumulating soft bits,
         // the transmission might have ended

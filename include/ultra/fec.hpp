@@ -65,6 +65,9 @@ public:
     // Set code rate
     void setRate(CodeRate rate);
 
+    // Get current code rate
+    CodeRate getRate() const;
+
     // Set max iterations (tradeoff: more = better correction, slower)
     void setMaxIterations(int max_iter);
 
