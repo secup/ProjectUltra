@@ -34,6 +34,44 @@ Complex qam16_point(int bits) {
     return Complex(levels[i_bits] * QAM16_SCALE, levels[q_bits] * QAM16_SCALE);
 }
 
+// Pilot sequence RNG seed - must match between modulator and demodulator
+// Using a fixed seed ensures TX/RX pilot sequences are identical
+constexpr uint32_t PILOT_RNG_SEED = 0x50494C54;  // "PILT" in ASCII
+
+// 32-QAM rectangular constellation (5 bits per symbol)
+// Uses 8×4 grid: 8 Q levels × 4 I levels = 32 points
+// Gray-coded for minimum bit errors on adjacent symbol errors
+//
+// Bit mapping:
+//   b4b3b2: Q position (3 bits, Gray coded for 8 levels)
+//   b1b0: I position (2 bits, Gray coded for 4 levels)
+//
+// Average power calculation:
+// I variance: (9+1+1+9)/4 × scale² = 5 × scale²
+// Q variance: (49+25+9+1+1+9+25+49)/8 × scale² = 21 × scale²
+// Total: 26 × scale² = 1 → scale = 1/sqrt(26)
+Complex qam32_point(int bits) {
+    constexpr float QAM32_SCALE = 0.1961161351381840f;  // 1/sqrt(26) for unit average power
+
+    // Gray-coded I levels (2 bits): 00→-3, 01→-1, 11→+1, 10→+3
+    static const float I_LEVELS[4] = {-3, -1, 1, 3};
+    static const int I_GRAY[4] = {0, 1, 3, 2};  // Gray decode: 00→0, 01→1, 11→2, 10→3
+
+    // Gray-coded Q levels (3 bits): 000→-7, 001→-5, 011→-3, 010→-1, 110→+1, 111→+3, 101→+5, 100→+7
+    static const float Q_LEVELS[8] = {-7, -5, -3, -1, 1, 3, 5, 7};
+    static const int Q_GRAY[8] = {0, 1, 3, 2, 6, 7, 5, 4};  // Gray decode
+
+    int q_bits = (bits >> 2) & 0x7;  // bits 4,3,2
+    int i_bits = bits & 0x3;         // bits 1,0
+
+    // Find actual Q and I indices from Gray code
+    int q_idx = 0, i_idx = 0;
+    for (int i = 0; i < 4; ++i) if (I_GRAY[i] == i_bits) { i_idx = i; break; }
+    for (int i = 0; i < 8; ++i) if (Q_GRAY[i] == q_bits) { q_idx = i; break; }
+
+    return Complex(I_LEVELS[i_idx] * QAM32_SCALE, Q_LEVELS[q_idx] * QAM32_SCALE);
+}
+
 // Map bits to constellation point
 Complex mapBits(uint32_t bits, Modulation mod) {
     switch (mod) {
@@ -43,6 +81,8 @@ Complex mapBits(uint32_t bits, Modulation mod) {
             return QPSK_MAP[bits & 3];
         case Modulation::QAM16:
             return qam16_point(bits & 0xF);
+        case Modulation::QAM32:
+            return qam32_point(bits & 0x1F);
         case Modulation::QAM64: {
             // 64-QAM: 6 bits -> I(3 bits) + Q(3 bits)
             static const float levels[] = {-7, -5, -1, -3, 7, 5, 1, 3};
@@ -118,6 +158,7 @@ struct OFDMModulator::Impl {
             }
             ++pilot_count;
         }
+
     }
 
     void generateSequences() {
@@ -134,7 +175,7 @@ struct OFDMModulator::Impl {
 
         // Pilot sequence: known BPSK pattern (pseudo-random but deterministic)
         pilot_sequence.resize(pilot_carrier_indices.size());
-        std::mt19937 rng(0xDEADBEEF);  // Fixed seed for reproducibility
+        std::mt19937 rng(PILOT_RNG_SEED);
         for (size_t i = 0; i < pilot_sequence.size(); ++i) {
             pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
         }
@@ -223,10 +264,11 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
         for (size_t c = 0; c < carriers_per_symbol && data_idx < data.size(); ++c) {
             uint32_t bits = 0;
             for (size_t b = 0; b < bits_per_carrier; ++b) {
+                bits <<= 1;  // Always shift left (padding with 0 when no more data)
                 if (data_idx < data.size()) {
                     uint8_t byte = data[data_idx];
                     uint8_t bit = (byte >> (7 - bit_idx)) & 1;
-                    bits = (bits << 1) | bit;
+                    bits |= bit;
 
                     ++bit_idx;
                     if (bit_idx >= 8) {

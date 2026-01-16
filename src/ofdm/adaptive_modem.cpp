@@ -125,7 +125,9 @@ PreambleChannelEstimate ChannelCharacterizer::characterize(
         for (size_t m = 0; m < cfg.num_subcarriers && m < known_sequence.size(); ++m) {
             size_t idx = m + 1;  // Skip DC
             if (idx < cfg.fft_size / 2) {
-                Complex received = freq_domain[idx] * 2.4f;  // SSB scaling
+                // SSB scaling: compensate for Hilbert transform gain in upper sideband
+                // Factor of ~2.4 accounts for: 2x from analytic signal + filter rolloff
+                Complex received = freq_domain[idx] * 2.4f;
                 Complex expected = known_sequence[m];
                 float expected_mag_sq = std::norm(expected);
 
@@ -430,8 +432,8 @@ bool AdaptiveModem::process(SampleSpan samples) {
     // 3. Select mode based on channel
     // 4. Demodulate with selected mode
 
-    // For now, use the active mode's demodulator
-    // TODO: Implement preamble-first estimation and mode switching
+    // Use the active mode's demodulator (set via setMode() before receiving)
+    // Future: could auto-detect mode from preamble characteristics
 
     bool ready = false;
 

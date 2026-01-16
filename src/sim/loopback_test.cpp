@@ -159,10 +159,10 @@ E2EResult runE2ETest(
     E2EResult result = {};
     result.frames_sent = num_frames;
 
-    // Debug counters
-    size_t dbg_frame_ready_count = 0;
-    size_t dbg_soft_bits_ok_count = 0;
-    size_t dbg_decode_ok_count = 0;
+    // Processing stage counters (for diagnostics)
+    size_t frames_detected = 0;
+    size_t soft_bits_valid = 0;
+    size_t ldpc_success = 0;
 
     // CRITICAL: Set the modulation in config so demodulator knows what to expect!
     // Without this, demodulator uses default QPSK and fails for other modulations.
@@ -247,12 +247,12 @@ E2EResult runE2ETest(
         }
 
         if (frame_ready) {
-            dbg_frame_ready_count++;
+            frames_detected++;
             // Get soft bits
             std::vector<float> soft_bits = demodulator.getSoftBits();
 
             if (soft_bits.size() >= LDPC_BLOCK_SIZE) {
-                dbg_soft_bits_ok_count++;
+                soft_bits_valid++;
                 // Deinterleave
                 std::vector<float> deinterleaved = interleaver.deinterleave(soft_bits);
 
@@ -260,7 +260,7 @@ E2EResult runE2ETest(
                 Bytes rx_data = decoder.decodeSoft(deinterleaved);
 
                 if (decoder.lastDecodeSuccess()) {
-                    dbg_decode_ok_count++;
+                    ldpc_success++;
                     // Truncate to original size
                     if (rx_data.size() > tx_data.size()) {
                         rx_data.resize(tx_data.size());
@@ -274,16 +274,16 @@ E2EResult runE2ETest(
                     }
                 }
             } else if (debug && frame == 0) {
-                std::cout << "   [DEBUG] soft_bits.size()=" << soft_bits.size()
-                          << " < LDPC_BLOCK_SIZE=" << LDPC_BLOCK_SIZE << "\n";
+                std::cout << "   Insufficient soft bits: " << soft_bits.size()
+                          << " (need " << LDPC_BLOCK_SIZE << ")\n";
             }
         }
     }
 
     if (debug) {
-        std::cout << "   [DEBUG] frame_ready=" << dbg_frame_ready_count
-                  << " soft_ok=" << dbg_soft_bits_ok_count
-                  << " decode_ok=" << dbg_decode_ok_count
+        std::cout << "   Pipeline: detected=" << frames_detected
+                  << " valid_bits=" << soft_bits_valid
+                  << " decoded=" << ldpc_success
                   << " perfect=" << result.frames_decoded << "/" << num_frames << "\n";
     }
 
@@ -322,15 +322,11 @@ void runRealisticTests(const ModemConfig& config) {
     };
 
     std::vector<TestMode> modes = {
-        {Modulation::BPSK, CodeRate::R1_4, "BPSK R1/4"},   // Most robust - for extreme conditions
-        {Modulation::BPSK, CodeRate::R1_2, "BPSK R1/2"},
-        {Modulation::QPSK, CodeRate::R1_2, "QPSK R1/2"},
-        {Modulation::QPSK, CodeRate::R3_4, "QPSK R3/4"},
+        // Focus on 16QAM for now - this is what we need to fix
         {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2"},
         {Modulation::QAM16, CodeRate::R3_4, "16QAM R3/4"},
-        {Modulation::QAM64, CodeRate::R1_2, "64QAM R1/2"},
-        {Modulation::QAM64, CodeRate::R3_4, "64QAM R3/4"},
-        {Modulation::QAM256, CodeRate::R3_4, "256QAM R3/4"},
+        // Reference: QPSK works well
+        {Modulation::QPSK, CodeRate::R1_2, "QPSK R1/2"},
     };
 
     for (const auto& mode : modes) {
@@ -376,6 +372,508 @@ void runRealisticTests(const ModemConfig& config) {
 
         std::cout << "\n";
     }
+}
+
+// Compare standard config vs high-throughput config for 16QAM
+void runConfigurationComparisonTest() {
+    std::cout << "=== Configuration Comparison (Standard vs High-Throughput) ===\n\n";
+
+    // Current (original) config - try WITHOUT adaptive EQ
+    // Decision-directed EQ can diverge if initial decisions are wrong (16QAM issue)
+    ModemConfig current;
+    current.adaptive_eq_enabled = false;  // Disable adaptive EQ - use pure ZF
+
+    // High-throughput config - also without adaptive EQ
+    ModemConfig ht_config = presets::high_throughput();
+    ht_config.adaptive_eq_enabled = false;  // Disable adaptive EQ
+
+    std::cout << "Standard Config (512 FFT, 30 carriers):\n";
+    std::cout << "  FFT:        " << current.fft_size << "\n";
+    std::cout << "  Carriers:   " << current.num_carriers << " ("
+              << current.getDataCarriers() << " data)\n";
+    std::cout << "  Symbol:     " << std::fixed << std::setprecision(1)
+              << (float)current.getSymbolDuration() / current.sample_rate * 1000 << " ms ("
+              << current.sample_rate / current.getSymbolDuration() << " sym/s)\n";
+    std::cout << "  Bandwidth:  " << (current.num_carriers * current.sample_rate / current.fft_size) << " Hz\n\n";
+
+    std::cout << "High-Throughput Config (1024 FFT, 59 carriers):\n";
+    std::cout << "  FFT:        " << ht_config.fft_size << "\n";
+    std::cout << "  Carriers:   " << ht_config.num_carriers << " ("
+              << ht_config.getDataCarriers() << " data)\n";
+    std::cout << "  Symbol:     " << std::fixed << std::setprecision(1)
+              << (float)ht_config.getSymbolDuration() / ht_config.sample_rate * 1000 << " ms ("
+              << ht_config.sample_rate / ht_config.getSymbolDuration() << " sym/s)\n";
+    std::cout << "  Bandwidth:  " << (ht_config.num_carriers * ht_config.sample_rate / ht_config.fft_size) << " Hz\n\n";
+
+    // Test 16QAM R3/4 on both configs
+    std::cout << "Testing 16QAM R3/4 on Moderate channel (15 dB SNR):\n";
+    std::cout << "─────────────────────────────────────────────────────\n";
+
+    // Current config
+    auto r_current = runE2ETest(current, Modulation::QAM16, CodeRate::R3_4,
+                                 ccir::moderate(15.0f), 100);
+    float current_data_carriers = current.getDataCarriers();
+    float current_sym_rate = current.sample_rate / current.getSymbolDuration();
+    float current_raw = current_data_carriers * 4 * current_sym_rate * 0.75f;  // 16QAM * R3/4
+
+    std::cout << "Standard (512 FFT): " << std::setw(3) << r_current.frames_decoded << "/100"
+              << " (" << std::fixed << std::setprecision(1) << r_current.frame_success_rate << "%)"
+              << "  Effective: " << (r_current.effective_throughput / 1000) << " kbps\n";
+
+    // High-throughput config
+    auto r_ht_config = runE2ETest(ht_config, Modulation::QAM16, CodeRate::R3_4,
+                              ccir::moderate(15.0f), 100);
+    float ht_config_data_carriers = ht_config.getDataCarriers();
+    float ht_config_sym_rate = ht_config.sample_rate / ht_config.getSymbolDuration();
+    float ht_config_raw = ht_config_data_carriers * 4 * ht_config_sym_rate * 0.75f;
+
+    std::cout << "High-Tput (1024):   " << std::setw(3) << r_ht_config.frames_decoded << "/100"
+              << " (" << std::fixed << std::setprecision(1) << r_ht_config.frame_success_rate << "%)"
+              << "  Effective: " << (r_ht_config.effective_throughput / 1000) << " kbps\n";
+
+    std::cout << "\nRaw throughput comparison:\n";
+    std::cout << "  Standard raw:    " << std::fixed << std::setprecision(1) << current_raw / 1000 << " kbps\n";
+    std::cout << "  High-Tput raw:   " << ht_config_raw / 1000 << " kbps\n";
+    std::cout << "  (Target: ~7 kbps for high-speed HF data)\n\n";
+
+    // Also test at different conditions
+    std::cout << "Full comparison across conditions:\n";
+    std::cout << "─────────────────────────────────────────────────────\n";
+    std::cout << std::setw(16) << "Condition"
+              << std::setw(16) << "Standard (512)"
+              << std::setw(16) << "High-Tput\n";
+
+    // Compare 512 FFT vs 1024 FFT configurations
+    // 512 FFT: faster symbols, potentially better tracking
+    // 1024 FFT: narrower carriers, less fading per carrier
+    ModemConfig cfg_512;
+    cfg_512.fft_size = 512;
+    cfg_512.num_carriers = 30;
+    cfg_512.pilot_spacing = 2;  // 50% pilots for robust estimation
+
+    ModemConfig cfg_1024 = ht_config;  // Already configured for 1024 FFT
+
+    auto testConfigs = [&](const char* name, const WattersonChannel::Config& ch) {
+        // 512 FFT with R1/2
+        auto r512 = runE2ETest(cfg_512, Modulation::QAM16, CodeRate::R1_2, ch, 50);
+        float sym512 = (float)cfg_512.sample_rate / cfg_512.getSymbolDuration();
+        float raw512 = cfg_512.getDataCarriers() * 4.0f * sym512 * 0.5f;
+        float eff512 = raw512 * r512.frame_success_rate / 100.0f;
+
+        // 1024 FFT with R2/3 (better for good conditions)
+        auto r1024_23 = runE2ETest(cfg_1024, Modulation::QAM16, CodeRate::R2_3, ch, 50);
+        float sym1024 = (float)cfg_1024.sample_rate / cfg_1024.getSymbolDuration();
+        float raw1024 = cfg_1024.getDataCarriers() * 4.0f * sym1024 * 0.667f;
+        float eff1024 = raw1024 * r1024_23.frame_success_rate / 100.0f;
+
+        // Pick best effective throughput
+        float best = std::max(eff512, eff1024);
+        const char* best_cfg = (eff512 > eff1024) ? "512" : "1024";
+
+        std::cout << std::setw(14) << name
+                  << "  512:" << std::setw(3) << (int)r512.frame_success_rate << "% "
+                  << std::fixed << std::setprecision(1) << (eff512/1000) << "kb"
+                  << "  1024:" << std::setw(3) << (int)r1024_23.frame_success_rate << "% "
+                  << (eff1024/1000) << "kb"
+                  << "  Best: " << (best/1000) << "kb (" << best_cfg << ")\n";
+    };
+
+    // =========================================================================
+    // SPEED LADDER: Find maximum achievable throughput at each SNR level
+    // Goal: Find path to 7+ kbps (high-speed HF data target)
+    // =========================================================================
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "        SPEED LADDER: Maximum Throughput by Condition\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    float sym_rate = (float)cfg_1024.sample_rate / cfg_1024.getSymbolDuration();
+    uint32_t data_carriers = cfg_1024.getDataCarriers();
+
+    // Calculate raw throughputs
+    auto calcRaw = [&](int bits, float code_rate) {
+        return data_carriers * bits * sym_rate * code_rate;
+    };
+
+    std::cout << "Configuration: 1024 FFT, " << data_carriers << " data carriers, "
+              << std::fixed << std::setprecision(0) << sym_rate << " sym/s\n";
+    std::cout << "Theoretical maximums (100% decode rate):\n";
+    std::cout << "  16-QAM R2/3: " << std::setprecision(1) << calcRaw(4, 0.667f)/1000 << " kbps\n";
+    std::cout << "  16-QAM R3/4: " << calcRaw(4, 0.75f)/1000 << " kbps\n";
+    std::cout << "  32-QAM R2/3: " << calcRaw(5, 0.667f)/1000 << " kbps\n";
+    std::cout << "  32-QAM R3/4: " << calcRaw(5, 0.75f)/1000 << " kbps  <-- 7 kbps target\n";
+    std::cout << "  64-QAM R2/3: " << calcRaw(6, 0.667f)/1000 << " kbps\n";
+    std::cout << "  64-QAM R3/4: " << calcRaw(6, 0.75f)/1000 << " kbps  <-- 8 kbps target\n\n";
+
+    // Test function that tries all viable modes and finds best
+    auto findBestMode = [&](const char* name, const WattersonChannel::Config& ch, int num_frames = 30) {
+        struct Mode {
+            Modulation mod;
+            CodeRate rate;
+            const char* name;
+            float code_val;
+            int bits;
+        };
+        Mode modes[] = {
+            {Modulation::QPSK,  CodeRate::R1_2, "QPSK R1/2",   0.5f,   2},
+            {Modulation::QAM16, CodeRate::R1_2, "16QAM R1/2",  0.5f,   4},
+            {Modulation::QAM16, CodeRate::R2_3, "16QAM R2/3",  0.667f, 4},
+            {Modulation::QAM16, CodeRate::R3_4, "16QAM R3/4",  0.75f,  4},
+            {Modulation::QAM32, CodeRate::R1_2, "32QAM R1/2",  0.5f,   5},
+            {Modulation::QAM32, CodeRate::R2_3, "32QAM R2/3",  0.667f, 5},
+            {Modulation::QAM32, CodeRate::R3_4, "32QAM R3/4",  0.75f,  5},
+            {Modulation::QAM64, CodeRate::R1_2, "64QAM R1/2",  0.5f,   6},
+            {Modulation::QAM64, CodeRate::R2_3, "64QAM R2/3",  0.667f, 6},
+            {Modulation::QAM64, CodeRate::R3_4, "64QAM R3/4",  0.75f,  6},
+        };
+
+        float best_eff = 0;
+        const char* best_mode = "none";
+        float best_raw = 0;
+        float best_success = 0;
+
+        std::cout << std::setw(16) << std::left << name << std::right;
+
+        for (const auto& m : modes) {
+            auto result = runE2ETest(cfg_1024, m.mod, m.rate, ch, num_frames);
+            float raw = calcRaw(m.bits, m.code_val);
+            float eff = raw * result.frame_success_rate / 100.0f;
+
+            // Only consider modes with >70% success (usable with ARQ)
+            if (eff > best_eff && result.frame_success_rate > 70.0f) {
+                best_eff = eff;
+                best_mode = m.name;
+                best_raw = raw;
+                best_success = result.frame_success_rate;
+            }
+        }
+
+        if (best_eff > 0) {
+            std::cout << std::fixed << std::setprecision(1)
+                      << "  " << std::setw(11) << best_mode
+                      << "  " << std::setw(3) << (int)best_success << "%"
+                      << "  " << std::setw(4) << best_eff/1000 << " kbps"
+                      << (best_eff >= 7000 ? "  <-- 7KB+ ACHIEVED!" : "") << "\n";
+        } else {
+            std::cout << "  (no mode >70% success)\n";
+        }
+
+        return best_eff;
+    };
+
+    std::cout << "Condition        Best Mode     Success   Effective\n";
+    std::cout << "────────────────────────────────────────────────────\n";
+
+    // Test across realistic conditions
+    findBestMode("AWGN 30dB",     ccir::awgn(30.0f));
+    findBestMode("AWGN 25dB",     ccir::awgn(25.0f));
+    findBestMode("AWGN 20dB",     ccir::awgn(20.0f));
+    findBestMode("Good 25dB",     ccir::good(25.0f));
+    findBestMode("Good 20dB",     ccir::good(20.0f));
+    findBestMode("Good 15dB",     ccir::good(15.0f));
+    findBestMode("Moderate 25dB", ccir::moderate(25.0f));
+    findBestMode("Moderate 20dB", ccir::moderate(20.0f));
+    findBestMode("Moderate 15dB", ccir::moderate(15.0f));
+    findBestMode("Poor 15dB",     ccir::poor(15.0f));
+    findBestMode("Poor 10dB",     ccir::poor(10.0f));
+
+    // =========================================================================
+    // DETAILED 64-QAM ANALYSIS
+    // =========================================================================
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "        64-QAM Detailed Analysis (Path to 7 kbps)\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    std::cout << "Testing 64-QAM at higher SNRs to find working conditions...\n\n";
+    std::cout << "Condition        R1/2       R2/3       R3/4       Best Effective\n";
+    std::cout << "─────────────────────────────────────────────────────────────────\n";
+
+    auto test64QAM = [&](const char* name, const WattersonChannel::Config& ch) {
+        auto r12 = runE2ETest(cfg_1024, Modulation::QAM64, CodeRate::R1_2, ch, 30);
+        auto r23 = runE2ETest(cfg_1024, Modulation::QAM64, CodeRate::R2_3, ch, 30);
+        auto r34 = runE2ETest(cfg_1024, Modulation::QAM64, CodeRate::R3_4, ch, 30);
+
+        float eff12 = calcRaw(6, 0.5f) * r12.frame_success_rate / 100.0f;
+        float eff23 = calcRaw(6, 0.667f) * r23.frame_success_rate / 100.0f;
+        float eff34 = calcRaw(6, 0.75f) * r34.frame_success_rate / 100.0f;
+
+        float best = std::max({eff12, eff23, eff34});
+        const char* best_rate = (best == eff12) ? "R1/2" : (best == eff23) ? "R2/3" : "R3/4";
+
+        std::cout << std::setw(16) << std::left << name << std::right
+                  << std::fixed << std::setprecision(0)
+                  << std::setw(6) << r12.frame_success_rate << "%"
+                  << std::setw(10) << r23.frame_success_rate << "%"
+                  << std::setw(10) << r34.frame_success_rate << "%"
+                  << std::setprecision(1)
+                  << "     " << best/1000 << " kb (" << best_rate << ")"
+                  << (best >= 7000 ? " ***" : "") << "\n";
+    };
+
+    test64QAM("AWGN 35dB", ccir::awgn(35.0f));
+    test64QAM("AWGN 30dB", ccir::awgn(30.0f));
+    test64QAM("AWGN 25dB", ccir::awgn(25.0f));
+    test64QAM("Good 30dB", ccir::good(30.0f));
+    test64QAM("Good 25dB", ccir::good(25.0f));
+    test64QAM("Good 20dB", ccir::good(20.0f));
+
+    std::cout << "\n*** = 7+ kbps achieved\n";
+
+    // =========================================================================
+    // 32-QAM ANALYSIS (target: 7+ kbps)
+    // 32QAM = 5 bits/symbol, between 16QAM (4) and 64QAM (6)
+    // =========================================================================
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "        32-QAM Analysis (7 kbps target)\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    std::cout << "Theoretical: " << calcRaw(5, 0.667f)/1000 << " kbps (R2/3), "
+              << calcRaw(5, 0.75f)/1000 << " kbps (R3/4)\n\n";
+
+    std::cout << "Comparison: 16QAM vs 32QAM vs 64QAM (all R2/3)\n";
+    std::cout << "Condition        16QAM      32QAM      64QAM\n";
+    std::cout << "────────────────────────────────────────────────\n";
+
+    auto compareModulations = [&](const char* name, const WattersonChannel::Config& ch) {
+        auto r16 = runE2ETest(cfg_1024, Modulation::QAM16, CodeRate::R2_3, ch, 30);
+        auto r32 = runE2ETest(cfg_1024, Modulation::QAM32, CodeRate::R2_3, ch, 30);
+        auto r64 = runE2ETest(cfg_1024, Modulation::QAM64, CodeRate::R2_3, ch, 30);
+
+        float eff16 = calcRaw(4, 0.667f) * r16.frame_success_rate / 100.0f;
+        float eff32 = calcRaw(5, 0.667f) * r32.frame_success_rate / 100.0f;
+        float eff64 = calcRaw(6, 0.667f) * r64.frame_success_rate / 100.0f;
+
+        std::cout << std::setw(16) << std::left << name << std::right
+                  << std::fixed << std::setprecision(1)
+                  << std::setw(5) << eff16/1000 << "kb"
+                  << std::setw(9) << eff32/1000 << "kb"
+                  << std::setw(9) << eff64/1000 << "kb\n";
+    };
+
+    compareModulations("AWGN 30dB", ccir::awgn(30.0f));
+    compareModulations("AWGN 25dB", ccir::awgn(25.0f));
+    compareModulations("Good 25dB", ccir::good(25.0f));
+    compareModulations("Good 20dB", ccir::good(20.0f));
+    compareModulations("Moderate 25dB", ccir::moderate(25.0f));
+
+    std::cout << "\n32-QAM R3/4 detailed test:\n";
+    auto test32QAM = [&](const char* name, const WattersonChannel::Config& ch) {
+        auto result = runE2ETest(cfg_1024, Modulation::QAM32, CodeRate::R3_4, ch, 30);
+        float raw = calcRaw(5, 0.75f);
+        float eff = raw * result.frame_success_rate / 100.0f;
+        std::cout << "  " << std::setw(14) << name
+                  << std::setw(4) << (int)result.frame_success_rate << "%"
+                  << std::setw(6) << std::fixed << std::setprecision(1) << eff/1000 << " kbps"
+                  << (eff >= 7000 ? "  <-- 7 kbps target achieved!" : "") << "\n";
+    };
+    test32QAM("AWGN 30dB", ccir::awgn(30.0f));
+    test32QAM("AWGN 25dB", ccir::awgn(25.0f));
+
+    // Test 32QAM with denser pilots to see if channel estimation is the bottleneck
+    std::cout << "\n32-QAM with DENSE PILOTS (spacing=2):\n";
+    {
+        ModemConfig cfg_dense = cfg_1024;
+        cfg_dense.pilot_spacing = 2;  // Very dense pilots
+
+        uint32_t pilots_dense = (cfg_dense.num_carriers + 2 - 1) / 2;
+        uint32_t data_dense = cfg_dense.num_carriers - pilots_dense;
+        float sym_dense = (float)cfg_dense.sample_rate / cfg_dense.getSymbolDuration();
+        auto calcRawDense = [data_dense, sym_dense](int bits, float code_rate) {
+            return data_dense * bits * sym_dense * code_rate;
+        };
+
+        std::cout << "  Config: " << data_dense << " data carriers (vs 44 with spacing=4)\n";
+        std::cout << "  Theoretical 32QAM R2/3: " << calcRawDense(5, 0.667f)/1000 << " kbps\n\n";
+
+        auto testDense32 = [&](const char* name, const WattersonChannel::Config& ch) {
+            auto result = runE2ETest(cfg_dense, Modulation::QAM32, CodeRate::R2_3, ch, 30);
+            float raw = calcRawDense(5, 0.667f);
+            float eff = raw * result.frame_success_rate / 100.0f;
+            std::cout << "  " << std::setw(14) << name
+                      << std::setw(4) << (int)result.frame_success_rate << "%"
+                      << std::setw(6) << std::fixed << std::setprecision(1) << eff/1000 << " kbps\n";
+        };
+        testDense32("AWGN 25dB", ccir::awgn(25.0f));
+        testDense32("Good 25dB", ccir::good(25.0f));
+        testDense32("Good 20dB", ccir::good(20.0f));
+    }
+    test32QAM("Good 25dB", ccir::good(25.0f));
+    test32QAM("Good 20dB", ccir::good(20.0f));
+
+    // =========================================================================
+    // PILOT OVERHEAD OPTIMIZATION
+    // Can we push throughput higher by using fewer pilots?
+    // =========================================================================
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "        PILOT OVERHEAD OPTIMIZATION\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    std::cout << "Testing 16-QAM R2/3 with different pilot spacings...\n";
+    std::cout << "(Current: pilot_spacing=3 → 39 data carriers)\n\n";
+
+    auto testPilotSpacing = [&](int spacing, const WattersonChannel::Config& ch) {
+        ModemConfig cfg = cfg_1024;
+        cfg.pilot_spacing = spacing;
+
+        uint32_t pilots = (cfg.num_carriers + spacing - 1) / spacing;
+        uint32_t data = cfg.num_carriers - pilots;
+        float sym = (float)cfg.sample_rate / cfg.getSymbolDuration();
+        float raw = data * 4.0f * sym * 0.667f;  // 16-QAM R2/3
+
+        auto result = runE2ETest(cfg, Modulation::QAM16, CodeRate::R2_3, ch, 30);
+        float eff = raw * result.frame_success_rate / 100.0f;
+
+        std::cout << "  spacing=" << spacing << " (" << data << " data):"
+                  << std::setw(8) << std::fixed << std::setprecision(1) << raw/1000 << " raw"
+                  << " × " << std::setw(3) << (int)result.frame_success_rate << "%"
+                  << " = " << std::setw(4) << eff/1000 << " kbps\n";
+
+        return std::make_pair(eff, result.frame_success_rate);
+    };
+
+    std::cout << "Good 25dB channel:\n";
+    testPilotSpacing(3, ccir::good(25.0f));
+    testPilotSpacing(4, ccir::good(25.0f));
+    testPilotSpacing(5, ccir::good(25.0f));
+    testPilotSpacing(6, ccir::good(25.0f));
+
+    std::cout << "\nGood 20dB channel:\n";
+    testPilotSpacing(3, ccir::good(20.0f));
+    testPilotSpacing(4, ccir::good(20.0f));
+    testPilotSpacing(5, ccir::good(20.0f));
+    testPilotSpacing(6, ccir::good(20.0f));
+
+    std::cout << "\nModerate 20dB channel:\n";
+    testPilotSpacing(3, ccir::moderate(20.0f));
+    testPilotSpacing(4, ccir::moderate(20.0f));
+    testPilotSpacing(5, ccir::moderate(20.0f));
+    testPilotSpacing(6, ccir::moderate(20.0f));
+
+    // =========================================================================
+    // CYCLIC PREFIX OPTIMIZATION
+    // Can we go faster with shorter CP?
+    // =========================================================================
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "        CYCLIC PREFIX OPTIMIZATION\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    std::cout << "Testing 16-QAM R2/3 with different CP lengths...\n\n";
+
+    auto testCPMode = [&](CyclicPrefixMode cp_mode, const char* cp_name,
+                          const WattersonChannel::Config& ch) {
+        ModemConfig cfg = cfg_1024;
+        cfg.cp_mode = cp_mode;
+
+        uint32_t cp = cfg.getCyclicPrefix();
+        float sym = (float)cfg.sample_rate / cfg.getSymbolDuration();
+        float raw = cfg.getDataCarriers() * 4.0f * sym * 0.667f;
+
+        auto result = runE2ETest(cfg, Modulation::QAM16, CodeRate::R2_3, ch, 30);
+        float eff = raw * result.frame_success_rate / 100.0f;
+
+        std::cout << "  " << std::setw(8) << cp_name << " (" << cp << " samp, "
+                  << std::fixed << std::setprecision(0) << sym << " sym/s):"
+                  << std::setprecision(1) << std::setw(6) << raw/1000 << " raw"
+                  << " × " << std::setw(3) << (int)result.frame_success_rate << "%"
+                  << " = " << std::setw(4) << eff/1000 << " kbps\n";
+
+        return eff;
+    };
+
+    std::cout << "Good 20dB channel:\n";
+    testCPMode(CyclicPrefixMode::SHORT,  "SHORT",  ccir::good(20.0f));
+    testCPMode(CyclicPrefixMode::MEDIUM, "MEDIUM", ccir::good(20.0f));
+    testCPMode(CyclicPrefixMode::LONG,   "LONG",   ccir::good(20.0f));
+
+    std::cout << "\nModerate 20dB channel:\n";
+    testCPMode(CyclicPrefixMode::SHORT,  "SHORT",  ccir::moderate(20.0f));
+    testCPMode(CyclicPrefixMode::MEDIUM, "MEDIUM", ccir::moderate(20.0f));
+    testCPMode(CyclicPrefixMode::LONG,   "LONG",   ccir::moderate(20.0f));
+
+    // =========================================================================
+    // HIGH-THROUGHPUT ANALYSIS: Can we reach 7 kbps with 16QAM?
+    // Target: 42 sym/s, 59 carriers, 16QAM → ~7 kbps
+    // That implies ~71% efficiency (R3/4 with minimal pilot overhead)
+    // =========================================================================
+    std::cout << "\n" << std::string(70, '=') << "\n";
+    std::cout << "        HIGH-THROUGHPUT TARGET (7 kbps)\n";
+    std::cout << std::string(70, '=') << "\n\n";
+
+    std::cout << "Target config: 42 sym/s, 59 carriers, 16QAM = 9912 raw bps\n";
+    std::cout << "               7000 net / 9912 raw = 70.6% efficiency\n";
+    std::cout << "               Implies R3/4 FEC + minimal pilot overhead\n\n";
+
+    // Test: Can dense pilots make R3/4 work?
+    std::cout << "TEST 1: Can dense pilots make 16QAM R3/4 work?\n";
+    std::cout << "────────────────────────────────────────────────────\n";
+
+    auto testR34WithPilots = [&](int spacing, const WattersonChannel::Config& ch) {
+        ModemConfig cfg = presets::high_throughput();
+        cfg.pilot_spacing = spacing;
+        cfg.code_rate = CodeRate::R3_4;
+
+        uint32_t pilots = (cfg.num_carriers + spacing - 1) / spacing;
+        uint32_t data = cfg.num_carriers - pilots;
+        float sym = (float)cfg.sample_rate / cfg.getSymbolDuration();
+        float raw = data * 4.0f * sym * 0.75f;  // 16QAM R3/4
+
+        auto result = runE2ETest(cfg, Modulation::QAM16, CodeRate::R3_4, ch, 40);
+        float eff = raw * result.frame_success_rate / 100.0f;
+
+        std::cout << "  pilot=" << spacing << " (" << std::setw(2) << data << " data):"
+                  << std::setw(6) << std::fixed << std::setprecision(1) << raw/1000 << " raw"
+                  << " × " << std::setw(3) << (int)result.frame_success_rate << "%"
+                  << " = " << std::setw(4) << eff/1000 << " kbps"
+                  << (result.frame_success_rate >= 90 ? "  <-- WORKS!" : "") << "\n";
+
+        return result.frame_success_rate;
+    };
+
+    std::cout << "\nGood 25dB (best fading condition):\n";
+    testR34WithPilots(2, ccir::good(25.0f));
+    testR34WithPilots(3, ccir::good(25.0f));
+    testR34WithPilots(4, ccir::good(25.0f));
+
+    std::cout << "\nGood 20dB:\n";
+    testR34WithPilots(2, ccir::good(20.0f));
+    testR34WithPilots(3, ccir::good(20.0f));
+    testR34WithPilots(4, ccir::good(20.0f));
+
+    std::cout << "\nModerate 25dB:\n";
+    testR34WithPilots(2, ccir::moderate(25.0f));
+    testR34WithPilots(3, ccir::moderate(25.0f));
+
+    // Test: What's the theoretical max if we use ALL carriers for data?
+    std::cout << "\n\nTEST 2: Theoretical throughput with decision-directed EQ\n";
+    std::cout << "────────────────────────────────────────────────────\n";
+    std::cout << "(Assumes perfect channel tracking, all 59 carriers = data)\n\n";
+
+    float sym_r = 42.0f;  // High-throughput symbol rate
+    float all_data = 59.0f;  // All carriers for data
+
+    std::cout << "59 carriers × 4 bits (16QAM) × 42 sym/s = "
+              << (int)(all_data * 4 * sym_r) << " raw bps\n";
+    std::cout << "  With R1/2: " << (int)(all_data * 4 * sym_r * 0.5) << " bps\n";
+    std::cout << "  With R2/3: " << (int)(all_data * 4 * sym_r * 0.667) << " bps\n";
+    std::cout << "  With R3/4: " << (int)(all_data * 4 * sym_r * 0.75) << " bps  <-- 7 kbps target\n";
+
+    // Test: What if we boost pilot power?
+    std::cout << "\n\nTEST 3: Effect of channel estimation quality\n";
+    std::cout << "────────────────────────────────────────────────────\n";
+    std::cout << "Testing at very high SNR to isolate channel estimation effects...\n\n";
+
+    auto highSNR = [&](const char* name, const WattersonChannel::Config& ch) {
+        auto r = runE2ETest(cfg_1024, Modulation::QAM16, CodeRate::R3_4, ch, 40);
+        std::cout << "  " << std::setw(14) << std::left << name << std::right
+                  << ": " << std::setw(3) << (int)r.frame_success_rate << "% success\n";
+    };
+
+    highSNR("Good 30dB", ccir::good(30.0f));
+    highSNR("Good 35dB", ccir::good(35.0f));
+    highSNR("Good 40dB", ccir::good(40.0f));
+    highSNR("Moderate 30dB", ccir::moderate(30.0f));
+    highSNR("Moderate 35dB", ccir::moderate(35.0f));
+
+    std::cout << "\n";
 }
 
 void runSpeedProfileTest(const ModemConfig& config) {
@@ -516,6 +1014,7 @@ static const char* getModName(Modulation mod) {
         case Modulation::BPSK: return "BPSK";
         case Modulation::QPSK: return "QPSK";
         case Modulation::QAM16: return "16QAM";
+        case Modulation::QAM32: return "32QAM";
         case Modulation::QAM64: return "64QAM";
         case Modulation::QAM256: return "256QAM";
         default: return "?";
@@ -1171,6 +1670,10 @@ int main(int, char*[]) {
     printHeader();
 
     ModemConfig config;
+    // Enable adaptive RLS equalizer for better fading channel performance
+    config.adaptive_eq_enabled = true;
+    config.adaptive_eq_use_rls = true;  // RLS tracks faster than LMS
+    config.rls_lambda = 0.95f;          // Faster adaptation (lower = faster)
 
     std::cout << "Modem Configuration:\n";
     std::cout << "  FFT size:     " << config.fft_size << "\n";
@@ -1182,14 +1685,16 @@ int main(int, char*[]) {
               << (float)config.getSymbolDuration() / config.sample_rate * 1000 << " ms\n";
     std::cout << "  Cyclic prefix: " << config.getCyclicPrefix() << " samples ("
               << std::setprecision(2) << (float)config.getCyclicPrefix() / config.sample_rate * 1000 << " ms)\n";
+    std::cout << "  Adaptive EQ:  " << (config.adaptive_eq_enabled ? (config.adaptive_eq_use_rls ? "ENABLED (RLS)" : "ENABLED (LMS)") : "disabled") << "\n";
     std::cout << "\n";
 
-    // Run the tests
+    // Run the full test suite
+    runRealisticTests(config);
+    runConfigurationComparisonTest();
     runAdaptiveModulationTest();
     runSNREstimationTest(config);
     runInterleavingBenefitTest(config);
     runFrequencyOffsetTest(config);
-    runRealisticTests(config);
     runSpeedProfileTest(config);
 
     return 0;

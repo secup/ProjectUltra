@@ -265,8 +265,11 @@ void ModemEngine::processRxBuffer() {
     // Need at least one symbol worth of samples (or demodulator has pending data)
     size_t symbol_samples = config_.getSymbolDuration();
     if (rx_sample_buffer_.size() < symbol_samples * 2 && !ofdm_demodulator_->hasPendingData()) {
-        LOG_MODEM(TRACE, "RX: Not enough samples: %zu < %zu",
-                  rx_sample_buffer_.size(), symbol_samples * 2);
+        // Log when we skip processing (at TRACE level to avoid spam)
+        if (rx_sample_buffer_.size() > 0) {
+            LOG_MODEM(TRACE, "RX: Buffering %zu samples (need %zu)",
+                      rx_sample_buffer_.size(), symbol_samples * 2);
+        }
         return;
     }
 
@@ -280,6 +283,7 @@ void ModemEngine::processRxBuffer() {
 
     // Loop to process all available codewords (multi-codeword frames)
     bool frame_ready = ofdm_demodulator_->process(span);
+    LOG_MODEM(DEBUG, "RX: Demod returned frame_ready=%d, synced=%d", frame_ready, ofdm_demodulator_->isSynced());
 
     // Update SNR continuously when synced (not just after decode)
     if (ofdm_demodulator_->isSynced()) {
@@ -353,7 +357,10 @@ void ModemEngine::processRxBuffer() {
 
                 // Call raw callback first (for protocol layer)
                 if (raw_data_callback_) {
+                    LOG_MODEM(DEBUG, "RX: Calling raw_data_callback with %zu bytes", decoded.size());
                     raw_data_callback_(decoded);
+                } else {
+                    LOG_MODEM(WARN, "RX: No raw_data_callback set!");
                 }
 
                 // Call text callback (filtered for display)

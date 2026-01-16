@@ -387,6 +387,7 @@ struct OTFSDemodulator::Impl {
 
     std::vector<Complex> dd_symbols;
     std::vector<float> soft_bits;
+    // Default noise variance (~10 dB SNR) - updated during channel estimation
     float estimated_noise_var = 0.1f;
 
     std::vector<Complex> sync_sequence;

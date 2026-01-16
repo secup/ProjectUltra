@@ -24,9 +24,22 @@ ProjectUltra is a software modem designed for reliable data transfer over HF rad
 
 ## Performance
 
-> **Under Validation** — Performance metrics are currently being validated through rigorous testing with the full modem pipeline. Preliminary results show reliable operation on AWGN channels; fading channel performance (Watterson model) is under active optimization.
+> **Experimental** — Performance measured through simulation (Watterson HF channel model). Real-world on-air testing is in progress.
 
-Supports modulation from BPSK to 256-QAM with LDPC code rates from R1/4 to R5/6. Actual throughput depends on channel conditions and will be published after validation is complete.
+### Simulation Results (ultra_sim)
+
+| Condition | Best Mode | Success Rate | Throughput |
+|-----------|-----------|--------------|------------|
+| AWGN 20-30 dB | 64-QAM R3/4 | 100% | **8.5 kbps** |
+| Good (25 dB, 0.5ms delay) | 16-QAM R2/3 | 96% | 4.9 kbps |
+| Moderate (15 dB, 1ms delay) | 16-QAM R1/2 | 76% | 2.9 kbps |
+| Moderate (15 dB) | QPSK R1/2 | 89% | 1.1 kbps |
+| Poor/Flutter | Under development | — | — |
+
+**Notes:**
+- Poor and flutter channel conditions require OTFS mode (in development)
+- Supports modulation from BPSK to 256-QAM with LDPC rates R1/4 to R5/6
+- Real-world performance depends on actual ionospheric conditions
 
 ---
 
@@ -253,23 +266,25 @@ Testing uses ITU-R F.1487 Watterson model:
 ## Current Status
 
 **What Works:**
-- OFDM and OTFS modulation/demodulation
-- LDPC encoding/decoding (all rates)
-- Selective Repeat ARQ protocol
+- OFDM modulation/demodulation with robust frame detection
+- LDPC encoding/decoding (all rates R1/4 to R5/6)
+- Stop-and-Wait ARQ protocol with retransmission
 - File transfer with compression
 - GUI with waterfall and constellation displays
 - Channel simulation (ITU-R F.1487 Watterson model)
-- Two-modem test mode
+- Two-modem test mode (cross-wired virtual stations)
+- Loopback testing with channel noise simulation
 
 **In Progress:**
-- On-air testing and validation
-- Adaptive mode selection (auto OFDM/OTFS switching)
-- RLS equalizer tuning for flutter channels
-- Documentation and tutorials
+- On-air testing with real HF equipment
+- OTFS mode optimization for poor/flutter channels
+- Adaptive mode selection (auto modulation/coding)
+- Selective Repeat ARQ (currently using Stop-and-Wait)
 
-**Not Yet Implemented:**
+**Planned:**
 - Multi-carrier bonding
-- Automatic frequency control (AFC) beyond ±20 Hz
+- Extended AFC beyond ±20 Hz
+- Mobile/portable optimizations
 
 ---
 

@@ -17,11 +17,34 @@ namespace ultra {
 // Soft demapping - returns LLRs (log-likelihood ratios)
 namespace {
 
+// LLR clipping to prevent overconfident decisions
+// On fading channels, channel estimation errors can produce huge LLRs
+// that are confidently WRONG. Clipping allows LDPC to correct them.
+constexpr float MAX_LLR = 10.0f;
+
+// Minimum LLR magnitude to prevent complete erasures
+// When symbol is near decision boundary, don't tell LDPC "I have no idea"
+// Instead, give it a weak opinion that LDPC can use or override
+// This helps with dense constellations where many symbols land on boundaries
+constexpr float MIN_LLR_MAG = 0.5f;
+
+// Pilot sequence RNG seed - must match modulator for channel estimation
+constexpr uint32_t PILOT_RNG_SEED = 0x50494C54;  // "PILT" in ASCII
+
+inline float clipLLR(float llr) {
+    float clipped = std::max(-MAX_LLR, std::min(MAX_LLR, llr));
+    // Apply minimum magnitude while preserving sign
+    if (std::abs(clipped) < MIN_LLR_MAG) {
+        clipped = (clipped >= 0) ? MIN_LLR_MAG : -MIN_LLR_MAG;
+    }
+    return clipped;
+}
+
 float softDemapBPSK(Complex sym, float noise_var) {
     // BPSK: -1 maps to bit 0, +1 maps to bit 1
     // LLR convention: negative = bit 1, positive = bit 0
     // So: positive symbol → bit 1 → need negative LLR
-    return -2.0f * sym.real() / noise_var;
+    return clipLLR(-2.0f * sym.real() / noise_var);
 }
 
 std::vector<float> softDemapQPSK(Complex sym, float noise_var) {
@@ -30,7 +53,7 @@ std::vector<float> softDemapQPSK(Complex sym, float noise_var) {
     // QPSK_MAP[0]=(-,-), [1]=(-,+), [2]=(+,-), [3]=(+,+)
     // So positive I/Q → bit 1 → need negative LLR
     float scale = -2.0f * 0.7071067811865476f / noise_var;
-    return {sym.real() * scale, sym.imag() * scale};
+    return {clipLLR(sym.real() * scale), clipLLR(sym.imag() * scale)};
 }
 
 std::vector<float> softDemapQAM16(Complex sym, float noise_var) {
@@ -47,12 +70,82 @@ std::vector<float> softDemapQAM16(Complex sym, float noise_var) {
     float scale = 2.0f / noise_var;
 
     // I bits (bits 3,2 of 4-bit word)
-    llrs[0] = -scale * I;                      // bit3 (MSB): sign
-    llrs[1] = scale * (std::abs(I) - d);       // bit2: outer→0, inner→1
+    llrs[0] = clipLLR(-scale * I);                      // bit3 (MSB): sign
+    llrs[1] = clipLLR(scale * (std::abs(I) - d));       // bit2: outer→0, inner→1
 
     // Q bits (bits 1,0 of 4-bit word)
-    llrs[2] = -scale * Q;                      // bit1 (MSB): sign
-    llrs[3] = scale * (std::abs(Q) - d);       // bit0: outer→0, inner→1
+    llrs[2] = clipLLR(-scale * Q);                      // bit1 (MSB): sign
+    llrs[3] = clipLLR(scale * (std::abs(Q) - d));       // bit0: outer→0, inner→1
+
+    return llrs;
+}
+
+std::vector<float> softDemapQAM32(Complex sym, float noise_var) {
+    // 32-QAM BRUTE-FORCE soft demapping (max-log-MAP)
+    // 8×4 grid: 8 Q levels × 4 I levels = 32 points
+    //
+    // For each bit position, compute:
+    //   LLR(b) = min_dist(bit=0) - min_dist(bit=1)
+    // where min_dist is the minimum squared distance to any constellation
+    // point with that bit value.
+    //
+    // This is more expensive than analytical but guaranteed correct.
+
+    constexpr float scale = 0.1961161351381840f;  // 1/sqrt(26)
+
+    // I levels (2 bits): Gray code 00→-3, 01→-1, 11→+1, 10→+3
+    static const float I_LEVELS[4] = {-3, -1, 1, 3};
+    static const int I_GRAY[4] = {0, 1, 3, 2};  // Bit pattern for each level index
+
+    // Q levels (3 bits): Gray code
+    static const float Q_LEVELS[8] = {-7, -5, -3, -1, 1, 3, 5, 7};
+    static const int Q_GRAY[8] = {0, 1, 3, 2, 6, 7, 5, 4};  // Bit pattern for each level index
+
+    // Build constellation with bit mappings
+    // bits = (q_bits << 2) | i_bits, where q_bits uses Q_GRAY and i_bits uses I_GRAY
+    struct Point {
+        Complex pos;
+        int bits;
+    };
+    static Point constellation[32];
+    static bool initialized = false;
+
+    if (!initialized) {
+        for (int qi = 0; qi < 8; ++qi) {
+            for (int ii = 0; ii < 4; ++ii) {
+                int idx = qi * 4 + ii;
+                constellation[idx].pos = Complex(I_LEVELS[ii] * scale, Q_LEVELS[qi] * scale);
+                constellation[idx].bits = (Q_GRAY[qi] << 2) | I_GRAY[ii];
+            }
+        }
+        initialized = true;
+    }
+
+    std::vector<float> llrs(5);
+    float scale_factor = 2.0f / noise_var;  // Must match other demappers (2/σ² for proper LLR)
+
+    // For each bit position, find minimum distance to points with bit=0 and bit=1
+    for (int b = 0; b < 5; ++b) {
+        int bit_mask = 1 << (4 - b);  // bit 4 is llrs[0], bit 0 is llrs[4]
+        float min_dist_0 = 1e10f;
+        float min_dist_1 = 1e10f;
+
+        for (int i = 0; i < 32; ++i) {
+            Complex diff = sym - constellation[i].pos;
+            float dist_sq = diff.real() * diff.real() + diff.imag() * diff.imag();
+
+            if (constellation[i].bits & bit_mask) {
+                if (dist_sq < min_dist_1) min_dist_1 = dist_sq;
+            } else {
+                if (dist_sq < min_dist_0) min_dist_0 = dist_sq;
+            }
+        }
+
+        // LLR = scale * (min_dist_1 - min_dist_0)
+        // Standard max-log-MAP: positive LLR = bit more likely 0, negative = bit more likely 1
+        // If symbol is near bit-0 point: min_dist_0 small, min_dist_1 large → LLR positive
+        llrs[b] = clipLLR(scale_factor * (min_dist_1 - min_dist_0));
+    }
 
     return llrs;
 }
@@ -77,16 +170,16 @@ std::vector<float> softDemapQAM64(Complex sym, float noise_var) {
 
     // I bits (bits 5,4,3 of 6-bit word)
     // bit5: I<0 → 0, I>0 → 1. LLR: I>0 should give negative LLR
-    llrs[0] = -scale * I;
+    llrs[0] = clipLLR(-scale * I);
     // bit4: |I|>d4 → 0 (outer), |I|<d4 → 1 (inner). LLR: outer should give positive
-    llrs[1] = scale * (std::abs(I) - d4);
+    llrs[1] = clipLLR(scale * (std::abs(I) - d4));
     // bit3: distance from midpoint. Pattern gives 0 at extremes, 1 in middle of each region
-    llrs[2] = scale * (std::abs(std::abs(I) - d4) - d2);
+    llrs[2] = clipLLR(scale * (std::abs(std::abs(I) - d4) - d2));
 
     // Q bits (bits 2,1,0 of 6-bit word) - same pattern
-    llrs[3] = -scale * Q;
-    llrs[4] = scale * (std::abs(Q) - d4);
-    llrs[5] = scale * (std::abs(std::abs(Q) - d4) - d2);
+    llrs[3] = clipLLR(-scale * Q);
+    llrs[4] = clipLLR(scale * (std::abs(Q) - d4));
+    llrs[5] = clipLLR(scale * (std::abs(std::abs(Q) - d4) - d2));
 
     return llrs;
 }
@@ -105,16 +198,16 @@ std::vector<float> softDemapQAM256(Complex sym, float noise_var) {
     float scale = 2.0f / noise_var;
 
     // I bits (bits 7,6,5,4 of 8-bit word)
-    llrs[0] = -scale * I;                                               // bit 7: sign
-    llrs[1] = scale * (std::abs(I) - d8);                               // bit 6: outer/inner
-    llrs[2] = scale * (std::abs(std::abs(I) - d8) - d4);                // bit 5
-    llrs[3] = scale * (std::abs(std::abs(std::abs(I) - d8) - d4) - d2); // bit 4
+    llrs[0] = clipLLR(-scale * I);                                               // bit 7: sign
+    llrs[1] = clipLLR(scale * (std::abs(I) - d8));                               // bit 6: outer/inner
+    llrs[2] = clipLLR(scale * (std::abs(std::abs(I) - d8) - d4));                // bit 5
+    llrs[3] = clipLLR(scale * (std::abs(std::abs(std::abs(I) - d8) - d4) - d2)); // bit 4
 
     // Q bits (bits 3,2,1,0 of 8-bit word)
-    llrs[4] = -scale * Q;                                               // bit 3: sign
-    llrs[5] = scale * (std::abs(Q) - d8);                               // bit 2: outer/inner
-    llrs[6] = scale * (std::abs(std::abs(Q) - d8) - d4);                // bit 1
-    llrs[7] = scale * (std::abs(std::abs(std::abs(Q) - d8) - d4) - d2); // bit 0
+    llrs[4] = clipLLR(-scale * Q);                                               // bit 3: sign
+    llrs[5] = clipLLR(scale * (std::abs(Q) - d8));                               // bit 2: outer/inner
+    llrs[6] = clipLLR(scale * (std::abs(std::abs(Q) - d8) - d4));                // bit 1
+    llrs[7] = clipLLR(scale * (std::abs(std::abs(std::abs(Q) - d8) - d4) - d2)); // bit 0
 
     return llrs;
 }
@@ -223,6 +316,7 @@ struct OFDMDemodulator::Impl {
             }
             ++pilot_count;
         }
+
     }
 
     void generateSequences() {
@@ -236,9 +330,9 @@ struct OFDMDemodulator::Impl {
             sync_sequence[n] = Complex(std::cos(phase), std::sin(phase));
         }
 
-        // Same pilot sequence
+        // Same pilot sequence as modulator (must match for channel estimation)
         pilot_sequence.resize(pilot_carrier_indices.size());
-        std::mt19937 rng(0xDEADBEEF);
+        std::mt19937 rng(PILOT_RNG_SEED);
         for (size_t i = 0; i < pilot_sequence.size(); ++i) {
             pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
         }
@@ -674,7 +768,7 @@ struct OFDMDemodulator::Impl {
 
     void interpolateChannel() {
         // Interpolate channel estimate from pilots to data carriers
-        // Uses pre-computed lookup table for O(n) instead of O(n²)
+        // Uses linear interpolation between adjacent pilots
         //
         // NOTE: Use complex interpolation, NOT magnitude/phase interpolation!
         // While mag/phase interpolation seems intuitive, it assumes smooth phase
@@ -688,7 +782,7 @@ struct OFDMDemodulator::Impl {
                 Complex H1 = channel_estimate[info.lower_pilot];
                 Complex H2 = channel_estimate[info.upper_pilot];
 
-                // Simple linear interpolation of complex channel estimate
+                // Linear interpolation of complex channel estimate
                 channel_estimate[info.fft_idx] = (1.0f - info.alpha) * H1 + info.alpha * H2;
             } else if (info.lower_pilot >= 0) {
                 channel_estimate[info.fft_idx] = channel_estimate[info.lower_pilot];
@@ -720,6 +814,33 @@ struct OFDMDemodulator::Impl {
                     return 0.9487f;                        //  3/sqrt(10)
                 };
                 return Complex(slice(sym.real()), slice(sym.imag()));
+            }
+
+            case Modulation::QAM32: {
+                // 32-QAM rectangular 8×4 constellation
+                // I: 4 levels {-3,-1,+1,+3}, Q: 8 levels {-7,-5,-3,-1,+1,+3,+5,+7}
+                constexpr float d = 0.1961161351381840f;  // 1/sqrt(26)
+                auto slice_i = [](float x) -> float {
+                    // 4 levels: -3,-1,+1,+3
+                    constexpr float d = 0.1961161351381840f;
+                    if (x < -2*d) return -3*d;
+                    if (x < 0) return -d;
+                    if (x < 2*d) return d;
+                    return 3*d;
+                };
+                auto slice_q = [](float x) -> float {
+                    // 8 levels: -7,-5,-3,-1,+1,+3,+5,+7
+                    constexpr float d = 0.1961161351381840f;
+                    if (x < -6*d) return -7*d;
+                    if (x < -4*d) return -5*d;
+                    if (x < -2*d) return -3*d;
+                    if (x < 0) return -d;
+                    if (x < 2*d) return d;
+                    if (x < 4*d) return 3*d;
+                    if (x < 6*d) return 5*d;
+                    return 7*d;
+                };
+                return Complex(slice_i(sym.real()), slice_q(sym.imag()));
             }
 
             case Modulation::QAM64: {
@@ -830,16 +951,38 @@ struct OFDMDemodulator::Impl {
                 if (h_power < 1e-10f) {
                     // Deep fade - output zero with high uncertainty
                     equalized[i] = Complex(0, 0);
-                    carrier_noise_var[i] = 1.0f;  // Max uncertainty → soft bits near 0
+                    carrier_noise_var[i] = 100.0f;  // Erasure: LLRs ≈ 0
                 } else {
                     // Standard ZF equalization
                     equalized[i] = received / h;
                     // Per-carrier noise variance after ZF
                     // This makes deeply faded carriers give low-confidence LLRs
                     carrier_noise_var[i] = noise_variance / h_power;
-                    // Clamp to reasonable range
-                    carrier_noise_var[i] = std::max(1e-6f, std::min(10.0f, carrier_noise_var[i]));
+                    // Clamp - but allow high variance for soft erasure
+                    carrier_noise_var[i] = std::max(1e-6f, std::min(100.0f, carrier_noise_var[i]));
                 }
+            }
+        }
+
+        // Second pass: detect deep fades relative to average and apply soft erasure
+        // On frequency-selective channels, some carriers can be 10-20 dB below average
+        // These should be erased (LLR ≈ 0) rather than trusted
+        float avg_h_power = 0.0f;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            int idx = data_carrier_indices[i];
+            avg_h_power += std::norm(channel_estimate[idx]);
+        }
+        avg_h_power /= data_carrier_indices.size();
+
+        // Threshold: 10 dB below average = 0.1 * average
+        float fade_threshold = 0.1f * avg_h_power;
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            int idx = data_carrier_indices[i];
+            float h_power = std::norm(channel_estimate[idx]);
+            if (h_power < fade_threshold) {
+                // Soft erasure: very high noise variance → LLRs ≈ 0
+                // This tells LDPC "no information here, use other bits"
+                carrier_noise_var[i] = 100.0f;
             }
         }
 
@@ -877,10 +1020,38 @@ struct OFDMDemodulator::Impl {
         // CRITICAL: Use per-carrier noise variance for accurate LLRs!
         // On frequency-selective channels, deeply faded carriers have high noise variance
         // after ZF equalization, so their LLRs should have low confidence.
+        //
+        // For higher-order modulations, add channel estimation error margin.
+        // Residual channel estimation error acts like additional noise, causing
+        // constellation rotation/scaling. This error is proportional to the
+        // channel estimation MSE which depends on pilot density and SNR.
+        float ce_error_margin = 1.0f;
+        switch (mod) {
+            case Modulation::BPSK:
+            case Modulation::QPSK:
+                ce_error_margin = 1.0f;  // Robust to small errors
+                break;
+            case Modulation::QAM16:
+                ce_error_margin = 1.2f;  // 20% margin
+                break;
+            case Modulation::QAM32:
+                ce_error_margin = 1.5f;  // Same as 16QAM - let LDPC handle errors
+                break;
+            case Modulation::QAM64:
+                ce_error_margin = 1.8f;  // 80% margin
+                break;
+            case Modulation::QAM256:
+                ce_error_margin = 2.5f;  // Very tight spacing
+                break;
+            default:
+                ce_error_margin = 1.0f;
+        }
+
         for (size_t i = 0; i < equalized.size(); ++i) {
             const auto& sym = equalized[i];
-            // Use per-carrier noise variance (computed in equalize())
-            float nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
+            // Use per-carrier noise variance with CE error margin
+            float base_nv = (i < carrier_noise_var.size()) ? carrier_noise_var[i] : noise_variance;
+            float nv = base_nv * ce_error_margin;
 
             switch (mod) {
                 case Modulation::BPSK:
@@ -893,6 +1064,11 @@ struct OFDMDemodulator::Impl {
                 }
                 case Modulation::QAM16: {
                     auto llrs = softDemapQAM16(sym, nv);
+                    soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                    break;
+                }
+                case Modulation::QAM32: {
+                    auto llrs = softDemapQAM32(sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
@@ -1063,7 +1239,15 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
         size_t preamble_total_len = preamble_symbol_len * 6;  // 4 STS + 2 LTS
 
-        if (impl_->rx_buffer.size() >= preamble_total_len) {
+        // Only check for new preamble when we're IDLE (not actively receiving a frame)
+        // This prevents false preamble detection mid-frame when data correlates with preamble
+        // "Idle" means: we've processed at least one symbol AND been idle for multiple calls
+        // Note: Don't check right after initial sync (synced_symbol_count == 0) - that causes
+        // false detection when data correlates with preamble sequence
+        bool should_check_preamble = impl_->synced_symbol_count.load() > 0 &&
+                                      impl_->idle_call_count.load() >= 2;
+
+        if (should_check_preamble && impl_->rx_buffer.size() >= preamble_total_len) {
             // Search for preamble in the first portion of buffer
             // Limit search to avoid wasting CPU on every call
             size_t search_limit = std::min(impl_->rx_buffer.size() - preamble_total_len,
@@ -1089,6 +1273,8 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                                            impl_->rx_buffer.begin() + best_offset + preamble_total_len);
 
                     // Reset ALL state for new transmission (critical for correct decode!)
+                    LOG_SYNC(WARN, "Mid-frame preamble detected at offset %zu (had %zu soft bits)! Clearing state.",
+                             best_offset, impl_->soft_bits.size());
                     impl_->soft_bits.clear();
                     impl_->synced_symbol_count.store(0);
                     impl_->idle_call_count.store(0);
@@ -1113,9 +1299,13 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         }
 
         size_t soft_bits_before = impl_->soft_bits.size();
+        size_t symbols_to_process = impl_->rx_buffer.size() / impl_->symbol_samples;
+        LOG_DEMOD(DEBUG, "SYNCED: buffer=%zu samples, symbol_samples=%zu, can process %zu symbols",
+                  impl_->rx_buffer.size(), impl_->symbol_samples, symbols_to_process);
 
         // Process ALL complete symbols in the buffer (multi-codeword support)
         // Don't stop at LDPC_BLOCK_SIZE - keep processing to handle large frames
+        size_t symbols_processed = 0;
         while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
             // Convert to baseband
             SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
@@ -1136,6 +1326,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             // Remove processed samples
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + impl_->symbol_samples);
+            ++symbols_processed;
 
             impl_->updateQuality();
 
@@ -1154,6 +1345,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
             }
         }
+
+        LOG_DEMOD(DEBUG, "Processed %zu symbols, soft_bits now %zu (added %zu)",
+                  symbols_processed, impl_->soft_bits.size(),
+                  impl_->soft_bits.size() - soft_bits_before);
 
         // Track idle calls: if we're synced but not accumulating soft bits,
         // the transmission might have ended
@@ -1175,9 +1370,43 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         }
 
         // Return true if we have enough soft bits for an LDPC codeword
-        return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+        bool has_codeword = impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+
+        // Frame completion detection: Reset to SEARCHING when frame is truly done.
+        //
+        // CRITICAL: We must only reset when we're TRULY IDLE (empty span passed), not
+        // just when symbols_processed == 0. There are two cases where symbols_processed == 0:
+        // 1. Empty span passed (checking for more codewords) - truly idle
+        // 2. Samples added but not enough for a symbol (partial buffered) - NOT idle
+        //
+        // We distinguish by checking if samples were actually passed to us.
+        // If samples.empty() && symbols_processed == 0 → truly idle, OK to reset.
+        // If !samples.empty() && symbols_processed == 0 → partial symbol buffered, don't reset.
+        //
+        // Conditions for frame complete:
+        // 1. Don't have enough bits for a codeword
+        // 2. Have processed symbols in the past (synced_symbol_count > 0)
+        // 3. Didn't process any new symbols THIS CALL (symbols_processed == 0)
+        // 4. No new samples were passed (samples.empty()) - truly idle, not buffering
+        //
+        // Note: Back-to-back frames are also handled by preamble detection while
+        // synced, which triggers when idle_call_count >= 2.
+        bool truly_idle = samples.empty() && symbols_processed == 0;
+        if (!has_codeword && impl_->synced_symbol_count.load() > 0 && truly_idle) {
+            LOG_DEMOD(INFO, "Frame complete (only %zu leftover bits, truly idle), resetting to SEARCHING",
+                      impl_->soft_bits.size());
+            impl_->state.store(Impl::State::SEARCHING);
+            impl_->synced_symbol_count.store(0);
+            impl_->idle_call_count.store(0);
+            impl_->soft_bits.clear();  // Discard padding bits
+        }
+
+        LOG_DEMOD(DEBUG, "process: soft_bits=%zu, returning %s",
+                  impl_->soft_bits.size(), has_codeword ? "true" : "false");
+        return has_codeword;
     }
 
+    LOG_DEMOD(DEBUG, "process: not synced, returning false");
     return false;
 }
 
@@ -1204,6 +1433,8 @@ Bytes OFDMDemodulator::getData() {
 }
 
 std::vector<float> OFDMDemodulator::getSoftBits() {
+    LOG_DEMOD(DEBUG, "getSoftBits: buffer has %zu soft bits", impl_->soft_bits.size());
+
     // Trace: print first 24 LLRs and their hard decisions
     if (g_log_level >= LogLevel::TRACE && g_log_categories.demod && impl_->soft_bits.size() >= 24) {
         char buf[256];
