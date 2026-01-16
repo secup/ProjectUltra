@@ -234,6 +234,80 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     return output;
 }
 
+std::vector<float> ModemEngine::generateTestTone(float duration_sec) {
+    // Generate a simple 1500 Hz tone for audio path testing
+    size_t num_samples = static_cast<size_t>(config_.sample_rate * duration_sec);
+    std::vector<float> tone(num_samples);
+
+    float freq = 1500.0f;
+    float phase = 0.0f;
+    float phase_inc = 2.0f * M_PI * freq / config_.sample_rate;
+
+    for (size_t i = 0; i < num_samples; i++) {
+        tone[i] = 0.7f * std::sin(phase);
+        phase += phase_inc;
+        if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+    }
+
+    LOG_MODEM(INFO, "Generated test tone: %.1f Hz, %.1f sec, %zu samples",
+              freq, duration_sec, num_samples);
+    return tone;
+}
+
+std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
+    // Generate known data pattern for debugging
+    // This bypasses LDPC to test just the OFDM layer
+
+    // Create test data: enough for one LDPC codeword worth of OFDM symbols
+    // At R1/4: n=648 coded bits, with BPSK that's 648 symbols
+    // With 15 data carriers per symbol, that's 648/15 = 43.2 symbols
+    size_t num_bits = 648;  // One LDPC codeword
+    Bytes test_data((num_bits + 7) / 8);
+
+    switch (pattern) {
+        case 0:  // All zeros
+            std::fill(test_data.begin(), test_data.end(), 0x00);
+            LOG_MODEM(INFO, "TX Test Pattern: ALL ZEROS (%zu bytes)", test_data.size());
+            break;
+        case 1:  // All ones
+            std::fill(test_data.begin(), test_data.end(), 0xFF);
+            LOG_MODEM(INFO, "TX Test Pattern: ALL ONES (%zu bytes)", test_data.size());
+            break;
+        case 2:  // Alternating 01010101
+            std::fill(test_data.begin(), test_data.end(), 0x55);
+            LOG_MODEM(INFO, "TX Test Pattern: ALTERNATING 0101 (%zu bytes)", test_data.size());
+            break;
+        default:
+            std::fill(test_data.begin(), test_data.end(), 0xAA);
+            LOG_MODEM(INFO, "TX Test Pattern: ALTERNATING 1010 (%zu bytes)", test_data.size());
+    }
+
+    // Generate preamble
+    Samples preamble = ofdm_modulator_->generatePreamble();
+
+    // Modulate directly (NO LDPC encoding - raw bits)
+    Samples modulated = ofdm_modulator_->modulate(test_data, Modulation::BPSK);
+
+    // Combine
+    std::vector<float> output;
+    output.reserve(preamble.size() + modulated.size());
+    output.insert(output.end(), preamble.begin(), preamble.end());
+    output.insert(output.end(), modulated.begin(), modulated.end());
+
+    // Scale
+    float max_val = 0.0f;
+    for (float s : output) max_val = std::max(max_val, std::abs(s));
+    if (max_val > 0.0f) {
+        float scale = 0.8f / max_val;
+        for (float& s : output) s *= scale;
+    }
+
+    LOG_MODEM(INFO, "TX Test: preamble=%zu + data=%zu = %zu samples",
+              preamble.size(), modulated.size(), output.size());
+
+    return output;
+}
+
 void ModemEngine::receiveAudio(const std::vector<float>& samples) {
     // FAST PATH: Only lock the pending mutex, just append samples
     // This is safe to call from SDL audio callback

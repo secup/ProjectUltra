@@ -105,6 +105,14 @@ public:
     // Reset state (e.g., when switching modes)
     void reset();
 
+    // Test signal generation for audio path verification
+    // Returns 1 second of 1500 Hz tone
+    std::vector<float> generateTestTone(float duration_sec = 1.0f);
+
+    // Generate test frame with known data pattern for debugging
+    // Pattern: 0=all zeros, 1=all ones, 2=alternating 0101
+    std::vector<float> transmitTestPattern(int pattern = 0);
+
     // === Waveform Mode Control ===
     // Control frames (CONNECT, CONNECT_ACK, etc.) always use OFDM
     // Data frames use the negotiated waveform mode

@@ -875,6 +875,32 @@ void App::render() {
         modem_.pollRxAudio();
     }
 
+    // === DEBUG: Test signal keys (F1-F4) ===
+    // F1: Send 1500 Hz test tone
+    // F2: Send test pattern (all zeros, no LDPC)
+    // F3: Send test pattern (all ones, no LDPC)
+    // F4: Send test pattern (alternating 0101, no LDPC)
+    if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
+        auto tone = modem_.generateTestTone(1.0f);
+        audio_.queueTxSamples(tone);
+        rx_log_.push_back("[TEST] Sent 1500 Hz tone");
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
+        auto samples = modem_.transmitTestPattern(0);  // All zeros
+        audio_.queueTxSamples(samples);
+        rx_log_.push_back("[TEST] Sent pattern: ALL ZEROS");
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F3)) {
+        auto samples = modem_.transmitTestPattern(1);  // All ones
+        audio_.queueTxSamples(samples);
+        rx_log_.push_back("[TEST] Sent pattern: ALL ONES");
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F4)) {
+        auto samples = modem_.transmitTestPattern(2);  // Alternating
+        audio_.queueTxSamples(samples);
+        rx_log_.push_back("[TEST] Sent pattern: ALTERNATING");
+    }
+
     // Protocol engine tick (for ARQ timeouts)
     uint32_t now = SDL_GetTicks();
     uint32_t elapsed = (last_tick_time_ == 0) ? 0 : (now - last_tick_time_);
