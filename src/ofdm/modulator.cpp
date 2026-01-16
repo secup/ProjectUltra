@@ -2,8 +2,8 @@
 #include <cmath>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
+#include "ultra/logging.hpp"
 #include <random>
-#include <stdexcept>
 
 namespace ultra {
 
@@ -107,6 +107,9 @@ Complex mapBits(uint32_t bits, Modulation mod) {
 
 } // anonymous namespace
 
+// Flag to log TX pilots only once per transmission (reset in generatePreamble)
+static bool g_logged_tx_pilots = false;
+
 struct OFDMModulator::Impl {
     ModemConfig config;
     FFT fft;
@@ -179,6 +182,20 @@ struct OFDMModulator::Impl {
         for (size_t i = 0; i < pilot_sequence.size(); ++i) {
             pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
         }
+
+        // DEBUG: Log pilot configuration for comparison with RX
+        LOG_INFO("MOD", "Mod pilot config: %zu pilots, %zu data carriers",
+                 pilot_carrier_indices.size(), data_carrier_indices.size());
+        if (pilot_carrier_indices.size() >= 3) {
+            LOG_INFO("MOD", "Mod pilot indices[0-2]: %d, %d, %d",
+                     pilot_carrier_indices[0], pilot_carrier_indices[1], pilot_carrier_indices[2]);
+        }
+        if (pilot_sequence.size() >= 3) {
+            LOG_INFO("MOD", "Mod pilot seq[0-2]: (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)",
+                     pilot_sequence[0].real(), pilot_sequence[0].imag(),
+                     pilot_sequence[1].real(), pilot_sequence[1].imag(),
+                     pilot_sequence[2].real(), pilot_sequence[2].imag());
+        }
     }
 
     std::vector<Complex> createOFDMSymbol(const std::vector<Complex>& data_symbols,
@@ -194,6 +211,25 @@ struct OFDMModulator::Impl {
         if (include_pilots) {
             for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
                 freq_domain[pilot_carrier_indices[i]] = pilot_sequence[i];
+            }
+
+            // DEBUG: Log first data symbol's TX pilot values (only once per transmission)
+            // Note: g_logged_tx_pilots is defined and reset in generatePreamble()
+            if (!g_logged_tx_pilots) {
+                LOG_INFO("MOD", "=== TX freq_domain before IFFT (first data symbol) ===");
+                for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+                    int idx = pilot_carrier_indices[i];
+                    LOG_INFO("MOD", "TX Pilot[%zu] idx=%d: freq_domain=(%.2f,%.2f) pilot_seq=(%.1f,%.1f)",
+                             i, idx,
+                             freq_domain[idx].real(), freq_domain[idx].imag(),
+                             pilot_sequence[i].real(), pilot_sequence[i].imag());
+                }
+                // Also log a few data carriers
+                LOG_INFO("MOD", "TX Data[0-2]: idx=%d (%.2f,%.2f), idx=%d (%.2f,%.2f), idx=%d (%.2f,%.2f)",
+                         data_carrier_indices[0], freq_domain[data_carrier_indices[0]].real(), freq_domain[data_carrier_indices[0]].imag(),
+                         data_carrier_indices[1], freq_domain[data_carrier_indices[1]].real(), freq_domain[data_carrier_indices[1]].imag(),
+                         data_carrier_indices[2], freq_domain[data_carrier_indices[2]].real(), freq_domain[data_carrier_indices[2]].imag());
+                g_logged_tx_pilots = true;
             }
         }
 
@@ -310,6 +346,9 @@ Samples OFDMModulator::generatePreamble() {
     // Reset mixer phase so each transmission starts at phase 0
     // This ensures consistent signal polarity across transmissions
     impl_->mixer.reset();
+
+    // Reset TX pilot logging flag for new transmission
+    g_logged_tx_pilots = false;
 
     // Preamble structure:
     // 1. Short training sequence (STS) - for AGC, coarse timing

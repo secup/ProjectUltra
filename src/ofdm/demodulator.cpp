@@ -336,6 +336,20 @@ struct OFDMDemodulator::Impl {
         for (size_t i = 0; i < pilot_sequence.size(); ++i) {
             pilot_sequence[i] = (rng() & 1) ? Complex(1, 0) : Complex(-1, 0);
         }
+
+        // DEBUG: Log pilot configuration for comparison with TX
+        LOG_DEMOD(INFO, "Demod pilot config: %zu pilots, %zu data carriers",
+                  pilot_carrier_indices.size(), data_carrier_indices.size());
+        if (pilot_carrier_indices.size() >= 3) {
+            LOG_DEMOD(INFO, "Demod pilot indices[0-2]: %d, %d, %d",
+                      pilot_carrier_indices[0], pilot_carrier_indices[1], pilot_carrier_indices[2]);
+        }
+        if (pilot_sequence.size() >= 3) {
+            LOG_DEMOD(INFO, "Demod pilot seq[0-2]: (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)",
+                      pilot_sequence[0].real(), pilot_sequence[0].imag(),
+                      pilot_sequence[1].real(), pilot_sequence[1].imag(),
+                      pilot_sequence[2].real(), pilot_sequence[2].imag());
+        }
     }
 
     void buildInterpTable() {
@@ -632,6 +646,26 @@ struct OFDMDemodulator::Impl {
             // LS estimate: H = Rx / Tx
             h_ls_all[i] = rx / tx;
             h_sum += h_ls_all[i];
+        }
+
+        // DEBUG: Log first symbol's pilot analysis - ALL pilots
+        if (soft_bits.empty()) {
+            LOG_DEMOD(INFO, "=== First symbol pilot analysis ===");
+            for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+                int idx = pilot_carrier_indices[i];
+                LOG_DEMOD(INFO, "Pilot[%zu] idx=%d: tx=(%.1f,%.1f) rx=(%.2f,%.2f) H=(%.2f,%.2f) |H|=%.2f phase=%.1f°",
+                          i, idx,
+                          pilot_sequence[i].real(), pilot_sequence[i].imag(),
+                          freq_domain[idx].real(), freq_domain[idx].imag(),
+                          h_ls_all[i].real(), h_ls_all[i].imag(),
+                          std::abs(h_ls_all[i]),
+                          std::arg(h_ls_all[i]) * 180.0f / M_PI);
+            }
+            LOG_DEMOD(INFO, "H avg: (%.2f,%.2f), |H|=%.2f, phase=%.1f deg",
+                      (h_sum / float(pilot_carrier_indices.size())).real(),
+                      (h_sum / float(pilot_carrier_indices.size())).imag(),
+                      std::abs(h_sum / float(pilot_carrier_indices.size())),
+                      std::arg(h_sum / float(pilot_carrier_indices.size())) * 180.0f / M_PI);
         }
 
         // Compute average signal power from pilots
