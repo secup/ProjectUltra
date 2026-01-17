@@ -284,9 +284,12 @@ std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
             LOG_MODEM(INFO, "TX Test Pattern: ALTERNATING 1010 (%zu bytes)", test_data.size());
     }
 
-    // LDPC encode (uses current code rate setting)
+    // LDPC encode - FORCE R1/4 to match RX decoder (which is hardcoded to R1/4)
+    CodeRate saved_rate = encoder_->getRate();
+    encoder_->setRate(CodeRate::R1_4);
     Bytes encoded = encoder_->encode(test_data);
-    LOG_MODEM(INFO, "TX Test: %zu bytes -> %zu encoded bytes", test_data.size(), encoded.size());
+    encoder_->setRate(saved_rate);  // Restore
+    LOG_MODEM(INFO, "TX Test: %zu bytes -> %zu encoded bytes (R1/4 forced)", test_data.size(), encoded.size());
 
     // Generate preamble
     Samples preamble = ofdm_modulator_->generatePreamble();

@@ -275,6 +275,9 @@ struct OFDMDemodulator::Impl {
     static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor
     float freq_correction_phase = 0.0f;    // Running phase for correction
 
+    // Phase inversion detection (for audio paths with inverted polarity)
+    bool llr_sign_flip = false;  // Flip LLR signs if inverted
+
     // LMS/RLS Adaptive equalizer state
     std::vector<Complex> lms_weights;      // Per-carrier LMS weights
     std::vector<Complex> last_decisions;   // Last equalized symbols (for decision-directed)
@@ -706,15 +709,16 @@ struct OFDMDemodulator::Impl {
             channel_estimate[idx] = alpha * h_ls_all[i] + (1.0f - alpha) * h_old;
         }
 
-        // Fallback: if no previous pilots, use frequency-domain estimation
-        // (less accurate on frequency-selective channels but better than nothing)
+        // Fallback: if no previous pilots (first symbol), use a conservative default
+        // The old method (comparing pilots to average) confuses frequency-selective
+        // channel response with noise, giving falsely low SNR on non-flat channels.
+        // Instead, use the signal power with an assumed moderate SNR (15 dB).
         if (noise_count == 0) {
-            Complex h_avg = h_sum / static_cast<float>(pilot_carrier_indices.size());
-            for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
-                Complex deviation = h_ls_all[i] - h_avg;
-                noise_power_sum += std::norm(deviation);
-            }
-            noise_count = pilot_carrier_indices.size();
+            // First symbol: assume 15 dB SNR as default until we have inter-symbol data
+            // SNR = signal_power / noise_power => noise_power = signal_power / SNR
+            // 15 dB = 31.6 linear
+            noise_power_sum = signal_power / 31.6f;
+            noise_count = 1;
         }
 
         // === Frequency offset estimation from pilot phase differences ===
@@ -802,7 +806,10 @@ struct OFDMDemodulator::Impl {
 
     void interpolateChannel() {
         // Interpolate channel estimate from pilots to data carriers
-        // Uses linear interpolation between adjacent pilots
+        // Uses linear interpolation between adjacent pilots, BUT:
+        // If phase difference between pilots is >90°, use nearest pilot instead.
+        // Large phase jumps indicate frequency-selective nulls where interpolation
+        // would give completely wrong estimates.
         //
         // NOTE: Use complex interpolation, NOT magnitude/phase interpolation!
         // While mag/phase interpolation seems intuitive, it assumes smooth phase
@@ -816,8 +823,27 @@ struct OFDMDemodulator::Impl {
                 Complex H1 = channel_estimate[info.lower_pilot];
                 Complex H2 = channel_estimate[info.upper_pilot];
 
-                // Linear interpolation of complex channel estimate
-                channel_estimate[info.fft_idx] = (1.0f - info.alpha) * H1 + info.alpha * H2;
+                // Check phase difference between pilots
+                // phase_diff = angle(H2 * conj(H1)) gives the phase difference
+                Complex phase_diff_complex = H2 * std::conj(H1);
+                float phase_diff = std::abs(std::atan2(phase_diff_complex.imag(), phase_diff_complex.real()));
+
+                // If phase difference > 90°, interpolation will be wrong
+                // Use nearest pilot instead
+                constexpr float PHASE_THRESHOLD = 1.5708f;  // π/2 = 90°
+                if (phase_diff > PHASE_THRESHOLD) {
+                    // Use nearest pilot based on alpha (interpolation weight)
+                    if (info.alpha < 0.5f) {
+                        channel_estimate[info.fft_idx] = H1;  // Closer to lower pilot
+                    } else {
+                        channel_estimate[info.fft_idx] = H2;  // Closer to upper pilot
+                    }
+                    LOG_DEMOD(DEBUG, "Nearest-pilot for bin %d: phase_diff=%.1f°",
+                              info.fft_idx, phase_diff * 180.0f / 3.14159f);
+                } else {
+                    // Normal linear interpolation of complex channel estimate
+                    channel_estimate[info.fft_idx] = (1.0f - info.alpha) * H1 + info.alpha * H2;
+                }
             } else if (info.lower_pilot >= 0) {
                 channel_estimate[info.fft_idx] = channel_estimate[info.lower_pilot];
             } else if (info.upper_pilot >= 0) {
@@ -1041,6 +1067,7 @@ struct OFDMDemodulator::Impl {
         }
 
         // Log first few equalized symbols when starting a new frame
+        // Also detect phase inversion based on symbol sign distribution
         if (soft_bits.empty() && !equalized.empty()) {
             // For BPSK, symbols should be near +1 or -1 on real axis
             // Count how many are positive vs negative to detect phase inversion
@@ -1056,6 +1083,29 @@ struct OFDMDemodulator::Impl {
                     equalized.size() > 1 ? equalized[1].imag() : 0.0f,
                     equalized.size() > 2 ? equalized[2].real() : 0.0f,
                     equalized.size() > 2 ? equalized[2].imag() : 0.0f);
+
+            // Detect phase inversion: LDPC-coded data should be roughly 50/50
+            // If heavily skewed in EITHER direction, signal is likely inverted.
+            // - For zeros input: all transmitted symbols are -1 (negative)
+            // - For random data: should be ~50/50
+            // So if we see >75% positive OR >75% negative, something is wrong.
+            // For zeros: we expect 100% negative. If we see 100% positive → inverted.
+            float neg_ratio = float(neg_count) / equalized.size();
+            if (neg_ratio > 0.75f) {
+                // Mostly negative - for zeros input this is CORRECT, don't flip
+                LOG_DEMOD(INFO, "Mostly negative symbols (%.0f%%), consistent with zeros/low-bit data",
+                          neg_ratio * 100);
+                llr_sign_flip = false;
+            } else if (neg_ratio < 0.25f) {
+                // Mostly positive - for zeros input this means INVERTED!
+                // (zeros should produce -1 symbols, but we got +1 → inverted)
+                LOG_DEMOD(WARN, "Phase inversion detected: %.0f%% positive symbols (expected ~50%%), flipping LLR signs",
+                          (1.0f - neg_ratio) * 100);
+                llr_sign_flip = true;
+            } else {
+                // Normal range - no inversion
+                llr_sign_flip = false;
+            }
         }
 
         // Convert symbols to soft bits (LLRs)
@@ -1089,6 +1139,9 @@ struct OFDMDemodulator::Impl {
                 ce_error_margin = 1.0f;
         }
 
+        // Sign flip multiplier for phase inversion correction
+        float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
+
         for (size_t i = 0; i < equalized.size(); ++i) {
             const auto& sym = equalized[i];
             // Use per-carrier noise variance with CE error margin
@@ -1097,35 +1150,41 @@ struct OFDMDemodulator::Impl {
 
             switch (mod) {
                 case Modulation::BPSK:
-                    soft_bits.push_back(softDemapBPSK(sym, nv));
+                    soft_bits.push_back(softDemapBPSK(sym, nv) * llr_sign);
                     break;
                 case Modulation::QPSK: {
                     auto llrs = softDemapQPSK(sym, nv);
+                    for (auto& llr : llrs) llr *= llr_sign;
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM16: {
                     auto llrs = softDemapQAM16(sym, nv);
+                    for (auto& llr : llrs) llr *= llr_sign;
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM32: {
                     auto llrs = softDemapQAM32(sym, nv);
+                    for (auto& llr : llrs) llr *= llr_sign;
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM64: {
                     auto llrs = softDemapQAM64(sym, nv);
+                    for (auto& llr : llrs) llr *= llr_sign;
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 case Modulation::QAM256: {
                     auto llrs = softDemapQAM256(sym, nv);
+                    for (auto& llr : llrs) llr *= llr_sign;
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                     break;
                 }
                 default: {
                     auto llrs = softDemapQPSK(sym, nv);
+                    for (auto& llr : llrs) llr *= llr_sign;
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
                 }
             }

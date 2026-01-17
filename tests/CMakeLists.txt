@@ -11,6 +11,22 @@ add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
 
+# Modem loopback test (comprehensive pipeline verification)
+# Tests FFT roundtrip, carrier mapping, modulate->demodulate loopback
+add_executable(test_modem_loopback test_modem_loopback.cpp)
+target_link_libraries(test_modem_loopback PRIVATE ultra_core)
+add_test(NAME ModemLoopback COMMAND test_modem_loopback)
+
+# Basic audio path test (no OFDM/LDPC - just raw samples)
+# Use this to verify audio path between laptops
+add_executable(test_audio_basic test_audio_basic.cpp)
+add_test(NAME AudioBasic COMMAND test_audio_basic)
+
+# WAV file loopback test (generate/decode WAV files for cross-wire testing)
+add_executable(test_wav_loopback test_wav_loopback.cpp)
+target_link_libraries(test_wav_loopback PRIVATE ultra_core)
+add_test(NAME WavLoopback COMMAND test_wav_loopback --loopback)
+
 add_executable(test_protocol test_protocol.cpp)
 target_link_libraries(test_protocol PRIVATE ultra_core)
 add_test(NAME Protocol COMMAND test_protocol)
@@ -80,3 +96,9 @@ target_link_libraries(benchmark_milstd PRIVATE ultra_core)
 add_executable(test_adaptive_link test_adaptive_link.cpp)
 target_link_libraries(test_adaptive_link PRIVATE ultra_core)
 add_test(NAME AdaptiveLink COMMAND test_adaptive_link)
+
+# Timing Offset Test (simulate cross-wire audio path)
+# Tests demodulator with artificial timing offset to debug without audio hardware
+add_executable(test_timing_offset test_timing_offset.cpp)
+target_link_libraries(test_timing_offset PRIVATE ultra_core)
+add_test(NAME TimingOffset COMMAND test_timing_offset)
