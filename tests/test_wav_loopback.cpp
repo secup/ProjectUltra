@@ -213,7 +213,7 @@ bool decodeWavFile(const std::string& filename) {
 
     // Setup demodulator
     ModemConfig config;
-    config.modulation = Modulation::DQPSK;  // DQPSK: 2x DBPSK, immune to phase distortion
+    config.modulation = Modulation::DQPSK;  // DQPSK for link frames
     config.code_rate = CodeRate::R1_4;
     config.pilot_spacing = 2;
 

@@ -252,53 +252,37 @@ float softDemapDBPSK(Complex sym, Complex prev_sym, float noise_var) {
 }
 
 // DQPSK soft demapping - compares current symbol to previous symbol
-// Returns 2 LLRs based on phase difference:
-//   Phase quadrant determines 2-bit symbol: 00, 01, 10, 11
+// Returns 2 LLRs based on phase difference
+// TX encoding: 00→0°, 01→90°, 10→180°, 11→270°
 std::array<float, 2> softDemapDQPSK(Complex sym, Complex prev_sym, float noise_var) {
     std::array<float, 2> llrs = {0.0f, 0.0f};
 
     Complex diff = sym * std::conj(prev_sym);
-    float phase_diff = std::atan2(diff.imag(), diff.real());  // [-π, π]
+    float phase = std::atan2(diff.imag(), diff.real());  // [-π, π]
 
     float signal_power = std::abs(sym) * std::abs(prev_sym);
     if (signal_power < 1e-6f) {
         return llrs;  // Neutral LLRs for weak signal
     }
 
-    // DQPSK constellation (Gray coded):
-    //   00 → 0°    (I+, Q≈0)
-    //   01 → 90°   (I≈0, Q+)
-    //   11 → 180°  (I-, Q≈0)   <- Gray: differs by 1 bit from neighbors
-    //   10 → 270°  (I≈0, Q-)
-    //
-    // Bit 1 (MSB): positive when |phase| < π/2 (right half-plane)
-    // Bit 0 (LSB): positive when phase in [0, π] (upper half-plane)
-
     float scale = 2.0f * signal_power / noise_var;
+    static const float pi = 3.14159265358979f;
 
-    // cos(phase) > 0 means right half (bit 1 = 0)
-    // sin(phase) > 0 means upper half (bit 0 = 0)
-    llrs[0] = clipLLR(scale * std::cos(phase_diff));  // bit 1: + for 0°/270°, - for 90°/180°
-    llrs[1] = clipLLR(scale * std::sin(phase_diff));  // bit 0: + for 0°/90°, - for 180°/270°
+    // Bit mapping for 00→0°, 01→90°, 10→180°, 11→270°:
+    // - bit1 (MSB): 0 for 0°,90°; 1 for 180°,270° → boundaries at 135° and -45°
+    // - bit0 (LSB): 0 for 0°,180°; 1 for 90°,270° → boundaries at 45°,135°,225°,315°
+    //
+    // LLR positive means bit=0, negative means bit=1
 
-    // Remap for our encoding: 00→0°, 01→90°, 10→180°, 11→270°
-    // bit 1: 0 for 0°/90°, 1 for 180°/270° → negative of sin gives this
-    // bit 0: 0 for 0°/180°, 1 for 90°/270° → negative of (cos rotated)
-    llrs[0] = clipLLR(-scale * std::sin(phase_diff));  // bit 1
-    llrs[1] = clipLLR(-scale * std::cos(phase_diff));  // bit 0
+    // bit1: use sin(phase + π/4) as soft metric
+    // sin(45°)=+0.707 (bit1=0), sin(135°)=+0.707 (bit1=0)
+    // sin(225°)=-0.707 (bit1=1), sin(315°)=-0.707 (bit1=1)
+    llrs[0] = clipLLR(scale * std::sin(phase + pi/4));
 
-    // Actually simpler: map phase to nearest symbol and compute soft distance
-    // For 00→0°, 01→90°, 10→180°, 11→270°:
-    // bit 1 = 1 when phase in [π/2, 3π/2] (left half)
-    // bit 0 = 1 when phase in [π/4, 3π/4] or [5π/4, 7π/4]
-
-    // Use geometric approach:
-    // bit 1: + when real(diff) > 0, - when real(diff) < 0
-    // bit 0: + when |real(diff)| > |imag(diff)|, - otherwise
-    float I = diff.real();
-    float Q = diff.imag();
-    llrs[0] = clipLLR(scale * I / std::sqrt(I*I + Q*Q + 1e-10f));  // bit 1
-    llrs[1] = clipLLR(scale * (std::abs(I) - std::abs(Q)) / std::sqrt(I*I + Q*Q + 1e-10f));  // bit 0
+    // bit0: use cos(2*phase) as soft metric
+    // cos(0°)=+1 (bit0=0), cos(180°)=-1 (bit0=1)
+    // cos(360°)=+1 (bit0=0), cos(540°)=-1 (bit0=1)
+    llrs[1] = clipLLR(scale * std::cos(2 * phase));
 
     return llrs;
 }
