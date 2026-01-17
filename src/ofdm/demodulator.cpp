@@ -396,6 +396,14 @@ struct OFDMDemodulator::Impl {
     static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor
     float freq_correction_phase = 0.0f;    // Running phase for correction
 
+    // Pilot-based phase tracking for differential modulation (DQPSK/D8PSK)
+    Complex pilot_phase_correction = Complex(1, 0);  // Average phase correction
+
+    // Symbol timing recovery - corrects for sample rate offset (SRO)
+    // SRO causes FFT window to drift, creating linear phase slope across carriers
+    float timing_offset_samples = 0.0f;  // Estimated timing offset in fractional samples
+    static constexpr float TIMING_ALPHA = 0.3f;  // Smoothing factor for timing estimate
+
     // Carrier phase recovery - corrects arbitrary phase offset after sync
     Complex carrier_phase_correction = Complex(1, 0);  // Rotation to apply
     bool carrier_phase_initialized = false;
@@ -720,8 +728,10 @@ struct OFDMDemodulator::Impl {
             Complex osc = mixer.next();
             Complex mixed = samples[i] * std::conj(osc);
 
-            // Apply frequency offset correction
-            if (std::abs(freq_offset_hz) > 0.1f) {
+            // Apply frequency offset correction (always for CFO > 0.01 Hz)
+            // Lower threshold than before (0.1) to ensure CFO correction is applied
+            // even for small offsets that would otherwise accumulate phase errors
+            if (std::abs(freq_offset_hz) > 0.01f) {
                 Complex correction(std::cos(freq_correction_phase),
                                    std::sin(freq_correction_phase));
                 mixed *= correction;
@@ -874,24 +884,33 @@ struct OFDMDemodulator::Impl {
         // === Frequency offset estimation from pilot phase differences ===
         // Compare pilot phases between consecutive symbols
         if (!prev_pilot_phases.empty() && prev_pilot_phases.size() == h_ls_all.size()) {
-            float phase_diff_sum = 0.0f;
+            Complex phase_diff_sum(0, 0);  // Use complex sum for better averaging
             int valid_count = 0;
 
             for (size_t i = 0; i < h_ls_all.size(); ++i) {
-                // Phase difference = arg(current * conj(previous))
+                // Phase difference = current * conj(previous)
                 Complex diff = h_ls_all[i] * std::conj(prev_pilot_phases[i]);
-                float phase_diff = std::atan2(diff.imag(), diff.real());
 
                 // Skip pilots with very low magnitude (unreliable)
                 if (std::norm(prev_pilot_phases[i]) > 1e-6f &&
                     std::norm(h_ls_all[i]) > 1e-6f) {
-                    phase_diff_sum += phase_diff;
-                    valid_count++;
+                    // Normalize to unit vector before averaging
+                    float mag = std::abs(diff);
+                    if (mag > 1e-6f) {
+                        phase_diff_sum += diff / mag;
+                        valid_count++;
+                    }
                 }
             }
 
             if (valid_count > 0) {
-                float avg_phase_diff = phase_diff_sum / valid_count;
+                // Average unit vectors → gives average phase rotation as complex number
+                Complex avg_diff = phase_diff_sum / static_cast<float>(valid_count);
+                float avg_phase_diff = std::atan2(avg_diff.imag(), avg_diff.real());
+
+                // Store the INVERSE rotation for correction
+                // This will be applied to data carriers before differential decoding
+                pilot_phase_correction = Complex(std::cos(-avg_phase_diff), std::sin(-avg_phase_diff));
 
                 // Convert phase difference to frequency offset
                 // Δf = Δφ / (2π * T_symbol)
@@ -906,8 +925,59 @@ struct OFDMDemodulator::Impl {
                 // Clamp to reasonable range (±50 Hz for HF)
                 freq_offset_hz = std::max(-50.0f, std::min(50.0f, freq_offset_filtered));
 
-                LOG_DEMOD(TRACE, "Freq offset: instant=%.2f Hz, filtered=%.2f Hz",
-                         instantaneous_offset, freq_offset_hz);
+                LOG_DEMOD(TRACE, "Freq offset: instant=%.2f Hz, filtered=%.2f Hz, pilot_correction=%.1f°",
+                         instantaneous_offset, freq_offset_hz,
+                         -avg_phase_diff * 180.0f / M_PI);
+            }
+        } else {
+            // First symbol - no phase correction available yet
+            pilot_phase_correction = Complex(1, 0);
+        }
+
+        // === Symbol timing recovery from pilot phase slope ===
+        // Timing offset τ causes linear phase slope: phase(k) = 2π × k × τ / N
+        // Use linear regression on pilot phases to estimate τ
+        {
+            // Collect (fft_index, phase) pairs for linear regression
+            float sum_k = 0, sum_k2 = 0, sum_phase = 0, sum_k_phase = 0;
+            int timing_valid_count = 0;
+
+            for (size_t i = 0; i < h_ls_all.size(); ++i) {
+                if (std::norm(h_ls_all[i]) < 1e-6f) continue;
+
+                int k = pilot_carrier_indices[i];
+                // Unwrap to centered FFT index for correct slope
+                if (k > (int)config.fft_size / 2) k -= config.fft_size;
+
+                float phase = std::arg(h_ls_all[i]);
+
+                sum_k += k;
+                sum_k2 += k * k;
+                sum_phase += phase;
+                sum_k_phase += k * phase;
+                timing_valid_count++;
+            }
+
+            if (timing_valid_count >= 3) {  // Need at least 3 pilots for reliable slope
+                // Linear regression: slope = (n*sum_xy - sum_x*sum_y) / (n*sum_x2 - sum_x^2)
+                float n = timing_valid_count;
+                float denom = n * sum_k2 - sum_k * sum_k;
+                if (std::abs(denom) > 1e-6f) {
+                    float slope = (n * sum_k_phase - sum_k * sum_phase) / denom;
+
+                    // slope = 2π × τ / N  →  τ = slope × N / (2π)
+                    float instantaneous_timing = slope * config.fft_size / (2.0f * M_PI);
+
+                    // Low-pass filter to smooth timing estimate
+                    timing_offset_samples = TIMING_ALPHA * instantaneous_timing +
+                                           (1.0f - TIMING_ALPHA) * timing_offset_samples;
+
+                    // Clamp to reasonable range (±half symbol shouldn't happen)
+                    timing_offset_samples = std::max(-50.0f, std::min(50.0f, timing_offset_samples));
+
+                    LOG_DEMOD(DEBUG, "Timing recovery: instant=%.2f samp, filtered=%.2f samp (slope=%.4f rad/bin)",
+                             instantaneous_timing, timing_offset_samples, slope);
+                }
             }
         }
 
@@ -1117,6 +1187,47 @@ struct OFDMDemodulator::Impl {
         std::vector<Complex> equalized(data_carrier_indices.size());
         carrier_noise_var.resize(data_carrier_indices.size());
 
+        // For differential modulation (DBPSK, DQPSK, D8PSK), skip equalization entirely!
+        // The channel phase cancels out in differential decoding: H_n * conj(H_{n-1}) ≈ |H|²
+        // Equalizing introduces phase errors from poor channel estimation that DON'T cancel.
+        bool is_differential = (mod == Modulation::DBPSK || mod == Modulation::DQPSK || mod == Modulation::D8PSK);
+
+        if (is_differential) {
+            // Return raw received symbols for differential decoding
+            // Apply two corrections:
+            // 1. Pilot-based phase correction: removes common-mode phase rotation (CFO, channel drift)
+            // 2. Timing correction: removes per-carrier phase slope from sample rate offset (SRO)
+            //
+            // Timing offset τ samples causes phase rotation: exp(-j × 2π × k × τ / N) per carrier k
+            // We correct by multiplying by exp(+j × 2π × k × τ / N)
+            for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+                int idx = data_carrier_indices[i];
+
+                // Calculate per-carrier timing correction
+                // Use centered FFT index for correct sign
+                int k = idx;
+                if (k > (int)config.fft_size / 2) k -= config.fft_size;
+
+                // Timing correction: exp(+j × 2π × k × τ / N)
+                float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
+                Complex timing_correction = std::exp(Complex(0, timing_phase));
+
+                // Apply both corrections: pilot phase (common-mode) + timing (per-carrier)
+                equalized[i] = freq_domain[idx] * pilot_phase_correction * timing_correction;
+
+                // Estimate noise variance from channel estimate amplitude
+                // (use channel estimate just for noise scaling, not phase correction)
+                float h_power = std::norm(channel_estimate[idx]);
+                if (h_power < 1e-6f) {
+                    carrier_noise_var[i] = 100.0f;  // Weak carrier
+                } else {
+                    carrier_noise_var[i] = noise_variance / h_power;
+                    carrier_noise_var[i] = std::max(1e-6f, std::min(100.0f, carrier_noise_var[i]));
+                }
+            }
+            return equalized;
+        }
+
         bool use_adaptive = config.adaptive_eq_enabled;
 
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
@@ -1304,6 +1415,20 @@ struct OFDMDemodulator::Impl {
         // Sign flip multiplier for phase inversion correction
         float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
 
+        // DQPSK/D8PSK: First symbol establishes reference
+        // Output neutral bits and use received symbols as reference
+        if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
+            dbpsk_prev_equalized = equalized;  // Use first symbol as reference
+            size_t bits_per_sym = (mod == Modulation::DQPSK) ? 2 : 3;
+            // Output neutral bits (00 or 000) for all carriers - LDPC will handle
+            for (size_t i = 0; i < equalized.size(); ++i) {
+                for (size_t b = 0; b < bits_per_sym; ++b) {
+                    soft_bits.push_back(0.5f);  // Neutral LLR (uncertain)
+                }
+            }
+            return;  // Skip normal processing for this symbol
+        }
+
         for (size_t i = 0; i < equalized.size(); ++i) {
             const auto& sym = equalized[i];
             // Use per-carrier noise variance with CE error margin
@@ -1325,20 +1450,25 @@ struct OFDMDemodulator::Impl {
                 }
                 case Modulation::DQPSK: {
                     // DQPSK: compare to previous symbol, outputs 2 bits
-                    if (dbpsk_prev_equalized.empty()) {
-                        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
-                    }
+                    // Note: first symbol handled above (establishes reference)
                     Complex prev_sym = dbpsk_prev_equalized[i];
                     auto llrs = softDemapDQPSK(sym, prev_sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+
+                    // Debug: log differential phase for first few carriers on early symbols
+                    if (snr_symbol_count < 5 && i < 3) {
+                        Complex diff = sym * std::conj(prev_sym);
+                        float diff_phase = std::atan2(diff.imag(), diff.real()) * 180.0f / M_PI;
+                        LOG_DEMOD(DEBUG, "DQPSK sym=%d car=%zu: phase=%.1f° LLRs=[%.2f,%.2f]",
+                                 snr_symbol_count, i, diff_phase, llrs[0], llrs[1]);
+                    }
+
                     dbpsk_prev_equalized[i] = sym;
                     break;
                 }
                 case Modulation::D8PSK: {
                     // D8PSK: compare to previous symbol, outputs 3 bits
-                    if (dbpsk_prev_equalized.empty()) {
-                        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
-                    }
+                    // Note: first symbol handled above (establishes reference)
                     Complex prev_sym = dbpsk_prev_equalized[i];
                     auto llrs = softDemapD8PSK(sym, prev_sym, nv);
                     soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
@@ -1842,6 +1972,7 @@ void OFDMDemodulator::reset() {
     impl_->freq_offset_filtered = 0.0f;
     impl_->freq_correction_phase = 0.0f;
     impl_->prev_pilot_phases.clear();
+    impl_->pilot_phase_correction = Complex(1, 0);  // No correction until pilots received
 
     // Reset adaptive equalizer state
     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));

@@ -14,10 +14,10 @@ ModemEngine::ModemEngine() {
     // OFDM modulator uses config (TX modulation is determined per-frame)
     ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
 
-    // RX starts in disconnected state, so use BPSK R1/4 for link establishment
+    // RX starts in disconnected state, so use DQPSK R1/4 for link establishment
     // This will be switched to negotiated mode when setConnected(true) is called
     ModemConfig rx_config = config_;
-    rx_config.modulation = Modulation::BPSK;
+    rx_config.modulation = Modulation::DQPSK;
     rx_config.code_rate = CodeRate::R1_4;
     decoder_ = std::make_unique<LDPCDecoder>(rx_config.code_rate);
     ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
@@ -53,13 +53,13 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     // Recreate OFDM modulator with new config (TX uses config directly)
     ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
 
-    // For RX: if disconnected, use BPSK R1/4 (robust mode), not config's mode
+    // For RX: if disconnected, use DQPSK R1/4 (robust mode), not config's mode
     if (!connected_) {
         ModemConfig rx_config = config_;
-        rx_config.modulation = Modulation::BPSK;
+        rx_config.modulation = Modulation::DQPSK;
         rx_config.code_rate = CodeRate::R1_4;
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
-        LOG_MODEM(INFO, "setConfig: RX using disconnected mode (BPSK R1/4)");
+        LOG_MODEM(INFO, "setConfig: RX using disconnected mode (DQPSK R1/4)");
     } else {
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
         LOG_MODEM(INFO, "setConfig: RX using connected mode (config settings)");
@@ -674,13 +674,13 @@ void ModemEngine::setConnected(bool connected) {
     } else {
         // Switching to disconnected state - use robust mode for RX
         ModemConfig rx_config = config_;
-        rx_config.modulation = Modulation::BPSK;
+        rx_config.modulation = Modulation::DQPSK;
         rx_config.code_rate = CodeRate::R1_4;
 
         decoder_->setRate(CodeRate::R1_4);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
-        LOG_MODEM(INFO, "Switched to disconnected mode (RX: BPSK R1/4)");
+        LOG_MODEM(INFO, "Switched to disconnected mode (RX: DQPSK R1/4)");
     }
 }
 
