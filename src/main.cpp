@@ -382,6 +382,106 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
     return 0;
 }
 
+// Raw OFDM decode mode - NO LDPC, just extract hard bits from OFDM
+// Use this to test OFDM layer independently
+int runRawDecode(ultra::ModemConfig& config, const char* input_file) {
+    std::cerr << "Raw OFDM decode (NO LDPC)...\n";
+    if (input_file) std::cerr << "Input: " << input_file << "\n";
+
+    // Open input file if specified
+    std::ifstream infile;
+    std::istream* input = &std::cin;
+    if (input_file) {
+        infile.open(input_file, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open input file: " << input_file << "\n";
+            return 1;
+        }
+        input = &infile;
+    }
+
+    ultra::OFDMDemodulator demod(config);
+    std::vector<float> all_soft_bits;
+    std::vector<float> buffer(960);  // 20ms chunks
+
+    while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
+                                     buffer.size() * sizeof(float))) {
+        ultra::SampleSpan span(buffer.data(), buffer.size());
+        demod.process(span);
+
+        if (demod.isSynced()) {
+            auto bits = demod.getSoftBits();
+            if (!bits.empty()) {
+                all_soft_bits.insert(all_soft_bits.end(), bits.begin(), bits.end());
+            }
+        }
+    }
+
+    std::cerr << "Collected " << all_soft_bits.size() << " soft bits\n";
+
+    // Convert soft bits to hard bits and bytes
+    std::vector<uint8_t> rx_data;
+    uint8_t byte = 0;
+    int bit_count = 0;
+
+    for (float llr : all_soft_bits) {
+        // Negative LLR = bit 1, Positive LLR = bit 0
+        uint8_t bit = (llr < 0) ? 1 : 0;
+        byte = (byte << 1) | bit;
+        bit_count++;
+        if (bit_count == 8) {
+            rx_data.push_back(byte);
+            byte = 0;
+            bit_count = 0;
+        }
+    }
+
+    std::cerr << "\nRX Data (" << rx_data.size() << " bytes):\n";
+    std::cerr << "Received (first 32):   ";
+    for (size_t i = 0; i < std::min(rx_data.size(), (size_t)32); i++) {
+        fprintf(stderr, "%02X ", rx_data[i]);
+    }
+    std::cerr << "\n";
+
+    // Check against F5 pattern (0xAA 0x55)
+    int matches_f5 = 0;
+    int total = std::min(rx_data.size(), (size_t)81);
+    for (size_t i = 0; i < total; i++) {
+        uint8_t expected = (i % 2 == 0) ? 0xAA : 0x55;
+        if (rx_data[i] == expected) matches_f5++;
+    }
+
+    // Check against F6 pattern (DEADBEEF)
+    uint8_t deadbeef[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    int matches_f6 = 0;
+    for (size_t i = 0; i < total; i++) {
+        if (rx_data[i] == deadbeef[i % 4]) matches_f6++;
+    }
+
+    std::cerr << "\nPattern matching:\n";
+    std::cerr << "  F5 (AA 55):    " << matches_f5 << "/" << total << " bytes ("
+              << (total > 0 ? 100.0 * matches_f5 / total : 0) << "%)\n";
+    std::cerr << "  F6 (DEADBEEF): " << matches_f6 << "/" << total << " bytes ("
+              << (total > 0 ? 100.0 * matches_f6 / total : 0) << "%)\n";
+
+    // Bit-level analysis against best matching pattern
+    bool use_deadbeef = (matches_f6 > matches_f5);
+    std::cerr << "\nBit-level analysis (first 8 bytes) vs "
+              << (use_deadbeef ? "DEADBEEF" : "AA 55") << ":\n";
+    for (size_t i = 0; i < std::min(rx_data.size(), (size_t)8); i++) {
+        uint8_t expected = use_deadbeef ? deadbeef[i % 4] : ((i % 2 == 0) ? 0xAA : 0x55);
+        uint8_t got = rx_data[i];
+        uint8_t diff = expected ^ got;
+        fprintf(stderr, "  Byte %zu: expected=%02X got=%02X diff=%02X (%d bit errors)\n",
+               i, expected, got, diff, __builtin_popcount(diff));
+    }
+
+    // Output raw bytes to stdout
+    std::cout.write(reinterpret_cast<const char*>(rx_data.data()), rx_data.size());
+
+    return 0;
+}
+
 ultra::Modulation parseModulation(const char* s) {
     if (strcmp(s, "dbpsk") == 0) return ultra::Modulation::DBPSK;
     if (strcmp(s, "bpsk") == 0) return ultra::Modulation::BPSK;
@@ -452,6 +552,8 @@ int main(int argc, char* argv[]) {
         return runRx(config, input_file, output_file);
     } else if (strcmp(command, "decode") == 0) {
         return runDecode(config, input_file, output_file);
+    } else if (strcmp(command, "rawdecode") == 0) {
+        return runRawDecode(config, input_file);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
         printUsage(argv[0]);

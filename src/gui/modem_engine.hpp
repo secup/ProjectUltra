@@ -113,6 +113,10 @@ public:
     // Pattern: 0=all zeros, 1=all ones, 2=alternating 0101
     std::vector<float> transmitTestPattern(int pattern = 0);
 
+    // Generate RAW OFDM test (NO LDPC) for layer-by-layer debugging
+    // pattern: 0 = 0xAA 0x55 alternating, 1 = DEADBEEF
+    std::vector<float> transmitRawOFDM(int pattern = 0);
+
     // === Waveform Mode Control ===
     // Control frames (CONNECT, CONNECT_ACK, etc.) always use OFDM
     // Data frames use the negotiated waveform mode

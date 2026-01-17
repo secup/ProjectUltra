@@ -875,11 +875,13 @@ void App::render() {
         modem_.pollRxAudio();
     }
 
-    // === DEBUG: Test signal keys (F1-F4) ===
+    // === DEBUG: Test signal keys (F1-F6) ===
     // F1: Send 1500 Hz test tone
     // F2: Send test pattern (all zeros) with LDPC
     // F3: Send test pattern (DEADBEEF) with LDPC - non-trivial pattern to verify decoding
     // F4: Send test pattern (alternating 0101) with LDPC
+    // F5: Send RAW OFDM (NO LDPC) - 0xAA 0x55 pattern
+    // F6: Send RAW OFDM (NO LDPC) - DEADBEEF pattern
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
         audio_.queueTxSamples(tone);
@@ -899,6 +901,16 @@ void App::render() {
         auto samples = modem_.transmitTestPattern(2);  // Alternating
         audio_.queueTxSamples(samples);
         rx_log_.push_back("[TEST] Sent pattern: ALTERNATING (21 bytes, LDPC encoded)");
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F5)) {
+        auto samples = modem_.transmitRawOFDM(0);  // Raw OFDM, NO LDPC, 0xAA 0x55
+        audio_.queueTxSamples(samples);
+        rx_log_.push_back("[TEST] Sent RAW OFDM: 0xAA 0x55 pattern (81 bytes, NO LDPC)");
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_F6)) {
+        auto samples = modem_.transmitRawOFDM(1);  // Raw OFDM, NO LDPC, DEADBEEF
+        audio_.queueTxSamples(samples);
+        rx_log_.push_back("[TEST] Sent RAW OFDM: DEADBEEF pattern (81 bytes, NO LDPC)");
     }
 
     // Protocol engine tick (for ARQ timeouts)

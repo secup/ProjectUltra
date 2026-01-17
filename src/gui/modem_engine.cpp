@@ -317,6 +317,54 @@ std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
     return output;
 }
 
+std::vector<float> ModemEngine::transmitRawOFDM(int pattern) {
+    // RAW OFDM test - NO LDPC encoding
+    // This tests ONLY the OFDM layer for debugging
+
+    // 81 bytes = 648 bits = fills OFDM symbols evenly with DQPSK (2 bits/symbol)
+    Bytes test_data(81);
+
+    if (pattern == 0) {
+        // Alternating 0xAA 0x55
+        for (size_t i = 0; i < test_data.size(); i++) {
+            test_data[i] = (i % 2 == 0) ? 0xAA : 0x55;
+        }
+        LOG_MODEM(INFO, "TX Raw OFDM: %zu bytes (NO LDPC), pattern=0xAA 0x55", test_data.size());
+    } else {
+        // DEADBEEF pattern
+        uint8_t deadbeef[] = {0xDE, 0xAD, 0xBE, 0xEF};
+        for (size_t i = 0; i < test_data.size(); i++) {
+            test_data[i] = deadbeef[i % 4];
+        }
+        LOG_MODEM(INFO, "TX Raw OFDM: %zu bytes (NO LDPC), pattern=DEADBEEF", test_data.size());
+    }
+
+    // Generate preamble
+    Samples preamble = ofdm_modulator_->generatePreamble();
+
+    // Modulate directly (NO LDPC!)
+    Samples modulated = ofdm_modulator_->modulate(test_data, Modulation::DQPSK);
+
+    // Combine
+    std::vector<float> output;
+    output.reserve(preamble.size() + modulated.size());
+    output.insert(output.end(), preamble.begin(), preamble.end());
+    output.insert(output.end(), modulated.begin(), modulated.end());
+
+    // Scale
+    float max_val = 0.0f;
+    for (float s : output) max_val = std::max(max_val, std::abs(s));
+    if (max_val > 0.0f) {
+        float scale = 0.8f / max_val;
+        for (float& s : output) s *= scale;
+    }
+
+    LOG_MODEM(INFO, "TX Raw OFDM: preamble=%zu + data=%zu = %zu samples (%.2fs)",
+              preamble.size(), modulated.size(), output.size(), output.size() / 48000.0f);
+
+    return output;
+}
+
 void ModemEngine::receiveAudio(const std::vector<float>& samples) {
     // FAST PATH: Only lock the pending mutex, just append samples
     // This is safe to call from SDL audio callback
