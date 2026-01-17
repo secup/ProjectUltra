@@ -59,24 +59,155 @@ bool readWav(const std::string& filename, std::vector<float>& samples) {
     return true;
 }
 
+// Direct loopback test - simplest possible test
+bool test_loopback_simple(const std::string& name, const Bytes& test_data, Modulation mod) {
+    std::cout << "\n--- Test: " << name << " ---\n";
+    std::cout << "Data: " << test_data.size() << " bytes, Modulation: " << static_cast<int>(mod) << "\n";
+
+    ModemConfig config;
+    config.modulation = mod;
+    config.pilot_spacing = 2;
+
+    OFDMModulator tx(config);
+    OFDMDemodulator rx(config);
+
+    // TX: Generate preamble + data (NO lead-in silence!)
+    Samples preamble = tx.generatePreamble();
+    Samples data = tx.modulate(test_data, mod);
+
+    Samples signal;
+    signal.insert(signal.end(), preamble.begin(), preamble.end());
+    signal.insert(signal.end(), data.begin(), data.end());
+
+    // Normalize
+    float maxv = 0;
+    for (float s : signal) maxv = std::max(maxv, std::abs(s));
+    if (maxv > 0) for (float& s : signal) s *= 0.5f / maxv;
+
+    std::cout << "TX: " << signal.size() << " samples\n";
+
+    // RX: Feed all at once
+    SampleSpan span(signal.data(), signal.size());
+    rx.process(span);
+
+    if (!rx.isSynced()) {
+        std::cout << "[FAIL] No sync!\n";
+        return false;
+    }
+    std::cout << "[OK] Synced\n";
+
+    // Get soft bits while synced
+    auto soft = rx.getSoftBits();
+    std::cout << "Got " << soft.size() << " soft bits\n";
+
+    if (soft.empty()) {
+        std::cout << "[FAIL] No soft bits!\n";
+        return false;
+    }
+
+    // Convert to bytes
+    Bytes decoded;
+    uint8_t byte = 0;
+    int bit_count = 0;
+    for (float llr : soft) {
+        uint8_t bit = (llr < 0) ? 1 : 0;
+        byte = (byte << 1) | bit;
+        if (++bit_count == 8) {
+            decoded.push_back(byte);
+            byte = 0;
+            bit_count = 0;
+        }
+    }
+
+    // Compare
+    std::cout << "TX: ";
+    for (size_t i = 0; i < std::min(test_data.size(), (size_t)16); i++) printf("%02X ", test_data[i]);
+    std::cout << "\nRX: ";
+    for (size_t i = 0; i < std::min(decoded.size(), (size_t)16); i++) printf("%02X ", decoded[i]);
+    std::cout << "\n";
+
+    size_t check_len = std::min(decoded.size(), test_data.size());
+    int matches = 0;
+    for (size_t i = 0; i < check_len; i++) {
+        if (decoded[i] == test_data[i]) matches++;
+    }
+
+    float pct = check_len > 0 ? 100.0f * matches / check_len : 0;
+    std::cout << "Match: " << matches << "/" << check_len << " (" << pct << "%)\n";
+
+    if (pct >= 90) {
+        std::cout << "[PASS]\n";
+        return true;
+    } else {
+        std::cout << "[FAIL]\n";
+        return false;
+    }
+}
+
 int main(int argc, char* argv[]) {
-    std::cout << "=== Basic OFDM Test (No LDPC, QPSK) ===\n\n";
-    
+    std::cout << "=== Basic OFDM Test (No LDPC) ===\n";
+
+    // Loopback mode: test from simple to complex
+    if (argc >= 2 && strcmp(argv[1], "--loopback") == 0) {
+        int passed = 0, failed = 0;
+
+        // Test 1: All zeros (simplest - should definitely work)
+        {
+            Bytes data(81, 0x00);
+            if (test_loopback_simple("All Zeros (QPSK)", data, Modulation::QPSK)) passed++;
+            else failed++;
+        }
+
+        // Test 2: All ones
+        {
+            Bytes data(81, 0xFF);
+            if (test_loopback_simple("All Ones (QPSK)", data, Modulation::QPSK)) passed++;
+            else failed++;
+        }
+
+        // Test 3: Alternating (0xAA)
+        {
+            Bytes data(81, 0xAA);
+            if (test_loopback_simple("Alternating 0xAA (QPSK)", data, Modulation::QPSK)) passed++;
+            else failed++;
+        }
+
+        // Test 4: DEADBEEF
+        {
+            Bytes data;
+            std::vector<uint8_t> pattern = {0xDE, 0xAD, 0xBE, 0xEF};
+            for (int i = 0; i < 25; i++) data.insert(data.end(), pattern.begin(), pattern.end());
+            if (test_loopback_simple("DEADBEEF (QPSK)", data, Modulation::QPSK)) passed++;
+            else failed++;
+        }
+
+        // Test 5: BPSK (simpler modulation)
+        {
+            Bytes data(81, 0x00);
+            if (test_loopback_simple("All Zeros (BPSK)", data, Modulation::BPSK)) passed++;
+            else failed++;
+        }
+
+        std::cout << "\n=== Results: " << passed << " passed, " << failed << " failed ===\n";
+        return failed > 0 ? 1 : 0;
+    }
+
+    // Original file-based modes below
     ModemConfig config;
     config.modulation = Modulation::QPSK;  // Coherent QPSK, not differential
     config.pilot_spacing = 2;
-    
+
     // Test pattern: DEADBEEF repeated
     std::vector<uint8_t> pattern = {0xDE, 0xAD, 0xBE, 0xEF};
     Bytes test_data;
     for (int i = 0; i < 10; i++) {  // 40 bytes = 320 bits
         test_data.insert(test_data.end(), pattern.begin(), pattern.end());
     }
-    
+
     std::cout << "Test data: " << test_data.size() << " bytes (";
     for (int i = 0; i < 8; i++) printf("%02X ", test_data[i]);
     std::cout << "...)\n";
-    
+
     if (argc >= 2 && strcmp(argv[1], "--generate") == 0) {
         // === TX: Generate signal ===
         OFDMModulator mod(config);

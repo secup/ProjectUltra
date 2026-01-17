@@ -39,8 +39,8 @@ std::pair<Modulation, CodeRate> recommendMode(const ChannelQuality& quality) {
 
 // Calculate theoretical max data rate
 float calculateMaxDataRate(const ModemConfig& config, Modulation mod, CodeRate rate) {
-    // Bits per carrier
-    size_t bits_per_carrier = static_cast<size_t>(mod);
+    // Bits per carrier (use proper function, not enum cast!)
+    size_t bits_per_carrier = getBitsPerSymbol(mod);
 
     // Assume ~36 data carriers (out of 48, rest are pilots)
     size_t data_carriers = config.num_carriers - config.num_carriers / config.pilot_spacing;

@@ -9,6 +9,12 @@ add_executable(test_layers test_layers.cpp)
 target_link_libraries(test_layers PRIVATE ultra_core)
 add_test(NAME Layers COMMAND test_layers)
 
+# Basic OFDM test - stripped down, no LDPC, no heuristics
+# Use this to verify the core OFDM path before adding complexity
+add_executable(test_basic_ofdm test_basic_ofdm.cpp)
+target_link_libraries(test_basic_ofdm PRIVATE ultra_core)
+add_test(NAME BasicOFDM COMMAND test_basic_ofdm --loopback)
+
 add_executable(test_fft test_fft.cpp)
 target_link_libraries(test_fft PRIVATE ultra_core)
 add_test(NAME FFT COMMAND test_fft)
@@ -108,3 +114,17 @@ add_test(NAME AdaptiveLink COMMAND test_adaptive_link)
 add_executable(test_timing_offset test_timing_offset.cpp)
 target_link_libraries(test_timing_offset PRIVATE ultra_core)
 add_test(NAME TimingOffset COMMAND test_timing_offset)
+
+# QPSK bit mapping debug
+add_executable(test_qpsk_debug test_qpsk_debug.cpp)
+target_link_libraries(test_qpsk_debug PRIVATE ultra_core)
+
+# Direct carrier test (isolate FFT/NCO issues)
+add_executable(test_carrier_direct test_carrier_direct.cpp)
+target_link_libraries(test_carrier_direct PRIVATE ultra_core)
+
+# Comprehensive modem unit tests (LDPC, LLR, DQPSK, full chain)
+# CRITICAL: All these tests must pass for reliable modem operation
+add_executable(test_comprehensive_modem test_comprehensive_modem.cpp)
+target_link_libraries(test_comprehensive_modem PRIVATE ultra_core)
+add_test(NAME ComprehensiveModem COMMAND test_comprehensive_modem)

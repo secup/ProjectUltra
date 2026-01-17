@@ -210,6 +210,7 @@ struct OFDMModulator::Impl {
             freq_domain[data_carrier_indices[i]] = data_symbols[i];
         }
 
+
         // Add pilots
         if (include_pilots) {
             for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
@@ -277,16 +278,17 @@ size_t OFDMModulator::samplesPerSymbol() const {
 }
 
 size_t OFDMModulator::bitsPerSymbol(Modulation mod) const {
-    // DBPSK has enum value 0 but uses 1 bit per carrier
-    size_t bits_per_carrier = (mod == Modulation::DBPSK) ? 1 : static_cast<size_t>(mod);
+    // Use proper function - enum values don't correspond to bit counts!
+    size_t bits_per_carrier = getBitsPerSymbol(mod);
     return impl_->data_carrier_indices.size() * bits_per_carrier;
 }
 
 Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
     // Note: mixer phase continues from preamble for phase coherence
 
-    // DBPSK has enum value 0 but uses 1 bit per carrier
-    size_t bits_per_carrier = (mod == Modulation::DBPSK) ? 1 : static_cast<size_t>(mod);
+    // Use the proper function to get bits per symbol, NOT the enum value!
+    // (enum values don't correspond to bit counts)
+    size_t bits_per_carrier = getBitsPerSymbol(mod);
     size_t carriers_per_symbol = impl_->data_carrier_indices.size();
     size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
     size_t bytes_per_symbol = (bits_per_symbol + 7) / 8;
@@ -349,8 +351,10 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                 impl_->dbpsk_prev_symbols[c] = new_symbol;
                 symbol_data.push_back(new_symbol);
             } else {
-                symbol_data.push_back(mapBits(bits, mod));
-            }
+                Complex sym = mapBits(bits, mod);
+                symbol_data.push_back(sym);
+
+                }
         }
 
         // Pad if needed

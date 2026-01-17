@@ -390,10 +390,14 @@ struct OFDMDemodulator::Impl {
     std::vector<InterpInfo> interp_table;
 
     // Frequency offset estimation and correction
-    float freq_offset_hz = 0.0f;           // Estimated frequency offset
-    float freq_offset_filtered = 0.0f;     // Low-pass filtered estimate
+    // NOTE: freq_offset_hz is the TOTAL estimated CFO (what we report and correct for)
+    // The pilot phase tracking measures the RESIDUAL after correction is applied
+    float freq_offset_hz = 0.0f;           // Total estimated frequency offset (applied + residual)
+    float freq_offset_filtered = 0.0f;     // Low-pass filtered residual measurement
     std::vector<Complex> prev_pilot_phases; // Previous symbol's pilot values
-    static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor
+    static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor for tracking (after lock)
+    static constexpr int CFO_ACQUISITION_SYMBOLS = 10;  // Use fast alpha for first N symbols
+    int symbols_since_sync = 0;            // Counter for adaptive alpha
     float freq_correction_phase = 0.0f;    // Running phase for correction
 
     // Pilot-based phase tracking for differential modulation (DQPSK/D8PSK)
@@ -914,20 +918,39 @@ struct OFDMDemodulator::Impl {
 
                 // Convert phase difference to frequency offset
                 // Δf = Δφ / (2π * T_symbol)
+                // NOTE: This measures the RESIDUAL CFO after our correction is applied
                 float symbol_duration = static_cast<float>(config.getSymbolDuration()) /
                                        static_cast<float>(config.sample_rate);
-                float instantaneous_offset = avg_phase_diff / (2.0f * M_PI * symbol_duration);
+                float residual_cfo = avg_phase_diff / (2.0f * M_PI * symbol_duration);
 
-                // Low-pass filter to reduce noise
-                freq_offset_filtered = FREQ_OFFSET_ALPHA * instantaneous_offset +
-                                      (1.0f - FREQ_OFFSET_ALPHA) * freq_offset_filtered;
+                // TOTAL CFO = currently applied correction + measured residual
+                // This fixes the feedback loop that was causing 50% underestimation
+                float total_cfo = freq_offset_hz + residual_cfo;
+
+                // Use adaptive alpha: fast acquisition for first N symbols, then slow tracking
+                // This prevents oscillation that occurs if alpha drops too quickly
+                float adaptive_alpha = FREQ_OFFSET_ALPHA;
+                if (symbols_since_sync < CFO_ACQUISITION_SYMBOLS) {
+                    // During acquisition, use high alpha for fast convergence
+                    // Decay from 0.9 to FREQ_OFFSET_ALPHA over the acquisition period
+                    float progress = static_cast<float>(symbols_since_sync) / CFO_ACQUISITION_SYMBOLS;
+                    adaptive_alpha = 0.9f * (1.0f - progress) + FREQ_OFFSET_ALPHA * progress;
+                }
+                // Also boost alpha if residual is very large (re-acquisition)
+                if (std::abs(residual_cfo) > 10.0f) {
+                    adaptive_alpha = std::max(adaptive_alpha, 0.9f);
+                }
+                symbols_since_sync++;
+
+                // Low-pass filter the TOTAL estimate
+                freq_offset_filtered = adaptive_alpha * total_cfo +
+                                      (1.0f - adaptive_alpha) * freq_offset_filtered;
 
                 // Clamp to reasonable range (±50 Hz for HF)
                 freq_offset_hz = std::max(-50.0f, std::min(50.0f, freq_offset_filtered));
 
-                LOG_DEMOD(TRACE, "Freq offset: instant=%.2f Hz, filtered=%.2f Hz, pilot_correction=%.1f°",
-                         instantaneous_offset, freq_offset_hz,
-                         -avg_phase_diff * 180.0f / M_PI);
+                LOG_DEMOD(TRACE, "Freq offset: residual=%.2f Hz, total=%.2f Hz, filtered=%.2f Hz",
+                         residual_cfo, total_cfo, freq_offset_hz);
             }
         } else {
             // First symbol - no phase correction available yet
@@ -1288,6 +1311,7 @@ struct OFDMDemodulator::Impl {
                     // Clamp - but allow high variance for soft erasure
                     carrier_noise_var[i] = std::max(1e-6f, std::min(100.0f, carrier_noise_var[i]));
                 }
+
             }
         }
 
@@ -1351,28 +1375,20 @@ struct OFDMDemodulator::Impl {
                     equalized.size() > 2 ? equalized[2].real() : 0.0f,
                     equalized.size() > 2 ? equalized[2].imag() : 0.0f);
 
-            // Detect phase inversion: LDPC-coded data should be roughly 50/50
-            // If heavily skewed in EITHER direction, signal is likely inverted.
-            // - For zeros input: all transmitted symbols are -1 (negative)
-            // - For random data: should be ~50/50
-            // So if we see >75% positive OR >75% negative, something is wrong.
-            // For zeros: we expect 100% negative. If we see 100% positive → inverted.
+
+            // Phase inversion detection DISABLED
+            // This heuristic causes false positives with legitimate data patterns:
+            // - All-ones (0xFF) has 100% positive symbols
+            // - High-bit-density data like DEADBEEF has 80%+ positive symbols
+            // Without LDPC scrambling, any raw data can have extreme bias.
+            // The correct approach is to handle phase ambiguity at a higher layer
+            // (e.g., LDPC decoder, or explicit sync word).
+            //
+            // TODO: Re-enable only for LDPC-coded data where scrambling ensures ~50/50 distribution
+            llr_sign_flip = false;
             float neg_ratio = float(neg_count) / equalized.size();
-            if (neg_ratio > 0.75f) {
-                // Mostly negative - for zeros input this is CORRECT, don't flip
-                LOG_DEMOD(INFO, "Mostly negative symbols (%.0f%%), consistent with zeros/low-bit data",
-                          neg_ratio * 100);
-                llr_sign_flip = false;
-            } else if (neg_ratio < 0.25f) {
-                // Mostly positive - for zeros input this means INVERTED!
-                // (zeros should produce -1 symbols, but we got +1 → inverted)
-                LOG_DEMOD(WARN, "Phase inversion detected: %.0f%% positive symbols (expected ~50%%), flipping LLR signs",
-                          (1.0f - neg_ratio) * 100);
-                llr_sign_flip = true;
-            } else {
-                // Normal range - no inversion
-                llr_sign_flip = false;
-            }
+            LOG_DEMOD(INFO, "Symbol polarity: %.0f%% negative, %.0f%% positive (no flip)",
+                      neg_ratio * 100, (1.0f - neg_ratio) * 100);
         }
 
         // Convert symbols to soft bits (LLRs)
@@ -1415,18 +1431,11 @@ struct OFDMDemodulator::Impl {
         // Sign flip multiplier for phase inversion correction
         float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
 
-        // DQPSK/D8PSK: First symbol establishes reference
-        // Output neutral bits and use received symbols as reference
+        // DQPSK/D8PSK: Initialize reference to match TX (Complex(1,0))
+        // TX starts with dbpsk_prev_symbols = [1+0j, ...], so first symbol carries data
         if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
-            dbpsk_prev_equalized = equalized;  // Use first symbol as reference
-            size_t bits_per_sym = (mod == Modulation::DQPSK) ? 2 : 3;
-            // Output neutral bits (00 or 000) for all carriers - LDPC will handle
-            for (size_t i = 0; i < equalized.size(); ++i) {
-                for (size_t b = 0; b < bits_per_sym; ++b) {
-                    soft_bits.push_back(0.5f);  // Neutral LLR (uncertain)
-                }
-            }
-            return;  // Skip normal processing for this symbol
+            dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+            // Don't return - process the first symbol normally since it carries data
         }
 
         for (size_t i = 0; i < equalized.size(); ++i) {
@@ -1651,6 +1660,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->freq_offset_hz = coarse_cfo;
             impl_->freq_offset_filtered = coarse_cfo;
             impl_->freq_correction_phase = 0.0f;  // Reset correction phase
+            impl_->symbols_since_sync = 0;        // Reset acquisition counter
 
             LOG_SYNC(INFO, "SYNC FOUND: corr=%.3f at offset %zu, CFO=%.1f Hz, buffer=%zu samples",
                      sync_corr, sync_offset, coarse_cfo, impl_->rx_buffer.size());
@@ -1709,6 +1719,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     impl_->freq_offset_hz = coarse_cfo;
                     impl_->freq_offset_filtered = coarse_cfo;
                     impl_->freq_correction_phase = 0.0f;
+                    impl_->symbols_since_sync = 0;
 
                     // Remove preamble and any garbage before it
                     impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
@@ -1971,6 +1982,7 @@ void OFDMDemodulator::reset() {
     impl_->freq_offset_hz = 0.0f;
     impl_->freq_offset_filtered = 0.0f;
     impl_->freq_correction_phase = 0.0f;
+    impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
     impl_->pilot_phase_correction = Complex(1, 0);  // No correction until pilots received
 

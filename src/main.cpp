@@ -23,15 +23,20 @@ void printUsage(const char* prog) {
     std::cerr << "ProjectUltra - High-Speed HF Sound Modem\n\n";
     std::cerr << "Usage: " << prog << " [options] <command>\n\n";
     std::cerr << "Commands:\n";
-    std::cerr << "  tx <file>       Transmit file (outputs audio to stdout)\n";
-    std::cerr << "  rx              Receive (reads audio from stdin)\n";
+    std::cerr << "  tx <file>       Transmit file (outputs audio to stdout or -o file)\n";
+    std::cerr << "  rx [file]       Receive (from file or stdin, expects protocol frames)\n";
+    std::cerr << "  decode [file]   Raw decode (from file or stdin, outputs raw LDPC data)\n";
     std::cerr << "  test            Run self-test\n";
     std::cerr << "  info            Show modem capabilities\n";
     std::cerr << "\nOptions:\n";
     std::cerr << "  -r <rate>       Sample rate (default: 48000)\n";
-    std::cerr << "  -m <mod>        Modulation: bpsk, qpsk, qam16, qam64 (default: qpsk)\n";
+    std::cerr << "  -m <mod>        Modulation: dbpsk, bpsk, dqpsk, qpsk, d8psk, qam16, qam64 (default: qpsk)\n";
     std::cerr << "  -c <rate>       Code rate: 1/4, 1/2, 2/3, 3/4, 5/6 (default: 1/2)\n";
+    std::cerr << "  -o <file>       Output file (default: stdout)\n";
     std::cerr << "  -a              Enable adaptive modulation/coding\n";
+    std::cerr << "\nExamples:\n";
+    std::cerr << "  " << prog << " -m dqpsk -c 1/4 decode recording.raw\n";
+    std::cerr << "  " << prog << " tx data.bin -o output.raw\n";
     std::cerr << "\n";
 }
 
@@ -193,22 +198,48 @@ int runTx(const char* filename, ultra::ModemConfig& config) {
     return 0;
 }
 
-int runRx(ultra::ModemConfig& config) {
-    std::cerr << "Receiving... (Ctrl+C to stop)\n";
+int runRx(ultra::ModemConfig& config, const char* input_file, const char* output_file) {
+    std::cerr << "Receiving";
+    if (input_file) std::cerr << " from " << input_file;
+    std::cerr << "... (Ctrl+C to stop)\n";
+
+    // Open input file if specified
+    std::ifstream infile;
+    std::istream* input = &std::cin;
+    if (input_file) {
+        infile.open(input_file, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open input file: " << input_file << "\n";
+            return 1;
+        }
+        input = &infile;
+    }
+
+    // Open output file if specified
+    std::ofstream outfile;
+    std::ostream* output = &std::cout;
+    if (output_file) {
+        outfile.open(output_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open output file: " << output_file << "\n";
+            return 1;
+        }
+        output = &outfile;
+    }
 
     ultra::Modem modem(config);
 
-    modem.setDataCallback([](ultra::Bytes data) {
-        std::cout.write(reinterpret_cast<const char*>(data.data()), data.size());
-        std::cout.flush();
+    modem.setDataCallback([output](ultra::Bytes data) {
+        output->write(reinterpret_cast<const char*>(data.data()), data.size());
+        output->flush();
     });
 
     modem.start();
 
-    // Read audio from stdin
+    // Read audio from input
     std::vector<float> buffer(1024);
-    while (g_running && std::cin.read(reinterpret_cast<char*>(buffer.data()),
-                                       buffer.size() * sizeof(float))) {
+    while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
+                                     buffer.size() * sizeof(float))) {
         modem.rxSamples(buffer);
     }
 
@@ -223,9 +254,140 @@ int runRx(ultra::ModemConfig& config) {
     return 0;
 }
 
+// Raw decode mode - bypasses protocol layer, outputs raw LDPC-decoded data
+// Use this for decoding F3 test patterns from the GUI
+int runDecode(ultra::ModemConfig& config, const char* input_file, const char* output_file) {
+    std::cerr << "Raw decode mode (no protocol framing)...\n";
+    if (input_file) std::cerr << "Input: " << input_file << "\n";
+    std::cerr << "Modulation: " << static_cast<int>(config.modulation)
+              << ", Code rate: " << static_cast<int>(config.code_rate) << "\n";
+
+    // Open input file if specified
+    std::ifstream infile;
+    std::istream* input = &std::cin;
+    if (input_file) {
+        infile.open(input_file, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open input file: " << input_file << "\n";
+            return 1;
+        }
+        input = &infile;
+    }
+
+    // Open output file if specified
+    std::ofstream outfile;
+    std::ostream* output = &std::cout;
+    if (output_file) {
+        outfile.open(output_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open output file: " << output_file << "\n";
+            return 1;
+        }
+        output = &outfile;
+    }
+
+    ultra::OFDMDemodulator demod(config);
+    ultra::LDPCDecoder decoder(config.code_rate);
+
+    int frames_decoded = 0;
+    int total_bytes = 0;
+    int chunks_read = 0;
+    float max_level = 0;
+
+    // Accumulate soft bits across chunks
+    std::vector<float> accumulated_soft_bits;
+    const size_t LDPC_BLOCK_SIZE = 648;  // Bits per R1/4 codeword
+
+    // Read all audio from input
+    std::vector<float> buffer(960);  // 20ms chunks
+
+    while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
+                                     buffer.size() * sizeof(float))) {
+        chunks_read++;
+
+        // Track max level
+        for (float s : buffer) {
+            if (std::abs(s) > max_level) max_level = std::abs(s);
+        }
+
+        ultra::SampleSpan span(buffer.data(), buffer.size());
+
+        bool got_frame = demod.process(span);
+
+        // Report progress every 50 chunks (~1 second)
+        if (chunks_read % 50 == 0) {
+            std::cerr << "Processed " << chunks_read << " chunks ("
+                      << (chunks_read * 960 / 48000.0) << "s), max_level=" << max_level
+                      << ", synced=" << demod.isSynced()
+                      << ", accumulated=" << accumulated_soft_bits.size() << " bits\n";
+        }
+
+        if (demod.isSynced()) {
+            auto soft_bits = demod.getSoftBits();
+            if (!soft_bits.empty()) {
+                accumulated_soft_bits.insert(accumulated_soft_bits.end(),
+                                            soft_bits.begin(), soft_bits.end());
+            }
+
+            // Try to decode when we have enough bits
+            while (accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
+                // Extract one codeword worth of bits
+                std::vector<float> codeword_bits(accumulated_soft_bits.begin(),
+                                                  accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
+                accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
+                                            accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
+
+                // Debug: show first 32 LLRs
+                std::cerr << "First 32 LLRs: ";
+                int pos=0, neg=0;
+                for (size_t i = 0; i < std::min(codeword_bits.size(), (size_t)32); i++) {
+                    fprintf(stderr, "%.1f ", codeword_bits[i]);
+                }
+                for (float llr : codeword_bits) {
+                    if (llr > 0) pos++; else if (llr < 0) neg++;
+                }
+                std::cerr << "... (" << pos << " pos, " << neg << " neg)\n";
+
+                ultra::Bytes decoded = decoder.decodeSoft(codeword_bits);
+
+                if (decoder.lastDecodeSuccess() && !decoded.empty()) {
+                    frames_decoded++;
+                    total_bytes += decoded.size();
+
+                    // Output to file/stdout
+                    output->write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                    output->flush();
+
+                    // Also show hex on stderr
+                    std::cerr << "Frame " << frames_decoded << ": ";
+                    for (size_t i = 0; i < std::min(decoded.size(), (size_t)16); i++) {
+                        fprintf(stderr, "%02X ", decoded[i]);
+                    }
+                    if (decoded.size() > 16) std::cerr << "...";
+                    std::cerr << " (" << decoded.size() << " bytes)\n";
+                } else {
+                    std::cerr << "LDPC decode failed (accumulated " << accumulated_soft_bits.size() << " remaining)\n";
+                }
+            }
+        } else {
+            // Lost sync - clear accumulated bits
+            if (!accumulated_soft_bits.empty()) {
+                std::cerr << "Lost sync, discarding " << accumulated_soft_bits.size() << " accumulated bits\n";
+                accumulated_soft_bits.clear();
+            }
+        }
+    }
+
+    std::cerr << "\nDecoded " << frames_decoded << " frames, " << total_bytes << " bytes total\n";
+    return 0;
+}
+
 ultra::Modulation parseModulation(const char* s) {
+    if (strcmp(s, "dbpsk") == 0) return ultra::Modulation::DBPSK;
     if (strcmp(s, "bpsk") == 0) return ultra::Modulation::BPSK;
+    if (strcmp(s, "dqpsk") == 0) return ultra::Modulation::DQPSK;
     if (strcmp(s, "qpsk") == 0) return ultra::Modulation::QPSK;
+    if (strcmp(s, "d8psk") == 0) return ultra::Modulation::D8PSK;
     if (strcmp(s, "qam16") == 0) return ultra::Modulation::QAM16;
     if (strcmp(s, "qam64") == 0) return ultra::Modulation::QAM64;
     return ultra::Modulation::QPSK;
@@ -245,6 +407,7 @@ int main(int argc, char* argv[]) {
 
     ultra::ModemConfig config;
     bool adaptive = false;
+    const char* output_file = nullptr;
 
     // Parse options
     int i = 1;
@@ -255,6 +418,8 @@ int main(int argc, char* argv[]) {
             config.modulation = parseModulation(argv[++i]);
         } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             config.code_rate = parseCodeRate(argv[++i]);
+        } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+            output_file = argv[++i];
         } else if (strcmp(argv[i], "-a") == 0) {
             adaptive = true;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -270,6 +435,7 @@ int main(int argc, char* argv[]) {
     }
 
     const char* command = argv[i++];
+    const char* input_file = (i < argc && argv[i][0] != '-') ? argv[i++] : nullptr;
 
     if (strcmp(command, "test") == 0) {
         return runTest();
@@ -277,13 +443,15 @@ int main(int argc, char* argv[]) {
         printInfo(config);
         return 0;
     } else if (strcmp(command, "tx") == 0) {
-        if (i >= argc) {
+        if (!input_file) {
             std::cerr << "Error: tx requires a filename\n";
             return 1;
         }
-        return runTx(argv[i], config);
+        return runTx(input_file, config);
     } else if (strcmp(command, "rx") == 0) {
-        return runRx(config);
+        return runRx(config, input_file, output_file);
+    } else if (strcmp(command, "decode") == 0) {
+        return runDecode(config, input_file, output_file);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
         printUsage(argv[0]);

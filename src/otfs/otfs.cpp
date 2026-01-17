@@ -271,12 +271,12 @@ size_t OTFSModulator::symbolsPerFrame() const {
 }
 
 size_t OTFSModulator::bitsPerFrame(Modulation mod) const {
-    return symbolsPerFrame() * static_cast<size_t>(mod);
+    return symbolsPerFrame() * getBitsPerSymbol(mod);
 }
 
 std::vector<Complex> OTFSModulator::mapToDD(ByteSpan data, Modulation mod) {
     const auto& cfg = impl_->config;
-    size_t bits_per_symbol = static_cast<size_t>(mod);
+    size_t bits_per_symbol = getBitsPerSymbol(mod);
 
     // Create DD grid (data only - pilots added in TF domain)
     std::vector<Complex> dd_grid(cfg.M * cfg.N, Complex(0, 0));

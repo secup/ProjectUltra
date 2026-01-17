@@ -193,7 +193,7 @@ E2EResult runE2ETest(
         default: break;
     }
 
-    size_t bits_per_carrier = static_cast<size_t>(mod);
+    size_t bits_per_carrier = getBitsPerSymbol(mod);
     size_t data_carriers = config.num_carriers - config.num_carriers / config.pilot_spacing;
     float symbol_samples = config.getSymbolDuration();
     float symbol_rate = config.sample_rate / symbol_samples;
@@ -348,7 +348,7 @@ void runRealisticTests(const ModemConfig& config) {
             case CodeRate::R3_4: code_rate = 0.75f; break;
             default: break;
         }
-        size_t bits_per_carrier = static_cast<size_t>(mode.mod);
+        size_t bits_per_carrier = getBitsPerSymbol(mode.mod);
         size_t data_carriers = config.num_carriers - config.num_carriers / config.pilot_spacing;
         float symbol_samples = config.getSymbolDuration();
         float symbol_rate = config.sample_rate / symbol_samples;

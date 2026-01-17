@@ -223,7 +223,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         stats_.frames_sent++;
 
         // Calculate throughput
-        int bits_per_carrier = static_cast<int>(config_.modulation);
+        int bits_per_carrier = static_cast<int>(getBitsPerSymbol(config_.modulation));
         float code_rate = getCodeRateValue(config_.code_rate);
         float symbol_rate = config_.sample_rate / (float)config_.getSymbolDuration();
         stats_.throughput_bps = static_cast<int>(
