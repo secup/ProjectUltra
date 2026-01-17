@@ -294,8 +294,8 @@ std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
     // Generate preamble
     Samples preamble = ofdm_modulator_->generatePreamble();
 
-    // Modulate with LDPC-encoded data
-    Samples modulated = ofdm_modulator_->modulate(encoded, Modulation::BPSK);
+    // Modulate with LDPC-encoded data (DQPSK to match RX link establishment mode)
+    Samples modulated = ofdm_modulator_->modulate(encoded, Modulation::DQPSK);
 
     // Combine
     std::vector<float> output;
