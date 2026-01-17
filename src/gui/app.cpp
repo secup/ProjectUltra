@@ -877,9 +877,9 @@ void App::render() {
 
     // === DEBUG: Test signal keys (F1-F4) ===
     // F1: Send 1500 Hz test tone
-    // F2: Send test pattern (all zeros, no LDPC)
-    // F3: Send test pattern (all ones, no LDPC)
-    // F4: Send test pattern (alternating 0101, no LDPC)
+    // F2: Send test pattern (all zeros) with LDPC
+    // F3: Send test pattern (DEADBEEF) with LDPC - non-trivial pattern to verify decoding
+    // F4: Send test pattern (alternating 0101) with LDPC
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
         audio_.queueTxSamples(tone);
@@ -888,17 +888,17 @@ void App::render() {
     if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
         auto samples = modem_.transmitTestPattern(0);  // All zeros
         audio_.queueTxSamples(samples);
-        rx_log_.push_back("[TEST] Sent pattern: ALL ZEROS");
+        rx_log_.push_back("[TEST] Sent pattern: ALL ZEROS (21 bytes, LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F3)) {
-        auto samples = modem_.transmitTestPattern(1);  // All ones
+        auto samples = modem_.transmitTestPattern(1);  // DEADBEEF
         audio_.queueTxSamples(samples);
-        rx_log_.push_back("[TEST] Sent pattern: ALL ONES");
+        rx_log_.push_back("[TEST] Sent pattern: DEADBEEF (21 bytes, LDPC encoded)");
     }
     if (ImGui::IsKeyPressed(ImGuiKey_F4)) {
         auto samples = modem_.transmitTestPattern(2);  // Alternating
         audio_.queueTxSamples(samples);
-        rx_log_.push_back("[TEST] Sent pattern: ALTERNATING");
+        rx_log_.push_back("[TEST] Sent pattern: ALTERNATING (21 bytes, LDPC encoded)");
     }
 
     // Protocol engine tick (for ARQ timeouts)

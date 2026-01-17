@@ -256,22 +256,24 @@ std::vector<float> ModemEngine::generateTestTone(float duration_sec) {
 
 std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
     // Generate known data pattern for debugging
-    // This bypasses LDPC to test just the OFDM layer
+    // Uses full LDPC encoding so patterns can be verified on RX
 
-    // Create test data: enough for one LDPC codeword worth of OFDM symbols
-    // At R1/4: n=648 coded bits, with BPSK that's 648 symbols
-    // With 15 data carriers per symbol, that's 648/15 = 43.2 symbols
-    size_t num_bits = 648;  // One LDPC codeword
-    Bytes test_data((num_bits + 7) / 8);
+    // Create test data: 21 bytes fits in one R1/4 LDPC codeword (k=162 bits = 20.25 bytes)
+    Bytes test_data(21);
 
     switch (pattern) {
         case 0:  // All zeros
             std::fill(test_data.begin(), test_data.end(), 0x00);
             LOG_MODEM(INFO, "TX Test Pattern: ALL ZEROS (%zu bytes)", test_data.size());
             break;
-        case 1:  // All ones
-            std::fill(test_data.begin(), test_data.end(), 0xFF);
-            LOG_MODEM(INFO, "TX Test Pattern: ALL ONES (%zu bytes)", test_data.size());
+        case 1:  // DEADBEEF pattern (non-trivial for testing)
+            {
+                uint8_t deadbeef[] = {0xDE, 0xAD, 0xBE, 0xEF};
+                for (size_t i = 0; i < test_data.size(); i++) {
+                    test_data[i] = deadbeef[i % 4];
+                }
+            }
+            LOG_MODEM(INFO, "TX Test Pattern: DEADBEEF (%zu bytes)", test_data.size());
             break;
         case 2:  // Alternating 01010101
             std::fill(test_data.begin(), test_data.end(), 0x55);
@@ -282,11 +284,15 @@ std::vector<float> ModemEngine::transmitTestPattern(int pattern) {
             LOG_MODEM(INFO, "TX Test Pattern: ALTERNATING 1010 (%zu bytes)", test_data.size());
     }
 
+    // LDPC encode (uses current code rate setting)
+    Bytes encoded = encoder_->encode(test_data);
+    LOG_MODEM(INFO, "TX Test: %zu bytes -> %zu encoded bytes", test_data.size(), encoded.size());
+
     // Generate preamble
     Samples preamble = ofdm_modulator_->generatePreamble();
 
-    // Modulate directly (NO LDPC encoding - raw bits)
-    Samples modulated = ofdm_modulator_->modulate(test_data, Modulation::BPSK);
+    // Modulate with LDPC-encoded data
+    Samples modulated = ofdm_modulator_->modulate(encoded, Modulation::BPSK);
 
     // Combine
     std::vector<float> output;
