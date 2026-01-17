@@ -145,16 +145,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     CodeRate tx_code_rate;
 
     if (is_link_frame) {
-        // Link establishment: BPSK R1/4 for maximum robustness
-        tx_modulation = Modulation::BPSK;
+        // Link establishment: DQPSK R1/4 - 2x DBPSK speed, immune to phase distortion
+        tx_modulation = Modulation::DQPSK;
         tx_code_rate = CodeRate::R1_4;
     } else if (connected_) {
         // Connected: Use negotiated mode (from probing/adaptive)
         tx_modulation = data_modulation_;
         tx_code_rate = data_code_rate_;
     } else {
-        // Fallback: BPSK R1/4 for robustness
-        tx_modulation = Modulation::BPSK;
+        // Fallback: DQPSK R1/4 - 2x DBPSK speed, immune to phase distortion
+        tx_modulation = Modulation::DQPSK;
         tx_code_rate = CodeRate::R1_4;
     }
 

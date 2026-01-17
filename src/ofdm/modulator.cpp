@@ -319,12 +319,34 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                 }
             }
 
-            // DBPSK: differential encoding - multiply previous symbol by +1 or -1
+            // Differential encoding: multiply previous symbol by phase rotation
             if (mod == Modulation::DBPSK) {
-                // Bit 0 → no change (×+1), Bit 1 → 180° flip (×-1)
+                // 1 bit: 0 → 0° (+1), 1 → 180° (-1)
                 Complex phase_change = (bits & 1) ? Complex(-1, 0) : Complex(1, 0);
                 Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
-                impl_->dbpsk_prev_symbols[c] = new_symbol;  // Update state
+                impl_->dbpsk_prev_symbols[c] = new_symbol;
+                symbol_data.push_back(new_symbol);
+            } else if (mod == Modulation::DQPSK) {
+                // 2 bits: 00→0°, 01→90°, 10→180°, 11→270°
+                // Phase rotations: +1, +j, -1, -j
+                static const Complex dqpsk_phases[4] = {
+                    Complex(1, 0),   // 00 → 0°
+                    Complex(0, 1),   // 01 → 90°
+                    Complex(-1, 0),  // 10 → 180°
+                    Complex(0, -1)   // 11 → 270°
+                };
+                Complex phase_change = dqpsk_phases[bits & 3];
+                Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
+                impl_->dbpsk_prev_symbols[c] = new_symbol;
+                symbol_data.push_back(new_symbol);
+            } else if (mod == Modulation::D8PSK) {
+                // 3 bits: phase changes in 45° increments
+                // 000→0°, 001→45°, 010→90°, 011→135°, 100→180°, 101→225°, 110→270°, 111→315°
+                static const float pi = 3.14159265358979f;
+                float angle = (bits & 7) * (pi / 4.0f);  // 45° per step
+                Complex phase_change(std::cos(angle), std::sin(angle));
+                Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
+                impl_->dbpsk_prev_symbols[c] = new_symbol;
                 symbol_data.push_back(new_symbol);
             } else {
                 symbol_data.push_back(mapBits(bits, mod));

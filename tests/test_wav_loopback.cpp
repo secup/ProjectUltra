@@ -140,10 +140,10 @@ bool readWav(const std::string& filename, std::vector<float>& samples, int& samp
     return true;
 }
 
-// Generate test signal: preamble + LDPC-encoded all-zeros (BPSK all -1)
+// Generate test signal: preamble + LDPC-encoded all-zeros (DQPSK)
 std::vector<float> generateTestSignal(ModemConfig& config) {
-    // Use PROBE config: BPSK, R1/4
-    config.modulation = Modulation::BPSK;
+    // Use DQPSK, R1/4 - 2x throughput of DBPSK, immune to phase distortion
+    config.modulation = Modulation::DQPSK;
     config.code_rate = CodeRate::R1_4;
     config.pilot_spacing = 2;  // Dense pilots for robustness
 
@@ -213,7 +213,7 @@ bool decodeWavFile(const std::string& filename) {
 
     // Setup demodulator
     ModemConfig config;
-    config.modulation = Modulation::BPSK;
+    config.modulation = Modulation::DQPSK;  // DQPSK: 2x DBPSK, immune to phase distortion
     config.code_rate = CodeRate::R1_4;
     config.pilot_spacing = 2;
 

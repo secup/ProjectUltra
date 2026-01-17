@@ -8,6 +8,7 @@
 #include <random>
 #include <atomic>
 #include <mutex>
+#include <array>
 
 // LDPC codeword size (same for all code rates in this implementation)
 static constexpr size_t LDPC_BLOCK_SIZE = 648;
@@ -248,6 +249,104 @@ float softDemapDBPSK(Complex sym, Complex prev_sym, float noise_var) {
     float llr = 2.0f * signal_power * cos_diff / noise_var;
 
     return clipLLR(llr);
+}
+
+// DQPSK soft demapping - compares current symbol to previous symbol
+// Returns 2 LLRs based on phase difference:
+//   Phase quadrant determines 2-bit symbol: 00, 01, 10, 11
+std::array<float, 2> softDemapDQPSK(Complex sym, Complex prev_sym, float noise_var) {
+    std::array<float, 2> llrs = {0.0f, 0.0f};
+
+    Complex diff = sym * std::conj(prev_sym);
+    float phase_diff = std::atan2(diff.imag(), diff.real());  // [-π, π]
+
+    float signal_power = std::abs(sym) * std::abs(prev_sym);
+    if (signal_power < 1e-6f) {
+        return llrs;  // Neutral LLRs for weak signal
+    }
+
+    // DQPSK constellation (Gray coded):
+    //   00 → 0°    (I+, Q≈0)
+    //   01 → 90°   (I≈0, Q+)
+    //   11 → 180°  (I-, Q≈0)   <- Gray: differs by 1 bit from neighbors
+    //   10 → 270°  (I≈0, Q-)
+    //
+    // Bit 1 (MSB): positive when |phase| < π/2 (right half-plane)
+    // Bit 0 (LSB): positive when phase in [0, π] (upper half-plane)
+
+    float scale = 2.0f * signal_power / noise_var;
+
+    // cos(phase) > 0 means right half (bit 1 = 0)
+    // sin(phase) > 0 means upper half (bit 0 = 0)
+    llrs[0] = clipLLR(scale * std::cos(phase_diff));  // bit 1: + for 0°/270°, - for 90°/180°
+    llrs[1] = clipLLR(scale * std::sin(phase_diff));  // bit 0: + for 0°/90°, - for 180°/270°
+
+    // Remap for our encoding: 00→0°, 01→90°, 10→180°, 11→270°
+    // bit 1: 0 for 0°/90°, 1 for 180°/270° → negative of sin gives this
+    // bit 0: 0 for 0°/180°, 1 for 90°/270° → negative of (cos rotated)
+    llrs[0] = clipLLR(-scale * std::sin(phase_diff));  // bit 1
+    llrs[1] = clipLLR(-scale * std::cos(phase_diff));  // bit 0
+
+    // Actually simpler: map phase to nearest symbol and compute soft distance
+    // For 00→0°, 01→90°, 10→180°, 11→270°:
+    // bit 1 = 1 when phase in [π/2, 3π/2] (left half)
+    // bit 0 = 1 when phase in [π/4, 3π/4] or [5π/4, 7π/4]
+
+    // Use geometric approach:
+    // bit 1: + when real(diff) > 0, - when real(diff) < 0
+    // bit 0: + when |real(diff)| > |imag(diff)|, - otherwise
+    float I = diff.real();
+    float Q = diff.imag();
+    llrs[0] = clipLLR(scale * I / std::sqrt(I*I + Q*Q + 1e-10f));  // bit 1
+    llrs[1] = clipLLR(scale * (std::abs(I) - std::abs(Q)) / std::sqrt(I*I + Q*Q + 1e-10f));  // bit 0
+
+    return llrs;
+}
+
+// D8PSK soft demapping - compares current symbol to previous symbol
+// Returns 3 LLRs based on phase difference (8 phases at 45° increments)
+std::array<float, 3> softDemapD8PSK(Complex sym, Complex prev_sym, float noise_var) {
+    std::array<float, 3> llrs = {0.0f, 0.0f, 0.0f};
+
+    Complex diff = sym * std::conj(prev_sym);
+    float phase_diff = std::atan2(diff.imag(), diff.real());  // [-π, π]
+
+    float signal_power = std::abs(sym) * std::abs(prev_sym);
+    if (signal_power < 1e-6f) {
+        return llrs;  // Neutral LLRs for weak signal
+    }
+
+    // D8PSK: 8 phases at 45° increments
+    // 000→0°, 001→45°, 010→90°, 011→135°, 100→180°, 101→225°, 110→270°, 111→315°
+    //
+    // Gray coding would be better but we use natural binary for simplicity
+    // bit 2 (MSB): 0 for phases 0-135°, 1 for phases 180-315°
+    // bit 1: 0 for 0°,45°,180°,225°, 1 for 90°,135°,270°,315°
+    // bit 0 (LSB): alternates every 45°
+
+    float scale = signal_power / noise_var;
+    static const float pi = 3.14159265358979f;
+
+    // Normalize phase to [0, 2π)
+    float phase = phase_diff;
+    if (phase < 0) phase += 2 * pi;
+
+    // For natural binary encoding:
+    // bit 2: 1 when phase >= π (180°)
+    // bit 1: 1 when phase in [π/2, π) or [3π/2, 2π)
+    // bit 0: 1 when phase in [π/4, π/2) or [3π/4, π) or [5π/4, 3π/2) or [7π/4, 2π)
+
+    // Soft decision based on distance to decision boundaries
+    // bit 2: boundary at π
+    llrs[0] = clipLLR(scale * std::cos(phase));  // + when phase near 0, - when near π
+
+    // bit 1: boundaries at π/2 and 3π/2
+    llrs[1] = clipLLR(scale * std::cos(2 * phase - pi/2));
+
+    // bit 0: boundaries at π/4, 3π/4, 5π/4, 7π/4
+    llrs[2] = clipLLR(scale * std::cos(4 * phase - pi/4));
+
+    return llrs;
 }
 
 } // anonymous namespace
@@ -1192,10 +1291,15 @@ struct OFDMDemodulator::Impl {
         // channel estimation MSE which depends on pilot density and SNR.
         float ce_error_margin = 1.0f;
         switch (mod) {
-            case Modulation::DBPSK:  // DBPSK is even more robust than BPSK (differential)
+            case Modulation::DBPSK:  // Differential modes are robust to phase errors
+            case Modulation::DQPSK:
             case Modulation::BPSK:
             case Modulation::QPSK:
                 ce_error_margin = 1.0f;  // Robust to small errors
+                break;
+            case Modulation::D8PSK:  // 8PSK has tighter spacing (45° vs 90°)
+            case Modulation::QAM8:
+                ce_error_margin = 1.1f;  // Small margin for phase noise
                 break;
             case Modulation::QAM16:
                 ce_error_margin = 1.2f;  // 20% margin
@@ -1233,6 +1337,28 @@ struct OFDMDemodulator::Impl {
                     float llr = softDemapDBPSK(sym, prev_sym, nv);
                     soft_bits.push_back(llr);  // No sign flip for DBPSK - it's inherently phase-invariant
                     dbpsk_prev_equalized[i] = sym;  // Update for next symbol
+                    break;
+                }
+                case Modulation::DQPSK: {
+                    // DQPSK: compare to previous symbol, outputs 2 bits
+                    if (dbpsk_prev_equalized.empty()) {
+                        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+                    }
+                    Complex prev_sym = dbpsk_prev_equalized[i];
+                    auto llrs = softDemapDQPSK(sym, prev_sym, nv);
+                    soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                    dbpsk_prev_equalized[i] = sym;
+                    break;
+                }
+                case Modulation::D8PSK: {
+                    // D8PSK: compare to previous symbol, outputs 3 bits
+                    if (dbpsk_prev_equalized.empty()) {
+                        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+                    }
+                    Complex prev_sym = dbpsk_prev_equalized[i];
+                    auto llrs = softDemapD8PSK(sym, prev_sym, nv);
+                    soft_bits.insert(soft_bits.end(), llrs.begin(), llrs.end());
+                    dbpsk_prev_equalized[i] = sym;
                     break;
                 }
                 case Modulation::BPSK:

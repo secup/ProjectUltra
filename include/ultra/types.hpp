@@ -22,17 +22,37 @@ using ByteSpan = std::span<const uint8_t>;
 using MutableSampleSpan = std::span<Sample>;
 using MutableByteSpan = std::span<uint8_t>;
 
-// Modulation schemes (value = bits/symbol, except DBPSK which is special)
+// Modulation schemes
+// Differential modes (DBPSK, DQPSK, D8PSK) are immune to phase distortion from audio hardware
 enum class Modulation : uint8_t {
-    DBPSK = 0,   // 1 bit/symbol  - differential, immune to phase distortion
+    DBPSK = 0,   // 1 bit/symbol  - differential BPSK, immune to phase distortion
     BPSK = 1,    // 1 bit/symbol  - most robust, coherent detection
-    QPSK = 2,    // 2 bits/symbol
-    QAM8 = 3,    // 3 bits/symbol
-    QAM16 = 4,   // 4 bits/symbol
-    QAM32 = 5,   // 5 bits/symbol
-    QAM64 = 6,   // 6 bits/symbol
-    QAM256 = 8,  // 8 bits/symbol - highest throughput, needs 30+ dB SNR
+    DQPSK = 2,   // 2 bits/symbol - differential QPSK, immune to phase distortion
+    QPSK = 3,    // 2 bits/symbol - coherent
+    D8PSK = 4,   // 3 bits/symbol - differential 8PSK, immune to phase distortion
+    QAM8 = 5,    // 3 bits/symbol - coherent (same as 8PSK constellation)
+    QAM16 = 6,   // 4 bits/symbol - coherent
+    QAM32 = 7,   // 5 bits/symbol - coherent
+    QAM64 = 8,   // 6 bits/symbol - coherent
+    QAM256 = 10, // 8 bits/symbol - highest throughput, needs 30+ dB SNR
 };
+
+// Get bits per symbol for a modulation scheme
+inline uint32_t getBitsPerSymbol(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK:  return 1;
+        case Modulation::BPSK:   return 1;
+        case Modulation::DQPSK:  return 2;
+        case Modulation::QPSK:   return 2;
+        case Modulation::D8PSK:  return 3;
+        case Modulation::QAM8:   return 3;
+        case Modulation::QAM16:  return 4;
+        case Modulation::QAM32:  return 5;
+        case Modulation::QAM64:  return 6;
+        case Modulation::QAM256: return 8;
+        default: return 1;
+    }
+}
 
 // Cyclic prefix modes for adaptive overhead
 enum class CyclicPrefixMode : uint8_t {
@@ -159,7 +179,7 @@ struct ModemConfig {
 
     // Calculate theoretical throughput in bps
     float getTheoreticalThroughput(Modulation mod, CodeRate rate) const {
-        uint32_t bits_per_carrier = static_cast<uint32_t>(mod);
+        uint32_t bits_per_carrier = getBitsPerSymbol(mod);
         return getDataCarriers() * bits_per_carrier * getCodeRateValue(rate) * getSymbolRate();
     }
 };
