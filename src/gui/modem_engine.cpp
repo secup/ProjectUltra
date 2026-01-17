@@ -145,7 +145,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     CodeRate tx_code_rate;
 
     if (is_link_frame) {
-        // Link establishment: Always use most robust mode (works down to ~5 dB SNR)
+        // Link establishment: BPSK R1/4 for maximum robustness
         tx_modulation = Modulation::BPSK;
         tx_code_rate = CodeRate::R1_4;
     } else if (connected_) {
@@ -153,7 +153,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         tx_modulation = data_modulation_;
         tx_code_rate = data_code_rate_;
     } else {
-        // Fallback: Use robust mode
+        // Fallback: BPSK R1/4 for robustness
         tx_modulation = Modulation::BPSK;
         tx_code_rate = CodeRate::R1_4;
     }

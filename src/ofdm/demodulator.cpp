@@ -212,6 +212,44 @@ std::vector<float> softDemapQAM256(Complex sym, float noise_var) {
     return llrs;
 }
 
+// DBPSK soft demapping - compares current symbol to previous symbol
+// Returns LLR based on phase difference:
+//   phase_diff ≈ 0   → bit 0 → positive LLR
+//   phase_diff ≈ π   → bit 1 → negative LLR
+float softDemapDBPSK(Complex sym, Complex prev_sym, float noise_var) {
+    // Compute phase difference: angle(sym * conj(prev))
+    // This is equivalent to angle(sym) - angle(prev) but handles wrap-around
+    Complex diff = sym * std::conj(prev_sym);
+    float phase_diff = std::atan2(diff.imag(), diff.real());
+
+    // LLR based on distance from decision boundaries (0 and π)
+    // phase_diff near 0 → bit 0, phase_diff near ±π → bit 1
+    //
+    // For DBPSK with AWGN, the LLR is approximately:
+    //   LLR ≈ 2 * |sym| * |prev_sym| * cos(phase_diff) / noise_var
+    //
+    // Simplified: use phase_diff directly scaled by SNR
+    // phase_diff ∈ [-π, π], decision boundary at ±π/2
+    // Map to: LLR positive when |phase_diff| < π/2, negative when > π/2
+
+    float signal_power = std::abs(sym) * std::abs(prev_sym);
+    if (signal_power < 1e-6f) {
+        // Very weak signal - return neutral LLR
+        return 0.0f;
+    }
+
+    // cos(phase_diff) gives distance from boundaries:
+    // +1 when phase_diff=0 (bit 0), -1 when phase_diff=π (bit 1)
+    float cos_diff = std::cos(phase_diff);
+
+    // Scale by signal power and inverse noise
+    // Factor of 2 for BPSK-like scaling, factor of 2 again because differential
+    // uses product of two symbols (doubles the noise contribution)
+    float llr = 2.0f * signal_power * cos_diff / noise_var;
+
+    return clipLLR(llr);
+}
+
 } // anonymous namespace
 
 struct OFDMDemodulator::Impl {
@@ -275,8 +313,16 @@ struct OFDMDemodulator::Impl {
     static constexpr float FREQ_OFFSET_ALPHA = 0.3f;  // Smoothing factor
     float freq_correction_phase = 0.0f;    // Running phase for correction
 
+    // Carrier phase recovery - corrects arbitrary phase offset after sync
+    Complex carrier_phase_correction = Complex(1, 0);  // Rotation to apply
+    bool carrier_phase_initialized = false;
+
     // Phase inversion detection (for audio paths with inverted polarity)
     bool llr_sign_flip = false;  // Flip LLR signs if inverted
+
+    // DBPSK state: previous equalized symbols for differential decoding
+    std::vector<Complex> dbpsk_prev_equalized;
+    bool dbpsk_first_symbol = true;  // First symbol after sync needs special handling
 
     // LMS/RLS Adaptive equalizer state
     std::vector<Complex> lms_weights;      // Per-carrier LMS weights
@@ -651,6 +697,27 @@ struct OFDMDemodulator::Impl {
             h_sum += h_ls_all[i];
         }
 
+        // Carrier phase recovery: on first symbol, compute average phase offset
+        // and store correction to apply to all H estimates
+        if (!carrier_phase_initialized && !pilot_carrier_indices.empty()) {
+            Complex h_avg = h_sum / float(pilot_carrier_indices.size());
+            float avg_mag = std::abs(h_avg);
+            if (avg_mag > 0.01f) {
+                // Correction = conjugate of unit vector in direction of average phase
+                // This rotates all H values so average phase becomes 0
+                carrier_phase_correction = std::conj(h_avg) / avg_mag;
+                carrier_phase_initialized = true;
+                LOG_DEMOD(INFO, "Carrier phase recovery: avg_phase=%.1f°, applying correction",
+                          std::arg(h_avg) * 180.0f / M_PI);
+            }
+        }
+
+        // Apply carrier phase correction to all H estimates
+        for (size_t i = 0; i < h_ls_all.size(); ++i) {
+            h_ls_all[i] *= carrier_phase_correction;
+        }
+        h_sum *= carrier_phase_correction;
+
         // DEBUG: Log first symbol's pilot analysis - ALL pilots
         if (soft_bits.empty()) {
             LOG_DEMOD(INFO, "=== First symbol pilot analysis ===");
@@ -974,18 +1041,21 @@ struct OFDMDemodulator::Impl {
             Complex received = freq_domain[idx];
 
             if (use_adaptive) {
-                // Adaptive equalization using LMS/RLS weights
+                // Adaptive equalization using LMS/RLS weights with MMSE
                 Complex h = lms_weights[idx];
                 float h_power = std::norm(h);
 
-                // Avoid division by zero
-                if (h_power < 1e-10f) {
+                // MMSE equalization: y_eq = H* × y / (|H|² + σ²)
+                // Unlike ZF (y/H), MMSE doesn't amplify noise on weak carriers
+                // This is critical for soundcards with poor frequency response
+                float mmse_denom = h_power + noise_variance;
+                if (mmse_denom < 1e-10f) {
                     equalized[i] = Complex(0, 0);
-                    carrier_noise_var[i] = 1.0f;  // High uncertainty
+                    carrier_noise_var[i] = 100.0f;  // High uncertainty
                 } else {
-                    equalized[i] = received / h;
-                    // After ZF: noise variance = σ² / |H|²
-                    carrier_noise_var[i] = noise_variance / h_power;
+                    equalized[i] = std::conj(h) * received / mmse_denom;
+                    // MMSE noise variance (approximation - conservative estimate)
+                    carrier_noise_var[i] = noise_variance / (h_power + 1e-6f);
                 }
 
                 // Update weights using decision-directed mode
@@ -1001,23 +1071,26 @@ struct OFDMDemodulator::Impl {
                     last_decisions[idx] = decision;
                 }
             } else {
-                // Zero-Forcing equalization with per-carrier noise tracking
-                // ZF gives unbiased estimate: y_eq = y/H = x + n/H
-                // The noise variance after ZF is: σ²_eq = σ² / |H|²
-                // This per-carrier variance is CRITICAL for soft demapping!
+                // MMSE equalization with per-carrier noise tracking
+                // MMSE: y_eq = H* × y / (|H|² + σ²)
+                // Unlike ZF (y/H), MMSE gracefully handles weak carriers by not
+                // amplifying noise excessively. This is critical for soundcards
+                // with non-flat frequency response (e.g., 20+ dB variation).
                 Complex h = channel_estimate[idx];
                 float h_power = std::norm(h);
 
-                if (h_power < 1e-10f) {
+                // MMSE denominator includes noise variance to prevent blow-up
+                float mmse_denom = h_power + noise_variance;
+                if (mmse_denom < 1e-10f) {
                     // Deep fade - output zero with high uncertainty
                     equalized[i] = Complex(0, 0);
                     carrier_noise_var[i] = 100.0f;  // Erasure: LLRs ≈ 0
                 } else {
-                    // Standard ZF equalization
-                    equalized[i] = received / h;
-                    // Per-carrier noise variance after ZF
+                    // MMSE equalization
+                    equalized[i] = std::conj(h) * received / mmse_denom;
+                    // Per-carrier noise variance (conservative estimate)
                     // This makes deeply faded carriers give low-confidence LLRs
-                    carrier_noise_var[i] = noise_variance / h_power;
+                    carrier_noise_var[i] = noise_variance / (h_power + 1e-6f);
                     // Clamp - but allow high variance for soft erasure
                     carrier_noise_var[i] = std::max(1e-6f, std::min(100.0f, carrier_noise_var[i]));
                 }
@@ -1119,6 +1192,7 @@ struct OFDMDemodulator::Impl {
         // channel estimation MSE which depends on pilot density and SNR.
         float ce_error_margin = 1.0f;
         switch (mod) {
+            case Modulation::DBPSK:  // DBPSK is even more robust than BPSK (differential)
             case Modulation::BPSK:
             case Modulation::QPSK:
                 ce_error_margin = 1.0f;  // Robust to small errors
@@ -1149,6 +1223,18 @@ struct OFDMDemodulator::Impl {
             float nv = base_nv * ce_error_margin;
 
             switch (mod) {
+                case Modulation::DBPSK: {
+                    // DBPSK: compare to previous symbol for differential decoding
+                    // Initialize reference on first use
+                    if (dbpsk_prev_equalized.empty()) {
+                        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+                    }
+                    Complex prev_sym = dbpsk_prev_equalized[i];
+                    float llr = softDemapDBPSK(sym, prev_sym, nv);
+                    soft_bits.push_back(llr);  // No sign flip for DBPSK - it's inherently phase-invariant
+                    dbpsk_prev_equalized[i] = sym;  // Update for next symbol
+                    break;
+                }
                 case Modulation::BPSK:
                     soft_bits.push_back(softDemapBPSK(sym, nv) * llr_sign);
                     break;
@@ -1289,14 +1375,23 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             }
 
             if (corr > impl_->sync_threshold) {
-                // Found sync point - use this offset
-                // NOTE: We previously had "fine timing refinement" that searched ±16
-                // samples for the peak, but this caused problems: in clean channels,
-                // tiny numerical noise (0.999 vs 1.001) led to choosing wrong offsets.
-                // The first-above-threshold approach is more robust.
-                found_sync = true;
-                sync_offset = i;
-                sync_corr = corr;
+                // Found potential sync point - but don't lock immediately!
+                // Continue searching to find the PEAK correlation, not just first-above-threshold.
+                // False syncs in noise typically have lower correlation than real preambles.
+                if (corr > sync_corr) {
+                    found_sync = true;
+                    sync_offset = i;
+                    sync_corr = corr;
+                }
+                // If we found something very strong (>0.97), can stop early - this is definitely real
+                if (sync_corr > 0.97f) {
+                    break;
+                }
+            }
+            // Keep searching even if below threshold - the real preamble might be just ahead.
+            // Only stop if we've searched far past a candidate AND found nothing better.
+            // "Far past" = more than one preamble length (to handle noise gaps before signal)
+            if (found_sync && (i - sync_offset) > preamble_total_len) {
                 break;
             }
 
@@ -1326,6 +1421,9 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->state.store(Impl::State::SYNCED);
             impl_->synced_symbol_count.store(0);  // Reset timeout counter
             impl_->mixer.reset();
+            impl_->dbpsk_prev_equalized.clear();  // Reset DBPSK differential state for new frame
+            impl_->carrier_phase_initialized = false;  // Will compute from first symbol's pilots
+            impl_->carrier_phase_correction = Complex(1, 0);
         }
     }
 
@@ -1395,6 +1493,13 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
                     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
                     std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
+
+                    // Reset DBPSK differential state for new frame
+                    impl_->dbpsk_prev_equalized.clear();
+
+                    // Reset carrier phase recovery for new frame
+                    impl_->carrier_phase_initialized = false;
+                    impl_->carrier_phase_correction = Complex(1, 0);
 
                     // Continue processing in SYNCED state (don't return!)
                     break;

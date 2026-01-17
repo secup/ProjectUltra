@@ -22,9 +22,10 @@ using ByteSpan = std::span<const uint8_t>;
 using MutableSampleSpan = std::span<Sample>;
 using MutableByteSpan = std::span<uint8_t>;
 
-// Modulation schemes (in order of bits/symbol)
+// Modulation schemes (value = bits/symbol, except DBPSK which is special)
 enum class Modulation : uint8_t {
-    BPSK = 1,    // 1 bit/symbol  - most robust
+    DBPSK = 0,   // 1 bit/symbol  - differential, immune to phase distortion
+    BPSK = 1,    // 1 bit/symbol  - most robust, coherent detection
     QPSK = 2,    // 2 bits/symbol
     QAM8 = 3,    // 3 bits/symbol
     QAM16 = 4,   // 4 bits/symbol
@@ -118,7 +119,7 @@ struct ModemConfig {
     bool decision_directed = true;      // Use past decisions as reference
 
     // Synchronization settings
-    float sync_threshold = 0.75f;       // Correlation threshold for sync (0.7-0.95)
+    float sync_threshold = 0.80f;       // Correlation threshold for sync (0.7-0.95)
 
     // ARQ settings
     uint32_t frame_size = 256;         // Bytes per frame

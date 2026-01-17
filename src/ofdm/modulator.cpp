@@ -123,6 +123,9 @@ struct OFDMModulator::Impl {
     std::vector<int> data_carrier_indices;
     std::vector<int> pilot_carrier_indices;
 
+    // DBPSK state: previous symbol per data carrier for differential encoding
+    std::vector<Complex> dbpsk_prev_symbols;
+
     Impl(const ModemConfig& cfg)
         : config(cfg)
         , fft(cfg.fft_size)
@@ -274,14 +277,16 @@ size_t OFDMModulator::samplesPerSymbol() const {
 }
 
 size_t OFDMModulator::bitsPerSymbol(Modulation mod) const {
-    size_t bits_per_carrier = static_cast<size_t>(mod);
+    // DBPSK has enum value 0 but uses 1 bit per carrier
+    size_t bits_per_carrier = (mod == Modulation::DBPSK) ? 1 : static_cast<size_t>(mod);
     return impl_->data_carrier_indices.size() * bits_per_carrier;
 }
 
 Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
     // Note: mixer phase continues from preamble for phase coherence
 
-    size_t bits_per_carrier = static_cast<size_t>(mod);
+    // DBPSK has enum value 0 but uses 1 bit per carrier
+    size_t bits_per_carrier = (mod == Modulation::DBPSK) ? 1 : static_cast<size_t>(mod);
     size_t carriers_per_symbol = impl_->data_carrier_indices.size();
     size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
     size_t bytes_per_symbol = (bits_per_symbol + 7) / 8;
@@ -313,7 +318,17 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                     }
                 }
             }
-            symbol_data.push_back(mapBits(bits, mod));
+
+            // DBPSK: differential encoding - multiply previous symbol by +1 or -1
+            if (mod == Modulation::DBPSK) {
+                // Bit 0 → no change (×+1), Bit 1 → 180° flip (×-1)
+                Complex phase_change = (bits & 1) ? Complex(-1, 0) : Complex(1, 0);
+                Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
+                impl_->dbpsk_prev_symbols[c] = new_symbol;  // Update state
+                symbol_data.push_back(new_symbol);
+            } else {
+                symbol_data.push_back(mapBits(bits, mod));
+            }
         }
 
         // Pad if needed
@@ -349,6 +364,9 @@ Samples OFDMModulator::generatePreamble() {
 
     // Reset TX pilot logging flag for new transmission
     g_logged_tx_pilots = false;
+
+    // Initialize DBPSK state: all carriers start at +1 (reference symbol)
+    impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
     // Preamble structure:
     // 1. Short training sequence (STS) - for AGC, coarse timing
