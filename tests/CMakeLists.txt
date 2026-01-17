@@ -3,6 +3,12 @@
 # For now, we rely on the built-in self-test in main.cpp
 # Future: Add Google Test or Catch2 based unit tests
 
+# CRITICAL: Layer-by-layer OFDM verification tests
+# These tests MUST pass 100% before trusting any higher-level functionality
+add_executable(test_layers test_layers.cpp)
+target_link_libraries(test_layers PRIVATE ultra_core)
+add_test(NAME Layers COMMAND test_layers)
+
 add_executable(test_fft test_fft.cpp)
 target_link_libraries(test_fft PRIVATE ultra_core)
 add_test(NAME FFT COMMAND test_fft)
