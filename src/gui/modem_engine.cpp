@@ -126,18 +126,27 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     // Determine if this is a link establishment frame
-    // These must use robust modulation (BPSK R1/4) to get through at any SNR
-    // Frame format: [MAGIC:1][TYPE:1][...]
+    // These must use robust modulation (DQPSK R1/4) to get through at any SNR
+    // Frame format: [MAGIC:4][TYPE:1][FLAGS:1][SEQ:1][SRC:8][DST:8][LEN:2][DATA][CRC:2]
     bool is_link_frame = false;
-    if (data.size() >= 2 && data[0] == protocol::Frame::MAGIC) {
-        uint8_t frame_type = data[1];
-        // Link establishment frames that must work in poor conditions
-        is_link_frame = (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
-                         frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
-                         frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
-                         frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK) ||
-                         frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_NAK) ||
-                         frame_type == static_cast<uint8_t>(protocol::FrameType::BEACON));
+    if (data.size() >= 5) {
+        // Check 4-byte magic "ULTR" = 0x554C5452
+        uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
+                         (static_cast<uint32_t>(data[1]) << 16) |
+                         (static_cast<uint32_t>(data[2]) << 8) |
+                         static_cast<uint32_t>(data[3]);
+        if (magic == protocol::Frame::MAGIC) {
+            uint8_t frame_type = data[4];  // TYPE is at offset 4, after 4-byte magic
+            // Link establishment frames that must work in poor conditions
+            is_link_frame = (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
+                             frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
+                             frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
+                             frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK) ||
+                             frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_NAK) ||
+                             frame_type == static_cast<uint8_t>(protocol::FrameType::BEACON));
+            LOG_MODEM(INFO, "TX: Frame magic=0x%08X, type=%d, is_link_frame=%d",
+                      magic, frame_type, is_link_frame);
+        }
     }
 
     // Select modulation and code rate
@@ -178,7 +187,15 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     LOG_MODEM(INFO, "TX: Using code_rate=%d, modulation=%d, is_link=%d, connected=%d",
               static_cast<int>(tx_code_rate), static_cast<int>(tx_modulation),
               is_link_frame, connected_);
+    LOG_MODEM(INFO, "TX: Input data size=%zu bytes, first 4 bytes: %02x %02x %02x %02x",
+              data.size(),
+              data.size() > 0 ? data[0] : 0,
+              data.size() > 1 ? data[1] : 0,
+              data.size() > 2 ? data[2] : 0,
+              data.size() > 3 ? data[3] : 0);
     Bytes encoded = encoder_->encode(data);
+    LOG_MODEM(INFO, "TX: LDPC encoded size=%zu bytes (expected for R1/4: %zu)",
+              encoded.size(), encoder_->getCodedSize(data.size()));
 
     // Step 1.5: Interleave (optional - spreads burst errors for LDPC decoder)
     Bytes to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;
