@@ -94,7 +94,13 @@ struct LDPCDecoder::Impl {
                 }
             }
 
-            std::shuffle(available_checks.begin(), available_checks.end(), rng);
+            // NOTE: Using Fisher-Yates shuffle with direct RNG calls instead of std::shuffle
+            // because std::shuffle is implementation-defined and produces different results
+            // on different compilers (GCC vs Apple Clang), breaking cross-platform compatibility
+            for (size_t i = available_checks.size(); i > 1; --i) {
+                size_t j = rng() % i;
+                std::swap(available_checks[i - 1], available_checks[j]);
+            }
             int connections = std::min(target_var_degree, static_cast<int>(available_checks.size()));
 
             for (int d = 0; d < connections; ++d) {
