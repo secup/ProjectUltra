@@ -5,6 +5,8 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/fec.hpp"
 #include "ultra/dsp.hpp"
+#include "protocol/protocol_engine.hpp"
+#include "protocol/frame.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -24,7 +26,8 @@ void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog << " [options] <command>\n\n";
     std::cerr << "Commands:\n";
     std::cerr << "  tx <file>       Transmit file (outputs audio to stdout or -o file)\n";
-    std::cerr << "  rx [file]       Receive (from file or stdin, expects protocol frames)\n";
+    std::cerr << "  rx [file]       Receive (from file or stdin, old modem framing)\n";
+    std::cerr << "  prx [file]      Protocol RX (decodes ULTR frames with PROBE/CONNECT/DATA)\n";
     std::cerr << "  decode [file]   Raw decode (from file or stdin, outputs raw LDPC data)\n";
     std::cerr << "  test            Run self-test\n";
     std::cerr << "  info            Show modem capabilities\n";
@@ -33,9 +36,11 @@ void printUsage(const char* prog) {
     std::cerr << "  -m <mod>        Modulation: dbpsk, bpsk, dqpsk, qpsk, d8psk, qam16, qam64 (default: qpsk)\n";
     std::cerr << "  -c <rate>       Code rate: 1/4, 1/2, 2/3, 3/4, 5/6 (default: 1/2)\n";
     std::cerr << "  -o <file>       Output file (default: stdout)\n";
+    std::cerr << "  -s <call>       Local callsign for protocol mode (default: TEST)\n";
     std::cerr << "  -a              Enable adaptive modulation/coding\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  " << prog << " -m dqpsk -c 1/4 decode recording.raw\n";
+    std::cerr << "  " << prog << " -m dqpsk -s N0CALL prx recording.f32\n";
     std::cerr << "  " << prog << " tx data.bin -o output.raw\n";
     std::cerr << "\n";
 }
@@ -254,6 +259,182 @@ int runRx(ultra::ModemConfig& config, const char* input_file, const char* output
     return 0;
 }
 
+// Protocol RX mode - decodes frames with 4-byte magic "ULTR" and protocol parsing
+// Use this to receive PROBE, CONNECT, DATA frames from the GUI
+int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std::string& callsign) {
+    std::cerr << "Protocol RX mode (looking for ULTR frames)...\n";
+    if (input_file) std::cerr << "Input: " << input_file << "\n";
+    std::cerr << "Local callsign: " << callsign << "\n";
+
+    // Open input file
+    std::ifstream infile;
+    std::istream* input = &std::cin;
+    if (input_file) {
+        infile.open(input_file, std::ios::binary);
+        if (!infile) {
+            std::cerr << "Error: Cannot open input file: " << input_file << "\n";
+            return 1;
+        }
+        input = &infile;
+
+        // Skip startup samples to get closer to real signal
+        // User can trim audio file to start near the preamble
+        constexpr size_t STARTUP_SKIP = 0;  // No skip - user should trim file
+        std::vector<float> skip_buf(STARTUP_SKIP);
+        input->read(reinterpret_cast<char*>(skip_buf.data()), STARTUP_SKIP * sizeof(float));
+        std::cerr << "Skipped " << STARTUP_SKIP << " startup samples\n";
+    }
+
+    // Create demodulator and decoder
+    ultra::OFDMDemodulator demod(config);
+    ultra::LDPCDecoder decoder(config.code_rate);
+
+    // Create protocol engine
+    ultra::protocol::ConnectionConfig conn_config;
+    conn_config.auto_accept = true;
+    ultra::protocol::ProtocolEngine protocol(conn_config);
+    protocol.setLocalCallsign(callsign);
+
+    // Track received frames
+    int frames_received = 0;
+
+    // Set up protocol callbacks
+    protocol.setMessageReceivedCallback([&](const std::string& from, const std::string& text) {
+        std::cerr << "\n[MESSAGE from " << from << "]: " << text << "\n";
+    });
+
+    protocol.setConnectionChangedCallback([&](ultra::protocol::ConnectionState state, const std::string& remote) {
+        const char* state_str = "UNKNOWN";
+        switch (state) {
+            case ultra::protocol::ConnectionState::DISCONNECTED: state_str = "DISCONNECTED"; break;
+            case ultra::protocol::ConnectionState::CONNECTING: state_str = "CONNECTING"; break;
+            case ultra::protocol::ConnectionState::CONNECTED: state_str = "CONNECTED"; break;
+            case ultra::protocol::ConnectionState::DISCONNECTING: state_str = "DISCONNECTING"; break;
+            case ultra::protocol::ConnectionState::PROBING: state_str = "PROBING"; break;
+        }
+        std::cerr << "\n[CONNECTION] State: " << state_str << ", Remote: " << remote << "\n";
+    });
+
+    protocol.setIncomingCallCallback([&](const std::string& from) {
+        std::cerr << "\n[INCOMING CALL from " << from << "] - auto-accepting\n";
+    });
+
+    // Accumulate soft bits
+    std::vector<float> accumulated_soft_bits;
+    const size_t LDPC_BLOCK_SIZE = 648;
+
+    // Track consecutive LDPC failures to detect false sync
+    int consecutive_failures = 0;
+    const int MAX_FAILURES_BEFORE_RESET = 3;  // Faster reset
+    int negative_snr_count = 0;
+    int total_resets = 0;
+
+    // Read audio in chunks
+    std::vector<float> buffer(960);
+    uint32_t tick_counter = 0;
+
+    while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
+                                     buffer.size() * sizeof(float))) {
+        // Process through demodulator
+        ultra::SampleSpan span(buffer.data(), buffer.size());
+        demod.process(span);
+
+        if (demod.isSynced()) {
+            auto soft_bits = demod.getSoftBits();
+            accumulated_soft_bits.insert(accumulated_soft_bits.end(),
+                                         soft_bits.begin(), soft_bits.end());
+
+            // Decode complete LDPC blocks
+            while (accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
+                std::vector<float> block(accumulated_soft_bits.begin(),
+                                         accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
+                accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
+                                            accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
+
+                ultra::Bytes decoded = decoder.decodeSoft(std::span<const float>(block));
+
+                if (decoder.lastDecodeSuccess() && !decoded.empty()) {
+                    // Check if it looks like a valid frame (starts with ULTR magic)
+                    bool has_magic = (decoded.size() >= 4 &&
+                                      decoded[0] == 0x55 && decoded[1] == 0x4C &&
+                                      decoded[2] == 0x54 && decoded[3] == 0x52);
+
+                    if (has_magic) {
+                        // Feed to protocol engine
+                        protocol.onRxData(decoded);
+                        frames_received++;
+                        consecutive_failures = 0;
+
+                        std::cerr << "  [FRAME] " << decoded.size() << " bytes: ";
+                        for (size_t i = 0; i < std::min(decoded.size(), size_t(20)); i++) {
+                            fprintf(stderr, "%02X ", decoded[i]);
+                        }
+                        std::cerr << "\n";
+                    } else {
+                        // LDPC succeeded but no magic - probably false sync
+                        std::cerr << "  [NO MAGIC] decoded " << decoded.size() << " bytes, first 4: ";
+                        for (size_t i = 0; i < std::min(decoded.size(), size_t(4)); i++) {
+                            fprintf(stderr, "%02X ", decoded[i]);
+                        }
+                        std::cerr << " (expected 55 4C 54 52)\n";
+                        consecutive_failures++;
+                    }
+                } else {
+                    consecutive_failures++;
+                }
+
+                // Too many failures = probably false sync, reset and search again
+                if (consecutive_failures >= MAX_FAILURES_BEFORE_RESET) {
+                    total_resets++;
+                    std::cerr << "  [RESET #" << total_resets << "] " << consecutive_failures
+                              << " failures, continuing search\n";
+
+                    demod.reset();
+                    accumulated_soft_bits.clear();
+                    consecutive_failures = 0;
+                    negative_snr_count = 0;
+                }
+            }
+
+            // Check SNR - if consistently negative, we're processing noise
+            auto quality = demod.getChannelQuality();
+            if (quality.snr_db < -3) {  // Clearly noise
+                negative_snr_count++;
+                if (negative_snr_count >= 20) {
+                    total_resets++;
+                    std::cerr << "  [RESET #" << total_resets << "] Negative SNR, continuing search\n";
+
+                    demod.reset();
+                    accumulated_soft_bits.clear();
+                    consecutive_failures = 0;
+                    negative_snr_count = 0;
+                }
+            } else {
+                negative_snr_count = 0;
+            }
+        }
+
+        // Periodic tick for protocol timeouts
+        tick_counter += 20;  // 20ms per chunk at 48kHz
+        if (tick_counter >= 100) {
+            protocol.tick(tick_counter);
+            tick_counter = 0;
+        }
+    }
+
+    std::cerr << "\n=== Protocol RX Statistics ===\n";
+    std::cerr << "  LDPC frames decoded: " << frames_received << "\n";
+    auto stats = protocol.getStats();
+    std::cerr << "  ARQ frames RX:       " << stats.arq.frames_received << "\n";
+    std::cerr << "  Connects received:   " << stats.connects_received << "\n";
+    std::cerr << "  Connection state:    " << (protocol.isConnected() ? "CONNECTED" : "DISCONNECTED") << "\n";
+    if (protocol.isConnected()) {
+        std::cerr << "  Remote callsign:     " << protocol.getRemoteCallsign() << "\n";
+    }
+
+    return 0;
+}
+
 // Raw decode mode - bypasses protocol layer, outputs raw LDPC-decoded data
 // Use this for decoding F3 test patterns from the GUI
 int runDecode(ultra::ModemConfig& config, const char* input_file, const char* output_file) {
@@ -384,9 +565,10 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
 
 // Raw OFDM decode mode - NO LDPC, just extract hard bits from OFDM
 // Use this to test OFDM layer independently
-int runRawDecode(ultra::ModemConfig& config, const char* input_file) {
+int runRawDecode(ultra::ModemConfig& config, const char* input_file, int timing_offset = 0) {
     std::cerr << "Raw OFDM decode (NO LDPC)...\n";
     if (input_file) std::cerr << "Input: " << input_file << "\n";
+    if (timing_offset != 0) std::cerr << "Timing offset: " << timing_offset << " samples\n";
 
     // Open input file if specified
     std::ifstream infile;
@@ -401,6 +583,7 @@ int runRawDecode(ultra::ModemConfig& config, const char* input_file) {
     }
 
     ultra::OFDMDemodulator demod(config);
+    demod.setTimingOffset(timing_offset);  // Apply timing adjustment
     std::vector<float> all_soft_bits;
     std::vector<float> buffer(960);  // 20ms chunks
 
@@ -510,6 +693,8 @@ int main(int argc, char* argv[]) {
     const char* output_file = nullptr;
     const char* command = nullptr;
     const char* input_file = nullptr;
+    std::string callsign = "TEST";
+    int timing_offset = 0;
 
     // Parse all arguments - options can appear before or after command
     // This allows both: "ultra -m dqpsk rawdecode file" and "ultra rawdecode -m dqpsk file"
@@ -522,8 +707,12 @@ int main(int argc, char* argv[]) {
             config.code_rate = parseCodeRate(argv[++i]);
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             output_file = argv[++i];
+        } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
+            callsign = argv[++i];
         } else if (strcmp(argv[i], "-a") == 0) {
             adaptive = true;
+        } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+            timing_offset = std::atoi(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;
@@ -555,10 +744,12 @@ int main(int argc, char* argv[]) {
         return runTx(input_file, config);
     } else if (strcmp(command, "rx") == 0) {
         return runRx(config, input_file, output_file);
+    } else if (strcmp(command, "prx") == 0) {
+        return runProtocolRx(config, input_file, callsign);
     } else if (strcmp(command, "decode") == 0) {
         return runDecode(config, input_file, output_file);
     } else if (strcmp(command, "rawdecode") == 0) {
-        return runRawDecode(config, input_file);
+        return runRawDecode(config, input_file, timing_offset);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
         printUsage(argv[0]);

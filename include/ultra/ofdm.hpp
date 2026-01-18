@@ -87,6 +87,10 @@ public:
     // Returns the sample offset where sync was detected in the input buffer
     size_t getLastSyncOffset() const;
 
+    // Set timing offset adjustment (samples to skip after preamble)
+    // Positive = start symbols later, Negative = start symbols earlier
+    void setTimingOffset(int offset);
+
     // Reset state (e.g., after sync loss)
     void reset();
 

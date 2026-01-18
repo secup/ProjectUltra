@@ -417,6 +417,9 @@ struct OFDMDemodulator::Impl {
     // Phase inversion detection (for audio paths with inverted polarity)
     bool llr_sign_flip = false;  // Flip LLR signs if inverted
 
+    // Manual timing offset adjustment (for debugging/testing)
+    int manual_timing_offset = 0;  // Samples to skip (positive) or include (negative) after preamble
+
     // DBPSK state: previous equalized symbols for differential decoding
     std::vector<Complex> dbpsk_prev_equalized;
     bool dbpsk_first_symbol = true;  // First symbol after sync needs special handling
@@ -1725,8 +1728,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             // Store for testing/debugging
             impl_->last_sync_offset = sync_offset;
 
+            // Apply manual timing offset (for debugging symbol alignment)
+            size_t skip_amount = sync_offset + preamble_total_len + impl_->manual_timing_offset;
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
-                                   impl_->rx_buffer.begin() + sync_offset + preamble_total_len);
+                                   impl_->rx_buffer.begin() + skip_amount);
             impl_->search_offset = 0;  // Reset for next search
             impl_->state.store(Impl::State::SYNCED);
             impl_->synced_symbol_count.store(0);  // Reset timeout counter
@@ -2034,6 +2039,10 @@ bool OFDMDemodulator::hasPendingData() const {
 
 size_t OFDMDemodulator::getLastSyncOffset() const {
     return impl_->last_sync_offset;
+}
+
+void OFDMDemodulator::setTimingOffset(int offset) {
+    impl_->manual_timing_offset = offset;
 }
 
 void OFDMDemodulator::reset() {
