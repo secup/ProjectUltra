@@ -115,6 +115,12 @@ add_executable(test_timing_offset test_timing_offset.cpp)
 target_link_libraries(test_timing_offset PRIVATE ultra_core)
 add_test(NAME TimingOffset COMMAND test_timing_offset)
 
+# Sync Detection Accuracy Test
+# Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
+add_executable(test_sync_detection test_sync_detection.cpp)
+target_link_libraries(test_sync_detection PRIVATE ultra_core)
+add_test(NAME SyncDetection COMMAND test_sync_detection)
+
 # QPSK bit mapping debug
 add_executable(test_qpsk_debug test_qpsk_debug.cpp)
 target_link_libraries(test_qpsk_debug PRIVATE ultra_core)

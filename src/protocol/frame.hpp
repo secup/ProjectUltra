@@ -75,19 +75,20 @@ struct ChannelReport {
 // Protocol frame structure
 //
 // Wire format (big-endian):
-// ┌───────┬──────┬───────┬─────┬──────────┬──────────┬─────┬──────┬───────┐
-// │ MAGIC │ TYPE │ FLAGS │ SEQ │ SRC_CALL │ DST_CALL │ LEN │ DATA │ CRC16 │
-// │  1B   │  1B  │  1B   │ 1B  │    8B    │    8B    │ 2B  │  N   │  2B   │
-// └───────┴──────┴───────┴─────┴──────────┴──────────┴─────┴──────┴───────┘
+// ┌────────┬──────┬───────┬─────┬──────────┬──────────┬─────┬──────┬───────┐
+// │ MAGIC  │ TYPE │ FLAGS │ SEQ │ SRC_CALL │ DST_CALL │ LEN │ DATA │ CRC16 │
+// │  4B    │  1B  │  1B   │ 1B  │    8B    │    8B    │ 2B  │  N   │  2B   │
+// └────────┴──────┴───────┴─────┴──────────┴──────────┴─────┴──────┴───────┘
 //
-// Header: 22 bytes, CRC: 2 bytes, Max payload: 256 bytes
+// Header: 25 bytes, CRC: 2 bytes, Max payload: 256 bytes
 //
 struct Frame {
-    // Magic byte for frame detection
-    static constexpr uint8_t MAGIC = 0x55;
+    // 4-byte magic for robust frame detection (1 in 4 billion false positive rate)
+    // "ULTR" in ASCII = 0x554C5452
+    static constexpr uint32_t MAGIC = 0x554C5452;
 
     // Header size (before payload)
-    static constexpr size_t HEADER_SIZE = 22;
+    static constexpr size_t HEADER_SIZE = 25;
 
     // CRC size
     static constexpr size_t CRC_SIZE = 2;

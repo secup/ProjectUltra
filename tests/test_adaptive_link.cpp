@@ -175,10 +175,20 @@ public:
         });
     }
 
+    // Check if first 4 bytes match the frame magic
+    static bool hasMagic(const Bytes& data) {
+        if (data.size() < 4) return false;
+        uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
+                         (static_cast<uint32_t>(data[1]) << 16) |
+                         (static_cast<uint32_t>(data[2]) << 8) |
+                          static_cast<uint32_t>(data[3]);
+        return magic == Frame::MAGIC;
+    }
+
     // Determine if frame is a link establishment frame
     static bool isLinkFrame(const Bytes& data) {
-        if (data.size() >= 2 && data[0] == Frame::MAGIC) {
-            uint8_t frame_type = data[1];
+        if (data.size() >= 5 && hasMagic(data)) {
+            uint8_t frame_type = data[4];  // Type is at offset 4 after 4-byte magic
             return (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
                     frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
                     frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
@@ -191,8 +201,8 @@ public:
 
     // Get frame type from serialized data
     static protocol::FrameType getFrameType(const Bytes& data) {
-        if (data.size() >= 2 && data[0] == Frame::MAGIC) {
-            return static_cast<protocol::FrameType>(data[1]);
+        if (data.size() >= 5 && hasMagic(data)) {
+            return static_cast<protocol::FrameType>(data[4]);
         }
         return protocol::FrameType::DATA;  // Default
     }
@@ -405,12 +415,21 @@ bool test_probe_connect_at_snr(float snr_db) {
     if (alice.remote_call != "TEST2") FAIL("Alice has wrong remote callsign");
     if (bob.remote_call != "TEST1") FAIL("Bob has wrong remote callsign");
 
+    // Helper to check if a frame type is a link establishment frame
+    auto isLinkFrameType = [](protocol::FrameType ft) {
+        return (ft == protocol::FrameType::PROBE ||
+                ft == protocol::FrameType::PROBE_ACK ||
+                ft == protocol::FrameType::CONNECT ||
+                ft == protocol::FrameType::CONNECT_ACK ||
+                ft == protocol::FrameType::CONNECT_NAK ||
+                ft == protocol::FrameType::BEACON);
+    };
+
     // Verify all link establishment frames used BPSK
     for (size_t i = 0; i < alice.tx_frame_types.size(); i++) {
         protocol::FrameType ft = alice.tx_frame_types[i];
         Modulation mod = alice.tx_modulations[i];
-        if (AdaptiveTestStation::isLinkFrame(
-            {Frame::MAGIC, static_cast<uint8_t>(ft)})) {
+        if (isLinkFrameType(ft)) {
             if (mod != Modulation::BPSK) {
                 char buf[128];
                 snprintf(buf, sizeof(buf),
@@ -424,8 +443,7 @@ bool test_probe_connect_at_snr(float snr_db) {
     for (size_t i = 0; i < bob.tx_frame_types.size(); i++) {
         protocol::FrameType ft = bob.tx_frame_types[i];
         Modulation mod = bob.tx_modulations[i];
-        if (AdaptiveTestStation::isLinkFrame(
-            {Frame::MAGIC, static_cast<uint8_t>(ft)})) {
+        if (isLinkFrameType(ft)) {
             if (mod != Modulation::BPSK) {
                 char buf[128];
                 snprintf(buf, sizeof(buf),

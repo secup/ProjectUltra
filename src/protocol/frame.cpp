@@ -281,8 +281,11 @@ Bytes Frame::serialize() const {
     Bytes result;
     result.reserve(HEADER_SIZE + payload.size() + CRC_SIZE);
 
-    // MAGIC (1 byte)
-    result.push_back(MAGIC);
+    // MAGIC (4 bytes, big-endian)
+    result.push_back((MAGIC >> 24) & 0xFF);
+    result.push_back((MAGIC >> 16) & 0xFF);
+    result.push_back((MAGIC >> 8) & 0xFF);
+    result.push_back(MAGIC & 0xFF);
 
     // TYPE (1 byte)
     result.push_back(static_cast<uint8_t>(type));
@@ -327,10 +330,15 @@ std::optional<Frame> Frame::deserialize(ByteSpan data) {
 
     size_t pos = 0;
 
-    // MAGIC
-    if (data[pos++] != MAGIC) {
+    // MAGIC (4 bytes, big-endian)
+    uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
+                     (static_cast<uint32_t>(data[1]) << 16) |
+                     (static_cast<uint32_t>(data[2]) << 8) |
+                      static_cast<uint32_t>(data[3]);
+    if (magic != MAGIC) {
         return std::nullopt;
     }
+    pos = 4;
 
     // TYPE
     uint8_t type_byte = data[pos++];

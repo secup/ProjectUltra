@@ -563,9 +563,26 @@ bool test_full_chain_awgn(float snr_db) {
         return snr_db < 0;  // Expected for very low SNR
     }
 
+    std::cout << "    Sync offset: " << demod.getLastSyncOffset() << "\n";
+
     if (soft_bits.size() < 648) {
         std::cout << "    [WARN] Not enough soft bits: " << soft_bits.size() << "\n";
         return snr_db < 0;
+    }
+
+    // Debug: print soft bits info
+    std::cout << "    Soft bits: " << soft_bits.size() << "\n";
+    if (!soft_bits.empty()) {
+        float sum = 0, abssum = 0;
+        int pos = 0, neg = 0;
+        for (float llr : soft_bits) {
+            sum += llr;
+            abssum += std::abs(llr);
+            if (llr > 0) pos++; else neg++;
+        }
+        std::cout << "    LLR stats: avg=" << (sum / soft_bits.size())
+                  << " |avg|=" << (abssum / soft_bits.size())
+                  << " pos=" << pos << " neg=" << neg << "\n";
     }
 
     // Decode - calculate exact number of bits needed
@@ -576,7 +593,9 @@ bool test_full_chain_awgn(float snr_db) {
     size_t use_bits = std::min(soft_bits.size(), needed_bits);
 
     std::vector<float> cw(soft_bits.begin(), soft_bits.begin() + use_bits);
+    std::cout << "    Using " << use_bits << " of " << soft_bits.size() << " bits (need " << needed_bits << ")\n";
     Bytes decoded = decoder.decodeSoft(std::span<const float>(cw));
+    std::cout << "    Decoded " << decoded.size() << " bytes (expected " << data.size() << ")\n";
 
     if (!decoder.lastDecodeSuccess()) {
         std::cout << "    [INFO] LDPC failed at SNR=" << snr_db << "dB\n";

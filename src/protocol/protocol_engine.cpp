@@ -1,5 +1,6 @@
 #include "protocol_engine.hpp"
 #include "ultra/logging.hpp"
+#include <algorithm>
 
 namespace ultra {
 namespace protocol {
@@ -218,13 +219,23 @@ void ProtocolEngine::onRxData(const Bytes& data) {
 }
 
 void ProtocolEngine::processRxBuffer() {
-    // Look for frame magic byte
+    // Look for frame magic (4 bytes: 0x554C5452 = "ULTR")
     while (!rx_buffer_.empty()) {
-        // Find magic byte
-        auto it = std::find(rx_buffer_.begin(), rx_buffer_.end(), Frame::MAGIC);
+        // Find magic sequence - search for first byte then verify full magic
+        constexpr uint8_t magic_bytes[4] = {
+            static_cast<uint8_t>((Frame::MAGIC >> 24) & 0xFF),  // 'U' = 0x55
+            static_cast<uint8_t>((Frame::MAGIC >> 16) & 0xFF),  // 'L' = 0x4C
+            static_cast<uint8_t>((Frame::MAGIC >> 8) & 0xFF),   // 'T' = 0x54
+            static_cast<uint8_t>(Frame::MAGIC & 0xFF)           // 'R' = 0x52
+        };
+
+        auto it = std::search(rx_buffer_.begin(), rx_buffer_.end(),
+                              std::begin(magic_bytes), std::end(magic_bytes));
         if (it == rx_buffer_.end()) {
-            // No magic byte found, clear buffer
-            rx_buffer_.clear();
+            // No magic found, keep last 3 bytes in case magic straddles buffer boundary
+            if (rx_buffer_.size() > 3) {
+                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.end() - 3);
+            }
             return;
         }
 

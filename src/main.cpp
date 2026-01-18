@@ -508,10 +508,12 @@ int main(int argc, char* argv[]) {
     ultra::ModemConfig config;
     bool adaptive = false;
     const char* output_file = nullptr;
+    const char* command = nullptr;
+    const char* input_file = nullptr;
 
-    // Parse options
-    int i = 1;
-    while (i < argc && argv[i][0] == '-') {
+    // Parse all arguments - options can appear before or after command
+    // This allows both: "ultra -m dqpsk rawdecode file" and "ultra rawdecode -m dqpsk file"
+    for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-r") == 0 && i + 1 < argc) {
             config.sample_rate = std::atoi(argv[++i]);
         } else if (strcmp(argv[i], "-m") == 0 && i + 1 < argc) {
@@ -525,17 +527,20 @@ int main(int argc, char* argv[]) {
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             printUsage(argv[0]);
             return 0;
+        } else if (argv[i][0] != '-') {
+            // Non-option argument: first is command, second is input file
+            if (!command) {
+                command = argv[i];
+            } else if (!input_file) {
+                input_file = argv[i];
+            }
         }
-        ++i;
     }
 
-    if (i >= argc) {
+    if (!command) {
         printUsage(argv[0]);
         return 1;
     }
-
-    const char* command = argv[i++];
-    const char* input_file = (i < argc && argv[i][0] != '-') ? argv[i++] : nullptr;
 
     if (strcmp(command, "test") == 0) {
         return runTest();

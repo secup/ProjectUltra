@@ -83,6 +83,10 @@ public:
     // Used to avoid premature reset between codewords of multi-codeword frames
     bool hasPendingData() const;
 
+    // Get last detected sync offset (for testing/debugging)
+    // Returns the sample offset where sync was detected in the input buffer
+    size_t getLastSyncOffset() const;
+
     // Reset state (e.g., after sync loss)
     void reset();
 

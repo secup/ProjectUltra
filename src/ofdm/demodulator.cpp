@@ -379,6 +379,8 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> sync_sequence;
     float sync_threshold;  // Threshold for valid sync region (from config)
     size_t search_offset = 0;      // Track where we left off searching (optimization)
+    size_t last_sync_offset = 0;   // Last detected sync offset (for testing/debugging)
+    size_t total_samples_trimmed = 0;  // Track how many samples have been trimmed (for file offset calc)
 
     // Pre-computed interpolation lookup (avoids O(n²) per symbol)
     struct InterpInfo {
@@ -418,6 +420,7 @@ struct OFDMDemodulator::Impl {
     // DBPSK state: previous equalized symbols for differential decoding
     std::vector<Complex> dbpsk_prev_equalized;
     bool dbpsk_first_symbol = true;  // First symbol after sync needs special handling
+    bool dqpsk_skip_first_symbol = false;  // Skip first symbol data for DQPSK (use as reference only)
 
     // LMS/RLS Adaptive equalizer state
     std::vector<Complex> lms_weights;      // Per-carrier LMS weights
@@ -567,7 +570,9 @@ struct OFDMDemodulator::Impl {
 
         // Sample every 16th point for speed (64 samples for 1024 window)
         constexpr size_t SAMPLE_STEP = 16;
-        constexpr float MIN_RMS = 0.05f;  // Minimum RMS to consider as potential signal
+        // Preamble has RMS ~0.05, silence has RMS ~0.00004
+        // Use 0.03 to reliably catch preamble start while rejecting silence
+        constexpr float MIN_RMS = 0.03f;
         float sum_sq = 0;
         size_t count = 0;
 
@@ -622,33 +627,75 @@ struct OFDMDemodulator::Impl {
         return analytic;
     }
 
-    float measureCorrelation(size_t offset, float* out_energy = nullptr) {
-        // CFO-tolerant sync detection using analytic signal correlation
-        // For real passband signal s(t), we create analytic signal z(t) = s(t) + j*HT(s(t))
-        // Then correlate z(t) with z(t-L) - the magnitude is independent of carrier frequency
+    // Real-valued correlation for TIMING detection (no Hilbert edge effects)
+    // This gives accurate timing but is sensitive to CFO
+    float measureRealCorrelation(size_t offset, float* out_energy = nullptr) {
         if (offset + symbol_samples * 2 > rx_buffer.size()) return 0.0f;
 
         size_t len = config.fft_size + config.getCyclicPrefix();
 
-        // IMPORTANT: Compute analytic signal on the COMBINED window (both symbols together)
-        // This preserves the phase relationship between the two symbols
+        float P = 0.0f;   // Real correlation
+        float E1 = 0.0f;  // Energy of first window
+        float E2 = 0.0f;  // Energy of second window
+
+        for (size_t i = 0; i < len; ++i) {
+            float s1 = rx_buffer[offset + i];
+            float s2 = rx_buffer[offset + i + len];
+            P += s1 * s2;
+            E1 += s1 * s1;
+            E2 += s2 * s2;
+        }
+
+        if (out_energy) *out_energy = E2;
+
+        // Minimum energy threshold to avoid division by near-zero
+        // For 560 samples, 0.001 RMS signal gives energy = 560 * 0.001^2 = 0.00056
+        // Use threshold of 0.1 to reject very weak signals where correlation is meaningless
+        constexpr float MIN_ENERGY_THRESHOLD = 0.1f;
+        if (E1 < MIN_ENERGY_THRESHOLD || E2 < MIN_ENERGY_THRESHOLD) {
+            return 0.0f;  // Reject - signal too weak for reliable correlation
+        }
+
+        float normalization = std::sqrt(E1 * E2);
+        return P / normalization;  // Safe now that we've checked energy
+    }
+
+    // Analytic signal correlation for CFO estimation (phase-preserving)
+    // The angle of P gives CFO estimate, but timing has ~10-12 sample bias due to Hilbert edge effects
+    float measureAnalyticCorrelation(size_t offset, Complex* out_P = nullptr, float* out_energy = nullptr) {
+        if (offset + symbol_samples * 2 > rx_buffer.size()) return 0.0f;
+
+        size_t len = config.fft_size + config.getCyclicPrefix();
         auto analytic = toAnalytic(&rx_buffer[offset], len * 2);
 
-        // Complex correlation between first half and second half of the analytic signal
-        // This maintains the phase relationship (delay of L samples = phase rotation)
         Complex P(0.0f, 0.0f);
-        float R = 0.0f;
+        float E1 = 0.0f;
+        float E2 = 0.0f;
 
         for (size_t i = 0; i < len; ++i) {
             P += std::conj(analytic[i]) * analytic[i + len];
-            R += std::norm(analytic[i + len]);
+            E1 += std::norm(analytic[i]);
+            E2 += std::norm(analytic[i + len]);
         }
 
-        if (out_energy) *out_energy = R;
+        if (out_P) *out_P = P;
+        if (out_energy) *out_energy = E2;
 
-        // Return magnitude of normalized correlation
-        // For identical symbols, |P|/R ≈ 1.0 regardless of carrier frequency or CFO
-        return std::abs(P) / (R + 1e-10f);
+        float normalization = std::sqrt(E1 * E2);
+        return std::abs(P) / (normalization + 1e-10f);
+    }
+
+    float measureCorrelation(size_t offset, float* out_energy = nullptr) {
+        // Use REAL correlation for sync detection timing
+        // Real correlation gives a sharp peak at the true position without Hilbert edge effects.
+        // Analytic correlation has edge effects that cause ~10-12 sample timing bias and lower
+        // correlation at the true position (especially at signal boundaries).
+        //
+        // Note: Real correlation IS sensitive to CFO, but:
+        // 1. For sync TIMING, we just need the peak position - CFO affects magnitude, not position
+        // 2. CFO estimation is done separately using the analytic signal after sync is found
+        // 3. At reasonable CFO (<50Hz), correlation reduction is small (~1-2%)
+        return measureRealCorrelation(offset, out_energy);
     }
 
     bool detectSync(size_t offset) {
@@ -1431,11 +1478,20 @@ struct OFDMDemodulator::Impl {
         // Sign flip multiplier for phase inversion correction
         float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
 
-        // DQPSK/D8PSK: Initialize reference to match TX (Complex(1,0))
-        // TX starts with dbpsk_prev_symbols = [1+0j, ...], so first symbol carries data
+        // DQPSK/D8PSK: Initialize reference for differential decoding
+        // When dqpsk_skip_first_symbol is true, use actual received symbols as reference
+        // (sacrifices first symbol's data but makes decoding robust to timing/phase errors)
         if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
-            dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
-            // Don't return - process the first symbol normally since it carries data
+            if (dqpsk_skip_first_symbol) {
+                // Use received symbols as reference - don't decode this symbol
+                dbpsk_prev_equalized = equalized;
+                dqpsk_skip_first_symbol = false;  // Only skip the first one
+                LOG_DEMOD(DEBUG, "DQPSK: Using first symbol as reference (skipped data)");
+                return;  // Don't add soft bits from this symbol
+            } else {
+                // Original behavior: TX starts with dbpsk_prev_symbols = [1+0j, ...]
+                dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+            }
         }
 
         for (size_t i = 0; i < equalized.size(); ++i) {
@@ -1569,6 +1625,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
         size_t preamble_total_len = preamble_symbol_len * 6;  // 4 STS + 2 LTS
         size_t correlation_window = preamble_symbol_len * 2;  // Window needed for correlation
 
+
         // OPTIMIZATION: Trim samples we've already searched (they're stale)
         // Keep a margin of preamble_total_len in case preamble spans the boundary
         if (impl_->search_offset > preamble_total_len * 2) {
@@ -1576,6 +1633,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + trim);
             impl_->search_offset -= trim;
+            impl_->total_samples_trimmed += trim;
         }
 
         // Hard limit on buffer size to prevent runaway memory usage
@@ -1586,6 +1644,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + trim);
             impl_->search_offset = (impl_->search_offset > trim) ? impl_->search_offset - trim : 0;
+            impl_->total_samples_trimmed += trim;
         }
 
         // Sync detection: Resume from where we left off (don't re-search old samples)
@@ -1624,24 +1683,22 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             }
 
             if (corr > impl_->sync_threshold) {
-                // Found potential sync point - but don't lock immediately!
-                // Continue searching to find the PEAK correlation, not just first-above-threshold.
-                // False syncs in noise typically have lower correlation than real preambles.
-                if (corr > sync_corr) {
-                    found_sync = true;
-                    sync_offset = i;
-                    sync_corr = corr;
-                }
-                // If we found something very strong (>0.97), can stop early - this is definitely real
-                if (sync_corr > 0.97f) {
-                    break;
-                }
-            }
-            // Keep searching even if below threshold - the real preamble might be just ahead.
-            // Only stop if we've searched far past a candidate AND found nothing better.
-            // "Far past" = more than one preamble length (to handle noise gaps before signal)
-            if (found_sync && (i - sync_offset) > preamble_total_len) {
-                break;
+                // Found sync point - take the FIRST position above threshold
+                //
+                // STS preamble autocorrelation produces a PLATEAU, not a sharp peak.
+                // At lower SNR, noise causes random fluctuations across this plateau.
+                // Searching for the "maximum" leads to picking a random noise peak,
+                // not the true preamble position.
+                //
+                // The FIRST position above threshold is the leading edge of the preamble.
+                // This is the correct sync position because:
+                // 1. It's deterministic (always the same offset)
+                // 2. Cyclic prefix provides timing tolerance for any position in plateau
+                // 3. We avoid noise-induced offset errors
+                found_sync = true;
+                sync_offset = i;
+                sync_corr = corr;
+                break;  // Stop immediately - first above threshold is correct
             }
 
             i += STEP_SIZE;
@@ -1665,6 +1722,9 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             LOG_SYNC(INFO, "SYNC FOUND: corr=%.3f at offset %zu, CFO=%.1f Hz, buffer=%zu samples",
                      sync_corr, sync_offset, coarse_cfo, impl_->rx_buffer.size());
 
+            // Store for testing/debugging
+            impl_->last_sync_offset = sync_offset;
+
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + sync_offset + preamble_total_len);
             impl_->search_offset = 0;  // Reset for next search
@@ -1674,6 +1734,13 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->dbpsk_prev_equalized.clear();  // Reset DBPSK differential state for new frame
             impl_->carrier_phase_initialized = false;  // Will compute from first symbol's pilots
             impl_->carrier_phase_correction = Complex(1, 0);
+
+            // NOTE: For DQPSK with timing errors, we might need to use the first data
+            // symbol as reference only (set dqpsk_skip_first_symbol = true). However,
+            // this breaks loopback tests where timing is perfect. For now, keep the
+            // original behavior. Hardware timing issues should be fixed at the sync
+            // detection level, not by discarding data.
+            impl_->dqpsk_skip_first_symbol = false;
         }
     }
 
@@ -1963,6 +2030,10 @@ bool OFDMDemodulator::hasPendingData() const {
     }
     // Check for enough samples for at least one more symbol
     return impl_->rx_buffer.size() >= impl_->symbol_samples;
+}
+
+size_t OFDMDemodulator::getLastSyncOffset() const {
+    return impl_->last_sync_offset;
 }
 
 void OFDMDemodulator::reset() {
