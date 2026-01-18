@@ -353,11 +353,12 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
 }
 
 // Protocol RX mode - decodes v2 frames with 2-byte magic "UL"
-int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std::string& callsign) {
+int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std::string& callsign, int timing_offset = 0) {
     namespace v2 = ultra::protocol::v2;
 
     std::cerr << "Protocol RX v2 mode (looking for UL frames)...\n";
     if (input_file) std::cerr << "Input: " << input_file << "\n";
+    if (timing_offset != 0) std::cerr << "Timing offset: " << timing_offset << " samples\n";
     std::cerr << "Local callsign: " << callsign << "\n";
 
     // Open input file
@@ -376,6 +377,7 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
     config.modulation = ultra::Modulation::DQPSK;
     config.code_rate = ultra::CodeRate::R1_4;
     ultra::OFDMDemodulator demod(config);
+    demod.setTimingOffset(timing_offset);  // Apply timing adjustment
     ultra::LDPCDecoder decoder(config.code_rate);
 
     // Track received frames
@@ -898,7 +900,7 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(command, "rx") == 0) {
         return runRx(config, input_file, output_file);
     } else if (strcmp(command, "prx") == 0) {
-        return runProtocolRx(config, input_file, callsign);
+        return runProtocolRx(config, input_file, callsign, timing_offset);
     } else if (strcmp(command, "ptx") == 0) {
         // input_file is actually the message for ptx
         return runProtocolTx(config, input_file, output_file, callsign, dst_callsign);
