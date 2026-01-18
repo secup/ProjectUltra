@@ -137,3 +137,7 @@ add_test(NAME ComprehensiveModem COMMAND test_comprehensive_modem)
 
 # RNG consistency test for cross-platform LDPC debugging
 add_executable(test_rng test_rng.cpp)
+
+# LDPC encoding comparison test
+add_executable(check_probe check_probe.cpp)
+target_link_libraries(check_probe PRIVATE ultra_core)
