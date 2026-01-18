@@ -134,3 +134,6 @@ target_link_libraries(test_carrier_direct PRIVATE ultra_core)
 add_executable(test_comprehensive_modem test_comprehensive_modem.cpp)
 target_link_libraries(test_comprehensive_modem PRIVATE ultra_core)
 add_test(NAME ComprehensiveModem COMMAND test_comprehensive_modem)
+
+# RNG consistency test for cross-platform LDPC debugging
+add_executable(test_rng test_rng.cpp)
