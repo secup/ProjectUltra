@@ -1,4 +1,5 @@
 #include "modem_engine.hpp"
+#include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -121,100 +122,95 @@ std::vector<float> ModemEngine::transmit(const std::string& text) {
 }
 
 std::vector<float> ModemEngine::transmit(const Bytes& data) {
+    namespace v2 = protocol::v2;
+
     if (data.empty()) {
         return {};
     }
 
-    // Determine if this is a link establishment frame
-    // These must use robust modulation (DQPSK R1/4) to get through at any SNR
-    // Frame format: [MAGIC:4][TYPE:1][FLAGS:1][SEQ:1][SRC:8][DST:8][LEN:2][DATA][CRC:2]
-    bool is_link_frame = false;
-    if (data.size() >= 5) {
-        // Check 4-byte magic "ULTR" = 0x554C5452
-        uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
-                         (static_cast<uint32_t>(data[1]) << 16) |
-                         (static_cast<uint32_t>(data[2]) << 8) |
-                         static_cast<uint32_t>(data[3]);
-        if (magic == protocol::Frame::MAGIC) {
-            uint8_t frame_type = data[4];  // TYPE is at offset 4, after 4-byte magic
-            // Link establishment frames that must work in poor conditions
-            is_link_frame = (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
-                             frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
-                             frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
-                             frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK) ||
-                             frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_NAK) ||
-                             frame_type == static_cast<uint8_t>(protocol::FrameType::BEACON));
-            LOG_MODEM(INFO, "TX: Frame magic=0x%08X, type=%d, is_link_frame=%d",
-                      magic, frame_type, is_link_frame);
-        }
-    }
+    // Check for v2 frame magic "UL" (0x55, 0x4C)
+    bool is_v2_frame = (data.size() >= 2 && data[0] == 0x55 && data[1] == 0x4C);
 
-    // Select modulation and code rate
-    Modulation tx_modulation;
-    CodeRate tx_code_rate;
-
-    if (is_link_frame) {
-        // Link establishment: DQPSK R1/4 - 2x DBPSK speed, immune to phase distortion
-        tx_modulation = Modulation::DQPSK;
-        tx_code_rate = CodeRate::R1_4;
-    } else if (connected_) {
-        // Connected: Use negotiated mode (from probing/adaptive)
-        tx_modulation = data_modulation_;
-        tx_code_rate = data_code_rate_;
-    } else {
-        // Fallback: DQPSK R1/4 - 2x DBPSK speed, immune to phase distortion
-        tx_modulation = Modulation::DQPSK;
-        tx_code_rate = CodeRate::R1_4;
-    }
-
-    // Adaptive modulation: update data mode based on measured SNR
-    // (Only affects data frames, not link establishment)
-    if (connected_ && config_.speed_profile == SpeedProfile::ADAPTIVE) {
-        float snr = getCurrentSNR();
-        if (adaptive_.update(snr)) {
-            // Mode changed - update data mode
-            data_modulation_ = adaptive_.getModulation();
-            data_code_rate_ = adaptive_.getCodeRate();
-            if (!is_link_frame) {
-                tx_modulation = data_modulation_;
-                tx_code_rate = data_code_rate_;
-            }
-        }
-    }
-
-    // Step 1: LDPC encode with appropriate code rate
-    encoder_->setRate(tx_code_rate);
-    LOG_MODEM(INFO, "TX: Using code_rate=%d, modulation=%d, is_link=%d, connected=%d",
-              static_cast<int>(tx_code_rate), static_cast<int>(tx_modulation),
-              is_link_frame, connected_);
-    LOG_MODEM(INFO, "TX: Input data size=%zu bytes, first 4 bytes: %02x %02x %02x %02x",
+    LOG_MODEM(INFO, "TX: Input %zu bytes, first 4: %02x %02x %02x %02x, v2=%d",
               data.size(),
               data.size() > 0 ? data[0] : 0,
               data.size() > 1 ? data[1] : 0,
               data.size() > 2 ? data[2] : 0,
-              data.size() > 3 ? data[3] : 0);
-    Bytes encoded = encoder_->encode(data);
-    LOG_MODEM(INFO, "TX: LDPC encoded size=%zu bytes (expected for R1/4: %zu)",
-              encoded.size(), encoder_->getCodedSize(data.size()));
+              data.size() > 3 ? data[3] : 0,
+              is_v2_frame);
 
-    // Step 1.5: Interleave (optional - spreads burst errors for LDPC decoder)
-    Bytes to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;
+    Bytes to_modulate;
+
+    if (is_v2_frame) {
+        // === V2 Frame Path ===
+        // Use v2::encodeFrameWithLDPC which handles multi-codeword frames correctly
+        auto encoded_cws = v2::encodeFrameWithLDPC(data);
+
+        LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords", data.size(), encoded_cws.size());
+
+        // Concatenate all encoded codewords
+        for (const auto& cw : encoded_cws) {
+            to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
+        }
+
+        LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes", to_modulate.size());
+    } else {
+        // === Legacy/Data Frame Path ===
+        // Determine if this is a v1 link establishment frame
+        bool is_link_frame = false;
+        if (data.size() >= 5) {
+            uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
+                             (static_cast<uint32_t>(data[1]) << 16) |
+                             (static_cast<uint32_t>(data[2]) << 8) |
+                             static_cast<uint32_t>(data[3]);
+            if (magic == protocol::Frame::MAGIC) {
+                uint8_t frame_type = data[4];
+                is_link_frame = (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
+                                 frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
+                                 frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
+                                 frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK));
+            }
+        }
+
+        // Select code rate
+        CodeRate tx_code_rate = is_link_frame ? CodeRate::R1_4 :
+                                (connected_ ? data_code_rate_ : CodeRate::R1_4);
+
+        encoder_->setRate(tx_code_rate);
+        Bytes encoded = encoder_->encode(data);
+
+        LOG_MODEM(INFO, "TX legacy: %zu bytes -> %zu encoded (rate=%d)",
+                  data.size(), encoded.size(), static_cast<int>(tx_code_rate));
+
+        to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;
+    }
+
+    // All v2 frames use DQPSK R1/4, legacy frames also default to DQPSK
+    Modulation tx_modulation = Modulation::DQPSK;
+    if (!is_v2_frame && connected_) {
+        tx_modulation = data_modulation_;
+    }
 
     // Step 2: Generate preamble
     Samples preamble = ofdm_modulator_->generatePreamble();
 
-    // Step 3: OFDM modulate with appropriate modulation
+    // Step 3: OFDM modulate with DQPSK
     Samples modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
 
-    // Step 4: Combine preamble + data
+    // Step 4: Combine preamble + data + tail guard
+    // Tail guard ensures demodulator processes the last OFDM symbol
+    const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols of silence
     std::vector<float> output;
-    output.reserve(preamble.size() + modulated.size());
+    output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
 
     // Add preamble
     output.insert(output.end(), preamble.begin(), preamble.end());
 
     // Add modulated data
     output.insert(output.end(), modulated.begin(), modulated.end());
+
+    // Add tail guard
+    output.resize(output.size() + TAIL_SAMPLES, 0.0f);
 
     // Apply TX bandpass filter (before scaling to maintain filter characteristics)
     if (filter_config_.enabled && tx_filter_) {

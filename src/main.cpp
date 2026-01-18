@@ -7,6 +7,7 @@
 #include "ultra/dsp.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame.hpp"
+#include "protocol/frame_v2.hpp"
 
 #include <iostream>
 #include <fstream>
@@ -25,23 +26,29 @@ void printUsage(const char* prog) {
     std::cerr << "ProjectUltra - High-Speed HF Sound Modem\n\n";
     std::cerr << "Usage: " << prog << " [options] <command>\n\n";
     std::cerr << "Commands:\n";
-    std::cerr << "  tx <file>       Transmit file (outputs audio to stdout or -o file)\n";
-    std::cerr << "  rx [file]       Receive (from file or stdin, old modem framing)\n";
-    std::cerr << "  prx [file]      Protocol RX (decodes ULTR frames with PROBE/CONNECT/DATA)\n";
-    std::cerr << "  decode [file]   Raw decode (from file or stdin, outputs raw LDPC data)\n";
+    std::cerr << "  ptx [msg]       Protocol TX - send v2 frame (PROBE if no msg, DATA if msg)\n";
+    std::cerr << "  prx [file]      Protocol RX - decode v2 frames (from file or stdin)\n";
+    std::cerr << "  tx <file>       Transmit file (raw modem, outputs audio)\n";
+    std::cerr << "  rx [file]       Receive (raw modem, from file or stdin)\n";
+    std::cerr << "  decode [file]   Raw LDPC decode (no protocol framing)\n";
     std::cerr << "  test            Run self-test\n";
     std::cerr << "  info            Show modem capabilities\n";
     std::cerr << "\nOptions:\n";
+    std::cerr << "  -s <call>       Source callsign (default: TEST)\n";
+    std::cerr << "  -d <call>       Destination callsign (default: CQ)\n";
+    std::cerr << "  -o <file>       Output to file instead of stdout\n";
     std::cerr << "  -r <rate>       Sample rate (default: 48000)\n";
-    std::cerr << "  -m <mod>        Modulation: dbpsk, bpsk, dqpsk, qpsk, d8psk, qam16, qam64 (default: qpsk)\n";
-    std::cerr << "  -c <rate>       Code rate: 1/4, 1/2, 2/3, 3/4, 5/6 (default: 1/2)\n";
-    std::cerr << "  -o <file>       Output file (default: stdout)\n";
-    std::cerr << "  -s <call>       Local callsign for protocol mode (default: TEST)\n";
-    std::cerr << "  -a              Enable adaptive modulation/coding\n";
+    std::cerr << "  -m <mod>        Modulation: dbpsk, dqpsk, qpsk, qam16, qam64\n";
+    std::cerr << "  -c <rate>       Code rate: 1/4, 1/2, 2/3, 3/4, 5/6\n";
     std::cerr << "\nExamples:\n";
-    std::cerr << "  " << prog << " -m dqpsk -c 1/4 decode recording.raw\n";
-    std::cerr << "  " << prog << " -m dqpsk -s N0CALL prx recording.f32\n";
-    std::cerr << "  " << prog << " tx data.bin -o output.raw\n";
+    std::cerr << "  # Send PROBE and play audio (Linux)\n";
+    std::cerr << "  " << prog << " ptx -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000\n\n";
+    std::cerr << "  # Send DATA message to file\n";
+    std::cerr << "  " << prog << " ptx \"Hello!\" -s MYCALL -o msg.f32\n\n";
+    std::cerr << "  # Listen for frames from audio recording\n";
+    std::cerr << "  " << prog << " prx recording.f32 -s MYCALL\n\n";
+    std::cerr << "  # Live RX from microphone (Linux)\n";
+    std::cerr << "  arecord -f FLOAT_LE -r 48000 | " << prog << " prx -s MYCALL\n";
     std::cerr << "\n";
 }
 
@@ -259,10 +266,98 @@ int runRx(ultra::ModemConfig& config, const char* input_file, const char* output
     return 0;
 }
 
-// Protocol RX mode - decodes frames with 4-byte magic "ULTR" and protocol parsing
-// Use this to receive PROBE, CONNECT, DATA frames from the GUI
+// Protocol TX - transmit v2 frame (PROBE or DATA with text message)
+// Usage: ultra ptx "Hello World" -o output.f32 -s MYCALL
+int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* output_file,
+                  const std::string& src_call, const std::string& dst_call) {
+    namespace v2 = ultra::protocol::v2;
+
+    std::cerr << "Protocol TX v2 mode\n";
+    std::cerr << "  From: " << src_call << " To: " << dst_call << "\n";
+
+    // Create the frame
+    ultra::Bytes frame_data;
+    std::string frame_type_str;
+
+    if (!message || strlen(message) == 0) {
+        // No message = send PROBE
+        auto probe = v2::ControlFrame::makeProbe(src_call, dst_call);
+        frame_data = probe.serialize();
+        frame_type_str = "PROBE";
+    } else {
+        // Message = send DATA frame
+        auto data = v2::DataFrame::makeData(src_call, dst_call, 1, std::string(message));
+        frame_data = data.serialize();
+        frame_type_str = "DATA";
+    }
+
+    std::cerr << "  Frame type: " << frame_type_str << "\n";
+    std::cerr << "  Frame size: " << frame_data.size() << " bytes\n";
+
+    // LDPC encode with v2 function (splits into codewords)
+    auto encoded_cws = v2::encodeFrameWithLDPC(frame_data);
+    std::cerr << "  LDPC codewords: " << encoded_cws.size() << "\n";
+
+    // Concatenate all encoded codewords
+    ultra::Bytes all_encoded;
+    for (const auto& cw : encoded_cws) {
+        all_encoded.insert(all_encoded.end(), cw.begin(), cw.end());
+    }
+    std::cerr << "  Total encoded: " << all_encoded.size() << " bytes\n";
+
+    // Create modulator (DQPSK for robust link establishment)
+    config.modulation = ultra::Modulation::DQPSK;
+    config.code_rate = ultra::CodeRate::R1_4;
+    ultra::OFDMModulator mod(config);
+
+    // Generate preamble + modulated data
+    auto preamble = mod.generatePreamble();
+    auto modulated = mod.modulate(all_encoded, config.modulation);
+
+    // Combine: preamble + data + tail guard
+    // Tail guard ensures demodulator processes the last OFDM symbol
+    const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols of silence
+    std::vector<float> output;
+    output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
+    output.insert(output.end(), preamble.begin(), preamble.end());
+    output.insert(output.end(), modulated.begin(), modulated.end());
+    output.resize(output.size() + TAIL_SAMPLES, 0.0f);  // Add silence tail
+
+    // Normalize
+    float max_val = 0;
+    for (float s : output) max_val = std::max(max_val, std::abs(s));
+    if (max_val > 0) {
+        float scale = 0.8f / max_val;
+        for (float& s : output) s *= scale;
+    }
+
+    std::cerr << "  Audio samples: " << output.size() << " ("
+              << (output.size() / 48000.0) << " sec)\n";
+
+    // Write to file
+    if (output_file) {
+        std::ofstream outfile(output_file, std::ios::binary);
+        if (!outfile) {
+            std::cerr << "Error: Cannot open output file: " << output_file << "\n";
+            return 1;
+        }
+        outfile.write(reinterpret_cast<const char*>(output.data()),
+                      output.size() * sizeof(float));
+        std::cerr << "  Written to: " << output_file << "\n";
+    } else {
+        // Write to stdout
+        std::cout.write(reinterpret_cast<const char*>(output.data()),
+                        output.size() * sizeof(float));
+    }
+
+    return 0;
+}
+
+// Protocol RX mode - decodes v2 frames with 2-byte magic "UL"
 int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std::string& callsign) {
-    std::cerr << "Protocol RX mode (looking for ULTR frames)...\n";
+    namespace v2 = ultra::protocol::v2;
+
+    std::cerr << "Protocol RX v2 mode (looking for UL frames)...\n";
     if (input_file) std::cerr << "Input: " << input_file << "\n";
     std::cerr << "Local callsign: " << callsign << "\n";
 
@@ -276,73 +371,47 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
             return 1;
         }
         input = &infile;
-
-        // Skip startup samples to get closer to real signal
-        // User can trim audio file to start near the preamble
-        constexpr size_t STARTUP_SKIP = 0;  // No skip - user should trim file
-        std::vector<float> skip_buf(STARTUP_SKIP);
-        input->read(reinterpret_cast<char*>(skip_buf.data()), STARTUP_SKIP * sizeof(float));
-        std::cerr << "Skipped " << STARTUP_SKIP << " startup samples\n";
     }
 
-    // Create demodulator and decoder
+    // Create demodulator and decoder (DQPSK R1/4 for link frames)
+    config.modulation = ultra::Modulation::DQPSK;
+    config.code_rate = ultra::CodeRate::R1_4;
     ultra::OFDMDemodulator demod(config);
     ultra::LDPCDecoder decoder(config.code_rate);
 
-    // Create protocol engine
-    ultra::protocol::ConnectionConfig conn_config;
-    conn_config.auto_accept = true;
-    ultra::protocol::ProtocolEngine protocol(conn_config);
-    protocol.setLocalCallsign(callsign);
-
     // Track received frames
     int frames_received = 0;
-
-    // Set up protocol callbacks
-    protocol.setMessageReceivedCallback([&](const std::string& from, const std::string& text) {
-        std::cerr << "\n[MESSAGE from " << from << "]: " << text << "\n";
-    });
-
-    protocol.setConnectionChangedCallback([&](ultra::protocol::ConnectionState state, const std::string& remote) {
-        const char* state_str = "UNKNOWN";
-        switch (state) {
-            case ultra::protocol::ConnectionState::DISCONNECTED: state_str = "DISCONNECTED"; break;
-            case ultra::protocol::ConnectionState::CONNECTING: state_str = "CONNECTING"; break;
-            case ultra::protocol::ConnectionState::CONNECTED: state_str = "CONNECTED"; break;
-            case ultra::protocol::ConnectionState::DISCONNECTING: state_str = "DISCONNECTING"; break;
-            case ultra::protocol::ConnectionState::PROBING: state_str = "PROBING"; break;
-        }
-        std::cerr << "\n[CONNECTION] State: " << state_str << ", Remote: " << remote << "\n";
-    });
-
-    protocol.setIncomingCallCallback([&](const std::string& from) {
-        std::cerr << "\n[INCOMING CALL from " << from << "] - auto-accepting\n";
-    });
+    int control_frames = 0;
+    int data_frames = 0;
 
     // Accumulate soft bits
     std::vector<float> accumulated_soft_bits;
-    const size_t LDPC_BLOCK_SIZE = 648;
+    const size_t LDPC_BLOCK_SIZE = v2::LDPC_CODEWORD_BITS;  // 648 bits
 
-    // Track consecutive LDPC failures to detect false sync
+    // For multi-codeword frames
+    v2::CodewordStatus current_frame;
+    int expected_codewords = 0;
+    int current_cw_index = 0;
+
+    // Track consecutive failures
     int consecutive_failures = 0;
-    const int MAX_FAILURES_BEFORE_RESET = 3;  // Faster reset
-    int negative_snr_count = 0;
-    int total_resets = 0;
+    const int MAX_FAILURES = 5;
 
     // Read audio in chunks
     std::vector<float> buffer(960);
-    uint32_t tick_counter = 0;
 
     while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
                                      buffer.size() * sizeof(float))) {
-        // Process through demodulator
         ultra::SampleSpan span(buffer.data(), buffer.size());
         demod.process(span);
 
         if (demod.isSynced()) {
+            // Get soft bits produced by this chunk
             auto soft_bits = demod.getSoftBits();
-            accumulated_soft_bits.insert(accumulated_soft_bits.end(),
-                                         soft_bits.begin(), soft_bits.end());
+            if (!soft_bits.empty()) {
+                accumulated_soft_bits.insert(accumulated_soft_bits.end(),
+                                             soft_bits.begin(), soft_bits.end());
+            }
 
             // Decode complete LDPC blocks
             while (accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
@@ -351,95 +420,133 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                 accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
                                             accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
 
-                ultra::Bytes decoded = decoder.decodeSoft(std::span<const float>(block));
+                // LDPC decode this codeword
+                auto decoded = decoder.decodeSoft(std::span<const float>(block));
 
-                if (decoder.lastDecodeSuccess() && !decoded.empty()) {
-                    // Check if it looks like a valid frame (starts with ULTR magic)
-                    bool has_magic = (decoded.size() >= 4 &&
-                                      decoded[0] == 0x55 && decoded[1] == 0x4C &&
-                                      decoded[2] == 0x54 && decoded[3] == 0x52);
+                if (!decoder.lastDecodeSuccess()) {
+                    consecutive_failures++;
+                    std::cerr << "  [CW] LDPC decode failed\n";
 
-                    if (has_magic) {
-                        // Feed to protocol engine
-                        protocol.onRxData(decoded);
-                        frames_received++;
+                    if (consecutive_failures >= MAX_FAILURES) {
+                        std::cerr << "  [RESET] Too many failures\n";
+                        demod.reset();
+                        accumulated_soft_bits.clear();
                         consecutive_failures = 0;
+                        expected_codewords = 0;
+                        current_cw_index = 0;
+                    }
+                    continue;
+                }
 
-                        std::cerr << "  [FRAME] " << decoded.size() << " bytes: ";
-                        for (size_t i = 0; i < std::min(decoded.size(), size_t(20)); i++) {
-                            fprintf(stderr, "%02X ", decoded[i]);
+                consecutive_failures = 0;
+
+                // Trim to 20 bytes (info portion of codeword)
+                ultra::Bytes cw_data(decoded.begin(),
+                                     decoded.begin() + std::min(decoded.size(), size_t(v2::BYTES_PER_CODEWORD)));
+
+                // Is this the first codeword of a frame?
+                if (expected_codewords == 0) {
+                    // Check for v2 magic "UL" (0x55 0x4C)
+                    if (cw_data.size() >= 2 && cw_data[0] == 0x55 && cw_data[1] == 0x4C) {
+                        // Parse header
+                        auto header = v2::parseHeader(cw_data);
+                        if (header.valid) {
+                            expected_codewords = header.total_cw;
+                            current_frame.initForFrame(expected_codewords);
+                            current_frame.decoded[0] = true;
+                            current_frame.data[0] = cw_data;
+                            current_cw_index = 1;
+
+                            std::cerr << "  [FRAME START] type=" << v2::frameTypeToString(header.type)
+                                      << " codewords=" << (int)header.total_cw
+                                      << " seq=" << header.seq << "\n";
+
+                            // Single codeword frame (control frame)?
+                            if (expected_codewords == 1) {
+                                // Parse and display control frame
+                                auto ctrl = v2::ControlFrame::deserialize(cw_data);
+                                if (ctrl) {
+                                    frames_received++;
+                                    control_frames++;
+                                    std::cerr << "  [CONTROL] " << v2::frameTypeToString(ctrl->type)
+                                              << " src=0x" << std::hex << ctrl->src_hash
+                                              << " dst=0x" << ctrl->dst_hash << std::dec
+                                              << " seq=" << ctrl->seq << "\n";
+                                }
+                                expected_codewords = 0;
+                                current_cw_index = 0;
+                            }
+                        } else {
+                            std::cerr << "  [INVALID HEADER] magic OK but header CRC failed\n";
                         }
-                        std::cerr << "\n";
                     } else {
-                        // LDPC succeeded but no magic - probably false sync
-                        std::cerr << "  [NO MAGIC] decoded " << decoded.size() << " bytes, first 4: ";
-                        for (size_t i = 0; i < std::min(decoded.size(), size_t(4)); i++) {
-                            fprintf(stderr, "%02X ", decoded[i]);
+                        // No magic - not a frame start
+                        std::cerr << "  [NO MAGIC] first bytes: ";
+                        for (size_t i = 0; i < std::min(cw_data.size(), size_t(4)); i++) {
+                            fprintf(stderr, "%02X ", cw_data[i]);
                         }
-                        std::cerr << " (expected 55 4C 54 52)\n";
-                        consecutive_failures++;
+                        std::cerr << "(expected 55 4C)\n";
                     }
                 } else {
-                    consecutive_failures++;
-                }
+                    // Continuation codeword
+                    if (current_cw_index < expected_codewords) {
+                        current_frame.decoded[current_cw_index] = true;
+                        current_frame.data[current_cw_index] = cw_data;
+                        current_cw_index++;
 
-                // Too many failures = probably false sync, reset and search again
-                if (consecutive_failures >= MAX_FAILURES_BEFORE_RESET) {
-                    total_resets++;
-                    std::cerr << "  [RESET #" << total_resets << "] " << consecutive_failures
-                              << " failures, continuing search\n";
+                        std::cerr << "  [CW " << current_cw_index << "/" << expected_codewords << "] OK\n";
 
-                    demod.reset();
-                    accumulated_soft_bits.clear();
-                    consecutive_failures = 0;
-                    negative_snr_count = 0;
+                        // All codewords received?
+                        if (current_cw_index >= expected_codewords) {
+                            if (current_frame.allSuccess()) {
+                                // Reassemble and parse
+                                auto reassembled = current_frame.reassemble();
+                                auto data_frame = v2::DataFrame::deserialize(reassembled);
+
+                                if (data_frame) {
+                                    frames_received++;
+                                    data_frames++;
+                                    std::cerr << "  [DATA] seq=" << data_frame->seq
+                                              << " payload=" << data_frame->payload_len << " bytes\n";
+                                    std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                                } else {
+                                    std::cerr << "  [ERROR] Failed to parse reassembled data frame\n";
+                                }
+                            } else {
+                                // Some codewords failed - would send NACK in real protocol
+                                uint32_t bitmap = current_frame.getNackBitmap();
+                                std::cerr << "  [INCOMPLETE] NACK bitmap=0x" << std::hex << bitmap << std::dec << "\n";
+                            }
+
+                            expected_codewords = 0;
+                            current_cw_index = 0;
+                        }
+                    }
                 }
             }
-
-            // Check SNR - if consistently negative, we're processing noise
-            auto quality = demod.getChannelQuality();
-            if (quality.snr_db < -3) {  // Clearly noise
-                negative_snr_count++;
-                if (negative_snr_count >= 20) {
-                    total_resets++;
-                    std::cerr << "  [RESET #" << total_resets << "] Negative SNR, continuing search\n";
-
-                    demod.reset();
-                    accumulated_soft_bits.clear();
-                    consecutive_failures = 0;
-                    negative_snr_count = 0;
-                }
-            } else {
-                negative_snr_count = 0;
-            }
-        }
-
-        // Periodic tick for protocol timeouts
-        tick_counter += 20;  // 20ms per chunk at 48kHz
-        if (tick_counter >= 100) {
-            protocol.tick(tick_counter);
-            tick_counter = 0;
         }
     }
 
-    std::cerr << "\n=== Protocol RX Statistics ===\n";
-    std::cerr << "  LDPC frames decoded: " << frames_received << "\n";
-    auto stats = protocol.getStats();
-    std::cerr << "  ARQ frames RX:       " << stats.arq.frames_received << "\n";
-    std::cerr << "  Connects received:   " << stats.connects_received << "\n";
-    std::cerr << "  Connection state:    " << (protocol.isConnected() ? "CONNECTED" : "DISCONNECTED") << "\n";
-    if (protocol.isConnected()) {
-        std::cerr << "  Remote callsign:     " << protocol.getRemoteCallsign() << "\n";
+    // End of input (file ended or Ctrl+C)
+    // In real operation, this only happens on shutdown - just report stats
+    if (!accumulated_soft_bits.empty()) {
+        std::cerr << "  [INFO] " << accumulated_soft_bits.size() << " bits discarded (incomplete frame)\n";
     }
+
+    std::cerr << "\n=== Protocol RX v2 Statistics ===\n";
+    std::cerr << "  Frames received: " << frames_received << "\n";
+    std::cerr << "  Control frames:  " << control_frames << "\n";
+    std::cerr << "  Data frames:     " << data_frames << "\n";
 
     return 0;
 }
 
 // Raw decode mode - bypasses protocol layer, outputs raw LDPC-decoded data
 // Use this for decoding F3 test patterns from the GUI
-int runDecode(ultra::ModemConfig& config, const char* input_file, const char* output_file) {
+int runDecode(ultra::ModemConfig& config, const char* input_file, const char* output_file, int timing_offset = 0) {
     std::cerr << "Raw decode mode (no protocol framing)...\n";
     if (input_file) std::cerr << "Input: " << input_file << "\n";
+    if (timing_offset != 0) std::cerr << "Timing offset: " << timing_offset << " samples\n";
     std::cerr << "Modulation: " << static_cast<int>(config.modulation)
               << ", Code rate: " << static_cast<int>(config.code_rate) << "\n";
 
@@ -468,7 +575,9 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
     }
 
     ultra::OFDMDemodulator demod(config);
+    demod.setTimingOffset(timing_offset);  // Apply timing adjustment
     ultra::LDPCDecoder decoder(config.code_rate);
+    ultra::Interleaver interleaver(32, 32);  // Match TX interleaver
 
     int frames_decoded = 0;
     int total_bytes = 0;
@@ -476,8 +585,83 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
     float max_level = 0;
 
     // Accumulate soft bits across chunks
+    // CRITICAL: Must accumulate ALL codewords before decoding to handle bit-level boundaries
+    // correctly. k=162 bits doesn't align to bytes (20.25 bytes), so decoding codeword-by-codeword
+    // and concatenating bytes causes corruption at boundaries.
     std::vector<float> accumulated_soft_bits;
     const size_t LDPC_BLOCK_SIZE = 648;  // Bits per R1/4 codeword
+    bool was_synced = false;
+
+    // Helper lambda to decode accumulated soft bits
+    auto try_decode_accumulated = [&]() {
+        if (accumulated_soft_bits.size() < LDPC_BLOCK_SIZE) {
+            if (!accumulated_soft_bits.empty()) {
+                std::cerr << "Insufficient bits for decode: " << accumulated_soft_bits.size()
+                          << " (need at least " << LDPC_BLOCK_SIZE << ")\n";
+                accumulated_soft_bits.clear();
+            }
+            return;
+        }
+
+        size_t num_codewords = accumulated_soft_bits.size() / LDPC_BLOCK_SIZE;
+        size_t bits_to_decode = num_codewords * LDPC_BLOCK_SIZE;
+
+        std::cerr << "Decoding " << num_codewords << " codewords ("
+                  << bits_to_decode << " bits) as single multi-codeword block...\n";
+
+        // Trim to exact multiple of codeword size
+        std::vector<float> decode_bits(accumulated_soft_bits.begin(),
+                                        accumulated_soft_bits.begin() + bits_to_decode);
+        accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
+                                    accumulated_soft_bits.begin() + bits_to_decode);
+
+        // LLR normalization: Scale LLRs to target mean magnitude
+        float sum_abs = 0.0f;
+        for (float llr : decode_bits) {
+            sum_abs += std::abs(llr);
+        }
+        float mean_abs = sum_abs / decode_bits.size();
+        const float target_mean_abs = 3.5f;
+        float scale_factor = 1.0f;
+        if (mean_abs > 0.01f) {
+            scale_factor = target_mean_abs / mean_abs;
+            scale_factor = std::max(0.1f, std::min(10.0f, scale_factor));
+            for (float& llr : decode_bits) {
+                llr *= scale_factor;
+            }
+        }
+
+        // Debug: show first 32 LLRs
+        std::cerr << "LLRs (scaled " << scale_factor << "x): ";
+        int pos=0, neg=0;
+        for (size_t i = 0; i < std::min(decode_bits.size(), (size_t)32); i++) {
+            fprintf(stderr, "%.1f ", decode_bits[i]);
+        }
+        for (float llr : decode_bits) {
+            if (llr > 0) pos++; else if (llr < 0) neg++;
+        }
+        std::cerr << "... (" << pos << " pos, " << neg << " neg)\n";
+
+        // Decode ALL codewords at once - this handles bit-level boundaries correctly
+        ultra::Bytes decoded = decoder.decodeSoft(decode_bits);
+
+        if (decoder.lastDecodeSuccess() && !decoded.empty()) {
+            frames_decoded++;
+            total_bytes += decoded.size();
+
+            output->write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+            output->flush();
+
+            std::cerr << "Frame " << frames_decoded << ": ";
+            for (size_t i = 0; i < std::min(decoded.size(), (size_t)32); i++) {
+                fprintf(stderr, "%02X ", decoded[i]);
+            }
+            if (decoded.size() > 32) std::cerr << "...";
+            std::cerr << " (" << decoded.size() << " bytes)\n";
+        } else {
+            std::cerr << "LDPC decode failed for " << num_codewords << " codewords\n";
+        }
+    };
 
     // Read all audio from input
     std::vector<float> buffer(960);  // 20ms chunks
@@ -503,60 +687,27 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
                       << ", accumulated=" << accumulated_soft_bits.size() << " bits\n";
         }
 
-        if (demod.isSynced()) {
+        bool is_synced = demod.isSynced();
+
+        if (is_synced) {
             auto soft_bits = demod.getSoftBits();
             if (!soft_bits.empty()) {
                 accumulated_soft_bits.insert(accumulated_soft_bits.end(),
                                             soft_bits.begin(), soft_bits.end());
             }
-
-            // Try to decode when we have enough bits
-            while (accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
-                // Extract one codeword worth of bits
-                std::vector<float> codeword_bits(accumulated_soft_bits.begin(),
-                                                  accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
-                accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
-                                            accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
-
-                // Debug: show first 32 LLRs
-                std::cerr << "First 32 LLRs: ";
-                int pos=0, neg=0;
-                for (size_t i = 0; i < std::min(codeword_bits.size(), (size_t)32); i++) {
-                    fprintf(stderr, "%.1f ", codeword_bits[i]);
-                }
-                for (float llr : codeword_bits) {
-                    if (llr > 0) pos++; else if (llr < 0) neg++;
-                }
-                std::cerr << "... (" << pos << " pos, " << neg << " neg)\n";
-
-                ultra::Bytes decoded = decoder.decodeSoft(codeword_bits);
-
-                if (decoder.lastDecodeSuccess() && !decoded.empty()) {
-                    frames_decoded++;
-                    total_bytes += decoded.size();
-
-                    // Output to file/stdout
-                    output->write(reinterpret_cast<const char*>(decoded.data()), decoded.size());
-                    output->flush();
-
-                    // Also show hex on stderr
-                    std::cerr << "Frame " << frames_decoded << ": ";
-                    for (size_t i = 0; i < std::min(decoded.size(), (size_t)16); i++) {
-                        fprintf(stderr, "%02X ", decoded[i]);
-                    }
-                    if (decoded.size() > 16) std::cerr << "...";
-                    std::cerr << " (" << decoded.size() << " bytes)\n";
-                } else {
-                    std::cerr << "LDPC decode failed (accumulated " << accumulated_soft_bits.size() << " remaining)\n";
-                }
-            }
-        } else {
-            // Lost sync - clear accumulated bits
-            if (!accumulated_soft_bits.empty()) {
-                std::cerr << "Lost sync, discarding " << accumulated_soft_bits.size() << " accumulated bits\n";
-                accumulated_soft_bits.clear();
-            }
+        } else if (was_synced) {
+            // Just lost sync - decode all accumulated bits from this frame
+            std::cerr << "Lost sync after accumulating " << accumulated_soft_bits.size() << " bits\n";
+            try_decode_accumulated();
         }
+
+        was_synced = is_synced;
+    }
+
+    // End of file - try to decode any remaining accumulated bits
+    if (!accumulated_soft_bits.empty()) {
+        std::cerr << "End of file with " << accumulated_soft_bits.size() << " accumulated bits\n";
+        try_decode_accumulated();
     }
 
     std::cerr << "\nDecoded " << frames_decoded << " frames, " << total_bytes << " bytes total\n";
@@ -694,6 +845,7 @@ int main(int argc, char* argv[]) {
     const char* command = nullptr;
     const char* input_file = nullptr;
     std::string callsign = "TEST";
+    std::string dst_callsign = "CQ";
     int timing_offset = 0;
 
     // Parse all arguments - options can appear before or after command
@@ -709,6 +861,8 @@ int main(int argc, char* argv[]) {
             output_file = argv[++i];
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
             callsign = argv[++i];
+        } else if (strcmp(argv[i], "-d") == 0 && i + 1 < argc) {
+            dst_callsign = argv[++i];
         } else if (strcmp(argv[i], "-a") == 0) {
             adaptive = true;
         } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
@@ -746,8 +900,11 @@ int main(int argc, char* argv[]) {
         return runRx(config, input_file, output_file);
     } else if (strcmp(command, "prx") == 0) {
         return runProtocolRx(config, input_file, callsign);
+    } else if (strcmp(command, "ptx") == 0) {
+        // input_file is actually the message for ptx
+        return runProtocolTx(config, input_file, output_file, callsign, dst_callsign);
     } else if (strcmp(command, "decode") == 0) {
-        return runDecode(config, input_file, output_file);
+        return runDecode(config, input_file, output_file, timing_offset);
     } else if (strcmp(command, "rawdecode") == 0) {
         return runRawDecode(config, input_file, timing_offset);
     } else {

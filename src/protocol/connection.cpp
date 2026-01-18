@@ -1,4 +1,5 @@
 #include "connection.hpp"
+#include "frame_v2.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
@@ -79,10 +80,17 @@ bool Connection::connect(const std::string& remote_call) {
     LOG_MODEM(INFO, "Connection: Connecting to %s (probing first for optimal mode)",
               remote_call_.c_str());
 
-    // Start with PROBE to measure channel quality, then auto-connect with optimal mode
+    // Start with v2 PROBE to measure channel quality, then auto-connect with optimal mode
     // This ensures we always use the best modulation for current channel conditions
-    Frame probe_frame = Frame::makeProbe(local_call_, remote_call_, config_.mode_capabilities);
-    transmitFrame(probe_frame);
+    auto probe = v2::ControlFrame::makeProbe(local_call_, remote_call_);
+    Bytes probe_data = probe.serialize();
+
+    LOG_MODEM(INFO, "Connection: Sending v2 PROBE (%zu bytes) for connect", probe_data.size());
+
+    // Send via raw TX callback (modem_engine will LDPC encode and modulate)
+    if (on_transmit_raw_) {
+        on_transmit_raw_(probe_data);
+    }
 
     state_ = ConnectionState::PROBING;
     probe_retry_count_ = 0;
@@ -110,11 +118,16 @@ void Connection::acceptCall() {
     LOG_MODEM(INFO, "Connection: Accepting call from %s (mode=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_));
 
-    // Send CONNECT_ACK with negotiated mode AND channel report
-    // (last_channel_report_ was populated in handleConnect when we decoded their CONNECT)
-    Frame ack_frame = Frame::makeConnectAckWithReport(local_call_, remote_call_,
-                                                      negotiated_mode_, last_channel_report_);
-    transmitFrame(ack_frame);
+    // Send v2 CONNECT_ACK with negotiated mode
+    auto ack = v2::ControlFrame::makeConnectAck(local_call_, remote_call_,
+                                                 static_cast<uint8_t>(negotiated_mode_));
+    Bytes ack_data = ack.serialize();
+
+    LOG_MODEM(INFO, "Connection: Sending v2 CONNECT_ACK (%zu bytes)", ack_data.size());
+
+    if (on_transmit_raw_) {
+        on_transmit_raw_(ack_data);
+    }
 
     enterConnected();
 }
@@ -126,9 +139,15 @@ void Connection::rejectCall() {
 
     LOG_MODEM(INFO, "Connection: Rejecting call from %s", pending_remote_call_.c_str());
 
-    // Send CONNECT_NAK
-    Frame nak_frame = Frame::makeConnectNak(local_call_, pending_remote_call_);
-    transmitFrame(nak_frame);
+    // Send v2 CONNECT_NAK
+    auto nak = v2::ControlFrame::makeConnectNak(local_call_, pending_remote_call_);
+    Bytes nak_data = nak.serialize();
+
+    LOG_MODEM(INFO, "Connection: Sending v2 CONNECT_NAK (%zu bytes)", nak_data.size());
+
+    if (on_transmit_raw_) {
+        on_transmit_raw_(nak_data);
+    }
 
     pending_remote_call_.clear();
 }
@@ -151,13 +170,20 @@ bool Connection::probe(const std::string& remote_call) {
         return false;
     }
 
-    LOG_MODEM(INFO, "Connection: Probing channel to %s (caps=0x%02X)",
-              remote_call_.c_str(), config_.mode_capabilities);
+    LOG_MODEM(INFO, "Connection: Probing channel to %s (v2 frame)",
+              remote_call_.c_str());
 
-    // Send PROBE frame with our capabilities
-    // The PROBE frame includes a long training sequence for channel estimation
-    Frame probe_frame = Frame::makeProbe(local_call_, remote_call_, config_.mode_capabilities);
-    transmitFrame(probe_frame);
+    // Send v2 PROBE frame (20 bytes = 1 LDPC codeword)
+    auto probe = v2::ControlFrame::makeProbe(local_call_, remote_call_);
+    Bytes probe_data = probe.serialize();
+
+    LOG_MODEM(INFO, "Connection: Sending v2 PROBE (%zu bytes) src=%s dst=%s",
+              probe_data.size(), local_call_.c_str(), remote_call_.c_str());
+
+    // Send via raw TX callback (modem_engine will LDPC encode and modulate)
+    if (on_transmit_raw_) {
+        on_transmit_raw_(probe_data);
+    }
 
     state_ = ConnectionState::PROBING;
     probe_retry_count_ = 0;
@@ -191,11 +217,18 @@ bool Connection::connectAfterProbe() {
     LOG_MODEM(INFO, "Connection: Connecting to %s after probe (recommended mode: %s)",
               remote_call_.c_str(), waveformModeToString(config_.preferred_mode));
 
-    // Send CONNECT frame with our mode capabilities and the recommended preference
-    Frame connect_frame = Frame::makeConnect(local_call_, remote_call_,
-                                             config_.mode_capabilities,
-                                             config_.preferred_mode);
-    transmitFrame(connect_frame);
+    // Send v2 CONNECT frame with our mode capabilities and the recommended preference
+    auto connect = v2::ControlFrame::makeConnect(local_call_, remote_call_,
+                                                  config_.mode_capabilities,
+                                                  static_cast<uint8_t>(config_.preferred_mode));
+    Bytes connect_data = connect.serialize();
+
+    LOG_MODEM(INFO, "Connection: Sending v2 CONNECT (%zu bytes)", connect_data.size());
+
+    // Send via raw TX callback
+    if (on_transmit_raw_) {
+        on_transmit_raw_(connect_data);
+    }
 
     state_ = ConnectionState::CONNECTING;
     connect_retry_count_ = 0;
@@ -219,9 +252,15 @@ void Connection::disconnect() {
     if (state_ == ConnectionState::CONNECTED) {
         LOG_MODEM(INFO, "Connection: Disconnecting from %s", remote_call_.c_str());
 
-        // Send DISCONNECT frame
-        Frame disc_frame = Frame::makeDisconnect(local_call_, remote_call_);
-        transmitFrame(disc_frame);
+        // Send v2 DISCONNECT frame
+        auto disc = v2::ControlFrame::makeDisconnect(local_call_, remote_call_);
+        Bytes disc_data = disc.serialize();
+
+        LOG_MODEM(INFO, "Connection: Sending v2 DISCONNECT (%zu bytes)", disc_data.size());
+
+        if (on_transmit_raw_) {
+            on_transmit_raw_(disc_data);
+        }
 
         state_ = ConnectionState::DISCONNECTING;
         timeout_remaining_ms_ = config_.disconnect_timeout_ms;
@@ -801,6 +840,10 @@ void Connection::enterDisconnected(const std::string& reason) {
 
 void Connection::setTransmitCallback(TransmitCallback cb) {
     on_transmit_ = std::move(cb);
+}
+
+void Connection::setRawTransmitCallback(RawTransmitCallback cb) {
+    on_transmit_raw_ = std::move(cb);
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {

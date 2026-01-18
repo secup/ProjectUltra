@@ -13,6 +13,14 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
         handleTxFrame(f);
     });
 
+    // v2 frames (raw bytes) go directly to modem
+    connection_.setRawTransmitCallback([this](const Bytes& data) {
+        LOG_MODEM(INFO, "Protocol TX v2: %zu bytes -> modem", data.size());
+        if (on_tx_data_) {
+            on_tx_data_(data);
+        }
+    });
+
     connection_.setConnectedCallback([this]() {
         if (on_connection_changed_) {
             on_connection_changed_(ConnectionState::CONNECTED, connection_.getRemoteCallsign());

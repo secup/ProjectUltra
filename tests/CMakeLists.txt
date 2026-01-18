@@ -141,3 +141,13 @@ add_executable(test_rng test_rng.cpp)
 # LDPC encoding comparison test
 add_executable(check_probe check_probe.cpp)
 target_link_libraries(check_probe PRIVATE ultra_core)
+
+# Protocol v2 frame format tests
+add_executable(test_frame_v2 test_frame_v2.cpp)
+target_link_libraries(test_frame_v2 PRIVATE ultra_core)
+add_test(NAME FrameV2 COMMAND test_frame_v2)
+
+# Protocol v2 + Modem integration test (full LDPC+OFDM loopback)
+add_executable(test_frame_v2_modem test_frame_v2_modem.cpp)
+target_link_libraries(test_frame_v2_modem PRIVATE ultra_core)
+add_test(NAME FrameV2Modem COMMAND test_frame_v2_modem)

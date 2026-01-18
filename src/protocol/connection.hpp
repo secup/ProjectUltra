@@ -69,6 +69,7 @@ class Connection {
 public:
     // Callback types
     using TransmitCallback = std::function<void(const Frame&)>;
+    using RawTransmitCallback = std::function<void(const Bytes&)>;  // For v2 frames
     using ConnectedCallback = std::function<void()>;
     using DisconnectedCallback = std::function<void(const std::string& reason)>;
     using MessageReceivedCallback = std::function<void(const std::string& text)>;
@@ -170,6 +171,7 @@ public:
     // --- Callbacks ---
 
     void setTransmitCallback(TransmitCallback cb);
+    void setRawTransmitCallback(RawTransmitCallback cb);  // For v2 frames (raw bytes)
     void setConnectedCallback(ConnectedCallback cb);
     void setDisconnectedCallback(DisconnectedCallback cb);
     void setMessageReceivedCallback(MessageReceivedCallback cb);
@@ -250,6 +252,7 @@ private:
 
     // Callbacks
     TransmitCallback on_transmit_;
+    RawTransmitCallback on_transmit_raw_;  // For v2 frames
     ConnectedCallback on_connected_;
     DisconnectedCallback on_disconnected_;
     MessageReceivedCallback on_message_received_;
