@@ -3,7 +3,6 @@
 #include <cstring>
 #include "../src/protocol/frame_v2.hpp"
 
-using namespace ultra;
 using namespace ultra::protocol::v2;
 
 int tests_passed = 0;

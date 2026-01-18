@@ -55,7 +55,7 @@ Connection::Connection(const ConnectionConfig& config)
 }
 
 void Connection::setLocalCallsign(const std::string& call) {
-    local_call_ = Frame::sanitizeCallsign(call);
+    local_call_ = sanitizeCallsign(call);
     LOG_MODEM(INFO, "Connection: Local callsign set to %s", local_call_.c_str());
 }
 
@@ -71,8 +71,8 @@ bool Connection::connect(const std::string& remote_call) {
         return false;
     }
 
-    remote_call_ = Frame::sanitizeCallsign(remote_call);
-    if (remote_call_.empty() || !Frame::isValidCallsign(remote_call_)) {
+    remote_call_ = sanitizeCallsign(remote_call);
+    if (remote_call_.empty() || !isValidCallsign(remote_call_)) {
         LOG_MODEM(ERROR, "Connection: Invalid remote callsign: %s", remote_call.c_str());
         return false;
     }
@@ -164,8 +164,8 @@ bool Connection::probe(const std::string& remote_call) {
         return false;
     }
 
-    remote_call_ = Frame::sanitizeCallsign(remote_call);
-    if (remote_call_.empty() || !Frame::isValidCallsign(remote_call_)) {
+    remote_call_ = sanitizeCallsign(remote_call);
+    if (remote_call_.empty() || !isValidCallsign(remote_call_)) {
         LOG_MODEM(ERROR, "Connection: Invalid remote callsign: %s", remote_call.c_str());
         return false;
     }

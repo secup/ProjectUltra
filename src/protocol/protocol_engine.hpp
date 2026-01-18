@@ -1,7 +1,7 @@
 #pragma once
 
 #include "connection.hpp"
-#include "frame.hpp"
+#include "frame_v2.hpp"
 #include <functional>
 #include <mutex>
 

@@ -17,8 +17,8 @@ SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
 }
 
 void SelectiveRepeatARQ::setCallsigns(const std::string& local, const std::string& remote) {
-    local_call_ = Frame::sanitizeCallsign(local);
-    remote_call_ = Frame::sanitizeCallsign(remote);
+    local_call_ = sanitizeCallsign(local);
+    remote_call_ = sanitizeCallsign(remote);
 }
 
 bool SelectiveRepeatARQ::sendData(const Bytes& data) {

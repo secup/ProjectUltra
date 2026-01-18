@@ -3,9 +3,66 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace ultra {
 namespace protocol {
+
+// ============================================================================
+// Shared Protocol Types Implementation
+// ============================================================================
+
+const char* waveformModeToString(WaveformMode mode) {
+    switch (mode) {
+        case WaveformMode::OFDM:     return "OFDM";
+        case WaveformMode::OTFS_EQ:  return "OTFS-EQ";
+        case WaveformMode::OTFS_RAW: return "OTFS-RAW";
+        case WaveformMode::AUTO:     return "AUTO";
+        default:                     return "UNKNOWN";
+    }
+}
+
+Bytes ChannelReport::encode() const {
+    Bytes data(5);
+    // SNR: 0-50 dB mapped to 0-250 (0.2 dB resolution)
+    data[0] = static_cast<uint8_t>(std::min(250.0f, std::max(0.0f, snr_db * 5.0f)));
+    // Delay spread: 0-25 ms mapped to 0-250 (0.1 ms resolution)
+    data[1] = static_cast<uint8_t>(std::min(250.0f, std::max(0.0f, delay_spread_ms * 10.0f)));
+    // Doppler: 0-25 Hz mapped to 0-250 (0.1 Hz resolution)
+    data[2] = static_cast<uint8_t>(std::min(250.0f, std::max(0.0f, doppler_spread_hz * 10.0f)));
+    // Recommended mode
+    data[3] = static_cast<uint8_t>(recommended_mode);
+    // Capabilities
+    data[4] = capabilities;
+    return data;
+}
+
+ChannelReport ChannelReport::decode(const Bytes& data) {
+    ChannelReport report;
+    if (data.size() >= 5) {
+        report.snr_db = static_cast<float>(data[0]) / 5.0f;
+        report.delay_spread_ms = static_cast<float>(data[1]) / 10.0f;
+        report.doppler_spread_hz = static_cast<float>(data[2]) / 10.0f;
+        report.recommended_mode = static_cast<WaveformMode>(data[3]);
+        report.capabilities = data[4];
+    }
+    return report;
+}
+
+const char* ChannelReport::getConditionName() const {
+    if (snr_db >= 25.0f && delay_spread_ms < 1.0f && doppler_spread_hz < 1.0f) {
+        return "Excellent";
+    } else if (snr_db >= 18.0f && delay_spread_ms < 2.0f && doppler_spread_hz < 2.0f) {
+        return "Good";
+    } else if (snr_db >= 10.0f) {
+        return "Moderate";
+    } else if (snr_db >= 3.0f) {
+        return "Poor";
+    } else {
+        return "Flutter";
+    }
+}
+
 namespace v2 {
 
 // ============================================================================

@@ -10,8 +10,8 @@ StopAndWaitARQ::StopAndWaitARQ(const ARQConfig& config)
 }
 
 void StopAndWaitARQ::setCallsigns(const std::string& local, const std::string& remote) {
-    local_call_ = Frame::sanitizeCallsign(local);
-    remote_call_ = Frame::sanitizeCallsign(remote);
+    local_call_ = sanitizeCallsign(local);
+    remote_call_ = sanitizeCallsign(remote);
 }
 
 bool StopAndWaitARQ::sendData(const Bytes& data) {

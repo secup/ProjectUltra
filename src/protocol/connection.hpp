@@ -1,6 +1,6 @@
 #pragma once
 
-#include "frame.hpp"
+#include "frame_v2.hpp"
 #include "arq.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"  // For ChannelQuality

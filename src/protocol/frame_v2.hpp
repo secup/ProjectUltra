@@ -5,9 +5,90 @@
 #include <optional>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 
 namespace ultra {
 namespace protocol {
+
+// ============================================================================
+// Shared Protocol Types (used by both connection management and v2 frames)
+// ============================================================================
+
+// Frame flags
+namespace FrameFlags {
+    constexpr uint8_t NONE          = 0x00;
+    constexpr uint8_t MORE_DATA     = 0x01;  // More frames follow
+    constexpr uint8_t URGENT        = 0x02;  // High priority
+    constexpr uint8_t COMPRESSED    = 0x04;  // Payload is compressed
+    constexpr uint8_t ENCRYPTED     = 0x08;  // Payload is encrypted (future)
+}
+
+// Modulation modes for adaptive selection (negotiated in CONNECT)
+enum class WaveformMode : uint8_t {
+    OFDM     = 0x00,  // Standard OFDM (best for Moderate channels)
+    OTFS_EQ  = 0x01,  // OTFS with TF equalization (best for Good channels)
+    OTFS_RAW = 0x02,  // OTFS without TF eq (best for Poor channels)
+    AUTO     = 0xFF,  // Automatic selection (let receiver decide)
+};
+
+// Mode capabilities bitmap (for CONNECT payload)
+namespace ModeCapabilities {
+    constexpr uint8_t OFDM     = 0x01;
+    constexpr uint8_t OTFS_EQ  = 0x02;
+    constexpr uint8_t OTFS_RAW = 0x04;
+    constexpr uint8_t ALL      = OFDM | OTFS_EQ | OTFS_RAW;
+}
+
+const char* waveformModeToString(WaveformMode mode);
+
+// Channel report from PROBE_ACK (link establishment)
+// Contains measured channel parameters for mode selection
+struct ChannelReport {
+    float snr_db = 0.0f;           // Measured SNR (dB)
+    float delay_spread_ms = 0.0f;  // RMS delay spread (ms)
+    float doppler_spread_hz = 0.0f; // Doppler spread (Hz)
+    WaveformMode recommended_mode = WaveformMode::OFDM;
+    uint8_t capabilities = ModeCapabilities::ALL;
+
+    // Encode to bytes for transmission (5 bytes)
+    Bytes encode() const;
+
+    // Decode from bytes
+    static ChannelReport decode(const Bytes& data);
+
+    // Get human-readable channel condition
+    const char* getConditionName() const;
+};
+
+// Callsign utilities
+// Maximum callsign length
+constexpr size_t CALLSIGN_LEN = 8;
+
+// Validate and sanitize callsign (uppercase, valid chars only)
+inline std::string sanitizeCallsign(const std::string& call) {
+    std::string result;
+    result.reserve(CALLSIGN_LEN);
+    for (char c : call) {
+        if (result.size() >= CALLSIGN_LEN) break;
+        if (std::isalnum(static_cast<unsigned char>(c)) || c == '/' || c == '-') {
+            result += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+    }
+    return result;
+}
+
+// Check if callsign is valid
+inline bool isValidCallsign(const std::string& call) {
+    if (call.empty() || call.size() > CALLSIGN_LEN) return false;
+    for (char c : call) {
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '/' && c != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
 namespace v2 {
 
 // ============================================================================

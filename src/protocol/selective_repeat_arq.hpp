@@ -1,7 +1,7 @@
 #pragma once
 
 #include "arq_interface.hpp"
-#include "frame.hpp"
+#include "frame_v2.hpp"
 #include <deque>
 #include <optional>
 #include <array>
