@@ -6,7 +6,6 @@
 #include "ultra/fec.hpp"
 #include "ultra/dsp.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "protocol/frame.hpp"
 #include "protocol/frame_v2.hpp"
 
 #include <iostream>

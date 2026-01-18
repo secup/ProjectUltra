@@ -2,7 +2,6 @@
 
 #include "arq_interface.hpp"
 #include "frame_v2.hpp"
-#include "frame.hpp"
 #include <functional>
 #include <optional>
 
@@ -41,7 +40,7 @@ public:
     bool lastRxHadMoreData() const override { return last_rx_more_data_; }
     uint8_t lastRxFlags() const override { return last_rx_flags_; }
 
-    void onFrameReceived(const Frame& frame) override;
+    void onFrameReceived(const Bytes& frame_data) override;
 
     void tick(uint32_t elapsed_ms) override;
 
@@ -69,16 +68,16 @@ private:
     std::string remote_call_;
 
     // TX state
-    uint8_t tx_seq_ = 0;
-    Frame pending_frame_;
+    uint16_t tx_seq_ = 0;
+    Bytes pending_frame_data_;  // Serialized frame to send/resend
     int retry_count_ = 0;
     uint32_t timeout_remaining_ms_ = 0;
 
     // RX state
-    uint8_t rx_expected_seq_ = 0;
-    std::optional<Frame> pending_ack_;  // ACK to send after turnaround
-    bool last_rx_more_data_ = false;    // MORE_DATA flag from last received frame
-    uint8_t last_rx_flags_ = 0;         // All flags from last received frame
+    uint16_t rx_expected_seq_ = 0;
+    std::optional<Bytes> pending_ack_;  // ACK to send after turnaround
+    bool last_rx_more_data_ = false;
+    uint8_t last_rx_flags_ = 0;
 
     // Statistics
     ARQStats stats_;
@@ -89,10 +88,10 @@ private:
     SendCompleteCallback on_send_complete_;
 
     // Internal helpers
-    void transmitFrame(const Frame& frame);
-    void handleDataFrame(const Frame& frame);
-    void handleAckFrame(const Frame& frame);
-    void handleNakFrame(const Frame& frame);
+    void transmitData(const Bytes& data);
+    void handleDataFrame(const v2::DataFrame& frame);
+    void handleAckFrame(const v2::ControlFrame& frame);
+    void handleNackFrame(const v2::ControlFrame& frame);
     void retransmit();
     void sendFailed();
 };

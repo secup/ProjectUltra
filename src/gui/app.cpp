@@ -56,9 +56,6 @@ App::App() {
     protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
         std::string msg;
         switch (state) {
-            case protocol::ConnectionState::PROBING:
-                msg = "[SYS] Probing channel to " + info + "...";
-                break;
             case protocol::ConnectionState::CONNECTING:
                 msg = "[SYS] Connecting to " + info + "...";
                 break;
@@ -121,11 +118,6 @@ App::App() {
 
     // Set receive directory from settings (defaults to Downloads folder)
     protocol_.setReceiveDirectory(settings_.getReceiveDirectory());
-
-    // Set channel measurement provider - protocol layer calls this when responding to PROBE
-    protocol_.setChannelMeasurementCallback([this]() -> ChannelQuality {
-        return modem_.getChannelQuality();
-    });
 
     // Configure waterfall display
     waterfall_.setSampleRate(48000.0f);
@@ -470,15 +462,6 @@ void App::initProtocolTest() {
         if (test_remote_log_.size() > MAX_RX_LOG) test_remote_log_.pop_front();
     });
 
-    // Set channel measurement providers for probing
-    // TEST1 gets measurements from test_modem_1_, TEST2 from test_modem_2_
-    test_local_.setChannelMeasurementCallback([this]() -> ChannelQuality {
-        return test_modem_1_->getChannelQuality();
-    });
-    test_remote_.setChannelMeasurementCallback([this]() -> ChannelQuality {
-        return test_modem_2_->getChannelQuality();
-    });
-
     // Connection state callbacks - switch modem modes when connection is established
     test_local_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& remote) {
         bool connected = (state == protocol::ConnectionState::CONNECTED);
@@ -610,10 +593,7 @@ void App::renderProtocolTestControls() {
         auto state = test_local_.getState();
         const char* state_str = "IDLE";
         ImVec4 state_color(0.5f, 0.5f, 0.5f, 1.0f);
-        if (state == protocol::ConnectionState::PROBING) {
-            state_str = "PROBING...";
-            state_color = ImVec4(0.8f, 0.5f, 1.0f, 1.0f);  // Purple for probing
-        } else if (state == protocol::ConnectionState::CONNECTING) {
+        if (state == protocol::ConnectionState::CONNECTING) {
             state_str = "CONNECTING...";
             state_color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
         } else if (state == protocol::ConnectionState::CONNECTED) {
@@ -643,34 +623,11 @@ void App::renderProtocolTestControls() {
 
         ImGui::Spacing();
 
-        // Connect/Disconnect/Probe
+        // Connect/Disconnect
         if (state == protocol::ConnectionState::DISCONNECTED) {
-            // Show channel report if probe completed (from previous standalone probe)
-            const auto& report = test_local_.getLastChannelReport();
-            if (report.snr_db > 0) {  // Check if we have valid probe results
-                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.2f, 1.0f), "Last Channel Report:");
-                ImGui::TextDisabled("  SNR: %.1f dB", report.snr_db);
-                ImGui::TextDisabled("  Delay: %.1f ms", report.delay_spread_ms);
-                ImGui::TextDisabled("  Doppler: %.1f Hz", report.doppler_spread_hz);
-                ImGui::TextDisabled("  Condition: %s", report.getConditionName());
-                ImGui::TextDisabled("  Recommended: %s", protocol::waveformModeToString(report.recommended_mode));
-                ImGui::Spacing();
-            }
-
-            // Connect button now auto-probes first, then connects with optimal mode
             if (ImGui::Button("Connect to TEST2", ImVec2(-1, 25))) {
                 test_local_.connect("TEST2");
-                test_local_log_.push_back("[TX] Connecting (auto-probe + connect)...");
-            }
-            // Standalone probe for channel measurement only (advanced)
-            if (ImGui::Button("Probe Only##local", ImVec2(-1, 25))) {
-                test_local_.probe("TEST2");
-                test_local_log_.push_back("[TX] Probing channel to TEST2...");
-            }
-        } else if (state == protocol::ConnectionState::PROBING) {
-            ImGui::TextDisabled("Probing channel...");
-            if (ImGui::Button("Cancel Probe##local", ImVec2(-1, 25))) {
-                test_local_.disconnect();  // This cancels the probe
+                test_local_log_.push_back("[TX] Connecting...");
             }
         } else if (state == protocol::ConnectionState::CONNECTED) {
             if (ImGui::Button("Disconnect##local", ImVec2(-1, 25))) {
@@ -740,10 +697,7 @@ void App::renderProtocolTestControls() {
         auto state = test_remote_.getState();
         const char* state_str = "IDLE";
         ImVec4 state_color(0.5f, 0.5f, 0.5f, 1.0f);
-        if (state == protocol::ConnectionState::PROBING) {
-            state_str = "PROBING...";
-            state_color = ImVec4(0.8f, 0.5f, 1.0f, 1.0f);  // Purple for probing
-        } else if (state == protocol::ConnectionState::CONNECTING) {
+        if (state == protocol::ConnectionState::CONNECTING) {
             state_str = "CONNECTING...";
             state_color = ImVec4(1.0f, 0.8f, 0.0f, 1.0f);
         } else if (state == protocol::ConnectionState::CONNECTED) {
@@ -773,34 +727,11 @@ void App::renderProtocolTestControls() {
 
         ImGui::Spacing();
 
-        // Connect/Disconnect/Probe
+        // Connect/Disconnect
         if (state == protocol::ConnectionState::DISCONNECTED) {
-            // Show channel report if probe completed (from previous standalone probe)
-            const auto& report = test_remote_.getLastChannelReport();
-            if (report.snr_db > 0) {  // Check if we have valid probe results
-                ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.2f, 1.0f), "Last Channel Report:");
-                ImGui::TextDisabled("  SNR: %.1f dB", report.snr_db);
-                ImGui::TextDisabled("  Delay: %.1f ms", report.delay_spread_ms);
-                ImGui::TextDisabled("  Doppler: %.1f Hz", report.doppler_spread_hz);
-                ImGui::TextDisabled("  Condition: %s", report.getConditionName());
-                ImGui::TextDisabled("  Recommended: %s", protocol::waveformModeToString(report.recommended_mode));
-                ImGui::Spacing();
-            }
-
-            // Connect button now auto-probes first, then connects with optimal mode
             if (ImGui::Button("Connect to TEST1", ImVec2(-1, 25))) {
                 test_remote_.connect("TEST1");
-                test_remote_log_.push_back("[TX] Connecting (auto-probe + connect)...");
-            }
-            // Standalone probe for channel measurement only (advanced)
-            if (ImGui::Button("Probe Only##remote", ImVec2(-1, 25))) {
-                test_remote_.probe("TEST1");
-                test_remote_log_.push_back("[TX] Probing channel to TEST1...");
-            }
-        } else if (state == protocol::ConnectionState::PROBING) {
-            ImGui::TextDisabled("Probing channel...");
-            if (ImGui::Button("Cancel Probe##remote", ImVec2(-1, 25))) {
-                test_remote_.disconnect();  // This cancels the probe
+                test_remote_log_.push_back("[TX] Connecting...");
             }
         } else if (state == protocol::ConnectionState::CONNECTED) {
             if (ImGui::Button("Disconnect##remote", ImVec2(-1, 25))) {

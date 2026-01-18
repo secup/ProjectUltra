@@ -1,5 +1,4 @@
 #include "connection.hpp"
-#include "frame_v2.hpp"
 #include "ultra/logging.hpp"
 
 namespace ultra {
@@ -8,7 +7,6 @@ namespace protocol {
 const char* connectionStateToString(ConnectionState state) {
     switch (state) {
         case ConnectionState::DISCONNECTED:  return "DISCONNECTED";
-        case ConnectionState::PROBING:       return "PROBING";
         case ConnectionState::CONNECTING:    return "CONNECTING";
         case ConnectionState::CONNECTED:     return "CONNECTED";
         case ConnectionState::DISCONNECTING: return "DISCONNECTING";
@@ -21,36 +19,27 @@ Connection::Connection(const ConnectionConfig& config)
     , arq_(config.arq)
 {
     // Wire up ARQ callbacks
-    arq_.setTransmitCallback([this](const Frame& f) {
-        transmitFrame(f);
+    arq_.setTransmitCallback([this](const Bytes& data) {
+        transmitFrame(data);
     });
 
     arq_.setDataReceivedCallback([this](const Bytes& data) {
-        // Route through data payload handler for file/text discrimination
         handleDataPayload(data, arq_.lastRxHadMoreData());
     });
 
     arq_.setSendCompleteCallback([this](bool success) {
-        // Check if this was a file transfer chunk
         if (file_transfer_.getState() == FileTransferState::SENDING) {
             if (success) {
                 file_transfer_.onChunkAcked();
-                // Send next chunk if available
                 sendNextFileChunk();
             } else {
                 file_transfer_.onSendFailed();
             }
         } else {
-            // Regular message
             if (on_message_sent_) {
                 on_message_sent_(success);
             }
         }
-    });
-
-    // Wire up file transfer callbacks (forward to our callbacks)
-    file_transfer_.setProgressCallback([this](const FileTransferProgress& p) {
-        // Progress callbacks are set directly on file_transfer_
     });
 }
 
@@ -77,26 +66,20 @@ bool Connection::connect(const std::string& remote_call) {
         return false;
     }
 
-    LOG_MODEM(INFO, "Connection: Connecting to %s (probing first for optimal mode)",
-              remote_call_.c_str());
+    LOG_MODEM(INFO, "Connection: Connecting to %s", remote_call_.c_str());
 
-    // Start with v2 PROBE to measure channel quality, then auto-connect with optimal mode
-    // This ensures we always use the best modulation for current channel conditions
-    auto probe = v2::ControlFrame::makeProbe(local_call_, remote_call_);
-    Bytes probe_data = probe.serialize();
+    // Send CONNECT directly (no PROBE phase)
+    auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
+                                                        config_.mode_capabilities,
+                                                        static_cast<uint8_t>(config_.preferred_mode));
+    Bytes connect_data = connect_frame.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending v2 PROBE (%zu bytes) for connect", probe_data.size());
+    LOG_MODEM(INFO, "Connection: Sending CONNECT (%zu bytes)", connect_data.size());
+    transmitFrame(connect_data);
 
-    // Send via raw TX callback (modem_engine will LDPC encode and modulate)
-    if (on_transmit_raw_) {
-        on_transmit_raw_(probe_data);
-    }
-
-    state_ = ConnectionState::PROBING;
-    probe_retry_count_ = 0;
-    probe_complete_ = false;
-    connect_after_probe_ = true;  // Auto-connect after probe completes
-    timeout_remaining_ms_ = config_.probe_timeout_ms;
+    state_ = ConnectionState::CONNECTING;
+    connect_retry_count_ = 0;
+    timeout_remaining_ms_ = config_.connect_timeout_ms;
     stats_.connects_initiated++;
 
     return true;
@@ -111,23 +94,17 @@ void Connection::acceptCall() {
     remote_call_ = pending_remote_call_;
     pending_remote_call_.clear();
 
-    // Negotiate waveform mode (remote_capabilities_ was stored in handleConnect)
     negotiated_mode_ = negotiateMode(remote_capabilities_, remote_preferred_);
-    last_channel_report_.recommended_mode = negotiated_mode_;
 
     LOG_MODEM(INFO, "Connection: Accepting call from %s (mode=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_));
 
-    // Send v2 CONNECT_ACK with negotiated mode
-    auto ack = v2::ControlFrame::makeConnectAck(local_call_, remote_call_,
+    auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
                                                  static_cast<uint8_t>(negotiated_mode_));
     Bytes ack_data = ack.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending v2 CONNECT_ACK (%zu bytes)", ack_data.size());
-
-    if (on_transmit_raw_) {
-        on_transmit_raw_(ack_data);
-    }
+    LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
+    transmitFrame(ack_data);
 
     enterConnected();
 }
@@ -139,103 +116,13 @@ void Connection::rejectCall() {
 
     LOG_MODEM(INFO, "Connection: Rejecting call from %s", pending_remote_call_.c_str());
 
-    // Send v2 CONNECT_NAK
-    auto nak = v2::ControlFrame::makeConnectNak(local_call_, pending_remote_call_);
+    auto nak = v2::ConnectFrame::makeConnectNak(local_call_, pending_remote_call_);
     Bytes nak_data = nak.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending v2 CONNECT_NAK (%zu bytes)", nak_data.size());
-
-    if (on_transmit_raw_) {
-        on_transmit_raw_(nak_data);
-    }
+    LOG_MODEM(INFO, "Connection: Sending CONNECT_NAK (%zu bytes)", nak_data.size());
+    transmitFrame(nak_data);
 
     pending_remote_call_.clear();
-}
-
-bool Connection::probe(const std::string& remote_call) {
-    if (state_ != ConnectionState::DISCONNECTED) {
-        LOG_MODEM(WARN, "Connection: Cannot probe, state=%s",
-                  connectionStateToString(state_));
-        return false;
-    }
-
-    if (local_call_.empty()) {
-        LOG_MODEM(ERROR, "Connection: Local callsign not set");
-        return false;
-    }
-
-    remote_call_ = sanitizeCallsign(remote_call);
-    if (remote_call_.empty() || !isValidCallsign(remote_call_)) {
-        LOG_MODEM(ERROR, "Connection: Invalid remote callsign: %s", remote_call.c_str());
-        return false;
-    }
-
-    LOG_MODEM(INFO, "Connection: Probing channel to %s (v2 frame)",
-              remote_call_.c_str());
-
-    // Send v2 PROBE frame (20 bytes = 1 LDPC codeword)
-    auto probe = v2::ControlFrame::makeProbe(local_call_, remote_call_);
-    Bytes probe_data = probe.serialize();
-
-    LOG_MODEM(INFO, "Connection: Sending v2 PROBE (%zu bytes) src=%s dst=%s",
-              probe_data.size(), local_call_.c_str(), remote_call_.c_str());
-
-    // Send via raw TX callback (modem_engine will LDPC encode and modulate)
-    if (on_transmit_raw_) {
-        on_transmit_raw_(probe_data);
-    }
-
-    state_ = ConnectionState::PROBING;
-    probe_retry_count_ = 0;
-    probe_complete_ = false;
-    connect_after_probe_ = false;  // Standalone probe - don't auto-connect
-    timeout_remaining_ms_ = config_.probe_timeout_ms;
-
-    return true;
-}
-
-bool Connection::connectAfterProbe() {
-    if (state_ != ConnectionState::DISCONNECTED) {
-        LOG_MODEM(WARN, "Connection: Cannot connect, state=%s",
-                  connectionStateToString(state_));
-        return false;
-    }
-
-    if (!probe_complete_) {
-        LOG_MODEM(WARN, "Connection: No probe results available");
-        return false;
-    }
-
-    if (remote_call_.empty()) {
-        LOG_MODEM(ERROR, "Connection: No remote callsign from probe");
-        return false;
-    }
-
-    // Use recommended mode from channel report as our preference
-    config_.preferred_mode = last_channel_report_.recommended_mode;
-
-    LOG_MODEM(INFO, "Connection: Connecting to %s after probe (recommended mode: %s)",
-              remote_call_.c_str(), waveformModeToString(config_.preferred_mode));
-
-    // Send v2 CONNECT frame with our mode capabilities and the recommended preference
-    auto connect = v2::ControlFrame::makeConnect(local_call_, remote_call_,
-                                                  config_.mode_capabilities,
-                                                  static_cast<uint8_t>(config_.preferred_mode));
-    Bytes connect_data = connect.serialize();
-
-    LOG_MODEM(INFO, "Connection: Sending v2 CONNECT (%zu bytes)", connect_data.size());
-
-    // Send via raw TX callback
-    if (on_transmit_raw_) {
-        on_transmit_raw_(connect_data);
-    }
-
-    state_ = ConnectionState::CONNECTING;
-    connect_retry_count_ = 0;
-    timeout_remaining_ms_ = config_.connect_timeout_ms;
-    stats_.connects_initiated++;
-
-    return true;
 }
 
 void Connection::disconnect() {
@@ -243,8 +130,7 @@ void Connection::disconnect() {
         return;
     }
 
-    if (state_ == ConnectionState::CONNECTING || state_ == ConnectionState::PROBING) {
-        // Cancel connection/probe attempt
+    if (state_ == ConnectionState::CONNECTING) {
         enterDisconnected("Cancelled");
         return;
     }
@@ -252,15 +138,11 @@ void Connection::disconnect() {
     if (state_ == ConnectionState::CONNECTED) {
         LOG_MODEM(INFO, "Connection: Disconnecting from %s", remote_call_.c_str());
 
-        // Send v2 DISCONNECT frame
         auto disc = v2::ControlFrame::makeDisconnect(local_call_, remote_call_);
         Bytes disc_data = disc.serialize();
 
-        LOG_MODEM(INFO, "Connection: Sending v2 DISCONNECT (%zu bytes)", disc_data.size());
-
-        if (on_transmit_raw_) {
-            on_transmit_raw_(disc_data);
-        }
+        LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", disc_data.size());
+        transmitFrame(disc_data);
 
         state_ = ConnectionState::DISCONNECTING;
         timeout_remaining_ms_ = config_.disconnect_timeout_ms;
@@ -307,7 +189,6 @@ bool Connection::sendFile(const std::string& filepath) {
         return false;
     }
 
-    // Send first chunk
     sendNextFileChunk();
     return true;
 }
@@ -342,9 +223,7 @@ void Connection::sendNextFileChunk() {
         return;
     }
 
-    // Set MORE_DATA flag if more chunks follow
-    uint8_t flags = file_transfer_.hasMoreChunks() ? FrameFlags::MORE_DATA : FrameFlags::NONE;
-
+    uint8_t flags = file_transfer_.hasMoreChunks() ? v2::Flags::MORE_FRAG : v2::Flags::NONE;
     arq_.sendDataWithFlags(chunk, flags);
 }
 
@@ -353,21 +232,16 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
         return;
     }
 
-    // Check if this is a file transfer frame
     if (file_transfer_.processPayload(payload, more_data)) {
-        // Was a file transfer frame, already handled
         LOG_MODEM(DEBUG, "Connection: Processed file transfer payload (%zu bytes)",
                   payload.size());
 
-        // Also notify raw data callback if set
         if (on_data_received_) {
             on_data_received_(payload, more_data);
         }
         return;
     }
 
-    // Regular text message (starts with TEXT_MESSAGE type or is legacy)
-    // Skip type byte if present
     size_t start = 0;
     if (!payload.empty() && payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
         start = 1;
@@ -384,188 +258,189 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
     }
 }
 
-void Connection::onFrameReceived(const Frame& frame) {
-    // Check if frame is for us
-    if (!frame.isForCallsign(local_call_)) {
+void Connection::onFrameReceived(const Bytes& frame_data) {
+    if (frame_data.size() < 2) {
         return;
     }
 
-    LOG_MODEM(DEBUG, "Connection: Received %s from %s",
-              frameTypeToString(frame.type), frame.src_call.c_str());
+    // Check v2 magic
+    uint16_t magic = (static_cast<uint16_t>(frame_data[0]) << 8) | frame_data[1];
+    if (magic != v2::MAGIC_V2) {
+        LOG_MODEM(TRACE, "Connection: Ignoring frame with wrong magic");
+        return;
+    }
 
-    switch (frame.type) {
-        case FrameType::CONNECT:
-            handleConnect(frame);
-            break;
-        case FrameType::CONNECT_ACK:
-            handleConnectAck(frame);
-            break;
-        case FrameType::CONNECT_NAK:
-            handleConnectNak(frame);
-            break;
-        case FrameType::DISCONNECT:
-            handleDisconnect(frame);
-            break;
-        case FrameType::PROBE:
-            handleProbe(frame);
-            break;
-        case FrameType::PROBE_ACK:
-            handleProbeAck(frame);
-            break;
-        case FrameType::DATA:
-        case FrameType::NAK:
-        case FrameType::SACK:
-            // Pass to ARQ layer
-            if (state_ == ConnectionState::CONNECTED) {
-                arq_.onFrameReceived(frame);
+    auto header = v2::parseHeader(frame_data);
+    if (!header.valid) {
+        LOG_MODEM(TRACE, "Connection: Ignoring frame with invalid header");
+        return;
+    }
+
+    // Check if frame is for us
+    uint32_t our_hash = v2::hashCallsign(local_call_);
+    if (header.dst_hash != our_hash && header.dst_hash != 0xFFFFFF) {
+        LOG_MODEM(TRACE, "Connection: Ignoring frame for different station");
+        return;
+    }
+
+    // Resolve source callsign from hash if possible
+    std::string src_call;
+    if (!remote_call_.empty() && v2::hashCallsign(remote_call_) == header.src_hash) {
+        src_call = remote_call_;
+    } else if (!pending_remote_call_.empty() && v2::hashCallsign(pending_remote_call_) == header.src_hash) {
+        src_call = pending_remote_call_;
+    }
+
+    LOG_MODEM(DEBUG, "Connection: Received %s seq=%d from hash 0x%06X",
+              v2::frameTypeToString(header.type), header.seq, header.src_hash);
+
+    // Check frame type category and dispatch accordingly
+    if (v2::isConnectFrame(header.type)) {
+        // CONNECT/CONNECT_ACK/CONNECT_NAK - parse as ConnectFrame (carries full callsigns)
+        auto conn = v2::ConnectFrame::deserialize(frame_data);
+        if (conn) {
+            // Extract callsign from frame if available
+            std::string frame_src_call = conn->getSrcCallsign();
+            if (!frame_src_call.empty()) {
+                src_call = frame_src_call;  // Use verified callsign from frame
             }
-            break;
-        case FrameType::ACK:
-            // Handle ACK to our DISCONNECT
-            if (state_ == ConnectionState::DISCONNECTING) {
-                if (frame.src_call == remote_call_) {
-                    LOG_MODEM(INFO, "Connection: Disconnect acknowledged by %s",
-                              frame.src_call.c_str());
-                    enterDisconnected("Disconnect complete");
-                }
-            } else if (state_ == ConnectionState::CONNECTED) {
-                // Pass to ARQ layer for data ACKs
-                arq_.onFrameReceived(frame);
+
+            switch (conn->type) {
+                case v2::FrameType::CONNECT:
+                    handleConnect(*conn, src_call);
+                    break;
+                case v2::FrameType::CONNECT_ACK:
+                    handleConnectAck(*conn, src_call);
+                    break;
+                case v2::FrameType::CONNECT_NAK:
+                    handleConnectNak(*conn, src_call);
+                    break;
+                default:
+                    break;
             }
-            break;
-        case FrameType::BEACON:
-            // Could notify application of heard stations
-            LOG_MODEM(DEBUG, "Connection: Heard beacon from %s", frame.src_call.c_str());
-            break;
+        }
+    } else if (v2::isControlFrame(header.type)) {
+        // Control frames (DISCONNECT, ACK, NACK, etc) - parse as ControlFrame
+        auto ctrl = v2::ControlFrame::deserialize(frame_data);
+        if (ctrl) {
+            switch (ctrl->type) {
+                case v2::FrameType::DISCONNECT:
+                    handleDisconnect(*ctrl, src_call);
+                    break;
+                case v2::FrameType::ACK:
+                    if (state_ == ConnectionState::DISCONNECTING) {
+                        LOG_MODEM(INFO, "Connection: Disconnect acknowledged");
+                        enterDisconnected("Disconnect complete");
+                    } else if (state_ == ConnectionState::CONNECTED) {
+                        arq_.onFrameReceived(frame_data);
+                    }
+                    break;
+                case v2::FrameType::NACK:
+                    if (state_ == ConnectionState::CONNECTED) {
+                        arq_.onFrameReceived(frame_data);
+                    }
+                    break;
+                case v2::FrameType::PROBE:
+                case v2::FrameType::PROBE_ACK:
+                    // PROBE not used - ignore (or could respond with CONNECT_NAK)
+                    LOG_MODEM(DEBUG, "Connection: Ignoring PROBE (not supported)");
+                    break;
+                default:
+                    break;
+            }
+        }
+    } else {
+        // Data frame - pass to ARQ
+        if (state_ == ConnectionState::CONNECTED) {
+            arq_.onFrameReceived(frame_data);
+        }
     }
 }
 
-void Connection::handleConnect(const Frame& frame) {
+void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string& src_call) {
     if (state_ != ConnectionState::DISCONNECTED) {
-        // Already busy, reject
-        LOG_MODEM(WARN, "Connection: Rejecting CONNECT from %s (busy, state=%s)",
-                  frame.src_call.c_str(), connectionStateToString(state_));
-        Frame nak = Frame::makeConnectNak(local_call_, frame.src_call);
-        transmitFrame(nak);
+        LOG_MODEM(WARN, "Connection: Rejecting CONNECT (busy, state=%s)",
+                  connectionStateToString(state_));
+        auto nak = v2::ConnectFrame::makeConnectNakByHash(local_call_, frame.src_hash);
+        transmitFrame(nak.serialize());
         return;
     }
 
-    // Parse mode capabilities from CONNECT frame
-    uint8_t remote_caps = ModeCapabilities::OFDM;  // Default for old clients
-    WaveformMode remote_pref = WaveformMode::OFDM;
-    Frame::parseConnectPayload(frame.payload, remote_caps, remote_pref);
+    // Get capabilities from ConnectFrame
+    uint8_t remote_caps = frame.mode_capabilities;
+    WaveformMode remote_pref = static_cast<WaveformMode>(frame.negotiated_mode);
 
     LOG_MODEM(INFO, "Connection: Incoming call from %s (caps=0x%02X, pref=%s)",
-              frame.src_call.c_str(), remote_caps, waveformModeToString(remote_pref));
+              src_call.c_str(), remote_caps, waveformModeToString(remote_pref));
     stats_.connects_received++;
 
-    // Store remote capabilities for negotiation
     remote_capabilities_ = remote_caps;
     remote_preferred_ = remote_pref;
 
-    // Get our channel measurements - we just decoded their frame, so we have
-    // real measurements of the channel from our perspective (implicit probing!)
-    ChannelReport our_report;
-    if (on_measure_channel_) {
-        ChannelQuality quality = on_measure_channel_();
-        our_report.snr_db = quality.snr_db;
-        our_report.delay_spread_ms = quality.delay_spread_ms;
-        our_report.doppler_spread_hz = quality.doppler_hz;
-        LOG_MODEM(INFO, "Connection: Channel from %s: SNR=%.1f dB, delay=%.2f ms, doppler=%.2f Hz (%s)",
-                  frame.src_call.c_str(), quality.snr_db, quality.delay_spread_ms,
-                  quality.doppler_hz, our_report.getConditionName());
-    } else {
-        // Fallback defaults
-        our_report.snr_db = 15.0f;
-        our_report.delay_spread_ms = 1.0f;
-        our_report.doppler_spread_hz = 0.5f;
-    }
-    our_report.capabilities = config_.mode_capabilities;
+    // Default channel estimates for mode selection
+    float snr_db = 15.0f;
+    float delay_spread_ms = 1.0f;
+    float doppler_spread_hz = 0.5f;
 
     if (config_.auto_accept) {
-        // Auto-accept: negotiate mode and connect
-        remote_call_ = frame.src_call;
+        // Store callsign if known, otherwise use placeholder with hash for display
+        remote_call_ = src_call.empty() ? "REMOTE" : src_call;
+        remote_hash_ = frame.src_hash;  // Store hash for routing
 
-        // Negotiate waveform mode - consider our channel measurements
-        // If channel conditions suggest a different mode, we can override remote preference
         WaveformMode channel_recommended = WaveformMode::OFDM;
-        if (our_report.doppler_spread_hz > 5.0f) {
-            channel_recommended = WaveformMode::OTFS_RAW;  // Flutter
-        } else if (our_report.snr_db > 20.0f && our_report.delay_spread_ms < 1.0f) {
-            channel_recommended = WaveformMode::OTFS_EQ;   // Excellent conditions
+        if (doppler_spread_hz > 5.0f) {
+            channel_recommended = WaveformMode::OTFS_RAW;
+        } else if (snr_db > 20.0f && delay_spread_ms < 1.0f) {
+            channel_recommended = WaveformMode::OTFS_EQ;
         }
 
-        // If remote prefers AUTO, use our channel-based recommendation
         if (remote_pref == WaveformMode::AUTO) {
             remote_pref = channel_recommended;
         }
 
         negotiated_mode_ = negotiateMode(remote_caps, remote_pref);
-        our_report.recommended_mode = negotiated_mode_;
 
         LOG_MODEM(INFO, "Connection: Negotiated waveform mode: %s",
                   waveformModeToString(negotiated_mode_));
 
-        // Send CONNECT_ACK with negotiated mode AND our channel report
-        // This lets the caller know our view of the channel (implicit probe response)
-        Frame ack = Frame::makeConnectAckWithReport(local_call_, remote_call_,
-                                                    negotiated_mode_, our_report);
-        transmitFrame(ack);
+        // Use hash-based method since we may not know the actual callsign
+        auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
+                                                           static_cast<uint8_t>(negotiated_mode_));
+        transmitFrame(ack.serialize());
         enterConnected();
     } else {
-        // Store for manual accept/reject
-        pending_remote_call_ = frame.src_call;
-        // Store channel report for when acceptCall() is called
-        last_channel_report_ = our_report;
+        pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
+        pending_remote_hash_ = frame.src_hash;  // Store hash for later
         if (on_incoming_call_) {
-            on_incoming_call_(frame.src_call);
+            on_incoming_call_(pending_remote_call_);
         }
     }
 }
 
-void Connection::handleConnectAck(const Frame& frame) {
+void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::string& src_call) {
     if (state_ != ConnectionState::CONNECTING) {
         LOG_MODEM(DEBUG, "Connection: Ignoring CONNECT_ACK (state=%s)",
                   connectionStateToString(state_));
         return;
     }
 
-    if (frame.src_call != remote_call_) {
-        LOG_MODEM(WARN, "Connection: CONNECT_ACK from wrong station %s (expected %s)",
-                  frame.src_call.c_str(), remote_call_.c_str());
-        return;
-    }
-
-    // Parse negotiated mode and optional channel report from CONNECT_ACK
-    WaveformMode mode = WaveformMode::OFDM;  // Default for old clients
-    ChannelReport remote_report;
-    bool has_report = false;
-    Frame::parseConnectAckPayload(frame.payload, mode, remote_report, has_report);
+    // Get negotiated mode from ConnectFrame
+    WaveformMode mode = static_cast<WaveformMode>(frame.negotiated_mode);
     negotiated_mode_ = mode;
 
-    if (has_report) {
-        // Remote included their channel measurements - this is their view of the channel
-        // (implicit probe response - they measured the channel when decoding our CONNECT)
-        last_channel_report_ = remote_report;
-        LOG_MODEM(INFO, "Connection: Connected to %s (mode=%s) - Remote reports: "
-                  "SNR=%.1f dB, delay=%.1f ms, doppler=%.1f Hz (%s)",
-                  remote_call_.c_str(), waveformModeToString(negotiated_mode_),
-                  remote_report.snr_db, remote_report.delay_spread_ms,
-                  remote_report.doppler_spread_hz, remote_report.getConditionName());
-    } else {
-        LOG_MODEM(INFO, "Connection: Connected to %s (mode=%s)",
-                  remote_call_.c_str(), waveformModeToString(negotiated_mode_));
+    // Update remote callsign if we got it from the frame
+    if (!src_call.empty() && (remote_call_.empty() || remote_call_ == "REMOTE")) {
+        remote_call_ = src_call;
     }
+
+    LOG_MODEM(INFO, "Connection: Connected to %s (mode=%s)",
+              remote_call_.c_str(), waveformModeToString(negotiated_mode_));
 
     enterConnected();
 }
 
-void Connection::handleConnectNak(const Frame& frame) {
+void Connection::handleConnectNak(const v2::ConnectFrame& frame, const std::string& src_call) {
     if (state_ != ConnectionState::CONNECTING) {
-        return;
-    }
-
-    if (frame.src_call != remote_call_) {
         return;
     }
 
@@ -574,181 +449,24 @@ void Connection::handleConnectNak(const Frame& frame) {
     enterDisconnected("Connection rejected");
 }
 
-void Connection::handleDisconnect(const Frame& frame) {
+void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::string& src_call) {
     if (state_ == ConnectionState::DISCONNECTED) {
-        return;
-    }
-
-    if (frame.src_call != remote_call_) {
         return;
     }
 
     LOG_MODEM(INFO, "Connection: Disconnect from %s", remote_call_.c_str());
 
-    // ACK the disconnect
-    Frame ack = Frame::makeAck(local_call_, remote_call_, 0);
-    transmitFrame(ack);
+    auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, 0);
+    transmitFrame(ack.serialize());
 
     stats_.disconnects++;
     enterDisconnected("Remote disconnected");
 }
 
-void Connection::handleProbe(const Frame& frame) {
-    // Someone is probing us - they want to measure the channel
-    // We respond with PROBE_ACK containing our channel measurements
-
-    LOG_MODEM(INFO, "Connection: Received PROBE from %s", frame.src_call.c_str());
-
-    // Parse their capabilities
-    uint8_t remote_caps = ModeCapabilities::OFDM;  // Default
-    if (!frame.payload.empty()) {
-        remote_caps = frame.payload[0];
-    }
-
-    // Get channel measurements from modem (if callback is set)
-    ChannelReport report;
-    if (on_measure_channel_) {
-        // Get real channel measurements from modem layer
-        ChannelQuality quality = on_measure_channel_();
-        report.snr_db = quality.snr_db;
-        report.delay_spread_ms = quality.delay_spread_ms;
-        report.doppler_spread_hz = quality.doppler_hz;
-        LOG_MODEM(DEBUG, "Connection: Got channel measurements from modem: "
-                  "SNR=%.1f dB, delay=%.2f ms, doppler=%.2f Hz",
-                  quality.snr_db, quality.delay_spread_ms, quality.doppler_hz);
-    } else {
-        // Fallback to reasonable defaults if no measurement callback
-        LOG_MODEM(WARN, "Connection: No channel measurement callback, using defaults");
-        report.snr_db = 15.0f;
-        report.delay_spread_ms = 1.0f;
-        report.doppler_spread_hz = 0.5f;
-    }
-    report.capabilities = config_.mode_capabilities;
-
-    // Determine recommended mode based on channel conditions
-    // Priority: handle pathological cases first, then optimize for good conditions
-    if (report.doppler_spread_hz > 5.0f) {
-        // High Doppler (flutter) - use OTFS-RAW (no TF equalization)
-        // OTFS handles time-varying channels better than OFDM
-        report.recommended_mode = WaveformMode::OTFS_RAW;
-    } else if (report.delay_spread_ms > 2.0f) {
-        // Very high delay spread (severe multipath) - use standard OFDM (most robust)
-        report.recommended_mode = WaveformMode::OFDM;
-    } else if (report.snr_db < 10.0f) {
-        // Low SNR - use OFDM (most mature, best low-SNR performance)
-        report.recommended_mode = WaveformMode::OFDM;
-    } else if (report.snr_db > 20.0f && report.delay_spread_ms < 1.0f && report.doppler_spread_hz < 1.0f) {
-        // Excellent conditions - OTFS-EQ can provide best throughput
-        report.recommended_mode = WaveformMode::OTFS_EQ;
-    } else if (report.doppler_spread_hz > 1.0f) {
-        // Moderate Doppler - OTFS-RAW handles this better
-        report.recommended_mode = WaveformMode::OTFS_RAW;
-    } else {
-        // Default to OFDM (most compatible and robust)
-        report.recommended_mode = WaveformMode::OFDM;
-    }
-
-    LOG_MODEM(INFO, "Connection: Sending PROBE_ACK to %s (SNR=%.1f dB, delay=%.1f ms, "
-              "doppler=%.1f Hz, condition=%s, recommended=%s)",
-              frame.src_call.c_str(), report.snr_db, report.delay_spread_ms,
-              report.doppler_spread_hz, report.getConditionName(),
-              waveformModeToString(report.recommended_mode));
-
-    // Send PROBE_ACK with channel report
-    Frame probe_ack = Frame::makeProbeAck(local_call_, frame.src_call, report);
-    transmitFrame(probe_ack);
-}
-
-void Connection::handleProbeAck(const Frame& frame) {
-    if (state_ != ConnectionState::PROBING) {
-        LOG_MODEM(DEBUG, "Connection: Ignoring PROBE_ACK (state=%s)",
-                  connectionStateToString(state_));
-        return;
-    }
-
-    if (frame.src_call != remote_call_) {
-        LOG_MODEM(WARN, "Connection: PROBE_ACK from wrong station %s (expected %s)",
-                  frame.src_call.c_str(), remote_call_.c_str());
-        return;
-    }
-
-    // Parse channel report from payload
-    ChannelReport report;
-    if (!Frame::parseProbeAckPayload(frame.payload, report)) {
-        LOG_MODEM(WARN, "Connection: Failed to parse PROBE_ACK payload");
-        return;
-    }
-
-    LOG_MODEM(INFO, "Connection: Received channel report from %s: SNR=%.1f dB, "
-              "delay=%.1f ms, doppler=%.1f Hz, recommended=%s, condition=%s",
-              frame.src_call.c_str(), report.snr_db, report.delay_spread_ms,
-              report.doppler_spread_hz, waveformModeToString(report.recommended_mode),
-              report.getConditionName());
-
-    // Store the channel report
-    last_channel_report_ = report;
-    probe_complete_ = true;
-
-    // Store remote capabilities for later negotiation
-    remote_capabilities_ = report.capabilities;
-
-    // Notify callback (before potentially transitioning to CONNECTING)
-    if (on_probe_complete_) {
-        on_probe_complete_(report);
-    }
-
-    // Auto-connect if this was initiated via connect() (not standalone probe())
-    if (connect_after_probe_) {
-        connect_after_probe_ = false;
-
-        // Use recommended mode from channel report as our preference
-        config_.preferred_mode = report.recommended_mode;
-
-        LOG_MODEM(INFO, "Connection: Auto-connecting to %s (recommended mode: %s)",
-                  remote_call_.c_str(), waveformModeToString(config_.preferred_mode));
-
-        // Send CONNECT frame with optimal mode
-        Frame connect_frame = Frame::makeConnect(local_call_, remote_call_,
-                                                 config_.mode_capabilities,
-                                                 config_.preferred_mode);
-        transmitFrame(connect_frame);
-
-        state_ = ConnectionState::CONNECTING;
-        connect_retry_count_ = 0;
-        timeout_remaining_ms_ = config_.connect_timeout_ms;
-    } else {
-        // Standalone probe - return to DISCONNECTED, user can call connectAfterProbe()
-        state_ = ConnectionState::DISCONNECTED;
-    }
-}
-
 void Connection::tick(uint32_t elapsed_ms) {
     switch (state_) {
-        case ConnectionState::PROBING:
-            if (elapsed_ms >= timeout_remaining_ms_) {
-                // Probe timeout
-                probe_retry_count_++;
-                if (probe_retry_count_ >= config_.probe_retries) {
-                    LOG_MODEM(ERROR, "Connection: Probe failed after %d attempts",
-                              config_.probe_retries);
-                    enterDisconnected("Probe timeout");
-                } else {
-                    // Retry
-                    LOG_MODEM(WARN, "Connection: Probe timeout, retrying (%d/%d)",
-                              probe_retry_count_ + 1, config_.probe_retries);
-                    Frame probe_frame = Frame::makeProbe(local_call_, remote_call_,
-                                                         config_.mode_capabilities);
-                    transmitFrame(probe_frame);
-                    timeout_remaining_ms_ = config_.probe_timeout_ms;
-                }
-            } else {
-                timeout_remaining_ms_ -= elapsed_ms;
-            }
-            break;
-
         case ConnectionState::CONNECTING:
             if (elapsed_ms >= timeout_remaining_ms_) {
-                // Connection timeout
                 connect_retry_count_++;
                 if (connect_retry_count_ >= config_.connect_retries) {
                     LOG_MODEM(ERROR, "Connection: Connect failed after %d attempts",
@@ -756,13 +474,12 @@ void Connection::tick(uint32_t elapsed_ms) {
                     stats_.connects_failed++;
                     enterDisconnected("Connection timeout");
                 } else {
-                    // Retry
                     LOG_MODEM(WARN, "Connection: Connect timeout, retrying (%d/%d)",
                               connect_retry_count_ + 1, config_.connect_retries);
-                    Frame connect_frame = Frame::makeConnect(local_call_, remote_call_,
-                                                             config_.mode_capabilities,
-                                                             config_.preferred_mode);
-                    transmitFrame(connect_frame);
+                    auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
+                                                                        config_.mode_capabilities,
+                                                                        static_cast<uint8_t>(config_.preferred_mode));
+                    transmitFrame(connect_frame.serialize());
                     timeout_remaining_ms_ = config_.connect_timeout_ms;
                 }
             } else {
@@ -778,7 +495,6 @@ void Connection::tick(uint32_t elapsed_ms) {
 
         case ConnectionState::DISCONNECTING:
             if (elapsed_ms >= timeout_remaining_ms_) {
-                // Disconnect timeout - just go to disconnected anyway
                 LOG_MODEM(DEBUG, "Connection: Disconnect timeout, forcing disconnect");
                 enterDisconnected("Disconnect timeout");
             } else {
@@ -791,13 +507,10 @@ void Connection::tick(uint32_t elapsed_ms) {
     }
 }
 
-void Connection::transmitFrame(const Frame& frame) {
-    LOG_MODEM(INFO, "TX >> %s [%s -> %s] seq=%d payload=%zu bytes",
-              frameTypeToString(frame.type),
-              frame.src_call.c_str(), frame.dst_call.c_str(),
-              frame.sequence, frame.payload.size());
+void Connection::transmitFrame(const Bytes& frame_data) {
+    LOG_MODEM(DEBUG, "Connection: TX %zu bytes", frame_data.size());
     if (on_transmit_) {
-        on_transmit_(frame);
+        on_transmit_(frame_data);
     }
 }
 
@@ -805,14 +518,12 @@ void Connection::enterConnected() {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
 
-    // Configure ARQ with callsigns
     arq_.setCallsigns(local_call_, remote_call_);
     arq_.reset();
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_));
 
-    // Notify about negotiated mode
     if (on_mode_negotiated_) {
         on_mode_negotiated_(negotiated_mode_);
     }
@@ -840,10 +551,6 @@ void Connection::enterDisconnected(const std::string& reason) {
 
 void Connection::setTransmitCallback(TransmitCallback cb) {
     on_transmit_ = std::move(cb);
-}
-
-void Connection::setRawTransmitCallback(RawTransmitCallback cb) {
-    on_transmit_raw_ = std::move(cb);
 }
 
 void Connection::setConnectedCallback(ConnectedCallback cb) {
@@ -899,29 +606,23 @@ void Connection::reset() {
     pending_remote_call_.clear();
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
-    probe_retry_count_ = 0;
     connected_time_ms_ = 0;
     negotiated_mode_ = WaveformMode::OFDM;
     remote_capabilities_ = ModeCapabilities::OFDM;
     remote_preferred_ = WaveformMode::OFDM;
-    probe_complete_ = false;
-    connect_after_probe_ = false;
     arq_.reset();
     file_transfer_.cancel();
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 
 WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_pref) {
-    // Find common capabilities
     uint8_t common = config_.mode_capabilities & remote_caps;
 
     if (common == 0) {
-        // No common modes - shouldn't happen if both support OFDM
         LOG_MODEM(WARN, "Connection: No common waveform modes! Falling back to OFDM");
         return WaveformMode::OFDM;
     }
 
-    // If remote has a preference and we support it, use it
     if (remote_pref != WaveformMode::AUTO) {
         uint8_t pref_bit = 0;
         switch (remote_pref) {
@@ -931,13 +632,10 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
             default: break;
         }
         if (common & pref_bit) {
-            LOG_MODEM(INFO, "Connection: Using remote preferred mode: %s",
-                      waveformModeToString(remote_pref));
             return remote_pref;
         }
     }
 
-    // If we have a preference and it's supported, use it
     if (config_.preferred_mode != WaveformMode::AUTO) {
         uint8_t pref_bit = 0;
         switch (config_.preferred_mode) {
@@ -947,28 +645,14 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
             default: break;
         }
         if (common & pref_bit) {
-            LOG_MODEM(INFO, "Connection: Using local preferred mode: %s",
-                      waveformModeToString(config_.preferred_mode));
             return config_.preferred_mode;
         }
     }
 
-    // Default priority: OFDM > OTFS_EQ > OTFS_RAW
-    // (OFDM is most compatible/robust default)
-    if (common & ModeCapabilities::OFDM) {
-        LOG_MODEM(INFO, "Connection: Defaulting to OFDM (most compatible)");
-        return WaveformMode::OFDM;
-    }
-    if (common & ModeCapabilities::OTFS_EQ) {
-        LOG_MODEM(INFO, "Connection: Using OTFS-EQ");
-        return WaveformMode::OTFS_EQ;
-    }
-    if (common & ModeCapabilities::OTFS_RAW) {
-        LOG_MODEM(INFO, "Connection: Using OTFS-RAW");
-        return WaveformMode::OTFS_RAW;
-    }
+    if (common & ModeCapabilities::OFDM) return WaveformMode::OFDM;
+    if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
+    if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
 
-    // Fallback (should never reach)
     return WaveformMode::OFDM;
 }
 

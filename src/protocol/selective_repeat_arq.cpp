@@ -7,7 +7,6 @@ namespace protocol {
 SelectiveRepeatARQ::SelectiveRepeatARQ(const ARQConfig& config)
     : config_(config)
 {
-    // Validate window size
     if (config_.window_size > MAX_WINDOW) {
         config_.window_size = MAX_WINDOW;
     }
@@ -22,7 +21,7 @@ void SelectiveRepeatARQ::setCallsigns(const std::string& local, const std::strin
 }
 
 bool SelectiveRepeatARQ::sendData(const Bytes& data) {
-    return sendDataWithFlags(data, FrameFlags::NONE);
+    return sendDataWithFlags(data, v2::Flags::NONE);
 }
 
 bool SelectiveRepeatARQ::sendData(const std::string& text) {
@@ -41,27 +40,26 @@ bool SelectiveRepeatARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
         return false;
     }
 
-    // Find empty slot in window
     size_t slot = seqToSlot(tx_next_seq_);
 
-    // Create and store frame
-    Frame frame = Frame::makeData(local_call_, remote_call_, tx_next_seq_, data);
+    // Create and serialize v2 frame
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_next_seq_, data);
     frame.flags = flags;
 
     tx_window_[slot].active = true;
-    tx_window_[slot].frame = frame;
+    tx_window_[slot].frame_data = frame.serialize();
+    tx_window_[slot].seq = tx_next_seq_;
     tx_window_[slot].timeout_ms = config_.ack_timeout_ms;
     tx_window_[slot].retry_count = 0;
     tx_window_[slot].acked = false;
 
-    // Transmit
-    transmitFrame(frame);
+    transmitData(tx_window_[slot].frame_data);
 
     LOG_MODEM(DEBUG, "SR-ARQ: Sent DATA seq=%d slot=%zu, window=[%d,%d)",
-              tx_next_seq_, slot, tx_base_seq_, (tx_next_seq_ + 1) & 0xFF);
+              tx_next_seq_, slot, tx_base_seq_, (tx_next_seq_ + 1) & 0xFFFF);
 
     stats_.frames_sent++;
-    tx_next_seq_ = (tx_next_seq_ + 1) & 0xFF;
+    tx_next_seq_ = (tx_next_seq_ + 1) & 0xFFFF;
     tx_in_flight_++;
 
     return true;
@@ -76,53 +74,72 @@ size_t SelectiveRepeatARQ::getAvailableSlots() const {
     return (tx_in_flight_ < window) ? (window - tx_in_flight_) : 0;
 }
 
-void SelectiveRepeatARQ::onFrameReceived(const Frame& frame) {
-    // Check if frame is for us
-    if (!frame.isForCallsign(local_call_)) {
-        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame for %s (we are %s)",
-                  frame.dst_call.c_str(), local_call_.c_str());
+void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
+    if (frame_data.size() < 2) {
         return;
     }
 
-    LOG_MODEM(DEBUG, "SR-ARQ: Received %s from %s seq=%d",
-              frameTypeToString(frame.type), frame.src_call.c_str(), frame.sequence);
+    uint16_t magic = (static_cast<uint16_t>(frame_data[0]) << 8) | frame_data[1];
+    if (magic != v2::MAGIC_V2) {
+        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame with wrong magic");
+        return;
+    }
 
-    switch (frame.type) {
-        case FrameType::DATA:
-            handleDataFrame(frame);
-            break;
-        case FrameType::ACK:
-            handleAckFrame(frame);
-            break;
-        case FrameType::NAK:
-            handleNakFrame(frame);
-            break;
-        case FrameType::SACK:
-            handleSackFrame(frame);
-            break;
-        default:
-            break;
+    auto header = v2::parseHeader(frame_data);
+    if (!header.valid) {
+        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame with invalid header");
+        return;
+    }
+
+    uint32_t our_hash = v2::hashCallsign(local_call_);
+    if (header.dst_hash != our_hash && header.dst_hash != 0xFFFFFF) {
+        LOG_MODEM(TRACE, "SR-ARQ: Ignoring frame for different station");
+        return;
+    }
+
+    LOG_MODEM(DEBUG, "SR-ARQ: Received %s seq=%d",
+              v2::frameTypeToString(header.type), header.seq);
+
+    if (header.is_control) {
+        auto ctrl = v2::ControlFrame::deserialize(frame_data);
+        if (ctrl) {
+            switch (ctrl->type) {
+                case v2::FrameType::ACK:
+                    handleAckFrame(*ctrl);
+                    break;
+                case v2::FrameType::NACK:
+                    handleNackFrame(*ctrl);
+                    break;
+                default:
+                    break;
+            }
+        }
+    } else {
+        auto data_frame = v2::DataFrame::deserialize(frame_data);
+        if (data_frame) {
+            handleDataFrame(*data_frame);
+        }
     }
 }
 
-void SelectiveRepeatARQ::handleDataFrame(const Frame& frame) {
+void SelectiveRepeatARQ::handleDataFrame(const v2::DataFrame& frame) {
     last_rx_flags_ = frame.flags;
-    last_rx_more_data_ = (frame.flags & FrameFlags::MORE_DATA) != 0;
+    last_rx_more_data_ = (frame.flags & v2::Flags::MORE_FRAG) != 0;
 
-    uint8_t seq = frame.sequence;
+    uint16_t seq = frame.seq;
 
     if (isInRXWindow(seq)) {
         size_t slot = seqToSlot(seq);
 
         if (!rx_window_[slot].received) {
-            // New frame, store it
             rx_window_[slot].received = true;
-            rx_window_[slot].frame = frame;
+            rx_window_[slot].seq = seq;
+            rx_window_[slot].payload = frame.payload;
+            rx_window_[slot].flags = frame.flags;
             stats_.frames_received++;
 
             LOG_MODEM(DEBUG, "SR-ARQ: DATA seq=%d stored in slot %zu", seq, slot);
 
-            // If this is the expected frame, deliver in-order frames
             if (seq == rx_base_seq_) {
                 advanceRXWindow();
             } else {
@@ -134,27 +151,21 @@ void SelectiveRepeatARQ::handleDataFrame(const Frame& frame) {
             LOG_MODEM(DEBUG, "SR-ARQ: Duplicate DATA seq=%d", seq);
         }
 
-        // Send SACK
         sendSack();
 
     } else {
-        // Outside window - might be very old duplicate
         LOG_MODEM(WARN, "SR-ARQ: DATA seq=%d outside window [%d, %d)",
-                  seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFF);
-
-        // Send SACK anyway to help TX know where we are
+                  seq, rx_base_seq_, (rx_base_seq_ + config_.window_size) & 0xFFFF);
         sendSack();
     }
 }
 
-void SelectiveRepeatARQ::handleAckFrame(const Frame& frame) {
-    // Simple ACK - treat as cumulative
-    uint8_t seq = frame.sequence;
+void SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
+    uint16_t seq = frame.seq;
 
     LOG_MODEM(DEBUG, "SR-ARQ: ACK seq=%d (base=%d)", seq, tx_base_seq_);
 
-    // Mark this and all previous as ACKed
-    while (tx_in_flight_ > 0 && tx_base_seq_ != ((seq + 1) & 0xFF)) {
+    while (tx_in_flight_ > 0 && tx_base_seq_ != ((seq + 1) & 0xFFFF)) {
         size_t slot = seqToSlot(tx_base_seq_);
         if (tx_window_[slot].active) {
             tx_window_[slot].active = false;
@@ -162,82 +173,34 @@ void SelectiveRepeatARQ::handleAckFrame(const Frame& frame) {
             tx_in_flight_--;
             stats_.acks_received++;
 
-            // Notify completion
             if (on_send_complete_) {
                 on_send_complete_(true);
             }
         }
-        tx_base_seq_ = (tx_base_seq_ + 1) & 0xFF;
+        tx_base_seq_ = (tx_base_seq_ + 1) & 0xFFFF;
     }
 }
 
-void SelectiveRepeatARQ::handleNakFrame(const Frame& frame) {
-    uint8_t seq = frame.sequence;
+void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
+    uint16_t seq = frame.seq;
 
-    LOG_MODEM(DEBUG, "SR-ARQ: NAK seq=%d", seq);
+    LOG_MODEM(DEBUG, "SR-ARQ: NACK seq=%d", seq);
 
     if (isInTXWindow(seq)) {
         size_t slot = seqToSlot(seq);
         if (tx_window_[slot].active && !tx_window_[slot].acked) {
-            // Immediate retransmit
             retransmitFrame(slot);
         }
     }
 }
 
-void SelectiveRepeatARQ::handleSackFrame(const Frame& frame) {
-    uint8_t base_seq = frame.sequence;
-    uint8_t bitmap = frame.payload.empty() ? 0 : frame.payload[0];
-
-    LOG_MODEM(DEBUG, "SR-ARQ: SACK base=%d bitmap=0x%02X", base_seq, bitmap);
-    stats_.sacks_received++;
-
-    // Cumulative ACK up to and including base_seq
-    while (tx_in_flight_ > 0 && tx_base_seq_ != ((base_seq + 1) & 0xFF)) {
-        size_t slot = seqToSlot(tx_base_seq_);
-        if (tx_window_[slot].active) {
-            tx_window_[slot].active = false;
-            tx_in_flight_--;
-            stats_.acks_received++;
-
-            if (on_send_complete_) {
-                on_send_complete_(true);
-            }
-        }
-        tx_base_seq_ = (tx_base_seq_ + 1) & 0xFF;
-    }
-
-    // Process bitmap for selective ACKs
-    // Bit i means (base_seq + 1 + i) was received
-    for (int i = 0; i < 8 && i < static_cast<int>(config_.window_size); i++) {
-        uint8_t seq = (base_seq + 1 + i) & 0xFF;
-        if (isInTXWindow(seq)) {
-            size_t slot = seqToSlot(seq);
-            if (tx_window_[slot].active) {
-                if (bitmap & (1 << i)) {
-                    // Frame received, mark as ACKed (but don't advance window yet)
-                    tx_window_[slot].acked = true;
-                } else {
-                    // Frame not received, retransmit if timeout isn't imminent
-                    // (Let timeout handle it to avoid excessive retransmits)
-                }
-            }
-        }
-    }
-
-    // Advance window if head frames are ACKed
-    advanceTXWindow();
-}
-
 void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
-    // Process timeouts for each active slot
     for (size_t i = 0; i < config_.window_size; i++) {
-        size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFF);
+        size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         TXSlot& s = tx_window_[slot];
 
         if (s.active && !s.acked) {
             if (elapsed_ms >= s.timeout_ms) {
-                // Timeout - retransmit
                 stats_.timeouts++;
                 retransmitFrame(slot);
             } else {
@@ -252,9 +215,8 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot) {
 
     s.retry_count++;
     if (s.retry_count >= config_.max_retries) {
-        // Failed after max retries
         LOG_MODEM(ERROR, "SR-ARQ: Frame seq=%d failed after %d retries",
-                  s.frame.sequence, config_.max_retries);
+                  s.seq, config_.max_retries);
         stats_.failed++;
 
         s.active = false;
@@ -264,28 +226,25 @@ void SelectiveRepeatARQ::retransmitFrame(size_t slot) {
             on_send_complete_(false);
         }
 
-        // Advance window
         advanceTXWindow();
         return;
     }
 
     LOG_MODEM(DEBUG, "SR-ARQ: Retransmitting seq=%d (attempt %d/%d)",
-              s.frame.sequence, s.retry_count + 1, config_.max_retries);
+              s.seq, s.retry_count + 1, config_.max_retries);
 
     stats_.retransmissions++;
     s.timeout_ms = config_.ack_timeout_ms;
-    transmitFrame(s.frame);
+    transmitData(s.frame_data);
 }
 
 void SelectiveRepeatARQ::advanceTXWindow() {
-    // Advance base while head slots are complete (ACKed or failed)
     while (tx_in_flight_ > 0) {
         size_t slot = seqToSlot(tx_base_seq_);
         if (tx_window_[slot].active && !tx_window_[slot].acked) {
-            break;  // Still waiting for this frame
+            break;
         }
         if (tx_window_[slot].active) {
-            // Frame was ACKed, clear it
             tx_window_[slot].active = false;
             tx_in_flight_--;
 
@@ -293,51 +252,53 @@ void SelectiveRepeatARQ::advanceTXWindow() {
                 on_send_complete_(true);
             }
         }
-        tx_base_seq_ = (tx_base_seq_ + 1) & 0xFF;
+        tx_base_seq_ = (tx_base_seq_ + 1) & 0xFFFF;
     }
 }
 
 void SelectiveRepeatARQ::advanceRXWindow() {
-    // Deliver consecutive in-order frames
     while (true) {
         size_t slot = seqToSlot(rx_base_seq_);
         if (!rx_window_[slot].received) {
-            break;  // Gap in sequence
+            break;
         }
 
-        // Deliver frame
         LOG_MODEM(DEBUG, "SR-ARQ: Delivering seq=%d", rx_base_seq_);
 
         if (on_data_received_) {
-            on_data_received_(rx_window_[slot].frame.payload);
+            on_data_received_(rx_window_[slot].payload);
         }
 
-        // Clear slot
         rx_window_[slot].received = false;
-        rx_base_seq_ = (rx_base_seq_ + 1) & 0xFF;
+        rx_window_[slot].payload.clear();
+        rx_base_seq_ = (rx_base_seq_ + 1) & 0xFFFF;
     }
 }
 
 void SelectiveRepeatARQ::sendSack() {
     uint8_t bitmap = buildRXBitmap();
 
-    Frame sack = Frame::makeSack(local_call_, remote_call_,
-                                 (rx_base_seq_ - 1) & 0xFF, bitmap);
+    // Use NACK with bitmap as SACK
+    auto sack = v2::ControlFrame::makeNack(local_call_, remote_call_,
+                                            (rx_base_seq_ - 1) & 0xFFFF,
+                                            bitmap);
+    // Override type to ACK for cumulative ack behavior
+    sack.type = v2::FrameType::ACK;
+    sack.payload[2] = bitmap;  // Store bitmap in payload
 
     stats_.sacks_sent++;
     stats_.acks_sent++;
-    transmitFrame(sack);
+    transmitData(sack.serialize());
 
     LOG_MODEM(DEBUG, "SR-ARQ: Sent SACK base=%d bitmap=0x%02X",
-              (rx_base_seq_ - 1) & 0xFF, bitmap);
+              (rx_base_seq_ - 1) & 0xFFFF, bitmap);
 }
 
 uint8_t SelectiveRepeatARQ::buildRXBitmap() const {
     uint8_t bitmap = 0;
 
-    // Bit i = (rx_base_seq_ + i) received
     for (int i = 0; i < 8 && i < static_cast<int>(config_.window_size); i++) {
-        size_t slot = seqToSlot((rx_base_seq_ + i) & 0xFF);
+        size_t slot = seqToSlot((rx_base_seq_ + i) & 0xFFFF);
         if (rx_window_[slot].received) {
             bitmap |= (1 << i);
         }
@@ -346,25 +307,23 @@ uint8_t SelectiveRepeatARQ::buildRXBitmap() const {
     return bitmap;
 }
 
-size_t SelectiveRepeatARQ::seqToSlot(uint8_t seq) const {
+size_t SelectiveRepeatARQ::seqToSlot(uint16_t seq) const {
     return seq % MAX_WINDOW;
 }
 
-bool SelectiveRepeatARQ::isInTXWindow(uint8_t seq) const {
-    // Check if seq is in [tx_base_seq_, tx_next_seq_)
-    uint8_t diff = (seq - tx_base_seq_) & 0xFF;
+bool SelectiveRepeatARQ::isInTXWindow(uint16_t seq) const {
+    uint16_t diff = (seq - tx_base_seq_) & 0xFFFF;
     return diff < config_.window_size;
 }
 
-bool SelectiveRepeatARQ::isInRXWindow(uint8_t seq) const {
-    // Check if seq is in [rx_base_seq_, rx_base_seq_ + window_size)
-    uint8_t diff = (seq - rx_base_seq_) & 0xFF;
+bool SelectiveRepeatARQ::isInRXWindow(uint16_t seq) const {
+    uint16_t diff = (seq - rx_base_seq_) & 0xFFFF;
     return diff < config_.window_size;
 }
 
-void SelectiveRepeatARQ::transmitFrame(const Frame& frame) {
+void SelectiveRepeatARQ::transmitData(const Bytes& data) {
     if (on_transmit_) {
-        on_transmit_(frame);
+        on_transmit_(data);
     }
 }
 
@@ -381,18 +340,18 @@ void SelectiveRepeatARQ::setSendCompleteCallback(SendCompleteCallback cb) {
 }
 
 void SelectiveRepeatARQ::reset() {
-    // Clear TX window
     for (auto& slot : tx_window_) {
         slot.active = false;
         slot.acked = false;
+        slot.frame_data.clear();
     }
     tx_base_seq_ = 0;
     tx_next_seq_ = 0;
     tx_in_flight_ = 0;
 
-    // Clear RX window
     for (auto& slot : rx_window_) {
         slot.received = false;
+        slot.payload.clear();
     }
     rx_base_seq_ = 0;
 

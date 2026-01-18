@@ -1,7 +1,6 @@
 #pragma once
 
 #include "frame_v2.hpp"
-#include "frame.hpp"
 #include <functional>
 #include <memory>
 
@@ -55,8 +54,8 @@ struct ARQStats {
  */
 class IARQController {
 public:
-    // Callback types
-    using TransmitCallback = std::function<void(const Frame&)>;
+    // Callback types - uses Bytes for frame data (v2 serialized frames)
+    using TransmitCallback = std::function<void(const Bytes&)>;
     using DataReceivedCallback = std::function<void(const Bytes& data)>;
     using SendCompleteCallback = std::function<void(bool success)>;
 
@@ -92,8 +91,8 @@ public:
     // Get flags from last received frame
     virtual uint8_t lastRxFlags() const = 0;
 
-    // Process a received frame
-    virtual void onFrameReceived(const Frame& frame) = 0;
+    // Process received frame data (v2 serialized bytes)
+    virtual void onFrameReceived(const Bytes& frame_data) = 0;
 
     // --- Timing ---
 

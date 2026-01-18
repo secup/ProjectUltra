@@ -4,6 +4,7 @@
 #include "../src/protocol/frame_v2.hpp"
 
 using namespace ultra::protocol::v2;
+using ultra::Bytes;
 
 int tests_passed = 0;
 int tests_failed = 0;

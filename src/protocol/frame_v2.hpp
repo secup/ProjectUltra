@@ -179,10 +179,19 @@ namespace Flags {
 // 24-bit callsign hash (DJB2 algorithm, truncated)
 uint32_t hashCallsign(const std::string& callsign);
 
-// Check if a type is a control frame (1 codeword)
+// Check if a type is a control frame (1 codeword = 20 bytes)
+// NOTE: CONNECT/CONNECT_ACK/CONNECT_NAK are now ConnectFrames (larger)
 inline bool isControlFrame(FrameType type) {
-    uint8_t t = static_cast<uint8_t>(type);
-    return (t >= 0x10 && t <= 0x21) || t == 0x40;
+    return type == FrameType::PROBE || type == FrameType::PROBE_ACK ||
+           type == FrameType::DISCONNECT || type == FrameType::KEEPALIVE ||
+           type == FrameType::ACK || type == FrameType::NACK ||
+           type == FrameType::BEACON;
+}
+
+// Check if a type is a connect frame (carries full callsigns, ~41 bytes)
+inline bool isConnectFrame(FrameType type) {
+    return type == FrameType::CONNECT || type == FrameType::CONNECT_ACK ||
+           type == FrameType::CONNECT_NAK;
 }
 
 // Check if a type is a data frame (variable codewords)
@@ -208,7 +217,7 @@ struct ControlFrame {
     uint32_t dst_hash = 0;  // 24-bit (0xFFFFFF = broadcast)
     uint8_t payload[PAYLOAD_SIZE] = {0};
 
-    // Factory methods
+    // Factory methods (by callsign)
     static ControlFrame makeProbe(const std::string& src, const std::string& dst);
     static ControlFrame makeProbeAck(const std::string& src, const std::string& dst,
                                       uint8_t snr_db, uint8_t recommended_rate);
@@ -223,6 +232,16 @@ struct ControlFrame {
     static ControlFrame makeConnectAck(const std::string& src, const std::string& dst,
                                         uint8_t negotiated_mode);
     static ControlFrame makeConnectNak(const std::string& src, const std::string& dst);
+
+    // Factory methods (by hash - for responding to frames when callsign is unknown)
+    static ControlFrame makeProbeAckByHash(const std::string& src, uint32_t dst_hash,
+                                            uint8_t snr_db, uint8_t recommended_rate);
+    static ControlFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
+                                              uint8_t negotiated_mode);
+    static ControlFrame makeConnectNakByHash(const std::string& src, uint32_t dst_hash);
+    static ControlFrame makeAckByHash(const std::string& src, uint32_t dst_hash, uint16_t seq);
+    static ControlFrame makeNackByHash(const std::string& src, uint32_t dst_hash,
+                                        uint16_t seq, uint32_t cw_bitmap);
 
     // Serialize to exactly 20 bytes
     Bytes serialize() const;
@@ -268,6 +287,57 @@ struct DataFrame {
 
     // Get payload as text
     std::string payloadAsText() const;
+};
+
+// ============================================================================
+// Connect Frame (for ham-compliant callsign identification)
+// ============================================================================
+// Uses DATA frame structure for variable length, carrying full callsigns.
+// This ensures proper callsign identification per ham radio regulations.
+//
+// Payload format:
+// ┌────────────┬────────────┬──────┬──────┐
+// │ SRC_CALL   │ DST_CALL   │ CAPS │ PREF │
+// │ 10B (null) │ 10B (null) │  1B  │  1B  │  = 22 bytes payload
+// └────────────┴────────────┴──────┴──────┘
+//
+// Total frame: 17B header + 22B payload + 2B CRC = 41 bytes (3 codewords)
+struct ConnectFrame {
+    static constexpr size_t MAX_CALLSIGN_LEN = 10;  // 9 chars + null terminator
+    static constexpr size_t PAYLOAD_SIZE = 22;       // 10 + 10 + 1 + 1
+
+    FrameType type = FrameType::CONNECT;
+    uint8_t flags = Flags::VERSION_V2;
+    uint16_t seq = 0;
+    uint32_t src_hash = 0;  // For routing (24-bit)
+    uint32_t dst_hash = 0;  // For routing (24-bit)
+
+    char src_callsign[MAX_CALLSIGN_LEN] = {0};  // Full source callsign
+    char dst_callsign[MAX_CALLSIGN_LEN] = {0};  // Full destination callsign
+    uint8_t mode_capabilities = 0;               // Supported waveform modes
+    uint8_t negotiated_mode = 0;                 // Preferred/negotiated mode
+
+    // Factory methods
+    static ConnectFrame makeConnect(const std::string& src, const std::string& dst,
+                                     uint8_t mode_caps, uint8_t pref_mode);
+    static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
+                                        uint8_t neg_mode);
+    static ConnectFrame makeConnectNak(const std::string& src, const std::string& dst);
+
+    // Hash-based factory (for responding when only hash is known, fills in our callsign)
+    static ConnectFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
+                                              uint8_t neg_mode);
+    static ConnectFrame makeConnectNakByHash(const std::string& src, uint32_t dst_hash);
+
+    // Serialize to bytes (uses DATA frame format)
+    Bytes serialize() const;
+
+    // Deserialize from bytes
+    static std::optional<ConnectFrame> deserialize(ByteSpan data);
+
+    // Get callsigns as strings
+    std::string getSrcCallsign() const;
+    std::string getDstCallsign() const;
 };
 
 // ============================================================================
@@ -369,5 +439,11 @@ struct HeaderInfo {
 HeaderInfo parseHeader(const Bytes& first_codeword_data);
 
 } // namespace v2
+
+// Bring v2 types into protocol namespace for convenience
+using FrameType = v2::FrameType;
+using ControlFrame = v2::ControlFrame;
+using DataFrame = v2::DataFrame;
+
 } // namespace protocol
 } // namespace ultra

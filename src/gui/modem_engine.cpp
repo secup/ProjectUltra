@@ -155,31 +155,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes", to_modulate.size());
     } else {
-        // === Legacy/Data Frame Path ===
-        // Determine if this is a v1 link establishment frame
-        bool is_link_frame = false;
-        if (data.size() >= 5) {
-            uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
-                             (static_cast<uint32_t>(data[1]) << 16) |
-                             (static_cast<uint32_t>(data[2]) << 8) |
-                             static_cast<uint32_t>(data[3]);
-            if (magic == protocol::Frame::MAGIC) {
-                uint8_t frame_type = data[4];
-                is_link_frame = (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
-                                 frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
-                                 frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
-                                 frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK));
-            }
-        }
-
-        // Select code rate
-        CodeRate tx_code_rate = is_link_frame ? CodeRate::R1_4 :
-                                (connected_ ? data_code_rate_ : CodeRate::R1_4);
+        // === Raw Data Path (non-v2 frame) ===
+        // Use adaptive code rate based on connection state
+        CodeRate tx_code_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
 
         encoder_->setRate(tx_code_rate);
         Bytes encoded = encoder_->encode(data);
 
-        LOG_MODEM(INFO, "TX legacy: %zu bytes -> %zu encoded (rate=%d)",
+        LOG_MODEM(INFO, "TX raw: %zu bytes -> %zu encoded (rate=%d)",
                   data.size(), encoded.size(), static_cast<int>(tx_code_rate));
 
         to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;

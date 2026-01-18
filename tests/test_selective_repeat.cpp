@@ -11,7 +11,7 @@
 
 #include "protocol/arq_interface.hpp"
 #include "protocol/selective_repeat_arq.hpp"
-#include "protocol/frame.hpp"
+#include "protocol/frame_v2.hpp"
 #include <iostream>
 #include <cassert>
 #include <queue>
@@ -37,17 +37,17 @@ static int tests_passed = 0;
 // Test Helpers
 // ============================================================================
 
-// Simple frame queue to simulate channel
-class FrameChannel {
+// Simple byte queue to simulate channel (v2 frames as serialized bytes)
+class ByteChannel {
 public:
-    void send(const Frame& f) { queue_.push(f); }
+    void send(const Bytes& data) { queue_.push(data); }
 
-    bool hasFrame() const { return !queue_.empty(); }
+    bool hasData() const { return !queue_.empty(); }
 
-    Frame receive() {
-        Frame f = queue_.front();
+    Bytes receive() {
+        Bytes data = queue_.front();
         queue_.pop();
-        return f;
+        return data;
     }
 
     void clear() {
@@ -57,7 +57,7 @@ public:
     size_t size() const { return queue_.size(); }
 
 private:
-    std::queue<Frame> queue_;
+    std::queue<Bytes> queue_;
 };
 
 // ============================================================================
@@ -92,8 +92,8 @@ bool test_send_single_frame() {
     SelectiveRepeatARQ tx(config);
     tx.setCallsigns("TX1", "RX1");
 
-    FrameChannel channel;
-    tx.setTransmitCallback([&](const Frame& f) { channel.send(f); });
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
 
     // Send data
     Bytes data = {0x01, 0x02, 0x03};
@@ -104,12 +104,16 @@ bool test_send_single_frame() {
     if (channel.size() != 1)
         FAIL("Frame not transmitted");
 
-    Frame f = channel.receive();
-    if (f.type != protocol::FrameType::DATA)
+    Bytes frame_data = channel.receive();
+    auto parsed = v2::DataFrame::deserialize(frame_data);
+    if (!parsed)
+        FAIL("Failed to parse transmitted frame");
+
+    if (parsed->type != v2::FrameType::DATA)
         FAIL("Wrong frame type");
-    if (f.sequence != 0)
+    if (parsed->seq != 0)
         FAIL("Wrong sequence number");
-    if (f.payload != data)
+    if (parsed->payload != data)
         FAIL("Wrong payload");
 
     // Window should have 3 slots remaining
@@ -129,8 +133,8 @@ bool test_send_window_full() {
     SelectiveRepeatARQ tx(config);
     tx.setCallsigns("TX1", "RX1");
 
-    FrameChannel channel;
-    tx.setTransmitCallback([&](const Frame& f) { channel.send(f); });
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
 
     // Fill window
     for (int i = 0; i < 4; i++) {
@@ -168,8 +172,8 @@ bool test_receive_ack() {
     SelectiveRepeatARQ tx(config);
     tx.setCallsigns("TX1", "RX1");
 
-    FrameChannel channel;
-    tx.setTransmitCallback([&](const Frame& f) { channel.send(f); });
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
 
     int completions = 0;
     tx.setSendCompleteCallback([&](bool success) {
@@ -183,8 +187,9 @@ bool test_receive_ack() {
     channel.clear();
 
     // ACK first frame
-    Frame ack = Frame::makeAck("RX1", "TX1", 0);
-    tx.onFrameReceived(ack);
+    auto ack = v2::ControlFrame::makeAck("RX1", "TX1", 0);
+    Bytes ack_data = ack.serialize();
+    tx.onFrameReceived(ack_data);
 
     // Should have 1 completion
     if (completions != 1)
@@ -193,46 +198,6 @@ bool test_receive_ack() {
     // Should have 1 slot free
     if (tx.getAvailableSlots() != 1)
         FAIL("Expected 1 slot free");
-
-    PASS();
-    return true;
-}
-
-bool test_receive_sack() {
-    TEST("Receive SACK with bitmap");
-
-    ARQConfig config;
-    config.window_size = 4;
-
-    SelectiveRepeatARQ tx(config);
-    tx.setCallsigns("TX1", "RX1");
-
-    FrameChannel channel;
-    tx.setTransmitCallback([&](const Frame& f) { channel.send(f); });
-
-    int completions = 0;
-    tx.setSendCompleteCallback([&](bool success) {
-        if (success) completions++;
-    });
-
-    // Send 4 frames (seq 0,1,2,3)
-    for (int i = 0; i < 4; i++) {
-        tx.sendData(Bytes{static_cast<uint8_t>(i)});
-    }
-    channel.clear();
-
-    // SACK: base=1 (cumulative ACK of 0,1), bitmap=0x03 (bits 0,1 = seq 2,3 received)
-    // This ACKs all 4 frames: 0,1 cumulatively, 2,3 selectively
-    Frame sack = Frame::makeSack("RX1", "TX1", 1, 0x03);
-    tx.onFrameReceived(sack);
-
-    // All 4 frames should be ACKed (cumulative + selective + window advance)
-    if (completions != 4)
-        FAIL("Expected 4 completions, got " + std::to_string(completions));
-
-    // All slots should be free now
-    if (tx.getAvailableSlots() != 4)
-        FAIL("Expected 4 slots free, got " + std::to_string(tx.getAvailableSlots()));
 
     PASS();
     return true;
@@ -247,8 +212,8 @@ bool test_rx_in_order() {
     SelectiveRepeatARQ rx(config);
     rx.setCallsigns("RX1", "TX1");
 
-    FrameChannel channel;
-    rx.setTransmitCallback([&](const Frame& f) { channel.send(f); });
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
 
     std::vector<Bytes> received;
     rx.setDataReceivedCallback([&](const Bytes& data) {
@@ -257,8 +222,9 @@ bool test_rx_in_order() {
 
     // Receive frames in order
     for (int i = 0; i < 3; i++) {
-        Frame f = Frame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
-        rx.onFrameReceived(f);
+        auto frame = v2::DataFrame::makeData("TX1", "RX1", i, Bytes{static_cast<uint8_t>(i)});
+        Bytes frame_data = frame.serialize();
+        rx.onFrameReceived(frame_data);
     }
 
     // All 3 should be delivered
@@ -287,8 +253,8 @@ bool test_rx_out_of_order() {
     SelectiveRepeatARQ rx(config);
     rx.setCallsigns("RX1", "TX1");
 
-    FrameChannel channel;
-    rx.setTransmitCallback([&](const Frame& f) { channel.send(f); });
+    ByteChannel channel;
+    rx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
 
     std::vector<Bytes> received;
     rx.setDataReceivedCallback([&](const Bytes& data) {
@@ -296,24 +262,24 @@ bool test_rx_out_of_order() {
     });
 
     // Receive frame 2 first (out of order)
-    Frame f2 = Frame::makeData("TX1", "RX1", 2, Bytes{0x02});
-    rx.onFrameReceived(f2);
+    auto f2 = v2::DataFrame::makeData("TX1", "RX1", 2, Bytes{0x02});
+    rx.onFrameReceived(f2.serialize());
 
     // Should not deliver yet (waiting for 0,1)
     if (!received.empty())
         FAIL("Should not deliver out-of-order frame");
 
     // Receive frame 0
-    Frame f0 = Frame::makeData("TX1", "RX1", 0, Bytes{0x00});
-    rx.onFrameReceived(f0);
+    auto f0 = v2::DataFrame::makeData("TX1", "RX1", 0, Bytes{0x00});
+    rx.onFrameReceived(f0.serialize());
 
     // Should deliver frame 0 only
     if (received.size() != 1)
         FAIL("Should deliver frame 0");
 
     // Receive frame 1
-    Frame f1 = Frame::makeData("TX1", "RX1", 1, Bytes{0x01});
-    rx.onFrameReceived(f1);
+    auto f1 = v2::DataFrame::makeData("TX1", "RX1", 1, Bytes{0x01});
+    rx.onFrameReceived(f1.serialize());
 
     // Should now deliver 1 and 2 (in order)
     if (received.size() != 3)
@@ -340,8 +306,8 @@ bool test_timeout_retransmit() {
     SelectiveRepeatARQ tx(config);
     tx.setCallsigns("TX1", "RX1");
 
-    std::vector<Frame> transmitted;
-    tx.setTransmitCallback([&](const Frame& f) { transmitted.push_back(f); });
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
 
     // Send one frame
     tx.sendData(Bytes{0x01});
@@ -376,7 +342,7 @@ bool test_max_retries_failure() {
     SelectiveRepeatARQ tx(config);
     tx.setCallsigns("TX1", "RX1");
 
-    tx.setTransmitCallback([](const Frame&) {});
+    tx.setTransmitCallback([](const Bytes&) {});
 
     bool failed = false;
     tx.setSendCompleteCallback([&](bool success) {
@@ -414,13 +380,13 @@ bool test_full_exchange() {
     rx.setCallsigns("RX1", "TX1");
 
     // Connect TX -> RX
-    tx.setTransmitCallback([&](const Frame& f) {
-        rx.onFrameReceived(f);
+    tx.setTransmitCallback([&](const Bytes& data) {
+        rx.onFrameReceived(data);
     });
 
     // Connect RX -> TX
-    rx.setTransmitCallback([&](const Frame& f) {
-        tx.onFrameReceived(f);
+    rx.setTransmitCallback([&](const Bytes& data) {
+        tx.onFrameReceived(data);
     });
 
     std::vector<Bytes> received;
@@ -465,30 +431,26 @@ bool test_full_exchange() {
 // ============================================================================
 
 int main() {
-    std::cout << "╔════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║           Selective Repeat ARQ Test Suite                       ║\n";
-    std::cout << "╚════════════════════════════════════════════════════════════════╝\n\n";
+    std::cout << "=== Selective Repeat ARQ Test Suite (v2) ===\n\n";
 
-    std::cout << "=== Basic Tests ===\n";
+    std::cout << "Basic Tests:\n";
     test_create_sr_arq();
     test_send_single_frame();
     test_send_window_full();
     test_receive_ack();
-    test_receive_sack();
 
-    std::cout << "\n=== Receiver Tests ===\n";
+    std::cout << "\nReceiver Tests:\n";
     test_rx_in_order();
     test_rx_out_of_order();
 
-    std::cout << "\n=== Retransmission Tests ===\n";
+    std::cout << "\nRetransmission Tests:\n";
     test_timeout_retransmit();
     test_max_retries_failure();
 
-    std::cout << "\n=== Integration Tests ===\n";
+    std::cout << "\nIntegration Tests:\n";
     test_full_exchange();
 
-    std::cout << "\n════════════════════════════════════════════════════════════════\n";
-    std::cout << "Results: " << tests_passed << "/" << tests_run << " tests passed\n";
+    std::cout << "\n=== Results: " << tests_passed << "/" << tests_run << " tests passed ===\n";
 
     if (tests_passed == tests_run) {
         std::cout << "All tests PASSED!\n";

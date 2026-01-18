@@ -5,7 +5,7 @@
 #include "ultra/otfs.hpp"
 #include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
 #include "ultra/dsp.hpp"  // FIRFilter
-#include "protocol/frame.hpp"  // WaveformMode, FrameType
+#include "protocol/frame_v2.hpp"  // WaveformMode, FrameType
 #include "adaptive_mode.hpp"
 #include <memory>
 #include <vector>

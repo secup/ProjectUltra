@@ -25,7 +25,7 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/fec.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "protocol/frame.hpp"
+#include "protocol/frame_v2.hpp"
 #include <iostream>
 #include <iomanip>  // For std::setw
 #include <queue>
@@ -132,7 +132,7 @@ public:
     CodeRate data_code_rate = CodeRate::R1_2;
 
     // Frame type tracking for verification
-    std::vector<protocol::FrameType> tx_frame_types;
+    std::vector<v2::FrameType> tx_frame_types;
     std::vector<Modulation> tx_modulations;
 
     AdaptiveTestStation(const std::string& station_name, const std::string& callsign)
@@ -175,36 +175,34 @@ public:
         });
     }
 
-    // Check if first 4 bytes match the frame magic
+    // Check if first 2 bytes match v2 frame magic (0x554C = "UL")
     static bool hasMagic(const Bytes& data) {
-        if (data.size() < 4) return false;
-        uint32_t magic = (static_cast<uint32_t>(data[0]) << 24) |
-                         (static_cast<uint32_t>(data[1]) << 16) |
-                         (static_cast<uint32_t>(data[2]) << 8) |
-                          static_cast<uint32_t>(data[3]);
-        return magic == Frame::MAGIC;
+        if (data.size() < 2) return false;
+        uint16_t magic = (static_cast<uint16_t>(data[0]) << 8) |
+                          static_cast<uint16_t>(data[1]);
+        return magic == v2::MAGIC_V2;
     }
 
     // Determine if frame is a link establishment frame
     static bool isLinkFrame(const Bytes& data) {
-        if (data.size() >= 5 && hasMagic(data)) {
-            uint8_t frame_type = data[4];  // Type is at offset 4 after 4-byte magic
-            return (frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE) ||
-                    frame_type == static_cast<uint8_t>(protocol::FrameType::PROBE_ACK) ||
-                    frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT) ||
-                    frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_ACK) ||
-                    frame_type == static_cast<uint8_t>(protocol::FrameType::CONNECT_NAK) ||
-                    frame_type == static_cast<uint8_t>(protocol::FrameType::BEACON));
+        if (data.size() >= 3 && hasMagic(data)) {
+            uint8_t frame_type = data[2];  // Type is at offset 2 after 2-byte magic
+            return (frame_type == static_cast<uint8_t>(v2::FrameType::PROBE) ||
+                    frame_type == static_cast<uint8_t>(v2::FrameType::PROBE_ACK) ||
+                    frame_type == static_cast<uint8_t>(v2::FrameType::CONNECT) ||
+                    frame_type == static_cast<uint8_t>(v2::FrameType::CONNECT_ACK) ||
+                    frame_type == static_cast<uint8_t>(v2::FrameType::DISCONNECT) ||
+                    frame_type == static_cast<uint8_t>(v2::FrameType::BEACON));
         }
         return false;
     }
 
     // Get frame type from serialized data
-    static protocol::FrameType getFrameType(const Bytes& data) {
-        if (data.size() >= 5 && hasMagic(data)) {
-            return static_cast<protocol::FrameType>(data[4]);
+    static v2::FrameType getFrameType(const Bytes& data) {
+        if (data.size() >= 3 && hasMagic(data)) {
+            return static_cast<v2::FrameType>(data[2]);
         }
-        return protocol::FrameType::DATA;  // Default
+        return v2::FrameType::DATA;  // Default
     }
 
     // Transmit with adaptive modulation (like modem_engine.cpp)
@@ -213,7 +211,7 @@ public:
         Modulation tx_mod;
         CodeRate tx_rate;
 
-        protocol::FrameType frame_type = getFrameType(data);
+        v2::FrameType frame_type = getFrameType(data);
         bool is_link = isLinkFrame(data);
 
         if (is_link) {
@@ -416,18 +414,18 @@ bool test_probe_connect_at_snr(float snr_db) {
     if (bob.remote_call != "TEST1") FAIL("Bob has wrong remote callsign");
 
     // Helper to check if a frame type is a link establishment frame
-    auto isLinkFrameType = [](protocol::FrameType ft) {
-        return (ft == protocol::FrameType::PROBE ||
-                ft == protocol::FrameType::PROBE_ACK ||
-                ft == protocol::FrameType::CONNECT ||
-                ft == protocol::FrameType::CONNECT_ACK ||
-                ft == protocol::FrameType::CONNECT_NAK ||
-                ft == protocol::FrameType::BEACON);
+    auto isLinkFrameType = [](v2::FrameType ft) {
+        return (ft == v2::FrameType::PROBE ||
+                ft == v2::FrameType::PROBE_ACK ||
+                ft == v2::FrameType::CONNECT ||
+                ft == v2::FrameType::CONNECT_ACK ||
+                ft == v2::FrameType::CONNECT_NAK ||
+                ft == v2::FrameType::BEACON);
     };
 
     // Verify all link establishment frames used BPSK
     for (size_t i = 0; i < alice.tx_frame_types.size(); i++) {
-        protocol::FrameType ft = alice.tx_frame_types[i];
+        v2::FrameType ft = alice.tx_frame_types[i];
         Modulation mod = alice.tx_modulations[i];
         if (isLinkFrameType(ft)) {
             if (mod != Modulation::BPSK) {
@@ -441,7 +439,7 @@ bool test_probe_connect_at_snr(float snr_db) {
     }
 
     for (size_t i = 0; i < bob.tx_frame_types.size(); i++) {
-        protocol::FrameType ft = bob.tx_frame_types[i];
+        v2::FrameType ft = bob.tx_frame_types[i];
         Modulation mod = bob.tx_modulations[i];
         if (isLinkFrameType(ft)) {
             if (mod != Modulation::BPSK) {
@@ -507,9 +505,9 @@ bool test_link_frames_use_bpsk() {
     int bpsk_link_count = 0;
 
     for (size_t i = 0; i < alice.tx_frame_types.size(); i++) {
-        protocol::FrameType ft = alice.tx_frame_types[i];
-        if (ft == protocol::FrameType::PROBE || ft == protocol::FrameType::PROBE_ACK ||
-            ft == protocol::FrameType::CONNECT || ft == protocol::FrameType::CONNECT_ACK) {
+        v2::FrameType ft = alice.tx_frame_types[i];
+        if (ft == v2::FrameType::PROBE || ft == v2::FrameType::PROBE_ACK ||
+            ft == v2::FrameType::CONNECT || ft == v2::FrameType::CONNECT_ACK) {
             link_frame_count++;
             if (alice.tx_modulations[i] == Modulation::BPSK) {
                 bpsk_link_count++;
@@ -518,9 +516,9 @@ bool test_link_frames_use_bpsk() {
     }
 
     for (size_t i = 0; i < bob.tx_frame_types.size(); i++) {
-        protocol::FrameType ft = bob.tx_frame_types[i];
-        if (ft == protocol::FrameType::PROBE || ft == protocol::FrameType::PROBE_ACK ||
-            ft == protocol::FrameType::CONNECT || ft == protocol::FrameType::CONNECT_ACK) {
+        v2::FrameType ft = bob.tx_frame_types[i];
+        if (ft == v2::FrameType::PROBE || ft == v2::FrameType::PROBE_ACK ||
+            ft == v2::FrameType::CONNECT || ft == v2::FrameType::CONNECT_ACK) {
             link_frame_count++;
             if (bob.tx_modulations[i] == Modulation::BPSK) {
                 bpsk_link_count++;

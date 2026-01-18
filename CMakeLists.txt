@@ -59,7 +59,6 @@ add_library(ultra_core STATIC
     src/dsp/resampler.cpp
     src/modem/modem.cpp
     # Protocol layer (callsign addressing, connection management)
-    src/protocol/frame.cpp
     src/protocol/frame_v2.cpp
     src/protocol/arq_interface.cpp
     src/protocol/arq.cpp

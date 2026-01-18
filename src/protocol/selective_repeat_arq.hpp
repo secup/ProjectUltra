@@ -2,7 +2,6 @@
 
 #include "arq_interface.hpp"
 #include "frame_v2.hpp"
-#include "frame.hpp"
 #include <deque>
 #include <optional>
 #include <array>
@@ -49,7 +48,7 @@ public:
     bool lastRxHadMoreData() const override { return last_rx_more_data_; }
     uint8_t lastRxFlags() const override { return last_rx_flags_; }
 
-    void onFrameReceived(const Frame& frame) override;
+    void onFrameReceived(const Bytes& frame_data) override;
 
     void tick(uint32_t elapsed_ms) override;
 
@@ -66,7 +65,8 @@ private:
     // TX state per frame in window
     struct TXSlot {
         bool active = false;        // Slot in use
-        Frame frame;                // Frame to send/resend
+        Bytes frame_data;           // Serialized v2 frame to send/resend
+        uint16_t seq = 0;           // Sequence number
         uint32_t timeout_ms = 0;    // Time until retransmit
         int retry_count = 0;        // Number of retransmits
         bool acked = false;         // ACK received (waiting for earlier frames)
@@ -75,7 +75,9 @@ private:
     // RX state per frame in receive window
     struct RXSlot {
         bool received = false;      // Frame received
-        Frame frame;                // Received frame
+        uint16_t seq = 0;           // Sequence number
+        Bytes payload;              // Received payload
+        uint8_t flags = 0;          // Frame flags
     };
 
     // Maximum window size
@@ -89,13 +91,13 @@ private:
 
     // TX state
     std::array<TXSlot, MAX_WINDOW> tx_window_;
-    uint8_t tx_base_seq_ = 0;       // First unACKed sequence number
-    uint8_t tx_next_seq_ = 0;       // Next sequence to assign
+    uint16_t tx_base_seq_ = 0;      // First unACKed sequence number
+    uint16_t tx_next_seq_ = 0;      // Next sequence to assign
     size_t tx_in_flight_ = 0;       // Number of frames in flight
 
     // RX state
     std::array<RXSlot, MAX_WINDOW> rx_window_;
-    uint8_t rx_base_seq_ = 0;       // Next expected sequence
+    uint16_t rx_base_seq_ = 0;      // Next expected sequence
     bool last_rx_more_data_ = false;
     uint8_t last_rx_flags_ = 0;
 
@@ -108,15 +110,14 @@ private:
     SendCompleteCallback on_send_complete_;
 
     // Internal helpers
-    size_t seqToSlot(uint8_t seq) const;
-    bool isInTXWindow(uint8_t seq) const;
-    bool isInRXWindow(uint8_t seq) const;
+    size_t seqToSlot(uint16_t seq) const;
+    bool isInTXWindow(uint16_t seq) const;
+    bool isInRXWindow(uint16_t seq) const;
 
-    void transmitFrame(const Frame& frame);
-    void handleDataFrame(const Frame& frame);
-    void handleAckFrame(const Frame& frame);
-    void handleNakFrame(const Frame& frame);
-    void handleSackFrame(const Frame& frame);
+    void transmitData(const Bytes& data);
+    void handleDataFrame(const v2::DataFrame& frame);
+    void handleAckFrame(const v2::ControlFrame& frame);
+    void handleNackFrame(const v2::ControlFrame& frame);
 
     void retransmitFrame(size_t slot);
     void advanceTXWindow();

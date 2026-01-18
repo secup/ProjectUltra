@@ -9,16 +9,8 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     : connection_(config)
 {
     // Wire up Connection callbacks
-    connection_.setTransmitCallback([this](const Frame& f) {
-        handleTxFrame(f);
-    });
-
-    // v2 frames (raw bytes) go directly to modem
-    connection_.setRawTransmitCallback([this](const Bytes& data) {
-        LOG_MODEM(INFO, "Protocol TX v2: %zu bytes -> modem", data.size());
-        if (on_tx_data_) {
-            on_tx_data_(data);
-        }
+    connection_.setTransmitCallback([this](const Bytes& data) {
+        handleTxFrame(data);
     });
 
     connection_.setConnectedCallback([this]() {
@@ -113,46 +105,6 @@ void ProtocolEngine::disconnect() {
     }
 }
 
-// --- Channel Probing ---
-
-bool ProtocolEngine::probe(const std::string& remote_call) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool result = connection_.probe(remote_call);
-    if (result && on_connection_changed_) {
-        on_connection_changed_(ConnectionState::PROBING, remote_call);
-    }
-    return result;
-}
-
-bool ProtocolEngine::connectAfterProbe() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    bool result = connection_.connectAfterProbe();
-    if (result && on_connection_changed_) {
-        on_connection_changed_(ConnectionState::CONNECTING, connection_.getRemoteCallsign());
-    }
-    return result;
-}
-
-bool ProtocolEngine::isProbing() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return connection_.isProbing();
-}
-
-const ChannelReport& ProtocolEngine::getLastChannelReport() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return connection_.getLastChannelReport();
-}
-
-void ProtocolEngine::setProbeCompleteCallback(ProbeCompleteCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    connection_.setProbeCompleteCallback(std::move(cb));
-}
-
-void ProtocolEngine::setChannelMeasurementCallback(ChannelMeasurementCallback cb) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    connection_.setChannelMeasurementCallback(std::move(cb));
-}
-
 bool ProtocolEngine::sendMessage(const std::string& text) {
     std::lock_guard<std::mutex> lock(mutex_);
     return connection_.sendMessage(text);
@@ -211,114 +163,97 @@ void ProtocolEngine::onRxData(const Bytes& data) {
     LOG_MODEM(INFO, "Protocol RX: %zu bytes from modem (buffer now %zu)",
               data.size(), rx_buffer_.size() + data.size());
 
-    // Append to RX buffer
     rx_buffer_.insert(rx_buffer_.end(), data.begin(), data.end());
 
-    // Defer TX during RX processing to avoid re-entrancy
-    // TX will be flushed during tick()
     defer_tx_ = true;
-
-    // Try to parse frames
     processRxBuffer();
-
     defer_tx_ = false;
-    // NOTE: Don't flush TX queue here - do it in tick() to completely
-    // separate RX and TX processing paths
 }
 
 void ProtocolEngine::processRxBuffer() {
-    // Look for frame magic (4 bytes: 0x554C5452 = "ULTR")
+    // Look for v2 frame magic (2 bytes: 0x554C = "UL")
     while (!rx_buffer_.empty()) {
-        // Find magic sequence - search for first byte then verify full magic
-        constexpr uint8_t magic_bytes[4] = {
-            static_cast<uint8_t>((Frame::MAGIC >> 24) & 0xFF),  // 'U' = 0x55
-            static_cast<uint8_t>((Frame::MAGIC >> 16) & 0xFF),  // 'L' = 0x4C
-            static_cast<uint8_t>((Frame::MAGIC >> 8) & 0xFF),   // 'T' = 0x54
-            static_cast<uint8_t>(Frame::MAGIC & 0xFF)           // 'R' = 0x52
+        constexpr uint8_t magic_bytes[2] = {
+            static_cast<uint8_t>((v2::MAGIC_V2 >> 8) & 0xFF),  // 'U' = 0x55
+            static_cast<uint8_t>(v2::MAGIC_V2 & 0xFF)          // 'L' = 0x4C
         };
 
         auto it = std::search(rx_buffer_.begin(), rx_buffer_.end(),
                               std::begin(magic_bytes), std::end(magic_bytes));
         if (it == rx_buffer_.end()) {
-            // No magic found, keep last 3 bytes in case magic straddles buffer boundary
-            if (rx_buffer_.size() > 3) {
-                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.end() - 3);
+            if (rx_buffer_.size() > 1) {
+                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.end() - 1);
             }
             return;
         }
 
-        // Discard bytes before magic
         if (it != rx_buffer_.begin()) {
             rx_buffer_.erase(rx_buffer_.begin(), it);
         }
 
-        // Check if we have minimum frame size
-        if (rx_buffer_.size() < Frame::MIN_SIZE) {
-            // Need more data
+        // Check if we have minimum v2 frame size
+        if (rx_buffer_.size() < v2::ControlFrame::SIZE) {
             return;
         }
 
-        // Try to parse frame
-        ByteSpan span(rx_buffer_.data(), rx_buffer_.size());
-        auto frame_opt = Frame::deserialize(span);
+        // Parse header to determine frame type and size
+        auto header = v2::parseHeader(rx_buffer_);
+        if (!header.valid) {
+            LOG_MODEM(TRACE, "Protocol: Invalid v2 header, skipping 1 byte");
+            rx_buffer_.erase(rx_buffer_.begin());
+            continue;
+        }
 
-        if (frame_opt) {
-            // Successfully parsed frame
-            Frame& frame = *frame_opt;
-            LOG_MODEM(INFO, "RX << %s [%s -> %s] seq=%d payload=%zu bytes",
-                      frameTypeToString(frame.type),
-                      frame.src_call.c_str(), frame.dst_call.c_str(),
-                      frame.sequence, frame.payload.size());
-
-            // Calculate frame size and remove from buffer
-            size_t frame_size = Frame::HEADER_SIZE + frame.payload.size() + Frame::CRC_SIZE;
-            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
-
-            // Pass to connection
-            connection_.onFrameReceived(frame);
-
+        // Determine frame size based on type
+        size_t frame_size;
+        if (v2::isControlFrame(header.type)) {
+            // Control frames (PROBE, ACK, etc): 20 bytes
+            frame_size = v2::ControlFrame::SIZE;
+        } else if (v2::isConnectFrame(header.type)) {
+            // Connect frames: header + 22B payload + 2B CRC = 41 bytes
+            frame_size = v2::DataFrame::HEADER_SIZE + v2::ConnectFrame::PAYLOAD_SIZE + v2::DataFrame::CRC_SIZE;
         } else {
-            // Parse failed - could be:
-            // 1. Not enough data yet (need more bytes)
-            // 2. Corrupted frame (bad CRC)
-
-            // Debug: dump entire frame buffer (up to 64 bytes)
-            if (rx_buffer_.size() >= 24) {
-                char hex[200];
-                size_t dump_len = std::min(rx_buffer_.size(), size_t(64));
-                for (size_t i = 0; i < dump_len; i++) {
-                    snprintf(hex + i*3, 4, "%02x ", rx_buffer_[i]);
-                }
-                LOG_MODEM(INFO, "RX buffer (%zu bytes): %s", rx_buffer_.size(), hex);
+            // Data frame - need to read codeword count
+            if (rx_buffer_.size() < 12) {
+                return;  // Need more data
             }
+            uint8_t num_codewords = rx_buffer_[11];
+            frame_size = v2::DataFrame::HEADER_SIZE + num_codewords * v2::BYTES_PER_CODEWORD;
+        }
 
-            // Check if we have enough data for the frame based on length field
-            if (rx_buffer_.size() >= Frame::HEADER_SIZE) {
-                // Read length field (bytes 20-21, after callsigns)
-                uint16_t payload_len = (static_cast<uint16_t>(rx_buffer_[20]) << 8) |
-                                        static_cast<uint16_t>(rx_buffer_[21]);
+        if (rx_buffer_.size() < frame_size) {
+            return;  // Need more data
+        }
 
-                if (payload_len <= Frame::MAX_PAYLOAD) {
-                    size_t expected_size = Frame::HEADER_SIZE + payload_len + Frame::CRC_SIZE;
+        // Extract frame bytes
+        Bytes frame_data(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
 
-                    if (rx_buffer_.size() >= expected_size) {
-                        // We have all the data but CRC failed - corrupted frame
-                        LOG_MODEM(WARN, "ProtocolEngine: Corrupted frame (CRC failed), discarding");
-                        rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + expected_size);
-                        continue;
-                    }
-                }
-            }
+        // Verify CRC
+        bool crc_ok = false;
+        if (v2::isControlFrame(header.type)) {
+            auto ctrl = v2::ControlFrame::deserialize(frame_data);
+            crc_ok = ctrl.has_value();
+        } else if (v2::isConnectFrame(header.type)) {
+            auto conn = v2::ConnectFrame::deserialize(frame_data);
+            crc_ok = conn.has_value();
+        } else {
+            auto data_frame = v2::DataFrame::deserialize(frame_data);
+            crc_ok = data_frame.has_value();
+        }
 
-            // Not enough data yet, wait for more
-            return;
+        if (crc_ok) {
+            LOG_MODEM(INFO, "RX << %s seq=%d (%zu bytes)",
+                      v2::frameTypeToString(header.type), header.seq, frame_size);
+            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
+            connection_.onFrameReceived(frame_data);
+        } else {
+            LOG_MODEM(WARN, "Protocol: CRC failed, skipping frame");
+            rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
         }
     }
 }
 
 void ProtocolEngine::tick(uint32_t elapsed_ms) {
-    // First, flush any pending TX (queued during RX processing)
-    // Do this OUTSIDE the mutex to avoid holding lock during TX
     std::vector<Bytes> to_send;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -326,14 +261,12 @@ void ProtocolEngine::tick(uint32_t elapsed_ms) {
         tx_queue_.clear();
     }
 
-    // Send queued frames
     for (const auto& tx_data : to_send) {
         if (on_tx_data_) {
             on_tx_data_(tx_data);
         }
     }
 
-    // Now do the regular tick (with lock)
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.tick(elapsed_ms);
 }
@@ -371,27 +304,14 @@ void ProtocolEngine::reset() {
     defer_tx_ = false;
 }
 
-void ProtocolEngine::handleTxFrame(const Frame& frame) {
-    Bytes data = frame.serialize();
-    LOG_MODEM(INFO, "Protocol TX: %zu bytes -> modem%s", data.size(),
+void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
+    LOG_MODEM(INFO, "Protocol TX: %zu bytes -> modem%s", frame_data.size(),
               defer_tx_ ? " (queued)" : "");
 
-    // Debug: dump entire frame (up to 64 bytes)
-    {
-        char hex[200];
-        size_t dump_len = std::min(data.size(), size_t(64));
-        for (size_t i = 0; i < dump_len; i++) {
-            snprintf(hex + i*3, 4, "%02x ", data[i]);
-        }
-        LOG_MODEM(INFO, "TX frame (%zu bytes): %s", data.size(), hex);
-    }
-
     if (defer_tx_) {
-        // Queue for later transmission (we're inside RX processing)
-        tx_queue_.push_back(std::move(data));
+        tx_queue_.push_back(frame_data);
     } else if (on_tx_data_) {
-        // Send immediately
-        on_tx_data_(data);
+        on_tx_data_(frame_data);
     }
 }
 

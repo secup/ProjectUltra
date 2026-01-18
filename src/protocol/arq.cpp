@@ -25,12 +25,13 @@ bool StopAndWaitARQ::sendData(const Bytes& data) {
         return false;
     }
 
-    // Create DATA frame
-    pending_frame_ = Frame::makeData(local_call_, remote_call_, tx_seq_, data);
+    // Create v2 DATA frame
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_seq_, data);
+    pending_frame_data_ = frame.serialize();
     retry_count_ = 0;
 
     // Transmit
-    transmitFrame(pending_frame_);
+    transmitData(pending_frame_data_);
     state_ = State::WAIT_ACK;
     timeout_remaining_ms_ = config_.ack_timeout_ms;
 
@@ -56,13 +57,14 @@ bool StopAndWaitARQ::sendDataWithFlags(const Bytes& data, uint8_t flags) {
         return false;
     }
 
-    // Create DATA frame with custom flags
-    pending_frame_ = Frame::makeData(local_call_, remote_call_, tx_seq_, data);
-    pending_frame_.flags = flags;
+    // Create v2 DATA frame with custom flags
+    auto frame = v2::DataFrame::makeData(local_call_, remote_call_, tx_seq_, data);
+    frame.flags = flags;
+    pending_frame_data_ = frame.serialize();
     retry_count_ = 0;
 
     // Transmit
-    transmitFrame(pending_frame_);
+    transmitData(pending_frame_data_);
     state_ = State::WAIT_ACK;
     timeout_remaining_ms_ = config_.ack_timeout_ms;
 
@@ -77,42 +79,68 @@ bool StopAndWaitARQ::isReadyToSend() const {
     return state_ == State::IDLE;
 }
 
-void StopAndWaitARQ::onFrameReceived(const Frame& frame) {
-    // Check if frame is for us
-    if (!frame.isForCallsign(local_call_)) {
-        LOG_MODEM(TRACE, "ARQ: Ignoring frame for %s (we are %s)",
-                  frame.dst_call.c_str(), local_call_.c_str());
+void StopAndWaitARQ::onFrameReceived(const Bytes& frame_data) {
+    if (frame_data.size() < 2) {
         return;
     }
 
-    LOG_MODEM(DEBUG, "ARQ: Received %s from %s seq=%d",
-              frameTypeToString(frame.type), frame.src_call.c_str(), frame.sequence);
+    // Check magic
+    uint16_t magic = (static_cast<uint16_t>(frame_data[0]) << 8) | frame_data[1];
+    if (magic != v2::MAGIC_V2) {
+        LOG_MODEM(TRACE, "ARQ: Ignoring frame with wrong magic");
+        return;
+    }
 
-    switch (frame.type) {
-        case FrameType::DATA:
-            handleDataFrame(frame);
-            break;
-        case FrameType::ACK:
-            handleAckFrame(frame);
-            break;
-        case FrameType::NAK:
-            handleNakFrame(frame);
-            break;
-        default:
-            // Other frame types handled by Connection layer
-            break;
+    // Check if this is our frame by parsing header
+    auto header = v2::parseHeader(frame_data);
+    if (!header.valid) {
+        LOG_MODEM(TRACE, "ARQ: Ignoring frame with invalid header");
+        return;
+    }
+
+    // Check if frame is for us
+    uint32_t our_hash = v2::hashCallsign(local_call_);
+    if (header.dst_hash != our_hash && header.dst_hash != 0xFFFFFF) {
+        LOG_MODEM(TRACE, "ARQ: Ignoring frame for different station");
+        return;
+    }
+
+    LOG_MODEM(DEBUG, "ARQ: Received %s seq=%d",
+              v2::frameTypeToString(header.type), header.seq);
+
+    // Handle based on frame type
+    if (header.is_control) {
+        auto ctrl = v2::ControlFrame::deserialize(frame_data);
+        if (ctrl) {
+            switch (ctrl->type) {
+                case v2::FrameType::ACK:
+                    handleAckFrame(*ctrl);
+                    break;
+                case v2::FrameType::NACK:
+                    handleNackFrame(*ctrl);
+                    break;
+                default:
+                    // Other control frames handled by Connection layer
+                    break;
+            }
+        }
+    } else {
+        auto data_frame = v2::DataFrame::deserialize(frame_data);
+        if (data_frame) {
+            handleDataFrame(*data_frame);
+        }
     }
 }
 
-void StopAndWaitARQ::handleDataFrame(const Frame& frame) {
+void StopAndWaitARQ::handleDataFrame(const v2::DataFrame& frame) {
     // Track flags from this frame
     last_rx_flags_ = frame.flags;
-    last_rx_more_data_ = (frame.flags & FrameFlags::MORE_DATA) != 0;
+    last_rx_more_data_ = (frame.flags & v2::Flags::MORE_FRAG) != 0;
 
-    if (frame.sequence == rx_expected_seq_) {
+    if (frame.seq == rx_expected_seq_) {
         // In-order frame, deliver data
         LOG_MODEM(DEBUG, "ARQ: DATA seq=%d accepted, delivering %zu bytes, flags=0x%02x",
-                  frame.sequence, frame.payload.size(), frame.flags);
+                  frame.seq, frame.payload.size(), frame.flags);
 
         stats_.frames_received++;
 
@@ -122,45 +150,48 @@ void StopAndWaitARQ::handleDataFrame(const Frame& frame) {
         }
 
         // Queue ACK
-        pending_ack_ = Frame::makeAck(local_call_, frame.src_call, frame.sequence);
+        auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
+        pending_ack_ = ack.serialize();
         stats_.acks_sent++;
 
         // Advance expected sequence
-        rx_expected_seq_ = (rx_expected_seq_ + 1) & 0xFF;
+        rx_expected_seq_ = (rx_expected_seq_ + 1) & 0xFFFF;
 
-    } else if (frame.sequence == ((rx_expected_seq_ - 1) & 0xFF)) {
+    } else if (frame.seq == ((rx_expected_seq_ - 1) & 0xFFFF)) {
         // Duplicate (already received), re-ACK
-        LOG_MODEM(DEBUG, "ARQ: Duplicate DATA seq=%d, re-ACKing", frame.sequence);
-        pending_ack_ = Frame::makeAck(local_call_, frame.src_call, frame.sequence);
+        LOG_MODEM(DEBUG, "ARQ: Duplicate DATA seq=%d, re-ACKing", frame.seq);
+        auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
+        pending_ack_ = ack.serialize();
         stats_.acks_sent++;
 
     } else {
-        // Out of order or too old, NAK
-        LOG_MODEM(WARN, "ARQ: Out-of-order DATA seq=%d (expected %d), NAKing",
-                  frame.sequence, rx_expected_seq_);
-        pending_ack_ = Frame::makeNak(local_call_, frame.src_call, rx_expected_seq_);
+        // Out of order or too old, NACK
+        LOG_MODEM(WARN, "ARQ: Out-of-order DATA seq=%d (expected %d), NACKing",
+                  frame.seq, rx_expected_seq_);
+        auto nack = v2::ControlFrame::makeNack(local_call_, remote_call_, rx_expected_seq_, 0);
+        pending_ack_ = nack.serialize();
     }
 
-    // Transmit ACK/NAK immediately
+    // Transmit ACK/NACK immediately
     if (pending_ack_ && on_transmit_) {
         on_transmit_(*pending_ack_);
         pending_ack_.reset();
     }
 }
 
-void StopAndWaitARQ::handleAckFrame(const Frame& frame) {
+void StopAndWaitARQ::handleAckFrame(const v2::ControlFrame& frame) {
     if (state_ != State::WAIT_ACK) {
         LOG_MODEM(DEBUG, "ARQ: Ignoring ACK, not waiting for one");
         return;
     }
 
-    if (frame.sequence == tx_seq_) {
+    if (frame.seq == tx_seq_) {
         // ACK for our pending frame
         LOG_MODEM(DEBUG, "ARQ: ACK received for seq=%d", tx_seq_);
         stats_.acks_received++;
 
         // Advance TX sequence
-        tx_seq_ = (tx_seq_ + 1) & 0xFF;
+        tx_seq_ = (tx_seq_ + 1) & 0xFFFF;
 
         // Return to idle BEFORE callback so isReadyToSend() is true
         state_ = State::IDLE;
@@ -172,19 +203,19 @@ void StopAndWaitARQ::handleAckFrame(const Frame& frame) {
 
     } else {
         LOG_MODEM(WARN, "ARQ: ACK seq=%d doesn't match pending seq=%d",
-                  frame.sequence, tx_seq_);
+                  frame.seq, tx_seq_);
     }
 }
 
-void StopAndWaitARQ::handleNakFrame(const Frame& frame) {
+void StopAndWaitARQ::handleNackFrame(const v2::ControlFrame& frame) {
     if (state_ != State::WAIT_ACK) {
-        LOG_MODEM(DEBUG, "ARQ: Ignoring NAK, not waiting for ACK");
+        LOG_MODEM(DEBUG, "ARQ: Ignoring NACK, not waiting for ACK");
         return;
     }
 
-    LOG_MODEM(DEBUG, "ARQ: NAK received for seq=%d, retransmitting", frame.sequence);
+    LOG_MODEM(DEBUG, "ARQ: NACK received for seq=%d, retransmitting", frame.seq);
 
-    // Treat NAK as immediate timeout - retransmit
+    // Treat NACK as immediate timeout - retransmit
     retransmit();
 }
 
@@ -213,7 +244,7 @@ void StopAndWaitARQ::retransmit() {
               tx_seq_, retry_count_ + 1, config_.max_retries);
 
     stats_.retransmissions++;
-    transmitFrame(pending_frame_);
+    transmitData(pending_frame_data_);
     timeout_remaining_ms_ = config_.ack_timeout_ms;
 }
 
@@ -230,12 +261,12 @@ void StopAndWaitARQ::sendFailed() {
 
     // Return to idle (drop the frame)
     state_ = State::IDLE;
-    tx_seq_ = (tx_seq_ + 1) & 0xFF;  // Still advance seq to avoid confusion
+    tx_seq_ = (tx_seq_ + 1) & 0xFFFF;  // Still advance seq to avoid confusion
 }
 
-void StopAndWaitARQ::transmitFrame(const Frame& frame) {
+void StopAndWaitARQ::transmitData(const Bytes& data) {
     if (on_transmit_) {
-        on_transmit_(frame);
+        on_transmit_(data);
     }
 }
 
@@ -257,6 +288,7 @@ void StopAndWaitARQ::reset() {
     rx_expected_seq_ = 0;
     retry_count_ = 0;
     timeout_remaining_ms_ = 0;
+    pending_frame_data_.clear();
     pending_ack_.reset();
     LOG_MODEM(DEBUG, "ARQ: Reset");
 }

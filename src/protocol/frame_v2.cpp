@@ -245,6 +245,73 @@ ControlFrame ControlFrame::makeConnectNak(const std::string& src, const std::str
     return f;
 }
 
+// Hash-based factory methods (for responding when callsign is unknown)
+ControlFrame ControlFrame::makeProbeAckByHash(const std::string& src, uint32_t dst_hash,
+                                               uint8_t snr_db, uint8_t recommended_rate) {
+    ControlFrame f;
+    f.type = FrameType::PROBE_ACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;  // Ensure 24-bit
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    f.payload[0] = snr_db;
+    f.payload[1] = recommended_rate;
+    return f;
+}
+
+ControlFrame ControlFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
+                                                 uint8_t negotiated_mode) {
+    ControlFrame f;
+    f.type = FrameType::CONNECT_ACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    f.payload[0] = negotiated_mode;
+    return f;
+}
+
+ControlFrame ControlFrame::makeConnectNakByHash(const std::string& src, uint32_t dst_hash) {
+    ControlFrame f;
+    f.type = FrameType::CONNECT_NAK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    return f;
+}
+
+ControlFrame ControlFrame::makeAckByHash(const std::string& src, uint32_t dst_hash, uint16_t seq) {
+    ControlFrame f;
+    f.type = FrameType::ACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+    std::memset(f.payload, 0, PAYLOAD_SIZE);
+    return f;
+}
+
+ControlFrame ControlFrame::makeNackByHash(const std::string& src, uint32_t dst_hash,
+                                           uint16_t seq, uint32_t cw_bitmap) {
+    ControlFrame f;
+    f.type = FrameType::NACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+
+    NackPayload np;
+    np.frame_seq = seq;
+    np.cw_bitmap = cw_bitmap;
+    np.encode(f.payload);
+
+    return f;
+}
+
 Bytes ControlFrame::serialize() const {
     Bytes out(SIZE);
 
@@ -457,6 +524,228 @@ std::optional<DataFrame> DataFrame::deserialize(ByteSpan data) {
 
 std::string DataFrame::payloadAsText() const {
     return std::string(payload.begin(), payload.end());
+}
+
+// ============================================================================
+// ConnectFrame implementation (ham-compliant with full callsigns)
+// ============================================================================
+
+ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string& dst,
+                                        uint8_t mode_caps, uint8_t pref_mode) {
+    ConnectFrame f;
+    f.type = FrameType::CONNECT;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+
+    // Copy callsigns (null-terminated, max 9 chars)
+    std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+
+    f.mode_capabilities = mode_caps;
+    f.negotiated_mode = pref_mode;
+    return f;
+}
+
+ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::string& dst,
+                                           uint8_t neg_mode) {
+    ConnectFrame f;
+    f.type = FrameType::CONNECT_ACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+
+    std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+
+    f.mode_capabilities = 0;  // Not used in ACK
+    f.negotiated_mode = neg_mode;
+    return f;
+}
+
+ConnectFrame ConnectFrame::makeConnectNak(const std::string& src, const std::string& dst) {
+    ConnectFrame f;
+    f.type = FrameType::CONNECT_NAK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+
+    std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+
+    f.mode_capabilities = 0;
+    f.negotiated_mode = 0;
+    return f;
+}
+
+ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
+                                                 uint8_t neg_mode) {
+    ConnectFrame f;
+    f.type = FrameType::CONNECT_ACK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+
+    std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+    // dst_callsign unknown - leave empty (will be filled from received CONNECT)
+    f.dst_callsign[0] = '\0';
+
+    f.mode_capabilities = 0;
+    f.negotiated_mode = neg_mode;
+    return f;
+}
+
+ConnectFrame ConnectFrame::makeConnectNakByHash(const std::string& src, uint32_t dst_hash) {
+    ConnectFrame f;
+    f.type = FrameType::CONNECT_NAK;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+
+    std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+    f.dst_callsign[0] = '\0';
+
+    f.mode_capabilities = 0;
+    f.negotiated_mode = 0;
+    return f;
+}
+
+Bytes ConnectFrame::serialize() const {
+    // Use DATA frame format: header (17B) + payload (22B) + CRC (2B) = 41 bytes
+    Bytes out;
+    out.reserve(DataFrame::HEADER_SIZE + PAYLOAD_SIZE + DataFrame::CRC_SIZE);
+
+    // Magic (2 bytes)
+    out.push_back((MAGIC_V2 >> 8) & 0xFF);
+    out.push_back(MAGIC_V2 & 0xFF);
+
+    // Type, flags, seq (4 bytes)
+    out.push_back(static_cast<uint8_t>(type));
+    out.push_back(flags);
+    out.push_back((seq >> 8) & 0xFF);
+    out.push_back(seq & 0xFF);
+
+    // Hashes (6 bytes)
+    out.push_back((src_hash >> 16) & 0xFF);
+    out.push_back((src_hash >> 8) & 0xFF);
+    out.push_back(src_hash & 0xFF);
+    out.push_back((dst_hash >> 16) & 0xFF);
+    out.push_back((dst_hash >> 8) & 0xFF);
+    out.push_back(dst_hash & 0xFF);
+
+    // Total codewords (1 byte) - 41 bytes = 3 codewords
+    uint8_t total_cw = DataFrame::calculateCodewords(PAYLOAD_SIZE);
+    out.push_back(total_cw);
+
+    // Payload length (2 bytes)
+    out.push_back((PAYLOAD_SIZE >> 8) & 0xFF);
+    out.push_back(PAYLOAD_SIZE & 0xFF);
+
+    // Header CRC (2 bytes)
+    uint16_t hcrc = ControlFrame::calculateCRC(out.data(), out.size());
+    out.push_back((hcrc >> 8) & 0xFF);
+    out.push_back(hcrc & 0xFF);
+
+    // Payload: src_callsign (10B) + dst_callsign (10B) + caps (1B) + mode (1B)
+    for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
+        out.push_back(static_cast<uint8_t>(src_callsign[i]));
+    }
+    for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
+        out.push_back(static_cast<uint8_t>(dst_callsign[i]));
+    }
+    out.push_back(mode_capabilities);
+    out.push_back(negotiated_mode);
+
+    // Frame CRC (2 bytes)
+    uint16_t fcrc = ControlFrame::calculateCRC(out.data(), out.size());
+    out.push_back((fcrc >> 8) & 0xFF);
+    out.push_back(fcrc & 0xFF);
+
+    return out;
+}
+
+std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
+    constexpr size_t MIN_SIZE = DataFrame::HEADER_SIZE + PAYLOAD_SIZE + DataFrame::CRC_SIZE;
+    if (data.size() < MIN_SIZE) {
+        return std::nullopt;
+    }
+
+    // Verify magic
+    uint16_t magic = (static_cast<uint16_t>(data[0]) << 8) | data[1];
+    if (magic != MAGIC_V2) {
+        return std::nullopt;
+    }
+
+    // Check type is CONNECT, CONNECT_ACK, or CONNECT_NAK
+    FrameType ftype = static_cast<FrameType>(data[2]);
+    if (ftype != FrameType::CONNECT && ftype != FrameType::CONNECT_ACK &&
+        ftype != FrameType::CONNECT_NAK) {
+        return std::nullopt;
+    }
+
+    // Verify header CRC
+    uint16_t stored_hcrc = (static_cast<uint16_t>(data[15]) << 8) | data[16];
+    uint16_t calc_hcrc = ControlFrame::calculateCRC(data.data(), 15);
+    if (stored_hcrc != calc_hcrc) {
+        return std::nullopt;
+    }
+
+    // Verify frame CRC
+    size_t fcrc_offset = DataFrame::HEADER_SIZE + PAYLOAD_SIZE;
+    uint16_t stored_fcrc = (static_cast<uint16_t>(data[fcrc_offset]) << 8) | data[fcrc_offset + 1];
+    uint16_t calc_fcrc = ControlFrame::calculateCRC(data.data(), fcrc_offset);
+    if (stored_fcrc != calc_fcrc) {
+        return std::nullopt;
+    }
+
+    ConnectFrame f;
+    f.type = ftype;
+    f.flags = data[3];
+    f.seq = (static_cast<uint16_t>(data[4]) << 8) | data[5];
+    f.src_hash = (static_cast<uint32_t>(data[6]) << 16) |
+                 (static_cast<uint32_t>(data[7]) << 8) |
+                 data[8];
+    f.dst_hash = (static_cast<uint32_t>(data[9]) << 16) |
+                 (static_cast<uint32_t>(data[10]) << 8) |
+                 data[11];
+
+    // Parse payload (starts at offset 17)
+    size_t payload_offset = DataFrame::HEADER_SIZE;
+    for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
+        f.src_callsign[i] = static_cast<char>(data[payload_offset + i]);
+    }
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';  // Ensure null-terminated
+
+    for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
+        f.dst_callsign[i] = static_cast<char>(data[payload_offset + MAX_CALLSIGN_LEN + i]);
+    }
+    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+
+    f.mode_capabilities = data[payload_offset + 2 * MAX_CALLSIGN_LEN];
+    f.negotiated_mode = data[payload_offset + 2 * MAX_CALLSIGN_LEN + 1];
+
+    return f;
+}
+
+std::string ConnectFrame::getSrcCallsign() const {
+    return std::string(src_callsign);
+}
+
+std::string ConnectFrame::getDstCallsign() const {
+    return std::string(dst_callsign);
 }
 
 // ============================================================================
