@@ -37,4 +37,3 @@ Makefile
 compile_commands.json
 packaging/dist/
 Claude.md
-tests/data/
