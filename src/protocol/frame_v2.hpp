@@ -119,19 +119,34 @@ namespace v2 {
 // └─────────────────────────────────────────────────────────────────────────────┘
 //
 // Codeword layout for data frames:
-//   CW1: Header (17 bytes) + first 3 bytes of payload
-//   CW2-N: 20 bytes payload each
+//   CW0: [0x55][0x4C][TYPE][FLAGS][SEQ 2B][SRC 3B][DST 3B][TOTAL_CW][LEN 2B][HCRC 2B][payload 3B]
+//   CW1+: [0xD5][INDEX][payload 18B]  (marker identifies data CWs, index = 1-254)
 //   Last CW: remaining payload + 2-byte frame CRC (may have padding)
+//
+// This design ensures every codeword is self-identifying:
+//   - 0x554C magic = header codeword (CW0)
+//   - 0xD5 marker = data codeword with index following
 // ============================================================================
 
 // v2 Magic: "UL" (0x554C) - distinguishes from v1 "ULTR" (0x554C5452)
 constexpr uint16_t MAGIC_V2 = 0x554C;
 
+// Data codeword marker (0xD5) - identifies continuation codewords (CW1+)
+// Bit pattern 11010101 is balanced (good RF properties)
+constexpr uint8_t DATA_CW_MARKER = 0xD5;
+
 // Bytes per LDPC codeword (R1/4: k=162 bits = 20.25 bytes, use 20)
 constexpr size_t BYTES_PER_CODEWORD = 20;
 
-// Maximum codewords per frame (8 bits = 255 max)
+// Maximum codewords per frame (8 bits = 255 max, index 0-254)
 constexpr size_t MAX_CODEWORDS = 255;
+
+// Codeword payload sizes:
+// - CW0 (Header): 17-byte header leaves 3 bytes for payload start
+// - CW1+ (Data): 2-byte header (marker + index) leaves 18 bytes for payload
+constexpr size_t HEADER_CW_PAYLOAD_SIZE = 3;   // Payload bytes in CW0
+constexpr size_t DATA_CW_HEADER_SIZE = 2;      // Marker + Index in CW1+
+constexpr size_t DATA_CW_PAYLOAD_SIZE = 18;    // Payload bytes per CW1+
 
 // Maximum payload size: 255 CWs * 20 bytes - overhead ≈ 5KB
 // For larger transfers, use segmentation at higher layer
@@ -437,6 +452,43 @@ struct HeaderInfo {
     uint32_t dst_hash = 0;
 };
 HeaderInfo parseHeader(const Bytes& first_codeword_data);
+
+// ============================================================================
+// Codeword Identification Helpers
+// ============================================================================
+
+// Codeword type enumeration
+enum class CodewordType {
+    UNKNOWN,      // Not identifiable (corrupted or invalid)
+    HEADER,       // CW0: Header codeword (0x554C magic)
+    DATA,         // CW1+: Data codeword (0xD5 marker)
+};
+
+// Identify codeword type from first two bytes
+// Returns type and index (index is valid only for DATA type, 1-254)
+struct CodewordInfo {
+    CodewordType type = CodewordType::UNKNOWN;
+    uint8_t index = 0;  // Only valid for DATA codewords
+};
+
+CodewordInfo identifyCodeword(const Bytes& cw_data);
+
+// Check if bytes look like a header codeword (starts with 0x554C)
+inline bool isHeaderCodeword(const Bytes& data) {
+    return data.size() >= 2 &&
+           data[0] == ((MAGIC_V2 >> 8) & 0xFF) &&
+           data[1] == (MAGIC_V2 & 0xFF);
+}
+
+// Check if bytes look like a data codeword (starts with 0xD5)
+inline bool isDataCodeword(const Bytes& data) {
+    return data.size() >= 2 && data[0] == DATA_CW_MARKER;
+}
+
+// Get index from data codeword (assumes isDataCodeword returned true)
+inline uint8_t getDataCodewordIndex(const Bytes& data) {
+    return data.size() >= 2 ? data[1] : 0;
+}
 
 } // namespace v2
 

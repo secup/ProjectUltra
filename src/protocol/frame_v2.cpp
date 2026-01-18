@@ -388,10 +388,21 @@ std::optional<ControlFrame> ControlFrame::deserialize(ByteSpan data) {
 // ============================================================================
 
 uint8_t DataFrame::calculateCodewords(size_t payload_size) {
-    // Total frame size = header (17) + payload + CRC (2)
+    // Total frame size = header (17) + payload + frame_CRC (2)
     size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
-    // Ceiling division by BYTES_PER_CODEWORD
-    return static_cast<uint8_t>((total + BYTES_PER_CODEWORD - 1) / BYTES_PER_CODEWORD);
+
+    // CW0 carries 20 bytes of raw frame data
+    if (total <= BYTES_PER_CODEWORD) {
+        return 1;
+    }
+
+    // Remaining bytes after CW0
+    size_t remaining = total - BYTES_PER_CODEWORD;
+
+    // Each CW1+ carries DATA_CW_PAYLOAD_SIZE (18) bytes due to marker + index overhead
+    size_t additional_cws = (remaining + DATA_CW_PAYLOAD_SIZE - 1) / DATA_CW_PAYLOAD_SIZE;
+
+    return static_cast<uint8_t>(1 + additional_cws);
 }
 
 DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
@@ -791,13 +802,34 @@ int NackPayload::countFailed() const {
 std::vector<Bytes> splitIntoCodewords(const Bytes& frame_data) {
     std::vector<Bytes> codewords;
 
-    size_t offset = 0;
+    // CW0: First 20 bytes of frame data (contains header with 0x554C magic)
+    // No modification needed - the magic already identifies it
+    {
+        Bytes cw0(BYTES_PER_CODEWORD, 0);  // Zero-pad if needed
+        size_t cw0_data = std::min(BYTES_PER_CODEWORD, frame_data.size());
+        std::memcpy(cw0.data(), frame_data.data(), cw0_data);
+        codewords.push_back(std::move(cw0));
+    }
+
+    // CW1+: Add marker + index header before payload data
+    size_t offset = BYTES_PER_CODEWORD;  // Start after CW0's data
+    uint8_t cw_index = 1;
+
     while (offset < frame_data.size()) {
-        size_t chunk_size = std::min(BYTES_PER_CODEWORD, frame_data.size() - offset);
         Bytes cw(BYTES_PER_CODEWORD, 0);  // Zero-pad if needed
-        std::memcpy(cw.data(), frame_data.data() + offset, chunk_size);
+
+        // Add marker and index
+        cw[0] = DATA_CW_MARKER;
+        cw[1] = cw_index;
+
+        // Copy payload data (up to 18 bytes)
+        size_t remaining = frame_data.size() - offset;
+        size_t chunk_size = std::min(DATA_CW_PAYLOAD_SIZE, remaining);
+        std::memcpy(cw.data() + DATA_CW_HEADER_SIZE, frame_data.data() + offset, chunk_size);
+
         codewords.push_back(std::move(cw));
-        offset += BYTES_PER_CODEWORD;
+        offset += DATA_CW_PAYLOAD_SIZE;  // Each CW1+ consumes 18 bytes of frame data
+        cw_index++;
     }
 
     return codewords;
@@ -809,11 +841,26 @@ Bytes reassembleCodewords(const std::vector<Bytes>& codewords, size_t expected_s
 
     for (size_t i = 0; i < codewords.size(); i++) {
         size_t remaining = expected_size - result.size();
-        size_t to_copy = std::min(remaining, codewords[i].size());
-        result.insert(result.end(), codewords[i].begin(), codewords[i].begin() + to_copy);
+        if (remaining == 0) break;
 
-        if (result.size() >= expected_size) {
-            break;
+        if (i == 0) {
+            // CW0: All 20 bytes are frame data (header + payload start)
+            size_t to_copy = std::min(remaining, codewords[i].size());
+            result.insert(result.end(), codewords[i].begin(), codewords[i].begin() + to_copy);
+        } else {
+            // CW1+: Skip marker (0xD5) and index, copy payload portion
+            // Verify marker byte (optional - for robustness)
+            if (codewords[i].size() >= DATA_CW_HEADER_SIZE && codewords[i][0] == DATA_CW_MARKER) {
+                size_t payload_size = codewords[i].size() - DATA_CW_HEADER_SIZE;
+                size_t to_copy = std::min(remaining, payload_size);
+                result.insert(result.end(),
+                              codewords[i].begin() + DATA_CW_HEADER_SIZE,
+                              codewords[i].begin() + DATA_CW_HEADER_SIZE + to_copy);
+            } else {
+                // Fallback: old format without marker (backward compatibility during transition)
+                size_t to_copy = std::min(remaining, codewords[i].size());
+                result.insert(result.end(), codewords[i].begin(), codewords[i].begin() + to_copy);
+            }
         }
     }
 
@@ -1019,6 +1066,32 @@ HeaderInfo parseHeader(const Bytes& first_codeword_data) {
     }
 
     info.valid = true;
+    return info;
+}
+
+CodewordInfo identifyCodeword(const Bytes& cw_data) {
+    CodewordInfo info;
+
+    if (cw_data.size() < 2) {
+        return info;  // Too short to identify
+    }
+
+    // Check for header magic (0x554C = "UL")
+    uint16_t first_two = (static_cast<uint16_t>(cw_data[0]) << 8) | cw_data[1];
+    if (first_two == MAGIC_V2) {
+        info.type = CodewordType::HEADER;
+        info.index = 0;
+        return info;
+    }
+
+    // Check for data codeword marker (0xD5)
+    if (cw_data[0] == DATA_CW_MARKER) {
+        info.type = CodewordType::DATA;
+        info.index = cw_data[1];
+        return info;
+    }
+
+    // Unknown codeword type
     return info;
 }
 

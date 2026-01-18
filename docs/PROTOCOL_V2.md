@@ -93,20 +93,28 @@ Total: 20 bytes = 160 bits < 162 bits (fits in 1 R1/4 codeword)
 
 ### Data Frame Format (Variable length)
 
+Data frames use a 17-byte header optimized for the codeword structure:
+
 ```
-┌────────┬──────┬───────┬───────┬───────────┬───────────┬─────────┬──────┬───────┐
-│ MAGIC  │ TYPE │ FLAGS │ SEQ   │ XFER_ID   │ FRAG_INFO │ LEN     │ DATA │ CRC16 │
-│  2B    │  1B  │  1B   │  2B   │    2B     │    4B     │  2B     │  N   │  2B   │
-└────────┴──────┴───────┴───────┴───────────┴───────────┴─────────┴──────┴───────┘
-Header: 14 bytes, Trailer: 2 bytes
+┌────────┬──────┬───────┬───────┬──────────┬──────────┬──────────┬─────┬───────┬──────┬───────┐
+│ MAGIC  │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ TOTAL_CW │ LEN │ HCRC  │ DATA │ FCRC  │
+│  2B    │  1B  │  1B   │  2B   │    3B    │    3B    │    1B    │ 2B  │  2B   │  N   │  2B   │
+└────────┴──────┴───────┴───────┴──────────┴──────────┴──────────┴─────┴───────┴──────┴───────┘
+Header: 17 bytes, Trailer: 2 bytes
 ```
 
-**Additional Fields for DATA frames:**
-- **XFER_ID** (2 bytes): Transfer identifier (for concurrent transfers)
-- **FRAG_INFO** (4 bytes): Fragment offset (3B) + Total fragments (1B) or Total size for DATA_START
-- **LEN** (2 bytes): Payload length in this frame (0-65535)
+**Fields:**
+- **MAGIC** (2 bytes): `0x554C` ("UL")
+- **TYPE** (1 byte): DATA (0x30), DATA_START (0x31), etc.
+- **FLAGS** (1 byte): Frame flags
+- **SEQ** (2 bytes): Sequence number
+- **SRC_HASH** (3 bytes): 24-bit source callsign hash
+- **DST_HASH** (3 bytes): 24-bit destination callsign hash
+- **TOTAL_CW** (1 byte): Number of codewords (1-255)
+- **LEN** (2 bytes): Payload length
+- **HCRC** (2 bytes): Header CRC (covers bytes 0-14)
 - **DATA** (N bytes): Payload data
-- **CRC16** (2 bytes): CRC-16 over entire frame
+- **FCRC** (2 bytes): Frame CRC over entire frame
 
 ### Flags Byte
 
@@ -144,36 +152,90 @@ uint32_t hashCallsign(const char* call) {
 
 ## Codeword Strategy
 
+### Self-Identifying Codewords
+
+Every codeword is **self-identifying** through its first bytes. This enables robust recovery when codewords are lost or arrive out of order.
+
+#### CW0 (Header Codeword) - 20 bytes
+```
+┌───────┬──────┬───────┬───────┬──────────┬──────────┬──────────┬─────┬───────┬──────────┐
+│ MAGIC │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ TOTAL_CW │ LEN │ HCRC  │ PAYLOAD  │
+│0x554C │  1B  │  1B   │  2B   │    3B    │    3B    │    1B    │ 2B  │  2B   │   3B     │
+└───────┴──────┴───────┴───────┴──────────┴──────────┴──────────┴─────┴───────┴──────────┘
+```
+
+- **MAGIC** (0x554C = "UL"): Identifies this as a header codeword
+- **TOTAL_CW**: Total codewords in frame (1-255)
+- **LEN**: Payload length for reassembly
+- **HCRC**: Header CRC (covers bytes 0-14)
+- **PAYLOAD**: First 3 bytes of payload data
+
+#### CW1+ (Data Codewords) - 20 bytes each
+```
+┌────────┬───────┬─────────────────────────────────────────────────┐
+│ MARKER │ INDEX │                  PAYLOAD                        │
+│  0xD5  │  1B   │                   18B                           │
+└────────┴───────┴─────────────────────────────────────────────────┘
+```
+
+- **MARKER** (0xD5): Identifies this as a data codeword
+- **INDEX**: Codeword position (1-254) within the frame
+- **PAYLOAD**: 18 bytes of frame data
+
+### Codeword Identification Logic
+
+```cpp
+if (cw[0] == 0x55 && cw[1] == 0x4C) {
+    // Header codeword (CW0) - parse full header
+} else if (cw[0] == 0xD5) {
+    // Data codeword (CW1+) - extract index from cw[1]
+} else {
+    // Unknown/corrupted - discard
+}
+```
+
+### Why Self-Identifying?
+
+**Problem**: If CW0 fails LDPC decode but CW1-3 succeed, the old design would lose the entire frame because data CWs had no identification.
+
+**Solution**: With marker + index, the receiver can:
+1. Buffer data CWs by their index while waiting for CW0
+2. Send NACK requesting CW0 retransmit
+3. When CW0 arrives, merge buffered CWs and reassemble
+4. Overhead: 2 bytes per data CW (10%) - acceptable tradeoff
+
 ### Codeword Count Calculation
 
-For a frame with total size `S` bytes and code rate with `k` info bits:
-
+For a data frame with payload of `P` bytes:
 ```
-bytes_per_codeword = floor(k / 8)  // Integer bytes that fit
-codewords_needed = ceil(S / bytes_per_codeword)
-```
+total_frame = 17 (header) + P (payload) + 2 (frame CRC) = 19 + P bytes
 
-For R1/4 (k=162 bits = 20.25 bytes):
-- Use 20 bytes per codeword (discard 0.25 bytes capacity for simplicity)
-- Frame of N bytes needs: `ceil(N / 20)` codewords
+CW0 carries: 20 bytes (header 17B + first 3B of remaining data)
+CW1+ each carry: 18 bytes of payload (due to 2B marker+index overhead)
+
+If total_frame <= 20: need 1 codeword
+Otherwise: need 1 + ceil((total_frame - 20) / 18) codewords
+```
 
 ### Transmission Structure
 
 ```
 ┌─────────────────┬─────────────────┬─────────────────┬─────────────────┐
-│   Preamble      │   Codeword 1    │   Codeword 2    │   Codeword N    │
-│   (Sync)        │   (81 bytes)    │   (81 bytes)    │   (81 bytes)    │
+│   Preamble      │      CW0        │      CW1        │      CWn        │
+│   (Sync)        │ [0x554C header] │ [0xD5 01 data]  │ [0xD5 nn data]  │
+│                 │   (81 bytes)    │   (81 bytes)    │   (81 bytes)    │
 └─────────────────┴─────────────────┴─────────────────┴─────────────────┘
 ```
 
 ### Frame Size Examples
 
-| Frame Type | Size (bytes) | Codewords (R1/4) | TX Time |
-|------------|--------------|------------------|---------|
-| Control (PROBE, ACK) | 20 | 1 | ~2.3 sec |
-| Small DATA (100B payload) | 116 | 6 | ~14 sec |
-| Medium DATA (256B payload) | 272 | 14 | ~32 sec |
-| Large DATA (1KB payload) | 1038 | 52 | ~2 min |
+| Frame Type | Payload | Frame Size | Codewords (R1/4) |
+|------------|---------|------------|------------------|
+| Control (PROBE, ACK) | 6B | 20B | 1 |
+| Short text (20B) | 20B | 39B | 2 |
+| Medium text (50B) | 50B | 69B | 4 |
+| Long text (100B) | 100B | 119B | 7 |
+| Large DATA (256B) | 256B | 275B | 16 |
 
 ---
 
@@ -233,6 +295,52 @@ struct Transfer {
     char filename[201];
 };
 ```
+
+---
+
+## Per-Codeword Recovery
+
+### NACK Frame for Codeword Retransmit
+
+When one or more codewords fail LDPC decode, the receiver sends a NACK control frame:
+
+```
+NACK Payload (6 bytes in control frame):
+┌───────────────┬────────────────────────────────────────┐
+│ FRAME_SEQ (2B)│ CW_BITMAP (4B = 32 bits)               │
+└───────────────┴────────────────────────────────────────┘
+```
+
+- **FRAME_SEQ**: Sequence number of the frame with errors
+- **CW_BITMAP**: Bit i = 1 means codeword i failed (supports up to 32 CWs)
+
+### Recovery Flow
+
+```
+Sender                              Receiver
+  │                                    │
+  │──── CW0 (header) ─────────────────►│  ✓ LDPC OK
+  │──── CW1 (data) ───────────────────►│  ✓ LDPC OK
+  │──── CW2 (data) ────────X (noise)   │  ✗ LDPC FAIL
+  │──── CW3 (data) ───────────────────►│  ✓ LDPC OK
+  │                                    │
+  │◄─── NACK seq=N, bitmap=0x04 ───────│  (CW2 failed)
+  │                                    │
+  │──── CW2 (retransmit) ─────────────►│  ✓ LDPC OK
+  │                                    │
+  │◄─── ACK seq=N ─────────────────────│  (frame complete)
+```
+
+### Out-of-Order Codeword Handling
+
+Because CW1+ have marker + index, the receiver can handle out-of-order arrival:
+
+1. **CW2 arrives first**: Buffer with index=2
+2. **CW1 arrives second**: Buffer with index=1
+3. **CW0 arrives last**: Parse header, learn TOTAL_CW, merge buffered CWs
+4. **Reassemble**: All codewords present, frame complete
+
+This is especially useful when CW0 fails and must be retransmitted - the data CWs are already buffered.
 
 ---
 
@@ -400,11 +508,6 @@ Start with R1/4 (most robust). If PROBE_ACK indicates SNR > 10dB, can negotiate 
 
 ---
 
-## Version History
+## Version
 
-- v2.0 (2026-01-18): Initial specification
-  - Optimized control frames for 1 codeword
-  - 16-bit sequence numbers
-  - Callsign hashing
-  - Selective Repeat ARQ
-  - Large file transfer support
+**v2 (2026-01-18)**

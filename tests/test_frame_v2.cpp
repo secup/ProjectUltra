@@ -660,6 +660,121 @@ void test_full_recovery_cycle() {
     }
 }
 
+void test_codeword_identification() {
+    TEST("codeword identification (marker + index)") {
+        // Create a data frame that will have multiple codewords
+        std::string message = "Test message for codeword identification";
+        auto data = DataFrame::makeData("VA2MVR", "W1AW", 100, message);
+        auto serialized = data.serialize();
+        auto codewords = splitIntoCodewords(serialized);
+
+        assert(codewords.size() >= 3);  // Should have at least 3 CWs
+
+        // CW0 should be identified as HEADER
+        auto cw0_info = identifyCodeword(codewords[0]);
+        assert(cw0_info.type == CodewordType::HEADER);
+        assert(cw0_info.index == 0);
+        assert(isHeaderCodeword(codewords[0]));
+        assert(!isDataCodeword(codewords[0]));
+
+        // CW1 should be identified as DATA with index 1
+        auto cw1_info = identifyCodeword(codewords[1]);
+        assert(cw1_info.type == CodewordType::DATA);
+        assert(cw1_info.index == 1);
+        assert(!isHeaderCodeword(codewords[1]));
+        assert(isDataCodeword(codewords[1]));
+        assert(getDataCodewordIndex(codewords[1]) == 1);
+
+        // CW2 should be identified as DATA with index 2
+        auto cw2_info = identifyCodeword(codewords[2]);
+        assert(cw2_info.type == CodewordType::DATA);
+        assert(cw2_info.index == 2);
+        assert(getDataCodewordIndex(codewords[2]) == 2);
+
+        // Verify CW1+ start with marker 0xD5
+        assert(codewords[1][0] == DATA_CW_MARKER);
+        assert(codewords[2][0] == DATA_CW_MARKER);
+
+        // Verify reassembly still works
+        auto reassembled = reassembleCodewords(codewords, serialized.size());
+        assert(reassembled == serialized);
+
+        auto parsed = DataFrame::deserialize(reassembled);
+        assert(parsed.has_value());
+        assert(parsed->payloadAsText() == message);
+
+        std::cout << "  CW0: HEADER (0x554C magic)\n";
+        std::cout << "  CW1: DATA index=1 (0xD5 marker)\n";
+        std::cout << "  CW2: DATA index=2 (0xD5 marker)\n  ";
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
+void test_codeword_out_of_order_recovery() {
+    TEST("out-of-order codeword recovery simulation") {
+        // Simulate receiving codewords out of order
+        std::string message = "This tests out-of-order codeword reception!";
+        auto data = DataFrame::makeData("VA2MVR", "W1AW", 200, message);
+        auto serialized = data.serialize();
+        auto codewords = splitIntoCodewords(serialized);
+
+        assert(codewords.size() >= 4);
+
+        // Initialize status for the frame
+        CodewordStatus status;
+        status.initForFrame(codewords.size());
+
+        // Receive CW2 first (out of order)
+        auto cw2_info = identifyCodeword(codewords[2]);
+        assert(cw2_info.type == CodewordType::DATA);
+        status.decoded[cw2_info.index] = true;
+        status.data[cw2_info.index] = codewords[2];
+
+        // Receive CW1 second (still out of order)
+        auto cw1_info = identifyCodeword(codewords[1]);
+        assert(cw1_info.type == CodewordType::DATA);
+        status.decoded[cw1_info.index] = true;
+        status.data[cw1_info.index] = codewords[1];
+
+        // Not all received yet
+        assert(!status.allSuccess());
+
+        // Receive CW3 (if exists)
+        if (codewords.size() > 3) {
+            auto cw3_info = identifyCodeword(codewords[3]);
+            status.decoded[cw3_info.index] = true;
+            status.data[cw3_info.index] = codewords[3];
+        }
+
+        // Finally receive CW0 (header)
+        auto cw0_info = identifyCodeword(codewords[0]);
+        assert(cw0_info.type == CodewordType::HEADER);
+        status.decoded[0] = true;
+        status.data[0] = codewords[0];
+
+        // Now all should be received
+        assert(status.allSuccess());
+
+        // Reassemble and verify
+        auto reassembled = status.reassemble();
+        assert(reassembled == serialized);
+
+        auto parsed = DataFrame::deserialize(reassembled);
+        assert(parsed.has_value());
+        assert(parsed->payloadAsText() == message);
+
+        std::cout << "  Received order: CW2 → CW1 → CW3 → CW0\n";
+        std::cout << "  Successfully reassembled after header arrival\n  ";
+
+        PASS();
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
+}
+
 int main() {
     std::cout << "=== ULTRA Protocol v2 Frame Tests ===\n\n";
 
@@ -686,6 +801,8 @@ int main() {
     test_ldpc_simulated_codeword_loss();
     test_header_parsing();
     test_full_recovery_cycle();
+    test_codeword_identification();
+    test_codeword_out_of_order_recovery();
 
     std::cout << "\n=== Results ===\n";
     std::cout << "Passed: " << tests_passed << "\n";

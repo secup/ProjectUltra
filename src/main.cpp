@@ -13,6 +13,7 @@
 #include <cstring>
 #include <csignal>
 #include <atomic>
+#include <map>
 
 // Signal handling for clean shutdown
 static std::atomic<bool> g_running{true};
@@ -394,6 +395,10 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
     int expected_codewords = 0;
     int current_cw_index = 0;
 
+    // Buffer for data codewords that arrive before header
+    // Key: codeword index, Value: decoded data
+    std::map<uint8_t, ultra::Bytes> buffered_data_cws;
+
     // Track consecutive failures
     int consecutive_failures = 0;
     const int MAX_FAILURES = 5;
@@ -435,6 +440,7 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                         consecutive_failures = 0;
                         expected_codewords = 0;
                         current_cw_index = 0;
+                        buffered_data_cws.clear();
                     }
                     continue;
                 }
@@ -445,10 +451,12 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                 ultra::Bytes cw_data(decoded.begin(),
                                      decoded.begin() + std::min(decoded.size(), size_t(v2::BYTES_PER_CODEWORD)));
 
-                // Is this the first codeword of a frame?
+                // Identify codeword type using marker bytes
+                auto cw_info = v2::identifyCodeword(cw_data);
+
+                // Is this the first codeword of a frame (header)?
                 if (expected_codewords == 0) {
-                    // Check for v2 magic "UL" (0x55 0x4C)
-                    if (cw_data.size() >= 2 && cw_data[0] == 0x55 && cw_data[1] == 0x4C) {
+                    if (cw_info.type == v2::CodewordType::HEADER) {
                         // Parse header
                         auto header = v2::parseHeader(cw_data);
                         if (header.valid) {
@@ -461,6 +469,25 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                             std::cerr << "  [FRAME START] type=" << v2::frameTypeToString(header.type)
                                       << " codewords=" << (int)header.total_cw
                                       << " seq=" << header.seq << "\n";
+
+                            // Merge any buffered data codewords that arrived before header
+                            if (!buffered_data_cws.empty()) {
+                                std::cerr << "  [MERGE] " << buffered_data_cws.size() << " buffered data CW(s)\n";
+                                for (auto& [idx, data] : buffered_data_cws) {
+                                    if (idx < expected_codewords) {
+                                        current_frame.decoded[idx] = true;
+                                        current_frame.data[idx] = data;
+                                        std::cerr << "    CW" << (int)idx << " merged from buffer\n";
+                                    }
+                                }
+                                buffered_data_cws.clear();
+                            }
+
+                            // Update current_cw_index to first missing codeword
+                            while (current_cw_index < expected_codewords &&
+                                   current_frame.decoded[current_cw_index]) {
+                                current_cw_index++;
+                            }
 
                             // Single codeword frame (control frame)?
                             if (expected_codewords == 1) {
@@ -476,31 +503,8 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                 }
                                 expected_codewords = 0;
                                 current_cw_index = 0;
-                            }
-                        } else {
-                            std::cerr << "  [INVALID HEADER] magic OK but header CRC failed\n";
-                        }
-                    } else {
-                        // No magic - not a frame start
-                        std::cerr << "  [NO MAGIC] first bytes: ";
-                        for (size_t i = 0; i < std::min(cw_data.size(), size_t(4)); i++) {
-                            fprintf(stderr, "%02X ", cw_data[i]);
-                        }
-                        std::cerr << "(expected 55 4C)\n";
-                    }
-                } else {
-                    // Continuation codeword
-                    if (current_cw_index < expected_codewords) {
-                        current_frame.decoded[current_cw_index] = true;
-                        current_frame.data[current_cw_index] = cw_data;
-                        current_cw_index++;
-
-                        std::cerr << "  [CW " << current_cw_index << "/" << expected_codewords << "] OK\n";
-
-                        // All codewords received?
-                        if (current_cw_index >= expected_codewords) {
-                            if (current_frame.allSuccess()) {
-                                // Reassemble and parse
+                            } else if (current_frame.allSuccess()) {
+                                // All codewords already received (from buffer)
                                 auto reassembled = current_frame.reassemble();
                                 auto data_frame = v2::DataFrame::deserialize(reassembled);
 
@@ -510,18 +514,85 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                     std::cerr << "  [DATA] seq=" << data_frame->seq
                                               << " payload=" << data_frame->payload_len << " bytes\n";
                                     std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
-                                } else {
-                                    std::cerr << "  [ERROR] Failed to parse reassembled data frame\n";
                                 }
-                            } else {
-                                // Some codewords failed - would send NACK in real protocol
-                                uint32_t bitmap = current_frame.getNackBitmap();
-                                std::cerr << "  [INCOMPLETE] NACK bitmap=0x" << std::hex << bitmap << std::dec << "\n";
+                                expected_codewords = 0;
+                                current_cw_index = 0;
                             }
-
-                            expected_codewords = 0;
-                            current_cw_index = 0;
+                        } else {
+                            std::cerr << "  [INVALID HEADER] magic OK but header CRC failed\n";
                         }
+                    } else if (cw_info.type == v2::CodewordType::DATA) {
+                        // Data codeword arrived before header - buffer it
+                        uint8_t idx = cw_info.index;
+                        buffered_data_cws[idx] = cw_data;
+                        std::cerr << "  [BUFFER] Data CW index=" << (int)idx
+                                  << " (waiting for header)\n";
+                    } else {
+                        // Unknown codeword - not a frame start
+                        std::cerr << "  [UNKNOWN CW] first bytes: ";
+                        for (size_t i = 0; i < std::min(cw_data.size(), size_t(4)); i++) {
+                            fprintf(stderr, "%02X ", cw_data[i]);
+                        }
+                        std::cerr << "(expected 55 4C or D5 xx)\n";
+                    }
+                } else {
+                    // Waiting for continuation codewords
+                    // With new format, data CWs have marker + index, so we can verify
+                    if (cw_info.type == v2::CodewordType::DATA) {
+                        uint8_t idx = cw_info.index;
+                        if (idx > 0 && idx < expected_codewords) {
+                            current_frame.decoded[idx] = true;
+                            current_frame.data[idx] = cw_data;
+                            std::cerr << "  [CW " << (int)idx << "/" << expected_codewords << "] OK\n";
+                        } else {
+                            std::cerr << "  [CW] Unexpected index=" << (int)idx
+                                      << " (expected 1-" << (expected_codewords-1) << ")\n";
+                        }
+                    } else if (cw_info.type == v2::CodewordType::HEADER) {
+                        // New header while waiting for data CWs - frame was lost
+                        std::cerr << "  [FRAME ABORT] New header received, previous frame incomplete\n";
+                        // Start processing the new header
+                        expected_codewords = 0;
+                        current_cw_index = 0;
+                        buffered_data_cws.clear();
+                        // Re-process this codeword as a new frame start
+                        auto header = v2::parseHeader(cw_data);
+                        if (header.valid) {
+                            expected_codewords = header.total_cw;
+                            current_frame.initForFrame(expected_codewords);
+                            current_frame.decoded[0] = true;
+                            current_frame.data[0] = cw_data;
+                            current_cw_index = 1;
+                            std::cerr << "  [FRAME START] type=" << v2::frameTypeToString(header.type)
+                                      << " codewords=" << (int)header.total_cw
+                                      << " seq=" << header.seq << "\n";
+                        }
+                    } else {
+                        // Unknown codeword type - maybe corrupted
+                        std::cerr << "  [CW] Unknown type, bytes: ";
+                        for (size_t i = 0; i < std::min(cw_data.size(), size_t(4)); i++) {
+                            fprintf(stderr, "%02X ", cw_data[i]);
+                        }
+                        std::cerr << "\n";
+                    }
+
+                    // Check if all codewords received
+                    if (current_frame.allSuccess()) {
+                        auto reassembled = current_frame.reassemble();
+                        auto data_frame = v2::DataFrame::deserialize(reassembled);
+
+                        if (data_frame) {
+                            frames_received++;
+                            data_frames++;
+                            std::cerr << "  [DATA] seq=" << data_frame->seq
+                                      << " payload=" << data_frame->payload_len << " bytes\n";
+                            std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                        } else {
+                            std::cerr << "  [ERROR] Failed to parse reassembled data frame\n";
+                        }
+
+                        expected_codewords = 0;
+                        current_cw_index = 0;
                     }
                 }
             }
