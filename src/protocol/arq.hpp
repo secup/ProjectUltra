@@ -2,6 +2,7 @@
 
 #include "arq_interface.hpp"
 #include "frame_v2.hpp"
+#include "frame.hpp"
 #include <functional>
 #include <optional>
 

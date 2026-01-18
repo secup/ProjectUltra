@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frame_v2.hpp"
+#include "frame.hpp"
 #include <functional>
 #include <memory>
 
