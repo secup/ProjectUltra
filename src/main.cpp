@@ -403,6 +403,15 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
     int consecutive_failures = 0;
     const int MAX_FAILURES = 5;
 
+    // Decode-centric synchronization state
+    // Instead of relying on perfect preamble timing, we hunt for valid codewords
+    // by trying LDPC decode at various bit offsets until one succeeds with valid magic
+    enum class CwSyncState { HUNTING, SYNCED };
+    CwSyncState cw_sync_state = CwSyncState::HUNTING;
+    const size_t HUNT_STEP = 30;  // Try every 30 bits (one OFDM symbol worth)
+    const size_t MAX_HUNT_OFFSET = LDPC_BLOCK_SIZE * 2;  // Search up to two codeword lengths
+    size_t hunt_attempts = 0;
+
     // Read audio in chunks
     std::vector<float> buffer(960);
 
@@ -417,9 +426,73 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
             if (!soft_bits.empty()) {
                 accumulated_soft_bits.insert(accumulated_soft_bits.end(),
                                              soft_bits.begin(), soft_bits.end());
+                // Debug: track soft bit accumulation
+                static size_t total_soft_bits = 0;
+                total_soft_bits += soft_bits.size();
+                if (soft_bits.size() > 100 || accumulated_soft_bits.size() > 500) {
+                    std::cerr << "  [BITS] +" << soft_bits.size() << " total_accum=" << accumulated_soft_bits.size() << "\n";
+                }
             }
 
-            // Decode complete LDPC blocks
+            // === HUNTING STATE: Try to find codeword boundary ===
+            if (cw_sync_state == CwSyncState::HUNTING) {
+                // Try LDPC decode at various offsets to find a valid codeword
+                size_t hunt_this_round = 0;
+                for (size_t offset = 0;
+                     offset < MAX_HUNT_OFFSET &&
+                     accumulated_soft_bits.size() >= offset + LDPC_BLOCK_SIZE;
+                     offset += HUNT_STEP) {
+
+                    std::vector<float> block(accumulated_soft_bits.begin() + offset,
+                                             accumulated_soft_bits.begin() + offset + LDPC_BLOCK_SIZE);
+
+                    auto decoded = decoder.decodeSoft(std::span<const float>(block));
+                    hunt_attempts++;
+                    hunt_this_round++;
+
+                    if (decoder.lastDecodeSuccess()) {
+                        // LDPC decoded - check if it's a valid codeword (has magic)
+                        ultra::Bytes cw_data(decoded.begin(),
+                                             decoded.begin() + std::min(decoded.size(), size_t(v2::BYTES_PER_CODEWORD)));
+                        auto cw_info = v2::identifyCodeword(cw_data);
+
+                        if (cw_info.type != v2::CodewordType::UNKNOWN) {
+                            // Found valid codeword! We're now synced to codeword boundaries
+                            std::cerr << "  [HUNT SUCCESS] Found valid CW at offset " << offset
+                                      << " after " << hunt_attempts << " attempts"
+                                      << " (type=" << (cw_info.type == v2::CodewordType::HEADER ? "HEADER" : "DATA")
+                                      << ")\n";
+
+                            // Discard bits before this codeword
+                            accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
+                                                        accumulated_soft_bits.begin() + offset);
+
+                            cw_sync_state = CwSyncState::SYNCED;
+                            consecutive_failures = 0;
+                            hunt_attempts = 0;
+                            break;  // Exit hunt loop, will process in SYNCED state
+                        }
+                    }
+                }
+
+                // Debug: show hunting activity
+                if (hunt_this_round > 0 || accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
+                    std::cerr << "  [HUNTING] tried " << hunt_this_round << " decodes, accum="
+                              << accumulated_soft_bits.size() << " bits\n";
+                }
+
+                // Prevent unbounded buffer growth during hunting
+                if (cw_sync_state == CwSyncState::HUNTING &&
+                    accumulated_soft_bits.size() > LDPC_BLOCK_SIZE * 4) {
+                    // Discard one step worth of bits and keep hunting
+                    accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
+                                                accumulated_soft_bits.begin() + HUNT_STEP);
+                }
+
+                continue;  // Keep hunting or processing next chunk
+            }
+
+            // === SYNCED STATE: Decode at fixed codeword boundaries ===
             while (accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
                 std::vector<float> block(accumulated_soft_bits.begin(),
                                          accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
@@ -434,13 +507,14 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                     std::cerr << "  [CW] LDPC decode failed\n";
 
                     if (consecutive_failures >= MAX_FAILURES) {
-                        std::cerr << "  [RESET] Too many failures\n";
-                        demod.reset();
-                        accumulated_soft_bits.clear();
+                        std::cerr << "  [LOST SYNC] Too many failures, resetting for next preamble\n";
+                        cw_sync_state = CwSyncState::HUNTING;
                         consecutive_failures = 0;
                         expected_codewords = 0;
                         current_cw_index = 0;
                         buffered_data_cws.clear();
+                        accumulated_soft_bits.clear();  // Clear stale soft bits
+                        demod.reset();  // Reset OFDM demod to look for new preamble
                     }
                     continue;
                 }

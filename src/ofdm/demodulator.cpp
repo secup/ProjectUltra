@@ -2,6 +2,7 @@
 #include <cmath>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
+#include "ultra/fec.hpp"  // For LDPC decoder in hunting mode
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <numeric>
@@ -378,9 +379,14 @@ struct OFDMDemodulator::Impl {
     // Sync detection
     std::vector<Complex> sync_sequence;
     float sync_threshold;  // Threshold for valid sync region (from config)
-    size_t search_offset = 0;      // Track where we left off searching (optimization)
     size_t last_sync_offset = 0;   // Last detected sync offset (for testing/debugging)
-    size_t total_samples_trimmed = 0;  // Track how many samples have been trimmed (for file offset calc)
+
+    // Buffer management constants
+    // Preamble = 6 symbols × 560 samples = 3360 samples
+    // We need at least this much data to detect a preamble
+    static constexpr size_t MIN_SEARCH_SAMPLES = 4000;   // Minimum buffer before searching
+    static constexpr size_t MAX_BUFFER_SAMPLES = 240000; // ~5 seconds at 48kHz
+    static constexpr size_t OVERLAP_SAMPLES = 4000;      // Keep for boundary-spanning preambles
 
     // Pre-computed interpolation lookup (avoids O(n²) per symbol)
     struct InterpInfo {
@@ -767,6 +773,226 @@ struct OFDMDemodulator::Impl {
         cfo_hz = std::max(-40.0f, std::min(40.0f, cfo_hz));
 
         return cfo_hz;
+    }
+
+    // ========================================================================
+    // DECODE HUNTING: Try multiple timing offsets and validate with LDPC
+    // ========================================================================
+    //
+    // Instead of trying to nail exact timing from correlation alone, we:
+    // 1. Use correlation to find candidate regions (coarse detection)
+    // 2. Try demodulating at multiple timing offsets around the candidate
+    // 3. Use LDPC decode success as the ultimate validator
+    //
+    // This is more robust because LDPC R1/4 can tolerate some timing error,
+    // and a successful decode proves we have the correct timing.
+
+    // Trial demodulate: demodulate symbols from buffer WITHOUT modifying state
+    // Returns soft bits for LDPC validation
+    std::vector<float> trialDemodulate(size_t data_start_offset, size_t num_symbols) {
+        std::vector<float> trial_soft_bits;
+
+        // Need enough samples for the requested symbols
+        size_t samples_needed = num_symbols * symbol_samples;
+        if (data_start_offset + samples_needed > rx_buffer.size()) {
+            return trial_soft_bits;  // Empty = failed
+        }
+
+        // Create a temporary NCO for mixing (don't use main mixer state)
+        NCO trial_mixer(config.center_freq, config.sample_rate);
+
+        // Temporary channel estimate (will be initialized from first symbol)
+        std::vector<Complex> trial_channel_estimate(config.fft_size, Complex(1, 0));
+        bool channel_initialized = false;
+
+        // Temporary DQPSK state
+        std::vector<Complex> trial_prev_equalized;
+
+        // Process symbols
+        for (size_t sym = 0; sym < num_symbols; ++sym) {
+            size_t sym_offset = data_start_offset + sym * symbol_samples;
+
+            // Mix to baseband (no CFO correction in trial - assume small)
+            std::vector<Complex> baseband(symbol_samples);
+            for (size_t i = 0; i < symbol_samples; ++i) {
+                Complex osc = trial_mixer.next();
+                baseband[i] = rx_buffer[sym_offset + i] * std::conj(osc);
+            }
+
+            // Extract symbol (skip CP, do FFT)
+            size_t cp_len = config.getCyclicPrefix();
+            std::vector<Complex> symbol(config.fft_size);
+            for (size_t i = 0; i < config.fft_size; ++i) {
+                symbol[i] = baseband[cp_len + i];
+            }
+            std::vector<Complex> freq_domain;
+            fft.forward(symbol, freq_domain);
+
+            // Update channel estimate from pilots (simplified version)
+            if (!channel_initialized) {
+                // First symbol: compute channel estimate from pilots
+                for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+                    int idx = pilot_carrier_indices[i];
+                    Complex rx_pilot = freq_domain[idx];
+                    Complex tx_pilot = pilot_sequence[i];
+                    if (std::abs(tx_pilot) > 1e-6f) {
+                        trial_channel_estimate[idx] = rx_pilot / tx_pilot;
+                    }
+                }
+                // Interpolate to data carriers (simplified: use nearest pilot)
+                for (int idx : data_carrier_indices) {
+                    // Find nearest pilot
+                    int nearest = pilot_carrier_indices[0];
+                    int min_dist = std::abs(idx - nearest);
+                    for (int pidx : pilot_carrier_indices) {
+                        int dist = std::abs(idx - pidx);
+                        if (dist < min_dist) {
+                            min_dist = dist;
+                            nearest = pidx;
+                        }
+                    }
+                    trial_channel_estimate[idx] = trial_channel_estimate[nearest];
+                }
+                channel_initialized = true;
+            }
+
+            // Equalize data carriers
+            std::vector<Complex> equalized;
+            equalized.reserve(data_carrier_indices.size());
+            for (int idx : data_carrier_indices) {
+                Complex H = trial_channel_estimate[idx];
+                float H_mag_sq = std::norm(H);
+                if (H_mag_sq < 1e-6f) H_mag_sq = 1e-6f;
+                Complex eq = freq_domain[idx] * std::conj(H) / H_mag_sq;
+                equalized.push_back(eq);
+            }
+
+            // DQPSK demodulation
+            if (config.modulation == Modulation::DQPSK) {
+                if (!trial_prev_equalized.empty()) {
+                    // Differential decode using previous symbol
+                    for (size_t i = 0; i < equalized.size() && i < trial_prev_equalized.size(); ++i) {
+                        Complex diff = equalized[i] * std::conj(trial_prev_equalized[i]);
+                        float phase = std::atan2(diff.imag(), diff.real());
+                        float signal_power = std::abs(equalized[i]) * std::abs(trial_prev_equalized[i]);
+
+                        if (signal_power < 1e-6f) {
+                            trial_soft_bits.push_back(0.0f);
+                            trial_soft_bits.push_back(0.0f);
+                        } else {
+                            float scale = 2.0f * signal_power / noise_variance;
+                            static const float pi = 3.14159265358979f;
+                            // bit1 (MSB)
+                            trial_soft_bits.push_back(std::max(-10.0f, std::min(10.0f,
+                                scale * std::sin(phase + pi/4))));
+                            // bit0 (LSB)
+                            trial_soft_bits.push_back(std::max(-10.0f, std::min(10.0f,
+                                scale * std::cos(2 * phase))));
+                        }
+                    }
+                }
+                trial_prev_equalized = equalized;
+            } else {
+                // BPSK fallback (simplified)
+                for (const auto& eq : equalized) {
+                    float llr = -2.0f * eq.real() / noise_variance;
+                    trial_soft_bits.push_back(std::max(-10.0f, std::min(10.0f, llr)));
+                }
+            }
+        }
+
+        return trial_soft_bits;
+    }
+
+    // Hunt result codes
+    static constexpr int HUNT_NEED_MORE_SAMPLES = -9999;  // Sentinel: retry when more samples available
+
+    // Hunt for valid codeword at multiple timing offsets around candidate position
+    // Returns: (success, best_offset) where offset is relative to candidate
+    // If success, the data can be decoded starting at (candidate + preamble_len + best_offset)
+    // NOTE: This function is currently unused - kept for potential future use
+    std::pair<bool, int> huntForCodeword(size_t candidate_sync_pos) {
+        size_t preamble_len = symbol_samples * 6;  // 4 STS + 2 LTS symbols
+
+        // Timing offsets to try (samples relative to nominal data start)
+        // Negative = data starts earlier, positive = data starts later
+        static const int offsets[] = {0, -50, 50, -100, 100, -150, 150};
+        static const size_t num_offsets = sizeof(offsets) / sizeof(offsets[0]);
+
+        // Symbols needed for one codeword (648 bits at 30 bits/symbol for DQPSK)
+        // Add +1 because DQPSK needs a reference symbol
+        size_t bits_per_symbol = (config.modulation == Modulation::DQPSK) ?
+            (data_carrier_indices.size() * 2) : data_carrier_indices.size();
+        size_t symbols_needed = (LDPC_BLOCK_SIZE + bits_per_symbol - 1) / bits_per_symbol + 1;
+
+        // Check if we have enough samples for ANY offset attempt
+        // If not, signal caller to wait for more samples
+        size_t samples_for_hunt = candidate_sync_pos + preamble_len + 150 + symbols_needed * symbol_samples;
+        if (samples_for_hunt > rx_buffer.size()) {
+            LOG_SYNC(INFO, "Hunt at %zu: need %zu samples, have %zu - waiting for more",
+                     candidate_sync_pos, samples_for_hunt, rx_buffer.size());
+            return {false, HUNT_NEED_MORE_SAMPLES};
+        }
+
+        bool any_ldpc_attempted = false;
+
+        // Try each offset
+        for (size_t i = 0; i < num_offsets; ++i) {
+            int offset = offsets[i];
+
+            // Calculate data start position
+            // Check for underflow when offset is negative
+            size_t nominal_data_start = candidate_sync_pos + preamble_len;
+            size_t data_start;
+            if (offset < 0 && static_cast<size_t>(-offset) > nominal_data_start) {
+                continue;  // Would go negative, skip
+            }
+            data_start = nominal_data_start + offset;
+
+            // Trial demodulate
+            auto soft_bits = trialDemodulate(data_start, symbols_needed);
+
+            if (soft_bits.size() < LDPC_BLOCK_SIZE) {
+                LOG_SYNC(INFO, "Hunt offset %+d: only %zu soft bits (need %zu)",
+                         offset, soft_bits.size(), LDPC_BLOCK_SIZE);
+                continue;
+            }
+
+            any_ldpc_attempted = true;
+
+            // Try LDPC decode (R1/4)
+            LDPCDecoder decoder(CodeRate::R1_4);
+            std::vector<float> codeword_bits(soft_bits.begin(),
+                                              soft_bits.begin() + LDPC_BLOCK_SIZE);
+            auto decoded = decoder.decodeSoft(codeword_bits);
+
+            if (decoded.empty()) {
+                LOG_SYNC(INFO, "Hunt offset %+d: LDPC decode failed", offset);
+                continue;
+            }
+
+            // Check for valid frame magic (v2 magic = 0x55 0x4C or "UL")
+            // First 2 bytes of decoded data should be magic
+            if (decoded.size() >= 2) {
+                uint16_t magic = (static_cast<uint16_t>(decoded[0]) << 8) | decoded[1];
+                LOG_SYNC(INFO, "Hunt offset %+d: LDPC OK, magic=0x%04X (bytes: %02X %02X %02X %02X)",
+                         offset, magic, decoded[0], decoded[1],
+                         decoded.size() > 2 ? decoded[2] : 0,
+                         decoded.size() > 3 ? decoded[3] : 0);
+                if (magic == 0x554C) {  // "UL" - v2 frame magic
+                    LOG_SYNC(INFO, "Hunt SUCCESS at offset %+d: valid v2 frame magic found!", offset);
+                    return {true, offset};
+                }
+            }
+        }
+
+        if (!any_ldpc_attempted) {
+            LOG_SYNC(DEBUG, "Hunt at %zu: no LDPC attempts made (insufficient samples at all offsets)", candidate_sync_pos);
+            return {false, HUNT_NEED_MORE_SAMPLES};
+        }
+
+        LOG_SYNC(DEBUG, "Hunt FAILED: no valid codeword found at any offset");
+        return {false, 0};
     }
 
     std::vector<Complex> toBaseband(SampleSpan samples) {
@@ -1617,135 +1843,175 @@ OFDMDemodulator::OFDMDemodulator(const ModemConfig& config)
 OFDMDemodulator::~OFDMDemodulator() = default;
 
 bool OFDMDemodulator::process(SampleSpan samples) {
+    // ============================================================
+    // SIMPLE BUFFER STRATEGY: Accumulate → Search → Consume
+    //
+    // 1. Append incoming samples to buffer
+    // 2. If buffer >= minimum, search for preamble from index 0
+    // 3. If preamble found → sync → consume processed samples
+    // 4. If buffer too large → keep only overlap for boundary cases
+    //
+    // Always search from index 0 - no offset tracking needed
+    // ============================================================
+
     // Add to buffer
     impl_->rx_buffer.insert(impl_->rx_buffer.end(), samples.begin(), samples.end());
 
+    // Preamble size constants
+    size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
+    size_t preamble_total_len = preamble_symbol_len * 6;  // 4 STS + 2 LTS = 3360 samples
+    size_t correlation_window = preamble_symbol_len * 2;  // Window for autocorrelation
+
     // State machine
     if (impl_->state.load() == Impl::State::SEARCHING) {
-        // Look for sync preamble
-        // Preamble symbols have NO guard interval (only fft_size + cp)
-        size_t preamble_symbol_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
-        size_t preamble_total_len = preamble_symbol_len * 6;  // 4 STS + 2 LTS
-        size_t correlation_window = preamble_symbol_len * 2;  // Window needed for correlation
-
-
-        // OPTIMIZATION: Trim samples we've already searched (they're stale)
-        // Keep a margin of preamble_total_len in case preamble spans the boundary
-        if (impl_->search_offset > preamble_total_len * 2) {
-            size_t trim = impl_->search_offset - preamble_total_len;
-            impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
-                                   impl_->rx_buffer.begin() + trim);
-            impl_->search_offset -= trim;
-            impl_->total_samples_trimmed += trim;
+        // Need minimum data before searching
+        if (impl_->rx_buffer.size() < impl_->MIN_SEARCH_SAMPLES) {
+            return false;  // Wait for more samples
         }
 
-        // Hard limit on buffer size to prevent runaway memory usage
-        // Must be large enough for biggest expected frame + preamble (~5s for large files)
-        constexpr size_t ABSOLUTE_MAX_BUFFER = 240000;  // ~5s at 48kHz
-        if (impl_->rx_buffer.size() > ABSOLUTE_MAX_BUFFER) {
-            size_t trim = impl_->rx_buffer.size() - ABSOLUTE_MAX_BUFFER;
+        // Buffer overflow protection - keep only recent data + overlap
+        if (impl_->rx_buffer.size() > impl_->MAX_BUFFER_SAMPLES) {
+            size_t keep = impl_->OVERLAP_SAMPLES;
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
-                                   impl_->rx_buffer.begin() + trim);
-            impl_->search_offset = (impl_->search_offset > trim) ? impl_->search_offset - trim : 0;
-            impl_->total_samples_trimmed += trim;
+                                   impl_->rx_buffer.end() - keep);
+            LOG_SYNC(WARN, "Buffer overflow, trimmed to %zu samples", keep);
         }
 
-        // Sync detection: Resume from where we left off (don't re-search old samples)
-        // Step by 8 samples - plenty accurate for preamble detection
-        // Energy pre-filter: skip silent regions to save correlation work
+        // Search for preamble from beginning of buffer
         bool found_sync = false;
         size_t sync_offset = 0;
         float sync_corr = 0;
 
         constexpr size_t STEP_SIZE = 8;  // Check every 8th sample
-        constexpr size_t MAX_ITERATIONS = 300;  // Limit work per frame (~2400 samples)
-        size_t iterations = 0;
-        size_t energy_skips = 0;
-        size_t i = impl_->search_offset;
 
-        // Track max correlation for debugging
-        float max_corr_found = 0.0f;
-        size_t max_corr_offset = 0;
+        // Search until we run out of buffer
+        size_t search_end = (impl_->rx_buffer.size() > preamble_total_len + correlation_window)
+                          ? impl_->rx_buffer.size() - preamble_total_len - correlation_window
+                          : 0;
 
-        while (i + preamble_total_len < impl_->rx_buffer.size() && iterations < MAX_ITERATIONS) {
-            // Quick energy check - skip silent regions entirely
+        for (size_t i = 0; i < search_end; i += STEP_SIZE) {
+            // Quick energy check - skip silent regions
             if (!impl_->hasMinimumEnergy(i, correlation_window)) {
-                i += correlation_window / 2;  // Skip ahead by half window
-                ++iterations;
-                ++energy_skips;
+                i += correlation_window / 2 - STEP_SIZE;  // Skip ahead (will add STEP_SIZE in loop)
                 continue;
             }
 
-            // Full correlation check
+            // Autocorrelation check
             float corr = impl_->measureCorrelation(i);
 
-            // Track maximum for debugging
-            if (corr > max_corr_found) {
-                max_corr_found = corr;
-                max_corr_offset = i;
-            }
-
             if (corr > impl_->sync_threshold) {
-                // Found sync point - take the FIRST position above threshold
+                // Timing acquisition using CP-based offset.
                 //
-                // STS preamble autocorrelation produces a PLATEAU, not a sharp peak.
-                // At lower SNR, noise causes random fluctuations across this plateau.
-                // Searching for the "maximum" leads to picking a random noise peak,
-                // not the true preamble position.
+                // The STS autocorrelation produces a plateau, not a sharp peak. The optimal
+                // timing position is 4.5 × CP_length samples after the coarse detection point.
+                // This relationship is derived from preamble geometry:
+                //   - Preamble = 2 identical symbols, each of length (FFT + CP)
+                //   - Coarse detection (correlation > 0.80) occurs during correlation ramp-up
+                //   - Optimal timing (correlation ≈ 1.0) is at the plateau center
+                //   - Empirically verified: offset = 4.5 × CP = 216 samples (for CP=48)
                 //
-                // The FIRST position above threshold is the leading edge of the preamble.
-                // This is the correct sync position because:
-                // 1. It's deterministic (always the same offset)
-                // 2. Cyclic prefix provides timing tolerance for any position in plateau
-                // 3. We avoid noise-induced offset errors
-                found_sync = true;
-                sync_offset = i;
-                sync_corr = corr;
-                break;  // Stop immediately - first above threshold is correct
-            }
+                // To distinguish real recordings (with ramp-up) from synthetic signals (no ramp-up):
+                // - Check if correlation increases significantly from coarse to coarse+offset
+                // - If increase > 0.05: real signal with ramp-up, use offset
+                // - If increase <= 0.05: already at plateau, use offset=0
+                constexpr float PLATEAU_THRESHOLD = 0.90f;
+                constexpr float RAMP_UP_THRESHOLD = 0.01f;  // Min increase to indicate ramp-up
+                constexpr size_t SEARCH_WINDOW = 300;
+                constexpr size_t MIN_PLATEAU_SAMPLES = 15;
 
-            i += STEP_SIZE;
-            ++iterations;
+                // CP-based timing offset: 4.5 × CP = (9 × CP) / 2
+                const size_t cp_len = impl_->config.getCyclicPrefix();
+                const size_t CP_TIMING_OFFSET = (9 * cp_len) / 2;  // 216 for CP=48
+
+                size_t plateau_count = 0;
+                float peak_corr = corr;
+                size_t peak_pos = i;  // Track WHERE the peak occurs
+
+                for (size_t j = 0; j <= SEARCH_WINDOW && i + j + preamble_total_len < impl_->rx_buffer.size(); j += 8) {
+                    float ref_corr = impl_->measureCorrelation(i + j);
+                    if (ref_corr >= PLATEAU_THRESHOLD) {
+                        plateau_count++;
+                    }
+                    if (ref_corr > peak_corr) {
+                        peak_corr = ref_corr;
+                        peak_pos = i + j;  // Remember peak position
+                    }
+                }
+
+                if (plateau_count >= MIN_PLATEAU_SAMPLES) {
+                    found_sync = true;
+
+                    // Sync timing depends on how we detected the preamble:
+                    //
+                    // The "improvement" (peak_corr - coarse_corr) indicates whether we
+                    // detected during ramp-up or on the plateau:
+                    //
+                    // improvement > 0.03: Detected on RAMP-UP (real audio with leading silence)
+                    //   - Coarse detection is early, during correlation ramp-up
+                    //   - Apply 4.5×CP offset to reach optimal FFT window position
+                    //   - This was empirically verified with Mac→Linux hardware recordings
+                    //
+                    // improvement <= 0.03: Detected on PLATEAU (clean signal or already optimal)
+                    //   - Coarse detection is already at or near optimal position
+                    //   - Use peak position (same as coarse for truly clean signals)
+                    //
+                    constexpr float RAMP_THRESHOLD = 0.03f;
+
+                    float improvement = peak_corr - corr;
+
+                    if (improvement > RAMP_THRESHOLD) {
+                        // Real audio detected on ramp-up - apply 4.5×CP offset
+                        sync_offset = i + CP_TIMING_OFFSET;
+                        sync_corr = corr;
+                    } else {
+                        // On plateau - use COARSE position (first above threshold)
+                        // Don't use peak because noise fluctuations on plateau can
+                        // cause the "peak" to be at random positions
+                        sync_offset = i;
+                        sync_corr = corr;
+                    }
+
+                    LOG_SYNC(INFO, "Preamble: coarse=%zu, peak=%zu, sync=%zu, corr=%.3f/%.3f, impr=%.3f, ramp=%d",
+                             i, peak_pos, sync_offset, corr, peak_corr, improvement,
+                             improvement > RAMP_THRESHOLD ? 1 : 0);
+                    break;
+                }
+            }
         }
 
-        // Update search position for next frame (resume from here)
-        impl_->search_offset = i;
-
         if (found_sync) {
-            // Estimate coarse CFO from preamble BEFORE discarding it
+            // Estimate coarse CFO from preamble
             float coarse_cfo = impl_->estimateCoarseCFO(sync_offset);
-
-            // Initialize frequency offset with coarse estimate
-            // This gives us a head start on tracking
             impl_->freq_offset_hz = coarse_cfo;
             impl_->freq_offset_filtered = coarse_cfo;
-            impl_->freq_correction_phase = 0.0f;  // Reset correction phase
-            impl_->symbols_since_sync = 0;        // Reset acquisition counter
+            impl_->freq_correction_phase = 0.0f;
+            impl_->symbols_since_sync = 0;
 
-            LOG_SYNC(INFO, "SYNC FOUND: corr=%.3f at offset %zu, CFO=%.1f Hz, buffer=%zu samples",
-                     sync_corr, sync_offset, coarse_cfo, impl_->rx_buffer.size());
+            LOG_SYNC(INFO, "SYNC: offset=%zu, corr=%.3f, CFO=%.1f Hz, buffer=%zu",
+                     sync_offset, sync_corr, coarse_cfo, impl_->rx_buffer.size());
 
-            // Store for testing/debugging
             impl_->last_sync_offset = sync_offset;
 
-            // Apply manual timing offset (for debugging symbol alignment)
-            size_t skip_amount = sync_offset + preamble_total_len + impl_->manual_timing_offset;
+            // Consume samples: everything up to end of preamble
+            size_t consume = sync_offset + preamble_total_len + impl_->manual_timing_offset;
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
-                                   impl_->rx_buffer.begin() + skip_amount);
-            impl_->search_offset = 0;  // Reset for next search
-            impl_->state.store(Impl::State::SYNCED);
-            impl_->synced_symbol_count.store(0);  // Reset timeout counter
-            impl_->mixer.reset();
-            impl_->dbpsk_prev_equalized.clear();  // Reset DBPSK differential state for new frame
-            impl_->carrier_phase_initialized = false;  // Will compute from first symbol's pilots
-            impl_->carrier_phase_correction = Complex(1, 0);
+                                   impl_->rx_buffer.begin() + consume);
 
-            // NOTE: For DQPSK with timing errors, we might need to use the first data
-            // symbol as reference only (set dqpsk_skip_first_symbol = true). However,
-            // this breaks loopback tests where timing is perfect. For now, keep the
-            // original behavior. Hardware timing issues should be fixed at the sync
-            // detection level, not by discarding data.
+            // Transition to SYNCED state
+            impl_->state.store(Impl::State::SYNCED);
+            impl_->synced_symbol_count.store(0);
+            impl_->mixer.reset();
+            impl_->dbpsk_prev_equalized.clear();
+            impl_->carrier_phase_initialized = false;
+            impl_->carrier_phase_correction = Complex(1, 0);
             impl_->dqpsk_skip_first_symbol = false;
+        } else {
+            // No preamble found - if buffer is large, trim old data but keep overlap
+            if (impl_->rx_buffer.size() > impl_->OVERLAP_SAMPLES * 2) {
+                size_t trim = impl_->rx_buffer.size() - impl_->OVERLAP_SAMPLES;
+                impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
+                                       impl_->rx_buffer.begin() + trim);
+            }
         }
     }
 
@@ -2049,7 +2315,6 @@ void OFDMDemodulator::reset() {
     impl_->state.store(Impl::State::SEARCHING);
     impl_->synced_symbol_count.store(0);
     impl_->idle_call_count.store(0);
-    impl_->search_offset = 0;
     impl_->rx_buffer.clear();
     impl_->soft_bits.clear();
     impl_->demod_data.clear();
