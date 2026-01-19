@@ -401,8 +401,21 @@ size_t ModemEngine::injectSignalFromFile(const std::string& filepath) {
 
     LOG_MODEM(INFO, "Injecting %zu samples from %s", num_samples, filepath.c_str());
 
-    // Inject via the normal receiveAudio path
-    receiveAudio(samples);
+    // Inject in chunks and process between each chunk to simulate real-time streaming
+    // This prevents buffer overflow when injecting large files
+    constexpr size_t CHUNK_SIZE = 48000;  // 1 second at 48kHz
+    size_t offset = 0;
+    while (offset < num_samples) {
+        size_t chunk_end = std::min(offset + CHUNK_SIZE, num_samples);
+        std::vector<float> chunk(samples.begin() + offset, samples.begin() + chunk_end);
+        receiveAudio(chunk);
+        // Process after each chunk to prevent buffer overflow
+        while (pollRxAudio()) {
+            // Keep processing until demodulator catches up
+        }
+        offset = chunk_end;
+    }
+
     return num_samples;
 }
 
