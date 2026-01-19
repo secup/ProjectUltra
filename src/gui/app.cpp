@@ -35,6 +35,11 @@ App::App() {
         }
     });
 
+    // Set up status callback to show codeword progress in RX log
+    modem_.setStatusCallback([this](const std::string& status) {
+        rx_log_.push_back(status);
+    });
+
     // Set up protocol engine callbacks
     protocol_.setTxDataCallback([this](const Bytes& data) {
         // When protocol layer wants to transmit, convert to audio
@@ -846,7 +851,7 @@ void App::render() {
     }
     // F7: Inject test signal from file into RX buffer (for testing decode without audio)
     if (ImGui::IsKeyPressed(ImGuiKey_F7)) {
-        const char* test_file = "tests/data/v2_connect_marker_index_verified.f32";
+        const char* test_file = "/tmp/cli_test.f32";  // Fresh CLI-generated test signal
         size_t injected = modem_.injectSignalFromFile(test_file);
         if (injected > 0) {
             rx_log_.push_back("[TEST] Injected " + std::to_string(injected) + " samples from " + test_file);

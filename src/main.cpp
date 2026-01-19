@@ -193,7 +193,7 @@ int runTx(const char* filename, ultra::ModemConfig& config) {
     // Create modulator
     ultra::OFDMModulator mod(config);
     ultra::LDPCEncoder encoder(config.code_rate);
-    ultra::Interleaver interleaver(32, 32);
+    ultra::Interleaver interleaver(6, 108);  // Match GUI settings for HF diversity
 
     // Output preamble
     auto preamble = mod.generatePreamble();
@@ -310,10 +310,12 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
     auto encoded_cws = v2::encodeFrameWithLDPC(frame_data);
     std::cerr << "  LDPC codewords: " << encoded_cws.size() << "\n";
 
-    // Concatenate all encoded codewords
+    // Interleave each codeword for HF channel diversity
+    ultra::Interleaver interleaver(6, 108);  // Match GUI settings
     ultra::Bytes all_encoded;
     for (const auto& cw : encoded_cws) {
-        all_encoded.insert(all_encoded.end(), cw.begin(), cw.end());
+        auto interleaved = interleaver.interleave(cw);
+        all_encoded.insert(all_encoded.end(), interleaved.begin(), interleaved.end());
     }
     std::cerr << "  Total encoded: " << all_encoded.size() << " bytes\n";
 
@@ -392,6 +394,7 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
     ultra::OFDMDemodulator demod(config);
     demod.setTimingOffset(timing_offset);  // Apply timing adjustment
     ultra::LDPCDecoder decoder(config.code_rate);
+    ultra::Interleaver interleaver(6, 108);  // Match GUI settings for HF diversity
 
     // Track received frames
     int frames_received = 0;
@@ -458,7 +461,10 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                     std::vector<float> block(accumulated_soft_bits.begin() + offset,
                                              accumulated_soft_bits.begin() + offset + LDPC_BLOCK_SIZE);
 
-                    auto decoded = decoder.decodeSoft(std::span<const float>(block));
+                    // Deinterleave before LDPC decode
+                    auto deinterleaved = interleaver.deinterleave(block);
+
+                    auto decoded = decoder.decodeSoft(std::span<const float>(deinterleaved));
                     hunt_attempts++;
                     hunt_this_round++;
 
@@ -511,8 +517,11 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                 accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
                                             accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
 
+                // Deinterleave before LDPC decode
+                auto deinterleaved = interleaver.deinterleave(block);
+
                 // LDPC decode this codeword
-                auto decoded = decoder.decodeSoft(std::span<const float>(block));
+                auto decoded = decoder.decodeSoft(std::span<const float>(deinterleaved));
 
                 if (!decoder.lastDecodeSuccess()) {
                     consecutive_failures++;
@@ -735,7 +744,7 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
     ultra::OFDMDemodulator demod(config);
     demod.setTimingOffset(timing_offset);  // Apply timing adjustment
     ultra::LDPCDecoder decoder(config.code_rate);
-    ultra::Interleaver interleaver(32, 32);  // Match TX interleaver
+    ultra::Interleaver interleaver(6, 108);  // Match GUI settings for HF diversity
 
     int frames_decoded = 0;
     int total_bytes = 0;
@@ -800,8 +809,18 @@ int runDecode(ultra::ModemConfig& config, const char* input_file, const char* ou
         }
         std::cerr << "... (" << pos << " pos, " << neg << " neg)\n";
 
+        // Deinterleave each codeword block separately
+        std::vector<float> deinterleaved_bits;
+        deinterleaved_bits.reserve(decode_bits.size());
+        for (size_t i = 0; i < num_codewords; i++) {
+            std::vector<float> block(decode_bits.begin() + i * LDPC_BLOCK_SIZE,
+                                     decode_bits.begin() + (i + 1) * LDPC_BLOCK_SIZE);
+            auto deint = interleaver.deinterleave(block);
+            deinterleaved_bits.insert(deinterleaved_bits.end(), deint.begin(), deint.end());
+        }
+
         // Decode ALL codewords at once - this handles bit-level boundaries correctly
-        ultra::Bytes decoded = decoder.decodeSoft(decode_bits);
+        ultra::Bytes decoded = decoder.decodeSoft(deinterleaved_bits);
 
         if (decoder.lastDecodeSuccess() && !decoded.empty()) {
             frames_decoded++;

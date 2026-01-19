@@ -490,120 +490,142 @@ void ModemEngine::processRxBuffer() {
         stats_.synced = true;
     }
 
-    // CRITICAL: Accumulate ALL soft bits from all codewords of this frame FIRST,
-    // then decode once. This is necessary because k=486 info bits per codeword
-    // doesn't align on byte boundaries (486 bits = 60.75 bytes). Decoding
-    // codeword-by-codeword and concatenating bytes causes corruption at boundaries.
+    // Accumulate soft bits from all codewords
+    namespace v2 = protocol::v2;
     std::vector<float> accumulated_soft_bits;
     int codewords_collected = 0;
 
     while (frame_ready) {
-        // Get soft bits from demodulator (one codeword worth = n bits)
         auto soft_bits = ofdm_demodulator_->getSoftBits();
-        LOG_MODEM(DEBUG, "RX: Codeword ready, got %zu soft bits", soft_bits.size());
-
         if (!soft_bits.empty()) {
             codewords_collected++;
-            // Deinterleave if enabled (reverses TX interleaving) - per codeword
             auto to_accumulate = interleaving_enabled_ ? interleaver_.deinterleave(soft_bits) : soft_bits;
-
-            // Accumulate soft bits
             accumulated_soft_bits.insert(accumulated_soft_bits.end(),
                                          to_accumulate.begin(), to_accumulate.end());
-            LOG_MODEM(DEBUG, "RX: Accumulated %zu soft bits (total: %zu)",
-                      to_accumulate.size(), accumulated_soft_bits.size());
         }
-
-        // Try to get next codeword from demodulator's internal buffer
         SampleSpan empty_span;
         frame_ready = ofdm_demodulator_->process(empty_span);
     }
 
-    // Now decode all accumulated soft bits at once (handles bit-level boundaries correctly)
-    if (!accumulated_soft_bits.empty()) {
-        // Log first few soft bits to check sign convention and magnitudes
-        // Positive LLR = bit 0 likely, Negative LLR = bit 1 likely
-        // Magnitude indicates confidence (typical range: 1-10 for good SNR)
-        if (accumulated_soft_bits.size() >= 16) {
-            int pos_count = 0, neg_count = 0;
-            float sum_abs = 0;
-            for (size_t i = 0; i < std::min(size_t(100), accumulated_soft_bits.size()); i++) {
-                if (accumulated_soft_bits[i] > 0) pos_count++;
-                else neg_count++;
-                sum_abs += std::abs(accumulated_soft_bits[i]);
-            }
-            float avg_magnitude = sum_abs / std::min(size_t(100), accumulated_soft_bits.size());
-            LOG_MODEM(INFO, "RX: First 100 LLRs: %d positive (bit 0), %d negative (bit 1), avg |LLR|=%.2f",
-                      pos_count, neg_count, avg_magnitude);
-            LOG_MODEM(INFO, "RX: First 8 LLRs: %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f",
-                      accumulated_soft_bits[0], accumulated_soft_bits[1],
-                      accumulated_soft_bits[2], accumulated_soft_bits[3],
-                      accumulated_soft_bits[4], accumulated_soft_bits[5],
-                      accumulated_soft_bits[6], accumulated_soft_bits[7]);
-        }
-        LOG_MODEM(INFO, "RX: Decoding %d codewords (%zu soft bits total), decoder_rate=%d",
-                  codewords_collected, accumulated_soft_bits.size(),
-                  static_cast<int>(decoder_->getRate()));
+    // Process accumulated soft bits codeword by codeword
+    if (accumulated_soft_bits.empty()) return;
 
-        Bytes decoded = decoder_->decodeSoft(accumulated_soft_bits);
+    const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;  // 648 bits
+    size_t num_codewords = accumulated_soft_bits.size() / LDPC_BLOCK;
+    if (num_codewords == 0) return;
+
+    // Notify start of frame
+    if (status_callback_) {
+        status_callback_("[FRAME] Received " + std::to_string(num_codewords) + " codewords");
+    }
+
+    // Decode each codeword individually using CodewordStatus for tracking
+    v2::CodewordStatus cw_status;
+    cw_status.decoded.resize(num_codewords, false);
+    cw_status.data.resize(num_codewords);
+    int cw_success = 0, cw_failed = 0;
+    int expected_total = 0;
+    std::string frame_type_str;
+
+    for (size_t i = 0; i < num_codewords; i++) {
+        std::vector<float> cw_bits(accumulated_soft_bits.begin() + i * LDPC_BLOCK,
+                                    accumulated_soft_bits.begin() + (i + 1) * LDPC_BLOCK);
+
+        Bytes decoded = decoder_->decodeSoft(cw_bits);
         bool success = decoder_->lastDecodeSuccess();
 
-        LOG_MODEM(INFO, "RX: LDPC decode %s, got %zu bytes",
-                  success ? "SUCCESS" : "FAILED", decoded.size());
+        if (success && decoded.size() >= v2::BYTES_PER_CODEWORD) {
+            // Trim to codeword size and store
+            Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
+            cw_status.decoded[i] = true;
+            cw_status.data[i] = cw_data;
+            cw_success++;
 
-        // Print first few bytes as hex (always at INFO for debugging)
-        if (!decoded.empty()) {
-            char hex_buf[80], text_buf[32];
-            size_t n = std::min(decoded.size(), size_t(24));
-            for (size_t i = 0; i < n; i++) {
-                snprintf(hex_buf + i*3, 4, "%02x ", decoded[i]);
-                char c = decoded[i];
-                text_buf[i] = (c >= 32 && c < 127) ? c : '.';
-            }
-            text_buf[n] = '\0';
-            LOG_MODEM(INFO, "RX: First %zu bytes hex: %s", n, hex_buf);
-            LOG_MODEM(INFO, "RX: As text: '%s'", text_buf);
-        }
+            // Identify codeword type
+            auto cw_info = v2::identifyCodeword(cw_data);
 
-        // Update stats
-        {
-            std::lock_guard<std::mutex> lock(stats_mutex_);
-            if (success) {
-                stats_.frames_received++;
-
-                // Queue the received data
-                rx_data_queue_.push(decoded);
-
-                // Call raw callback first (for protocol layer)
-                if (raw_data_callback_) {
-                    LOG_MODEM(DEBUG, "RX: Calling raw_data_callback with %zu bytes", decoded.size());
-                    raw_data_callback_(decoded);
-                } else {
-                    LOG_MODEM(WARN, "RX: No raw_data_callback set!");
-                }
-
-                // Call text callback (filtered for display)
-                if (data_callback_) {
-                    std::string text(decoded.begin(), decoded.end());
-                    // Remove null characters and non-printable
-                    text.erase(std::remove_if(text.begin(), text.end(),
-                        [](char c) { return c == '\0' || !isprint(c); }), text.end());
-                    if (!text.empty()) {
-                        data_callback_(text);
+            if (i == 0 && cw_info.type == v2::CodewordType::HEADER) {
+                // Parse header to get frame info
+                auto header = v2::parseHeader(cw_data);
+                if (header.valid) {
+                    expected_total = header.total_cw;
+                    // Get frame type name
+                    switch (header.type) {
+                        case v2::FrameType::PROBE: frame_type_str = "PROBE"; break;
+                        case v2::FrameType::PROBE_ACK: frame_type_str = "PROBE_ACK"; break;
+                        case v2::FrameType::CONNECT: frame_type_str = "CONNECT"; break;
+                        case v2::FrameType::CONNECT_ACK: frame_type_str = "CONNECT_ACK"; break;
+                        case v2::FrameType::DISCONNECT: frame_type_str = "DISCONNECT"; break;
+                        case v2::FrameType::DATA: frame_type_str = "DATA"; break;
+                        case v2::FrameType::ACK: frame_type_str = "ACK"; break;
+                        case v2::FrameType::NACK: frame_type_str = "NACK"; break;
+                        default: frame_type_str = "OTHER"; break;
+                    }
+                    if (status_callback_) {
+                        status_callback_("[FRAME] Type=" + frame_type_str +
+                                       " CWs=" + std::to_string(expected_total));
                     }
                 }
-            } else {
-                stats_.frames_failed++;
             }
 
-            // Update channel quality
-            ChannelQuality quality = ofdm_demodulator_->getChannelQuality();
-            stats_.snr_db = quality.snr_db;
-            stats_.ber = quality.ber_estimate;
-            stats_.synced = true;
+            // Report codeword progress
+            std::string cw_type = (cw_info.type == v2::CodewordType::HEADER) ? "HDR" :
+                                  (cw_info.type == v2::CodewordType::DATA) ? "DATA" : "?";
+            if (status_callback_) {
+                std::string progress = "[CW " + std::to_string(i + 1);
+                if (expected_total > 0) progress += "/" + std::to_string(expected_total);
+                progress += "] OK (" + cw_type + ")";
+                status_callback_(progress);
+            }
+        } else {
+            cw_failed++;
+            if (status_callback_) {
+                status_callback_("[CW " + std::to_string(i + 1) + "] FAILED");
+            }
         }
+    }
 
-        LOG_MODEM(DEBUG, "RX: Decoded %d codewords -> %zu bytes", codewords_collected, decoded.size());
+    // Try to reassemble and parse the complete frame
+    if (cw_status.allSuccess()) {
+        Bytes frame_data = cw_status.reassemble();
+
+        if (!frame_data.empty()) {
+            // Try to parse as v2 frame
+            auto parsed = v2::DataFrame::deserialize(frame_data);
+            if (parsed && !parsed->payload.empty()) {
+                std::string msg(parsed->payload.begin(), parsed->payload.end());
+                // Clean non-printable
+                msg.erase(std::remove_if(msg.begin(), msg.end(),
+                    [](char c) { return c < 32 || c > 126; }), msg.end());
+
+                if (status_callback_ && !msg.empty()) {
+                    status_callback_("[MESSAGE] \"" + msg + "\"");
+                }
+                if (data_callback_ && !msg.empty()) {
+                    data_callback_(msg);
+                }
+            }
+
+            // Update stats and call raw callback
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.frames_received++;
+                rx_data_queue_.push(frame_data);
+            }
+            if (raw_data_callback_) {
+                raw_data_callback_(frame_data);
+            }
+        }
+    }
+
+    // Update stats
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        if (cw_failed > 0) stats_.frames_failed++;
+        ChannelQuality quality = ofdm_demodulator_->getChannelQuality();
+        stats_.snr_db = quality.snr_db;
+        stats_.ber = quality.ber_estimate;
+        stats_.synced = true;
     }
 }
 

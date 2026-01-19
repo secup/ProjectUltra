@@ -106,6 +106,10 @@ public:
     using RawDataCallback = std::function<void(const Bytes&)>;
     void setRawDataCallback(RawDataCallback callback) { raw_data_callback_ = callback; }
 
+    // Callback for RX status messages (codeword progress, etc.)
+    using StatusCallback = std::function<void(const std::string&)>;
+    void setStatusCallback(StatusCallback callback) { status_callback_ = callback; }
+
     // Reset state (e.g., when switching modes)
     void reset();
 
@@ -186,6 +190,7 @@ private:
     // Callbacks
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
+    StatusCallback status_callback_;
 
     // Adaptive modulation controller
     AdaptiveModeController adaptive_;

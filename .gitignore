@@ -40,3 +40,4 @@ Makefile
 compile_commands.json
 packaging/dist/
 Claude.md
+imgui.ini
