@@ -3,6 +3,7 @@
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
+#include <fstream>
 
 namespace ultra {
 namespace gui {
@@ -365,7 +366,44 @@ void ModemEngine::receiveAudio(const std::vector<float>& samples) {
     // FAST PATH: Only lock the pending mutex, just append samples
     // This is safe to call from SDL audio callback
     std::lock_guard<std::mutex> lock(rx_pending_mutex_);
+
+    // Cap buffer size to prevent unbounded growth if main loop stalls
+    if (rx_pending_samples_.size() + samples.size() > MAX_PENDING_SAMPLES) {
+        size_t to_remove = rx_pending_samples_.size() + samples.size() - MAX_PENDING_SAMPLES;
+        if (to_remove >= rx_pending_samples_.size()) {
+            rx_pending_samples_.clear();
+        } else {
+            rx_pending_samples_.erase(rx_pending_samples_.begin(), rx_pending_samples_.begin() + to_remove);
+        }
+    }
     rx_pending_samples_.insert(rx_pending_samples_.end(), samples.begin(), samples.end());
+}
+
+size_t ModemEngine::injectSignalFromFile(const std::string& filepath) {
+    // Read f32 samples from file and inject into RX buffer
+    std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+    if (!file) {
+        LOG_MODEM(ERROR, "Failed to open signal file: %s", filepath.c_str());
+        return 0;
+    }
+
+    size_t file_size = file.tellg();
+    size_t num_samples = file_size / sizeof(float);
+    file.seekg(0);
+
+    std::vector<float> samples(num_samples);
+    file.read(reinterpret_cast<char*>(samples.data()), file_size);
+
+    if (!file) {
+        LOG_MODEM(ERROR, "Failed to read signal file: %s", filepath.c_str());
+        return 0;
+    }
+
+    LOG_MODEM(INFO, "Injecting %zu samples from %s", num_samples, filepath.c_str());
+
+    // Inject via the normal receiveAudio path
+    receiveAudio(samples);
+    return num_samples;
 }
 
 bool ModemEngine::pollRxAudio() {

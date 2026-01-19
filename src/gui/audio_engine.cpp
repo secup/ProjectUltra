@@ -152,6 +152,16 @@ void AudioEngine::queueTxSamples(const std::vector<float>& samples) {
         addChannelNoise(loopback_samples);
 
         std::lock_guard<std::mutex> rx_lock(rx_mutex_);
+
+        // Cap buffer size to prevent unbounded growth
+        if (rx_buffer_.size() + loopback_samples.size() > MAX_RX_BUFFER_SAMPLES) {
+            size_t to_remove = rx_buffer_.size() + loopback_samples.size() - MAX_RX_BUFFER_SAMPLES;
+            if (to_remove >= rx_buffer_.size()) {
+                rx_buffer_.clear();
+            } else {
+                rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + to_remove);
+            }
+        }
         rx_buffer_.insert(rx_buffer_.end(), loopback_samples.begin(), loopback_samples.end());
 
         // NOTE: Don't call rx_callback_ here - it creates a synchronous loop
@@ -278,6 +288,16 @@ void AudioEngine::inputCallback(void* userdata, Uint8* stream, int len) {
 
     {
         std::lock_guard<std::mutex> lock(engine->rx_mutex_);
+
+        // Cap buffer size to prevent unbounded growth if main loop stalls
+        if (engine->rx_buffer_.size() + captured.size() > MAX_RX_BUFFER_SAMPLES) {
+            size_t to_remove = engine->rx_buffer_.size() + captured.size() - MAX_RX_BUFFER_SAMPLES;
+            if (to_remove >= engine->rx_buffer_.size()) {
+                engine->rx_buffer_.clear();
+            } else {
+                engine->rx_buffer_.erase(engine->rx_buffer_.begin(), engine->rx_buffer_.begin() + to_remove);
+            }
+        }
         engine->rx_buffer_.insert(engine->rx_buffer_.end(), captured.begin(), captured.end());
     }
 

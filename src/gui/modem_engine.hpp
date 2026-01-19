@@ -66,6 +66,10 @@ public:
     // Call this with chunks of audio from the input
     void receiveAudio(const std::vector<float>& samples);
 
+    // RX: Inject test signal from file (for debugging/testing)
+    // Returns number of samples injected, 0 on error
+    size_t injectSignalFromFile(const std::string& filepath);
+
     // Process queued audio samples (slow - call from main loop, NOT audio callback)
     // Returns true if there's more data to process
     bool pollRxAudio();
@@ -169,6 +173,9 @@ private:
     std::vector<float> rx_sample_buffer_;      // Main processing buffer
     std::vector<float> rx_pending_samples_;    // Pending samples from callback (fast push)
     mutable std::mutex rx_pending_mutex_;      // Protects pending buffer only (fast lock)
+
+    // Buffer limit (prevent unbounded growth if main loop stalls)
+    static constexpr size_t MAX_PENDING_SAMPLES = 96000;  // 2 seconds at 48kHz
     std::queue<Bytes> rx_data_queue_;
     mutable std::mutex rx_mutex_;              // Protects processing buffer and queue
 

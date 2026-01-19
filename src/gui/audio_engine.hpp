@@ -108,6 +108,9 @@ private:
     int sample_rate_ = 48000;
     int buffer_size_ = 1024;
 
+    // Buffer limits (prevent unbounded growth if main loop stalls)
+    static constexpr size_t MAX_RX_BUFFER_SAMPLES = 96000;  // 2 seconds at 48kHz
+
     // RX callback
     RxCallback rx_callback_;
 

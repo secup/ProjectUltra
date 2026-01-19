@@ -806,13 +806,14 @@ void App::render() {
         modem_.pollRxAudio();
     }
 
-    // === DEBUG: Test signal keys (F1-F6) ===
+    // === DEBUG: Test signal keys (F1-F7) ===
     // F1: Send 1500 Hz test tone
     // F2: Send test pattern (all zeros) with LDPC
     // F3: Send test pattern (DEADBEEF) with LDPC - non-trivial pattern to verify decoding
     // F4: Send test pattern (alternating 0101) with LDPC
     // F5: Send RAW OFDM (NO LDPC) - 0xAA 0x55 pattern
     // F6: Send RAW OFDM (NO LDPC) - DEADBEEF pattern
+    // F7: Inject test signal FILE into RX buffer (tests decode without audio hardware)
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
         audio_.queueTxSamples(tone);
@@ -842,6 +843,16 @@ void App::render() {
         auto samples = modem_.transmitRawOFDM(1);  // Raw OFDM, NO LDPC, DEADBEEF
         audio_.queueTxSamples(samples);
         rx_log_.push_back("[TEST] Sent RAW OFDM: DEADBEEF pattern (81 bytes, NO LDPC)");
+    }
+    // F7: Inject test signal from file into RX buffer (for testing decode without audio)
+    if (ImGui::IsKeyPressed(ImGuiKey_F7)) {
+        const char* test_file = "tests/data/v2_connect_marker_index_verified.f32";
+        size_t injected = modem_.injectSignalFromFile(test_file);
+        if (injected > 0) {
+            rx_log_.push_back("[TEST] Injected " + std::to_string(injected) + " samples from " + test_file);
+        } else {
+            rx_log_.push_back("[TEST] Failed to inject signal from " + std::string(test_file));
+        }
     }
 
     // Protocol engine tick (for ARQ timeouts)
