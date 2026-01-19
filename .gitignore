@@ -18,6 +18,9 @@ CLAUDE.md
 # Cache
 .cache/
 
+# Test artifacts
+Testing/
+
 # Compiled objects
 *.o
 *.a
