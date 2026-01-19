@@ -351,6 +351,14 @@ void App::renderLoopbackControls() {
 
         // RX log
         ImGui::Text("Message Log");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Copy##log1")) {
+            std::string all_log;
+            for (const auto& msg : rx_log_) {
+                all_log += msg + "\n";
+            }
+            ImGui::SetClipboardText(all_log.c_str());
+        }
         ImGui::BeginChild("RXLog", ImVec2(-1, 150), true);
         for (const auto& msg : rx_log_) {
             ImVec4 color = (msg.size() >= 4 && msg.substr(0, 4) == "[TX]")
@@ -851,10 +859,11 @@ void App::render() {
     }
     // F7: Inject test signal from file into RX buffer (for testing decode without audio)
     if (ImGui::IsKeyPressed(ImGuiKey_F7)) {
-        const char* test_file = "/tmp/cli_test.f32";  // Fresh CLI-generated test signal
+        // Test signal: CONNECT frame + 500ms gap + DATA frame ("Hello from ULTRA test signal!")
+        const char* test_file = "tests/data/test_connect_data_sequence.f32";
         size_t injected = modem_.injectSignalFromFile(test_file);
         if (injected > 0) {
-            rx_log_.push_back("[TEST] Injected " + std::to_string(injected) + " samples from " + test_file);
+            rx_log_.push_back("[TEST] Injected " + std::to_string(injected) + " samples from test signal");
         } else {
             rx_log_.push_back("[TEST] Failed to inject signal from " + std::string(test_file));
         }
@@ -1453,6 +1462,14 @@ void App::renderRadioControls() {
 
     // RX log
     ImGui::Text("Message Log");
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Copy##log2")) {
+        std::string all_log;
+        for (const auto& msg : rx_log_) {
+            all_log += msg + "\n";
+        }
+        ImGui::SetClipboardText(all_log.c_str());
+    }
     ImGui::BeginChild("RXLogRadio", ImVec2(-1, 150), true);
     for (const auto& msg : rx_log_) {
         ImVec4 color = (msg.size() >= 4 && msg.substr(0, 4) == "[TX]")

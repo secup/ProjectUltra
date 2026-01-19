@@ -138,7 +138,7 @@ void Connection::disconnect() {
     if (state_ == ConnectionState::CONNECTED) {
         LOG_MODEM(INFO, "Connection: Disconnecting from %s", remote_call_.c_str());
 
-        auto disc = v2::ControlFrame::makeDisconnect(local_call_, remote_call_);
+        auto disc = v2::ConnectFrame::makeDisconnect(local_call_, remote_call_);
         Bytes disc_data = disc.serialize();
 
         LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", disc_data.size());

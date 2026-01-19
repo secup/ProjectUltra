@@ -195,18 +195,19 @@ namespace Flags {
 uint32_t hashCallsign(const std::string& callsign);
 
 // Check if a type is a control frame (1 codeword = 20 bytes)
-// NOTE: CONNECT/CONNECT_ACK/CONNECT_NAK are now ConnectFrames (larger)
+// NOTE: CONNECT/CONNECT_ACK/CONNECT_NAK/DISCONNECT are now ConnectFrames (larger)
 inline bool isControlFrame(FrameType type) {
     return type == FrameType::PROBE || type == FrameType::PROBE_ACK ||
-           type == FrameType::DISCONNECT || type == FrameType::KEEPALIVE ||
+           type == FrameType::KEEPALIVE ||
            type == FrameType::ACK || type == FrameType::NACK ||
            type == FrameType::BEACON;
 }
 
-// Check if a type is a connect frame (carries full callsigns, ~41 bytes)
+// Check if a type is a connect frame (carries full callsigns, ~41 bytes = 3 codewords)
+// Includes DISCONNECT for proper station identification at end of contact
 inline bool isConnectFrame(FrameType type) {
     return type == FrameType::CONNECT || type == FrameType::CONNECT_ACK ||
-           type == FrameType::CONNECT_NAK;
+           type == FrameType::CONNECT_NAK || type == FrameType::DISCONNECT;
 }
 
 // Check if a type is a data frame (variable codewords)
@@ -241,7 +242,6 @@ struct ControlFrame {
                                   uint16_t seq, uint32_t cw_bitmap);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
-    static ControlFrame makeDisconnect(const std::string& src, const std::string& dst);
     static ControlFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_capabilities, uint8_t preferred_mode);
     static ControlFrame makeConnectAck(const std::string& src, const std::string& dst,
@@ -338,6 +338,7 @@ struct ConnectFrame {
     static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
                                         uint8_t neg_mode);
     static ConnectFrame makeConnectNak(const std::string& src, const std::string& dst);
+    static ConnectFrame makeDisconnect(const std::string& src, const std::string& dst);
 
     // Hash-based factory (for responding when only hash is known, fills in our callsign)
     static ConnectFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <algorithm>
 #include <fstream>
+#include <sstream>
 
 namespace ultra {
 namespace gui {
@@ -514,18 +515,44 @@ void ModemEngine::processRxBuffer() {
     size_t num_codewords = accumulated_soft_bits.size() / LDPC_BLOCK;
     if (num_codewords == 0) return;
 
+    // Decode each codeword individually using CodewordStatus for tracking
+    v2::CodewordStatus cw_status;
+    int cw_success = 0, cw_failed = 0;
+    int expected_total = 0;
+    std::string frame_type_str;
+
+    // First, decode CW0 to get expected codeword count
+    {
+        std::vector<float> cw_bits(accumulated_soft_bits.begin(),
+                                    accumulated_soft_bits.begin() + LDPC_BLOCK);
+        Bytes decoded = decoder_->decodeSoft(cw_bits);
+        bool success = decoder_->lastDecodeSuccess();
+
+        if (success && decoded.size() >= v2::BYTES_PER_CODEWORD) {
+            Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
+            auto cw_info = v2::identifyCodeword(cw_data);
+
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw_data);
+                if (header.valid) {
+                    expected_total = header.total_cw;
+                }
+            }
+        }
+    }
+
+    // Limit to expected codewords (or available if header failed)
+    if (expected_total > 0 && (size_t)expected_total < num_codewords) {
+        num_codewords = expected_total;
+    }
+
     // Notify start of frame
     if (status_callback_) {
         status_callback_("[FRAME] Received " + std::to_string(num_codewords) + " codewords");
     }
 
-    // Decode each codeword individually using CodewordStatus for tracking
-    v2::CodewordStatus cw_status;
     cw_status.decoded.resize(num_codewords, false);
     cw_status.data.resize(num_codewords);
-    int cw_success = 0, cw_failed = 0;
-    int expected_total = 0;
-    std::string frame_type_str;
 
     for (size_t i = 0; i < num_codewords; i++) {
         std::vector<float> cw_bits(accumulated_soft_bits.begin() + i * LDPC_BLOCK,
@@ -545,7 +572,7 @@ void ModemEngine::processRxBuffer() {
             auto cw_info = v2::identifyCodeword(cw_data);
 
             if (i == 0 && cw_info.type == v2::CodewordType::HEADER) {
-                // Parse header to get frame info
+                // Parse header to get frame info (already parsed above, just get type string)
                 auto header = v2::parseHeader(cw_data);
                 if (header.valid) {
                     expected_total = header.total_cw;
@@ -590,19 +617,52 @@ void ModemEngine::processRxBuffer() {
         Bytes frame_data = cw_status.reassemble();
 
         if (!frame_data.empty()) {
-            // Try to parse as v2 frame
-            auto parsed = v2::DataFrame::deserialize(frame_data);
-            if (parsed && !parsed->payload.empty()) {
-                std::string msg(parsed->payload.begin(), parsed->payload.end());
-                // Clean non-printable
-                msg.erase(std::remove_if(msg.begin(), msg.end(),
-                    [](char c) { return c < 32 || c > 126; }), msg.end());
+            bool frame_parsed = false;
 
-                if (status_callback_ && !msg.empty()) {
-                    status_callback_("[MESSAGE] \"" + msg + "\"");
+            // Try ControlFrame first (1 CW: PROBE, ACK, NACK, KEEPALIVE, BEACON)
+            if (num_codewords == 1) {
+                auto ctrl_frame = v2::ControlFrame::deserialize(frame_data);
+                if (ctrl_frame) {
+                    frame_parsed = true;
+                    if (status_callback_) {
+                        std::stringstream ss;
+                        ss << "[" << frame_type_str << "] src=0x" << std::hex << ctrl_frame->src_hash
+                           << " dst=0x" << ctrl_frame->dst_hash << std::dec
+                           << " seq=" << ctrl_frame->seq;
+                        status_callback_(ss.str());
+                    }
                 }
-                if (data_callback_ && !msg.empty()) {
-                    data_callback_(msg);
+            }
+
+            // Try ConnectFrame (3 CW: CONNECT, CONNECT_ACK, CONNECT_NAK, DISCONNECT)
+            if (!frame_parsed) {
+                auto connect_frame = v2::ConnectFrame::deserialize(frame_data);
+                if (connect_frame) {
+                    frame_parsed = true;
+                    std::string src = connect_frame->getSrcCallsign();
+                    std::string dst = connect_frame->getDstCallsign();
+                    if (status_callback_) {
+                        status_callback_("[" + frame_type_str + "] " + src + " -> " + dst);
+                    }
+                }
+            }
+
+            // Try DataFrame (variable CW: DATA, DATA_START, etc.)
+            if (!frame_parsed) {
+                auto parsed = v2::DataFrame::deserialize(frame_data);
+                if (parsed && !parsed->payload.empty()) {
+                    frame_parsed = true;
+                    std::string msg(parsed->payload.begin(), parsed->payload.end());
+                    // Clean non-printable
+                    msg.erase(std::remove_if(msg.begin(), msg.end(),
+                        [](char c) { return c < 32 || c > 126; }), msg.end());
+
+                    if (status_callback_ && !msg.empty()) {
+                        status_callback_("[MESSAGE] \"" + msg + "\"");
+                    }
+                    if (data_callback_ && !msg.empty()) {
+                        data_callback_(msg);
+                    }
                 }
             }
 
@@ -627,6 +687,10 @@ void ModemEngine::processRxBuffer() {
         stats_.ber = quality.ber_estimate;
         stats_.synced = true;
     }
+
+    // Reset demodulator to look for next preamble
+    // This ensures clean state between frames and prevents accumulated timing/phase errors
+    ofdm_demodulator_->reset();
 }
 
 bool ModemEngine::hasReceivedData() const {

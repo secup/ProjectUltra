@@ -196,17 +196,6 @@ ControlFrame ControlFrame::makeKeepalive(const std::string& src, const std::stri
     return f;
 }
 
-ControlFrame ControlFrame::makeDisconnect(const std::string& src, const std::string& dst) {
-    ControlFrame f;
-    f.type = FrameType::DISCONNECT;
-    f.flags = Flags::VERSION_V2;
-    f.seq = 0;
-    f.src_hash = hashCallsign(src);
-    f.dst_hash = hashCallsign(dst);
-    std::memset(f.payload, 0, PAYLOAD_SIZE);
-    return f;
-}
-
 ControlFrame ControlFrame::makeConnect(const std::string& src, const std::string& dst,
                                         uint8_t mode_capabilities, uint8_t preferred_mode) {
     ControlFrame f;
@@ -598,6 +587,24 @@ ConnectFrame ConnectFrame::makeConnectNak(const std::string& src, const std::str
     return f;
 }
 
+ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::string& dst) {
+    ConnectFrame f;
+    f.type = FrameType::DISCONNECT;
+    f.flags = Flags::VERSION_V2;
+    f.seq = 0;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+
+    std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
+    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
+
+    f.mode_capabilities = 0;
+    f.negotiated_mode = 0;
+    return f;
+}
+
 ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
                                                  uint8_t neg_mode) {
     ConnectFrame f;
@@ -700,10 +707,9 @@ std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
         return std::nullopt;
     }
 
-    // Check type is CONNECT, CONNECT_ACK, or CONNECT_NAK
+    // Check type is CONNECT, CONNECT_ACK, CONNECT_NAK, or DISCONNECT
     FrameType ftype = static_cast<FrameType>(data[2]);
-    if (ftype != FrameType::CONNECT && ftype != FrameType::CONNECT_ACK &&
-        ftype != FrameType::CONNECT_NAK) {
+    if (!isConnectFrame(ftype)) {
         return std::nullopt;
     }
 
@@ -945,7 +951,11 @@ bool CodewordStatus::mergeCodeword(size_t index, const Bytes& cw_data) {
 }
 
 void CodewordStatus::initForFrame(uint8_t total_cw) {
+    // Must clear first! resize() preserves existing elements when shrinking,
+    // which would leave stale 'true' values from previous frame
+    decoded.clear();
     decoded.resize(total_cw, false);
+    data.clear();
     data.resize(total_cw);
 }
 

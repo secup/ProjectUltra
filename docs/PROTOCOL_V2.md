@@ -55,21 +55,26 @@ ULTRA (Universal Lightweight Transport for Radio Amateurs) Protocol v2 is design
 
 ### Frame Types
 
-| Type | Value | Description | Typical Size |
-|------|-------|-------------|--------------|
-| PROBE | 0x10 | Channel probe request | 1 codeword |
-| PROBE_ACK | 0x11 | Channel probe response | 1 codeword |
-| CONNECT | 0x12 | Connection request | 1 codeword |
-| CONNECT_ACK | 0x13 | Connection accepted | 1 codeword |
-| CONNECT_NAK | 0x14 | Connection rejected | 1 codeword |
-| DISCONNECT | 0x15 | End connection | 1 codeword |
-| KEEPALIVE | 0x16 | Maintain connection | 1 codeword |
-| ACK | 0x20 | Acknowledge data | 1 codeword |
-| SACK | 0x21 | Selective ACK (bitmap) | 1 codeword |
+| Type | Value | Description | Size |
+|------|-------|-------------|------|
+| PROBE | 0x10 | Channel probe request | 1 CW (control) |
+| PROBE_ACK | 0x11 | Channel probe response | 1 CW (control) |
+| CONNECT | 0x12 | Connection request | 3 CW (full callsigns) |
+| CONNECT_ACK | 0x13 | Connection accepted | 3 CW (full callsigns) |
+| CONNECT_NAK | 0x14 | Connection rejected | 3 CW (full callsigns) |
+| DISCONNECT | 0x15 | End connection | 3 CW (full callsigns) |
+| KEEPALIVE | 0x16 | Maintain connection | 1 CW (control) |
+| ACK | 0x20 | Acknowledge data | 1 CW (control) |
+| NACK | 0x21 | Request retransmit (bitmap) | 1 CW (control) |
 | DATA | 0x30 | Data segment | Variable |
 | DATA_START | 0x31 | First segment (with metadata) | Variable |
 | DATA_END | 0x32 | Last segment (with checksum) | Variable |
-| BEACON | 0x40 | CQ broadcast | 1 codeword |
+| BEACON | 0x40 | CQ broadcast | 1 CW (control) |
+
+**Frame Categories:**
+- **Control frames** (1 CW): Use 24-bit callsign hashes for efficiency
+- **Connect frames** (3 CW): Include full callsigns for station identification
+- **Data frames** (variable): Use 24-bit hashes, payload in CW1+
 
 ### Control Frame Format (20 bytes - fits in 1 codeword)
 
@@ -90,6 +95,40 @@ Total: 20 bytes = 160 bits < 162 bits (fits in 1 R1/4 codeword)
 - **DST_HASH** (3 bytes): 24-bit hash of destination callsign (0xFFFFFF = broadcast)
 - **PAYLOAD** (6 bytes): Type-specific payload data
 - **CRC16** (2 bytes): CRC-16 CCITT over all preceding bytes
+
+### Connect Frame Format (41 bytes - 3 codewords)
+
+Used for: CONNECT, CONNECT_ACK, CONNECT_NAK, DISCONNECT
+
+These frames include **full callsigns** (up to 9 characters each) for proper station identification, which is required by amateur radio regulations at the start and end of contacts.
+
+```
+┌────────┬──────┬───────┬───────┬──────────┬──────────┬──────────┬─────┬───────┐
+│ MAGIC  │ TYPE │ FLAGS │ SEQ   │ SRC_HASH │ DST_HASH │ TOTAL_CW │ LEN │ HCRC  │
+│  2B    │  1B  │  1B   │  2B   │    3B    │    3B    │    1B    │ 2B  │  2B   │
+├────────┴──────┴───────┴───────┴──────────┴──────────┴──────────┴─────┴───────┤
+│                              PAYLOAD (22 bytes)                              │
+│  ┌─────────────┬─────────────┬──────────────┬────────────────┐               │
+│  │ SRC_CALL    │ DST_CALL    │ MODE_CAPS    │ NEGOTIATED     │               │
+│  │   10B       │   10B       │     1B       │     1B         │               │
+│  └─────────────┴─────────────┴──────────────┴────────────────┘               │
+├──────────────────────────────────────────────────────────────────────────────┤
+│                              FCRC (2 bytes)                                  │
+└──────────────────────────────────────────────────────────────────────────────┘
+Header: 17 bytes, Payload: 22 bytes, CRC: 2 bytes = 41 bytes total (3 codewords)
+```
+
+**Payload Fields:**
+- **SRC_CALL** (10 bytes): Full source callsign (null-terminated, max 9 chars)
+- **DST_CALL** (10 bytes): Full destination callsign (null-terminated, max 9 chars)
+- **MODE_CAPS** (1 byte): Supported waveform modes bitmap
+- **NEGOTIATED** (1 byte): Negotiated/preferred mode
+
+**Rationale for 3 Codewords:**
+- Full callsigns ensure proper identification per amateur radio regulations
+- Used at connection start (CONNECT) and end (DISCONNECT)
+- DATA frames use efficient 24-bit hashes since callsigns already exchanged
+- Overhead: Only +2 CW per session compared to hash-only DISCONNECT
 
 ### Data Frame Format (Variable length)
 
@@ -231,7 +270,8 @@ Otherwise: need 1 + ceil((total_frame - 20) / 18) codewords
 
 | Frame Type | Payload | Frame Size | Codewords (R1/4) |
 |------------|---------|------------|------------------|
-| Control (PROBE, ACK) | 6B | 20B | 1 |
+| Control (PROBE, ACK, NACK) | 6B | 20B | 1 |
+| Connect (CONNECT, DISCONNECT) | 22B | 41B | 3 |
 | Short text (20B) | 20B | 39B | 2 |
 | Medium text (50B) | 50B | 69B | 4 |
 | Long text (100B) | 100B | 119B | 7 |
@@ -414,10 +454,14 @@ Initiator                           Responder
 
 ### Disconnection
 
+DISCONNECT frames include **full callsigns** (same format as CONNECT) to ensure proper station identification at the end of the contact, as required by amateur radio regulations.
+
 ```
-    │──── DISCONNECT ──────────────────►│
+    │──── DISCONNECT (full callsigns) ─►│
     │◄─── DISCONNECT (optional ack) ────│
 ```
+
+The DISCONNECT frame is 3 codewords (41 bytes), containing both station callsigns for clear identification of who is ending the connection.
 
 ---
 

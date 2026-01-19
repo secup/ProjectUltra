@@ -27,9 +27,10 @@ void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog << " [options] <command>\n\n";
     std::cerr << "Commands:\n";
     std::cerr << "  ptx [msg]       Protocol TX - send v2 frame:\n";
-    std::cerr << "                    ptx           -> PROBE (no message)\n";
-    std::cerr << "                    ptx connect   -> CONNECT (with callsigns)\n";
-    std::cerr << "                    ptx \"Hello\"   -> DATA (with message)\n";
+    std::cerr << "                    ptx              -> PROBE (no message)\n";
+    std::cerr << "                    ptx connect      -> CONNECT (with callsigns)\n";
+    std::cerr << "                    ptx disconnect   -> DISCONNECT (end connection)\n";
+    std::cerr << "                    ptx \"Hello\"      -> DATA (with message)\n";
     std::cerr << "  prx [file]      Protocol RX - decode v2 frames (from file or stdin)\n";
     std::cerr << "  tx <file>       Transmit file (raw modem, outputs audio)\n";
     std::cerr << "  rx [file]       Receive (raw modem, from file or stdin)\n";
@@ -296,6 +297,11 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
         auto connect = v2::ConnectFrame::makeConnect(src_call, dst_call, 0xFF, 0x00);
         frame_data = connect.serialize();
         frame_type_str = "CONNECT";
+    } else if (strcmp(message, "disconnect") == 0) {
+        // "disconnect" keyword = send DISCONNECT frame (3 codewords with full callsigns)
+        auto disconnect = v2::ConnectFrame::makeDisconnect(src_call, dst_call);
+        frame_data = disconnect.serialize();
+        frame_type_str = "DISCONNECT";
     } else {
         // Message = send DATA frame
         auto data = v2::DataFrame::makeData(src_call, dst_call, 1, std::string(message));
@@ -507,7 +513,11 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                                 accumulated_soft_bits.begin() + HUNT_STEP);
                 }
 
-                continue;  // Keep hunting or processing next chunk
+                // If still hunting, continue to next chunk; otherwise fall through to SYNCED processing
+                if (cw_sync_state == CwSyncState::HUNTING) {
+                    continue;
+                }
+                // Fall through to SYNCED state processing below
             }
 
             // === SYNCED STATE: Decode at fixed codeword boundaries ===
@@ -598,20 +608,35 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                 }
                                 expected_codewords = 0;
                                 current_cw_index = 0;
+                                accumulated_soft_bits.clear();
+                                demod.reset();  // Look for next preamble
                             } else if (current_frame.allSuccess()) {
                                 // All codewords already received (from buffer)
                                 auto reassembled = current_frame.reassemble();
-                                auto data_frame = v2::DataFrame::deserialize(reassembled);
 
-                                if (data_frame) {
+                                // Try ConnectFrame first (CONNECT, CONNECT_ACK, CONNECT_NAK, DISCONNECT)
+                                auto connect_frame = v2::ConnectFrame::deserialize(reassembled);
+                                if (connect_frame) {
                                     frames_received++;
-                                    data_frames++;
-                                    std::cerr << "  [DATA] seq=" << data_frame->seq
-                                              << " payload=" << data_frame->payload_len << " bytes\n";
-                                    std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                                    control_frames++;  // Count as control for stats
+                                    std::cerr << "  [" << v2::frameTypeToString(connect_frame->type) << "] "
+                                              << connect_frame->getSrcCallsign() << " -> "
+                                              << connect_frame->getDstCallsign() << "\n";
+                                } else {
+                                    // Try DataFrame
+                                    auto data_frame = v2::DataFrame::deserialize(reassembled);
+                                    if (data_frame) {
+                                        frames_received++;
+                                        data_frames++;
+                                        std::cerr << "  [DATA] seq=" << data_frame->seq
+                                                  << " payload=" << data_frame->payload_len << " bytes\n";
+                                        std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                                    }
                                 }
                                 expected_codewords = 0;
                                 current_cw_index = 0;
+                                accumulated_soft_bits.clear();
+                                demod.reset();  // Look for next preamble
                             }
                         } else {
                             std::cerr << "  [INVALID HEADER] magic OK but header CRC failed\n";
@@ -674,20 +699,33 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                     // Check if all codewords received
                     if (current_frame.allSuccess()) {
                         auto reassembled = current_frame.reassemble();
-                        auto data_frame = v2::DataFrame::deserialize(reassembled);
 
-                        if (data_frame) {
+                        // Try ConnectFrame first (CONNECT, CONNECT_ACK, CONNECT_NAK, DISCONNECT)
+                        auto connect_frame = v2::ConnectFrame::deserialize(reassembled);
+                        if (connect_frame) {
                             frames_received++;
-                            data_frames++;
-                            std::cerr << "  [DATA] seq=" << data_frame->seq
-                                      << " payload=" << data_frame->payload_len << " bytes\n";
-                            std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                            control_frames++;  // Count as control for stats
+                            std::cerr << "  [" << v2::frameTypeToString(connect_frame->type) << "] "
+                                      << connect_frame->getSrcCallsign() << " -> "
+                                      << connect_frame->getDstCallsign() << "\n";
                         } else {
-                            std::cerr << "  [ERROR] Failed to parse reassembled data frame\n";
+                            // Try DataFrame
+                            auto data_frame = v2::DataFrame::deserialize(reassembled);
+                            if (data_frame) {
+                                frames_received++;
+                                data_frames++;
+                                std::cerr << "  [DATA] seq=" << data_frame->seq
+                                          << " payload=" << data_frame->payload_len << " bytes\n";
+                                std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                            } else {
+                                std::cerr << "  [ERROR] Failed to parse reassembled frame\n";
+                            }
                         }
 
                         expected_codewords = 0;
                         current_cw_index = 0;
+                        accumulated_soft_bits.clear();
+                        demod.reset();  // Look for next preamble
                     }
                 }
             }
