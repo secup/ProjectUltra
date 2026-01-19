@@ -1080,7 +1080,7 @@ struct OFDMDemodulator::Impl {
                 // This rotates all H values so average phase becomes 0
                 carrier_phase_correction = std::conj(h_avg) / avg_mag;
                 carrier_phase_initialized = true;
-                LOG_DEMOD(INFO, "Carrier phase recovery: avg_phase=%.1f°, applying correction",
+                LOG_DEMOD(DEBUG, "Carrier phase recovery: avg_phase=%.1f°, applying correction",
                           std::arg(h_avg) * 180.0f / M_PI);
             }
         }
@@ -1091,12 +1091,12 @@ struct OFDMDemodulator::Impl {
         }
         h_sum *= carrier_phase_correction;
 
-        // DEBUG: Log first symbol's pilot analysis - ALL pilots
+        // DEBUG: Log first symbol's pilot analysis - ALL pilots (verbose, use DEBUG level)
         if (soft_bits.empty()) {
-            LOG_DEMOD(INFO, "=== First symbol pilot analysis ===");
+            LOG_DEMOD(DEBUG, "=== First symbol pilot analysis ===");
             for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
                 int idx = pilot_carrier_indices[i];
-                LOG_DEMOD(INFO, "Pilot[%zu] idx=%d: tx=(%.1f,%.1f) rx=(%.2f,%.2f) H=(%.2f,%.2f) |H|=%.2f phase=%.1f°",
+                LOG_DEMOD(DEBUG, "Pilot[%zu] idx=%d: tx=(%.1f,%.1f) rx=(%.2f,%.2f) H=(%.2f,%.2f) |H|=%.2f phase=%.1f°",
                           i, idx,
                           pilot_sequence[i].real(), pilot_sequence[i].imag(),
                           freq_domain[idx].real(), freq_domain[idx].imag(),
@@ -1104,7 +1104,7 @@ struct OFDMDemodulator::Impl {
                           std::abs(h_ls_all[i]),
                           std::arg(h_ls_all[i]) * 180.0f / M_PI);
             }
-            LOG_DEMOD(INFO, "H avg: (%.2f,%.2f), |H|=%.2f, phase=%.1f deg",
+            LOG_DEMOD(DEBUG, "H avg: (%.2f,%.2f), |H|=%.2f, phase=%.1f deg",
                       (h_sum / float(pilot_carrier_indices.size())).real(),
                       (h_sum / float(pilot_carrier_indices.size())).imag(),
                       std::abs(h_sum / float(pilot_carrier_indices.size())),
@@ -1643,7 +1643,7 @@ struct OFDMDemodulator::Impl {
                 if (s.real() > 0) pos_count++;
                 else neg_count++;
             }
-            LOG_DEMOD(INFO, "First symbol stats: %zu carriers, %d positive, %d negative, first 3: (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f)",
+            LOG_DEMOD(DEBUG, "First symbol stats: %zu carriers, %d positive, %d negative, first 3: (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f)",
                     equalized.size(), pos_count, neg_count,
                     equalized[0].real(), equalized[0].imag(),
                     equalized.size() > 1 ? equalized[1].real() : 0.0f,
@@ -1663,7 +1663,7 @@ struct OFDMDemodulator::Impl {
             // TODO: Re-enable only for LDPC-coded data where scrambling ensures ~50/50 distribution
             llr_sign_flip = false;
             float neg_ratio = float(neg_count) / equalized.size();
-            LOG_DEMOD(INFO, "Symbol polarity: %.0f%% negative, %.0f%% positive (no flip)",
+            LOG_DEMOD(DEBUG, "Symbol polarity: %.0f%% negative, %.0f%% positive (no flip)",
                       neg_ratio * 100, (1.0f - neg_ratio) * 100);
         }
 
