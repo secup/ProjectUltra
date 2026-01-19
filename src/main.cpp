@@ -26,7 +26,10 @@ void printUsage(const char* prog) {
     std::cerr << "ProjectUltra - High-Speed HF Sound Modem\n\n";
     std::cerr << "Usage: " << prog << " [options] <command>\n\n";
     std::cerr << "Commands:\n";
-    std::cerr << "  ptx [msg]       Protocol TX - send v2 frame (PROBE if no msg, DATA if msg)\n";
+    std::cerr << "  ptx [msg]       Protocol TX - send v2 frame:\n";
+    std::cerr << "                    ptx           -> PROBE (no message)\n";
+    std::cerr << "                    ptx connect   -> CONNECT (with callsigns)\n";
+    std::cerr << "                    ptx \"Hello\"   -> DATA (with message)\n";
     std::cerr << "  prx [file]      Protocol RX - decode v2 frames (from file or stdin)\n";
     std::cerr << "  tx <file>       Transmit file (raw modem, outputs audio)\n";
     std::cerr << "  rx [file]       Receive (raw modem, from file or stdin)\n";
@@ -43,6 +46,8 @@ void printUsage(const char* prog) {
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Send PROBE and play audio (Linux)\n";
     std::cerr << "  " << prog << " ptx -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000\n\n";
+    std::cerr << "  # Send CONNECT frame to file\n";
+    std::cerr << "  " << prog << " ptx connect -s MYCALL -d THEIRCALL -o connect.f32\n\n";
     std::cerr << "  # Send DATA message to file\n";
     std::cerr << "  " << prog << " ptx \"Hello!\" -s MYCALL -o msg.f32\n\n";
     std::cerr << "  # Listen for frames from audio recording\n";
@@ -266,8 +271,9 @@ int runRx(ultra::ModemConfig& config, const char* input_file, const char* output
     return 0;
 }
 
-// Protocol TX - transmit v2 frame (PROBE or DATA with text message)
+// Protocol TX - transmit v2 frame (PROBE, CONNECT, or DATA with text message)
 // Usage: ultra ptx "Hello World" -o output.f32 -s MYCALL
+//        ultra ptx connect -s MYCALL -d THEIRCALL -o connect.f32
 int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* output_file,
                   const std::string& src_call, const std::string& dst_call) {
     namespace v2 = ultra::protocol::v2;
@@ -284,6 +290,12 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
         auto probe = v2::ControlFrame::makeProbe(src_call, dst_call);
         frame_data = probe.serialize();
         frame_type_str = "PROBE";
+    } else if (strcmp(message, "connect") == 0) {
+        // "connect" keyword = send CONNECT frame with full callsigns
+        // Mode caps: support all modes (0xFF), preferred: DQPSK R1/4 (0x00)
+        auto connect = v2::ConnectFrame::makeConnect(src_call, dst_call, 0xFF, 0x00);
+        frame_data = connect.serialize();
+        frame_type_str = "CONNECT";
     } else {
         // Message = send DATA frame
         auto data = v2::DataFrame::makeData(src_call, dst_call, 1, std::string(message));
