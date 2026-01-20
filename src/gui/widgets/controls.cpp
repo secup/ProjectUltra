@@ -106,11 +106,11 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
     ImGui::SameLine(80);
     ImGui::Text("%s R%s", getModulationName(data_mod), getCodeRateName(data_rate));
 
-    // Throughput (based on negotiated mode)
-    ImGui::Text("Throughput");
+    // Theoretical max throughput for negotiated mode
+    ImGui::Text("Max Speed");
     ImGui::SameLine(80);
     float throughput_bps = config.getTheoreticalThroughput(data_mod, data_rate);
-    ImGui::Text("%.1f kbps", throughput_bps / 1000.0f);
+    ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
 
     ImGui::Spacing();
     ImGui::Separator();

@@ -761,12 +761,11 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
     ImGui::PopStyleColor();
 
-    // Row 2: Mode + Throughput + BER
+    // Row 2: Mode + Theoretical max speed + BER
     ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
     ImGui::SameLine(100);
-    // Calculate throughput from negotiated mode (not modem base config)
     float throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
-    ImGui::Text("%.1f kbps", throughput_bps / 1000.0f);
+    ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
     ImGui::SameLine(180);
     ImGui::TextDisabled("BER:");
     ImGui::SameLine();
