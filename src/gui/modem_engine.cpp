@@ -487,7 +487,9 @@ void ModemEngine::processRxBuffer() {
 
     // Loop to process all available codewords (multi-codeword frames)
     bool frame_ready = ofdm_demodulator_->process(span);
-    LOG_MODEM(INFO, "RX: Demod returned frame_ready=%d, synced=%d", frame_ready, ofdm_demodulator_->isSynced());
+    if (frame_ready || ofdm_demodulator_->isSynced()) {
+        LOG_MODEM(INFO, "RX: Demod returned frame_ready=%d, synced=%d", frame_ready, ofdm_demodulator_->isSynced());
+    }
 
     // Update SNR continuously when synced (not just after decode)
     if (ofdm_demodulator_->isSynced()) {
@@ -514,9 +516,6 @@ void ModemEngine::processRxBuffer() {
         SampleSpan empty_span;
         frame_ready = ofdm_demodulator_->process(empty_span);
     }
-    LOG_MODEM(INFO, "RX: Accumulated %zu soft bits, %d codewords",
-              accumulated_soft_bits.size(), codewords_collected);
-
     // Process accumulated soft bits codeword by codeword
     if (accumulated_soft_bits.empty()) {
         // Reset demodulator even when no data - prevents stuck state
@@ -530,6 +529,9 @@ void ModemEngine::processRxBuffer() {
         ofdm_demodulator_->reset();
         return;
     }
+
+    LOG_MODEM(INFO, "RX: Accumulated %zu soft bits, %zu codewords",
+              accumulated_soft_bits.size(), num_codewords);
 
     // Decode each codeword individually using CodewordStatus for tracking
     v2::CodewordStatus cw_status;
