@@ -21,6 +21,11 @@ CLAUDE.md
 # Test artifacts
 Testing/
 
+# Runtime generated files
+logs/
+*.f32
+!tests/data/*.f32
+
 # Compiled objects
 *.o
 *.a
