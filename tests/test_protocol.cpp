@@ -9,6 +9,7 @@
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/file_transfer.hpp"
+#include "ultra/types.hpp"
 #include "protocol/compression.hpp"
 #include <iostream>
 #include <cassert>
@@ -111,20 +112,34 @@ bool test_frame_crc() {
 bool test_control_frame_types() {
     TEST("All v2 control frame types");
 
-    std::vector<std::pair<v2::ControlFrame, v2::FrameType>> cases = {
+    // Test ControlFrames (1 codeword)
+    std::vector<std::pair<v2::ControlFrame, v2::FrameType>> control_cases = {
         { v2::ControlFrame::makeProbe("A", "B"), v2::FrameType::PROBE },
-        { v2::ControlFrame::makeConnect("A", "B", 0x07, 0), v2::FrameType::CONNECT },
-        { v2::ControlFrame::makeConnectAck("A", "B", 0), v2::FrameType::CONNECT_ACK },
-        { v2::ControlFrame::makeConnectNak("A", "B"), v2::FrameType::CONNECT_NAK },
-        { v2::ControlFrame::makeDisconnect("A", "B"), v2::FrameType::DISCONNECT },
         { v2::ControlFrame::makeAck("A", "B", 1), v2::FrameType::ACK },
         { v2::ControlFrame::makeNack("A", "B", 1, 0), v2::FrameType::NACK },
+        { v2::ControlFrame::makeKeepalive("A", "B"), v2::FrameType::KEEPALIVE },
+        { v2::ControlFrame::makeModeChange("A", "B", 1, ultra::Modulation::QAM16, ultra::CodeRate::R2_3, 20.0f, 0), v2::FrameType::MODE_CHANGE },
     };
 
-    for (const auto& [frame, expected_type] : cases) {
+    for (const auto& [frame, expected_type] : control_cases) {
         Bytes data = frame.serialize();
         auto parsed = v2::ControlFrame::deserialize(data);
         if (!parsed) FAIL("Failed to parse control frame");
+        if (parsed->type != expected_type) FAIL("Type mismatch");
+    }
+
+    // Test ConnectFrames (3 codewords)
+    std::vector<std::pair<v2::ConnectFrame, v2::FrameType>> connect_cases = {
+        { v2::ConnectFrame::makeConnect("CALLSIGN1", "CALLSIGN2", 0x07, 0), v2::FrameType::CONNECT },
+        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0), v2::FrameType::CONNECT_ACK },
+        { v2::ConnectFrame::makeConnectNak("CALLSIGN1", "CALLSIGN2"), v2::FrameType::CONNECT_NAK },
+        { v2::ConnectFrame::makeDisconnect("CALLSIGN1", "CALLSIGN2"), v2::FrameType::DISCONNECT },
+    };
+
+    for (const auto& [frame, expected_type] : connect_cases) {
+        Bytes data = frame.serialize();
+        auto parsed = v2::ConnectFrame::deserialize(data);
+        if (!parsed) FAIL("Failed to parse connect frame");
         if (parsed->type != expected_type) FAIL("Type mismatch");
     }
 
@@ -595,6 +610,160 @@ bool test_quick_brown_fox() {
 }
 
 // ============================================================================
+// Adaptive Mode Tests
+// ============================================================================
+
+bool test_adaptive_mode_upgrade() {
+    TEST("Automatic MODE_CHANGE on good channel");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    // Station B measures good SNR - should trigger MODE_CHANGE
+    stationB.setMeasuredSNR(22.0f);  // Should recommend DQPSK R2/3
+
+    bool a_mode_changed = false;
+    ultra::Modulation a_new_mod = ultra::Modulation::DQPSK;
+    ultra::CodeRate a_new_rate = ultra::CodeRate::R1_4;
+
+    stationA.setDataModeChangedCallback([&](ultra::Modulation mod, ultra::CodeRate rate, float snr) {
+        a_mode_changed = true;
+        a_new_mod = mod;
+        a_new_rate = rate;
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    // Connect - should trigger automatic MODE_CHANGE from B
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected");
+    if (!stationB.isConnected()) FAIL("B not connected");
+
+    // Verify MODE_CHANGE was received
+    if (!a_mode_changed) FAIL("No MODE_CHANGE received at A");
+    if (a_new_mod != ultra::Modulation::DQPSK) FAIL("Wrong modulation");
+    if (a_new_rate != ultra::CodeRate::R2_3) FAIL("Expected R2/3 at 22 dB SNR");
+
+    // Verify both stations report same mode
+    if (stationA.getDataCodeRate() != ultra::CodeRate::R2_3) FAIL("A has wrong code rate");
+    if (stationB.getDataCodeRate() != ultra::CodeRate::R2_3) FAIL("B has wrong code rate");
+
+    PASS();
+    return true;
+}
+
+bool test_adaptive_data_transfer() {
+    TEST("Data transfer after mode upgrade");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    // Good SNR triggers upgrade to DQPSK R1/2
+    stationB.setMeasuredSNR(18.0f);
+
+    std::vector<std::string> received_at_b;
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_b.push_back(text);
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    // Connect with automatic MODE_CHANGE
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected");
+
+    // Verify mode upgrade happened
+    if (stationA.getDataCodeRate() != ultra::CodeRate::R1_2) {
+        std::cout << "(got " << ultra::codeRateToString(stationA.getDataCodeRate()) << ") ";
+        FAIL("Expected R1/2 at 18 dB SNR");
+    }
+
+    // Send message - should work with upgraded mode
+    if (!stationA.sendMessage("Hello at higher rate!")) {
+        FAIL("sendMessage() failed");
+    }
+    channel.run(30, 100);
+
+    if (received_at_b.empty()) FAIL("No message received");
+    if (received_at_b[0] != "Hello at higher rate!") FAIL("Message content mismatch");
+
+    PASS();
+    return true;
+}
+
+bool test_adaptive_bidirectional() {
+    TEST("Bidirectional transfer with adaptive mode");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    // Excellent SNR - should upgrade to QAM16
+    stationB.setMeasuredSNR(27.0f);
+
+    std::vector<std::string> received_at_a;
+    std::vector<std::string> received_at_b;
+
+    stationA.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_a.push_back(text);
+    });
+    stationB.setMessageReceivedCallback([&](const std::string&, const std::string& text) {
+        received_at_b.push_back(text);
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+
+    stationA.connect("K2DEF");
+    channel.run(30, 100);
+
+    if (!stationA.isConnected()) FAIL("Not connected");
+
+    // Verify QAM16 mode
+    if (stationA.getDataModulation() != ultra::Modulation::QAM16) {
+        std::cout << "(got " << ultra::modulationToString(stationA.getDataModulation()) << ") ";
+        FAIL("Expected QAM16 at 27 dB SNR");
+    }
+
+    // Bidirectional transfer
+    stationA.sendMessage("High-speed from A");
+    channel.run(30, 100);
+
+    stationB.sendMessage("High-speed from B");
+    channel.run(30, 100);
+
+    if (received_at_b.empty() || received_at_b[0] != "High-speed from A") {
+        FAIL("B didn't receive A's message");
+    }
+    if (received_at_a.empty() || received_at_a[0] != "High-speed from B") {
+        FAIL("A didn't receive B's message");
+    }
+
+    PASS();
+    return true;
+}
+
+// ============================================================================
 // File Transfer Tests
 // ============================================================================
 
@@ -746,6 +915,11 @@ int main() {
 
     std::cout << "\nRadio Test Messages:\n";
     test_quick_brown_fox();
+
+    std::cout << "\nAdaptive Mode Tests:\n";
+    test_adaptive_mode_upgrade();
+    test_adaptive_data_transfer();
+    test_adaptive_bidirectional();
 
     std::cout << "\nFile Transfer Tests:\n";
     test_file_transfer_small();

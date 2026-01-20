@@ -94,6 +94,20 @@ public:
     void setModeCapabilities(uint8_t caps);
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb);
 
+    // --- Adaptive Data Mode ---
+
+    // Set measured SNR from modem (used for adaptive mode selection)
+    void setMeasuredSNR(float snr_db);
+    float getMeasuredSNR() const;
+
+    // Get current data mode
+    Modulation getDataModulation() const;
+    CodeRate getDataCodeRate() const;
+
+    // Set callback for data mode changes
+    using DataModeChangedCallback = Connection::DataModeChangedCallback;
+    void setDataModeChangedCallback(DataModeChangedCallback cb);
+
 private:
     Connection connection_;
 

@@ -31,6 +31,9 @@ App::App() {
     // Set up raw data callback for ARQ mode (Radio mode only)
     modem_.setRawDataCallback([this](const Bytes& data) {
         if (mode_ == AppMode::OPERATE) {
+            // Update protocol layer with current SNR before processing frame
+            auto stats = modem_.getStats();
+            protocol_.setMeasuredSNR(stats.snr_db);
             protocol_.onRxData(data);
         }
     });

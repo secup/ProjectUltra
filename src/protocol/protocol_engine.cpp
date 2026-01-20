@@ -213,12 +213,15 @@ void ProtocolEngine::processRxBuffer() {
             // Connect frames: header + 22B payload + 2B CRC = 41 bytes
             frame_size = v2::DataFrame::HEADER_SIZE + v2::ConnectFrame::PAYLOAD_SIZE + v2::DataFrame::CRC_SIZE;
         } else {
-            // Data frame - need to read codeword count
-            if (rx_buffer_.size() < 12) {
+            // Data frame - need to read payload length from header
+            // Header layout: [0-1] magic, [2] type, [3] flags, [4-5] seq,
+            //                [6-8] src_hash, [9-11] dst_hash, [12] total_cw,
+            //                [13-14] payload_len, [15-16] header_crc
+            if (rx_buffer_.size() < v2::DataFrame::HEADER_SIZE) {
                 return;  // Need more data
             }
-            uint8_t num_codewords = rx_buffer_[11];
-            frame_size = v2::DataFrame::HEADER_SIZE + num_codewords * v2::BYTES_PER_CODEWORD;
+            uint16_t payload_len = (static_cast<uint16_t>(rx_buffer_[13]) << 8) | rx_buffer_[14];
+            frame_size = v2::DataFrame::HEADER_SIZE + payload_len + v2::DataFrame::CRC_SIZE;
         }
 
         if (rx_buffer_.size() < frame_size) {
@@ -335,6 +338,33 @@ void ProtocolEngine::setModeCapabilities(uint8_t caps) {
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.setModeNegotiatedCallback(std::move(cb));
+}
+
+// --- Adaptive Data Mode ---
+
+void ProtocolEngine::setMeasuredSNR(float snr_db) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setMeasuredSNR(snr_db);
+}
+
+float ProtocolEngine::getMeasuredSNR() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getMeasuredSNR();
+}
+
+Modulation ProtocolEngine::getDataModulation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getDataModulation();
+}
+
+CodeRate ProtocolEngine::getDataCodeRate() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getDataCodeRate();
+}
+
+void ProtocolEngine::setDataModeChangedCallback(DataModeChangedCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setDataModeChangedCallback(std::move(cb));
 }
 
 } // namespace protocol

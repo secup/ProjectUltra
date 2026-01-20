@@ -151,3 +151,8 @@ add_test(NAME FrameV2 COMMAND test_frame_v2)
 add_executable(test_frame_v2_modem test_frame_v2_modem.cpp)
 target_link_libraries(test_frame_v2_modem PRIVATE ultra_core)
 add_test(NAME FrameV2Modem COMMAND test_frame_v2_modem)
+
+# MODE_CHANGE protocol tests (adaptive mode selection)
+add_executable(test_mode_change test_mode_change.cpp)
+target_link_libraries(test_mode_change PRIVATE ultra_core)
+add_test(NAME ModeChange COMMAND test_mode_change)

@@ -133,6 +133,22 @@ public:
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }
 
+    // --- Data Mode (modulation + code rate) ---
+
+    Modulation getDataModulation() const { return data_modulation_; }
+    CodeRate getDataCodeRate() const { return data_code_rate_; }
+
+    // Set measured SNR from modem layer (call this when decoding frames)
+    void setMeasuredSNR(float snr_db) { measured_snr_db_ = snr_db; }
+    float getMeasuredSNR() const { return measured_snr_db_; }
+
+    // Callback when remote station requests mode change
+    using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate, float snr_db)>;
+    void setDataModeChangedCallback(DataModeChangedCallback cb) { on_data_mode_changed_ = cb; }
+
+    // Request mode change to remote station
+    void requestModeChange(Modulation new_mod, CodeRate new_rate, float measured_snr, uint8_t reason);
+
     void reset();
 
 private:
@@ -152,6 +168,23 @@ private:
     WaveformMode negotiated_mode_ = WaveformMode::OFDM;
     uint8_t remote_capabilities_ = ModeCapabilities::OFDM;
     WaveformMode remote_preferred_ = WaveformMode::OFDM;
+
+    // Data modulation and code rate (adaptive)
+    Modulation data_modulation_ = Modulation::DQPSK;
+    CodeRate data_code_rate_ = CodeRate::R1_4;
+    uint16_t mode_change_seq_ = 0;  // Sequence number for MODE_CHANGE frames
+    float measured_snr_db_ = 15.0f;  // SNR measured by modem (updated via setMeasuredSNR)
+
+    // MODE_CHANGE timeout/retry tracking
+    bool mode_change_pending_ = false;
+    uint32_t mode_change_timeout_ms_ = 0;
+    int mode_change_retry_count_ = 0;
+    Modulation pending_modulation_ = Modulation::DQPSK;
+    CodeRate pending_code_rate_ = CodeRate::R1_4;
+    float pending_snr_db_ = 15.0f;
+    uint8_t pending_reason_ = 0;
+    static constexpr uint32_t MODE_CHANGE_TIMEOUT_MS = 5000;
+    static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
 
     // ARQ for reliable data transfer
     StopAndWaitARQ arq_;
@@ -176,12 +209,15 @@ private:
     IncomingCallCallback on_incoming_call_;
     DataReceivedCallback on_data_received_;
     ModeNegotiatedCallback on_mode_negotiated_;
+    DataModeChangedCallback on_data_mode_changed_;
 
     // Internal handlers for v2 frames
     void handleConnect(const v2::ConnectFrame& frame, const std::string& src_call);
     void handleConnectAck(const v2::ConnectFrame& frame, const std::string& src_call);
     void handleConnectNak(const v2::ConnectFrame& frame, const std::string& src_call);
     void handleDisconnect(const v2::ControlFrame& frame, const std::string& src_call);
+    void handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call);
+    void handleModeChange(const v2::ControlFrame& frame, const std::string& src_call);
     void handleDataPayload(const Bytes& payload, bool more_data);
 
     void transmitFrame(const Bytes& frame_data);

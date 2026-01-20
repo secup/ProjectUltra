@@ -54,6 +54,23 @@ inline uint32_t getBitsPerSymbol(Modulation mod) {
     }
 }
 
+// Modulation to string
+inline const char* modulationToString(Modulation mod) {
+    switch (mod) {
+        case Modulation::DBPSK:  return "DBPSK";
+        case Modulation::BPSK:   return "BPSK";
+        case Modulation::DQPSK:  return "DQPSK";
+        case Modulation::QPSK:   return "QPSK";
+        case Modulation::D8PSK:  return "D8PSK";
+        case Modulation::QAM8:   return "8PSK";
+        case Modulation::QAM16:  return "16QAM";
+        case Modulation::QAM32:  return "32QAM";
+        case Modulation::QAM64:  return "64QAM";
+        case Modulation::QAM256: return "256QAM";
+        default: return "UNKNOWN";
+    }
+}
+
 // Cyclic prefix modes for adaptive overhead
 enum class CyclicPrefixMode : uint8_t {
     SHORT = 0,   // 32 samples (0.67ms) - good conditions, minimal multipath
@@ -91,6 +108,20 @@ inline float getCodeRateValue(CodeRate rate) {
         case CodeRate::R5_6: return 0.833f;
         case CodeRate::R7_8: return 0.875f;
         default: return 0.5f;
+    }
+}
+
+// Code rate to string
+inline const char* codeRateToString(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_4: return "R1/4";
+        case CodeRate::R1_3: return "R1/3";
+        case CodeRate::R1_2: return "R1/2";
+        case CodeRate::R2_3: return "R2/3";
+        case CodeRate::R3_4: return "R3/4";
+        case CodeRate::R5_6: return "R5/6";
+        case CodeRate::R7_8: return "R7/8";
+        default: return "UNKNOWN";
     }
 }
 

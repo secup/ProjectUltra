@@ -88,6 +88,7 @@ const char* frameTypeToString(FrameType type) {
         case FrameType::CONNECT_NAK: return "CONNECT_NAK";
         case FrameType::DISCONNECT:  return "DISCONNECT";
         case FrameType::KEEPALIVE:   return "KEEPALIVE";
+        case FrameType::MODE_CHANGE: return "MODE_CHANGE";
         case FrameType::ACK:         return "ACK";
         case FrameType::NACK:        return "NACK";
         case FrameType::BEACON:      return "BEACON";
@@ -193,6 +194,42 @@ ControlFrame ControlFrame::makeKeepalive(const std::string& src, const std::stri
     f.src_hash = hashCallsign(src);
     f.dst_hash = hashCallsign(dst);
     std::memset(f.payload, 0, PAYLOAD_SIZE);
+    return f;
+}
+
+ControlFrame ControlFrame::makeModeChange(const std::string& src, const std::string& dst,
+                                           uint16_t seq, Modulation new_mod, CodeRate new_rate,
+                                           float snr_db, uint8_t reason) {
+    ControlFrame f;
+    f.type = FrameType::MODE_CHANGE;
+    f.flags = Flags::VERSION_V2;
+    f.seq = seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    f.payload[0] = static_cast<uint8_t>(new_mod);
+    f.payload[1] = static_cast<uint8_t>(new_rate);
+    f.payload[2] = encodeSNR(snr_db);
+    f.payload[3] = reason;
+    f.payload[4] = 0;  // Reserved
+    f.payload[5] = 0;  // Reserved
+    return f;
+}
+
+ControlFrame ControlFrame::makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
+                                                 uint16_t seq, Modulation new_mod, CodeRate new_rate,
+                                                 float snr_db, uint8_t reason) {
+    ControlFrame f;
+    f.type = FrameType::MODE_CHANGE;
+    f.flags = Flags::VERSION_V2;
+    f.seq = seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = dst_hash & 0xFFFFFF;
+    f.payload[0] = static_cast<uint8_t>(new_mod);
+    f.payload[1] = static_cast<uint8_t>(new_rate);
+    f.payload[2] = encodeSNR(snr_db);
+    f.payload[3] = reason;
+    f.payload[4] = 0;  // Reserved
+    f.payload[5] = 0;  // Reserved
     return f;
 }
 

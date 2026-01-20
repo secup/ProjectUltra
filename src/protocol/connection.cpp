@@ -4,6 +4,44 @@
 namespace ultra {
 namespace protocol {
 
+// Recommend data mode based on measured SNR
+// Conservative thresholds calibrated for REAL HF channels (not just AWGN)
+// HF has multipath fading that requires 3-6 dB extra margin vs AWGN
+static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
+    // Typical HF SNR: 10-18 dB (50% of time), 18-25 dB (good, ~20%)
+    // These thresholds include ~4 dB margin for fading
+
+    if (snr_db >= 30.0f) {
+        // Excellent conditions (rare) - use high throughput
+        mod = Modulation::QAM16;
+        rate = CodeRate::R3_4;  // 3x baseline
+    } else if (snr_db >= 25.0f) {
+        // Very good conditions
+        mod = Modulation::QAM16;
+        rate = CodeRate::R2_3;  // 2.7x baseline
+    } else if (snr_db >= 20.0f) {
+        // Good conditions - sweet spot for speed
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R2_3;  // 2.7x baseline, differential for robustness
+    } else if (snr_db >= 16.0f) {
+        // Typical good HF - balanced speed/reliability
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_2;  // 2x baseline
+    } else if (snr_db >= 12.0f) {
+        // Typical HF - prioritize reliability
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_4;  // Baseline
+    } else if (snr_db >= 8.0f) {
+        // Marginal conditions
+        mod = Modulation::DBPSK;
+        rate = CodeRate::R1_4;  // Most robust
+    } else {
+        // Very poor SNR - maximum robustness
+        mod = Modulation::DBPSK;
+        rate = CodeRate::R1_4;
+    }
+}
+
 const char* connectionStateToString(ConnectionState state) {
     switch (state) {
         case ConnectionState::DISCONNECTED:  return "DISCONNECTED";
@@ -315,6 +353,9 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                 case v2::FrameType::CONNECT_NAK:
                     handleConnectNak(*conn, src_call);
                     break;
+                case v2::FrameType::DISCONNECT:
+                    handleDisconnectFrame(*conn, src_call);
+                    break;
                 default:
                     break;
             }
@@ -332,13 +373,32 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
                         LOG_MODEM(INFO, "Connection: Disconnect acknowledged");
                         enterDisconnected("Disconnect complete");
                     } else if (state_ == ConnectionState::CONNECTED) {
-                        arq_.onFrameReceived(frame_data);
+                        // Check if this ACK is for our pending MODE_CHANGE
+                        if (mode_change_pending_ && ctrl->seq == mode_change_seq_) {
+                            LOG_MODEM(INFO, "Connection: MODE_CHANGE acknowledged, applying %s %s",
+                                      modulationToString(pending_modulation_),
+                                      codeRateToString(pending_code_rate_));
+                            data_modulation_ = pending_modulation_;
+                            data_code_rate_ = pending_code_rate_;
+                            mode_change_pending_ = false;
+
+                            // Notify application of mode change
+                            if (on_data_mode_changed_) {
+                                on_data_mode_changed_(data_modulation_, data_code_rate_, pending_snr_db_);
+                            }
+                        } else {
+                            // Regular data ACK
+                            arq_.onFrameReceived(frame_data);
+                        }
                     }
                     break;
                 case v2::FrameType::NACK:
                     if (state_ == ConnectionState::CONNECTED) {
                         arq_.onFrameReceived(frame_data);
                     }
+                    break;
+                case v2::FrameType::MODE_CHANGE:
+                    handleModeChange(*ctrl, src_call);
                     break;
                 case v2::FrameType::PROBE:
                 case v2::FrameType::PROBE_ACK:
@@ -387,6 +447,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         remote_hash_ = frame.src_hash;  // Store hash for routing
 
+        // Use measured SNR from modem (set via setMeasuredSNR)
+        snr_db = measured_snr_db_;
+
         WaveformMode channel_recommended = WaveformMode::OFDM;
         if (doppler_spread_hz > 5.0f) {
             channel_recommended = WaveformMode::OTFS_RAW;
@@ -408,6 +471,18 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
                                                            static_cast<uint8_t>(negotiated_mode_));
         transmitFrame(ack.serialize());
         enterConnected();
+
+        // After connection is established, recommend data mode based on measured SNR
+        Modulation rec_mod;
+        CodeRate rec_rate;
+        recommendDataMode(snr_db, rec_mod, rec_rate);
+
+        // Only send MODE_CHANGE if different from default (DQPSK R1/4)
+        if (rec_mod != Modulation::DQPSK || rec_rate != CodeRate::R1_4) {
+            LOG_MODEM(INFO, "Connection: Recommending %s %s based on SNR=%.1f dB",
+                      modulationToString(rec_mod), codeRateToString(rec_rate), snr_db);
+            requestModeChange(rec_mod, rec_rate, snr_db, v2::ModeChangeReason::INITIAL_SETUP);
+        }
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         pending_remote_hash_ = frame.src_hash;  // Store hash for later
@@ -463,6 +538,94 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
     enterDisconnected("Remote disconnected");
 }
 
+void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call) {
+    if (state_ == ConnectionState::DISCONNECTED) {
+        return;
+    }
+
+    LOG_MODEM(INFO, "Connection: Disconnect from %s", src_call.c_str());
+
+    // Send ACK for the disconnect
+    auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
+    transmitFrame(ack.serialize());
+
+    stats_.disconnects++;
+    enterDisconnected("Remote disconnected");
+}
+
+void Connection::handleModeChange(const v2::ControlFrame& frame, const std::string& src_call) {
+    if (state_ != ConnectionState::CONNECTED) {
+        LOG_MODEM(DEBUG, "Connection: Ignoring MODE_CHANGE (not connected)");
+        return;
+    }
+
+    // Parse MODE_CHANGE payload
+    auto info = frame.getModeChangeInfo();
+
+    const char* reason_str = "unknown";
+    switch (info.reason) {
+        case v2::ModeChangeReason::CHANNEL_IMPROVED: reason_str = "channel improved"; break;
+        case v2::ModeChangeReason::CHANNEL_DEGRADED: reason_str = "channel degraded"; break;
+        case v2::ModeChangeReason::USER_REQUEST:     reason_str = "user request"; break;
+        case v2::ModeChangeReason::INITIAL_SETUP:    reason_str = "initial setup"; break;
+    }
+
+    LOG_MODEM(INFO, "Connection: MODE_CHANGE from %s: %s %s (SNR=%.1f dB, reason=%s)",
+              remote_call_.c_str(),
+              modulationToString(info.modulation),
+              codeRateToString(info.code_rate),
+              info.snr_db,
+              reason_str);
+
+    // Update local state
+    data_modulation_ = info.modulation;
+    data_code_rate_ = info.code_rate;
+
+    // Send ACK for the MODE_CHANGE
+    auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
+    transmitFrame(ack.serialize());
+
+    // Notify application of mode change
+    if (on_data_mode_changed_) {
+        on_data_mode_changed_(info.modulation, info.code_rate, info.snr_db);
+    }
+}
+
+void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
+                                    float measured_snr, uint8_t reason) {
+    if (state_ != ConnectionState::CONNECTED) {
+        LOG_MODEM(WARN, "Connection: Cannot request mode change (not connected)");
+        return;
+    }
+
+    // Don't send new MODE_CHANGE if one is already pending
+    if (mode_change_pending_) {
+        LOG_MODEM(DEBUG, "Connection: MODE_CHANGE already pending, ignoring request");
+        return;
+    }
+
+    LOG_MODEM(INFO, "Connection: Requesting MODE_CHANGE to %s %s (SNR=%.1f dB)",
+              modulationToString(new_mod), codeRateToString(new_rate), measured_snr);
+
+    // Store pending mode change parameters for retry
+    pending_modulation_ = new_mod;
+    pending_code_rate_ = new_rate;
+    pending_snr_db_ = measured_snr;
+    pending_reason_ = reason;
+    mode_change_pending_ = true;
+    mode_change_retry_count_ = 0;
+    mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
+
+    mode_change_seq_++;
+    auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
+                                                   mode_change_seq_, new_mod, new_rate,
+                                                   measured_snr, reason);
+    transmitFrame(frame.serialize());
+
+    // NOTE: Don't update local mode until ACK is received
+    // This prevents mode mismatch if the remote doesn't receive our MODE_CHANGE
+}
+
 void Connection::tick(uint32_t elapsed_ms) {
     switch (state_) {
         case ConnectionState::CONNECTING:
@@ -490,6 +653,32 @@ void Connection::tick(uint32_t elapsed_ms) {
         case ConnectionState::CONNECTED:
             connected_time_ms_ += elapsed_ms;
             stats_.connected_time_ms = connected_time_ms_;
+
+            // Handle MODE_CHANGE timeout
+            if (mode_change_pending_) {
+                if (elapsed_ms >= mode_change_timeout_ms_) {
+                    mode_change_retry_count_++;
+                    if (mode_change_retry_count_ > MODE_CHANGE_MAX_RETRIES) {
+                        LOG_MODEM(WARN, "Connection: MODE_CHANGE failed after %d attempts, keeping current mode",
+                                  MODE_CHANGE_MAX_RETRIES);
+                        mode_change_pending_ = false;
+                        // Stay at current mode - don't change anything
+                    } else {
+                        LOG_MODEM(WARN, "Connection: MODE_CHANGE timeout, retrying (%d/%d)",
+                                  mode_change_retry_count_, MODE_CHANGE_MAX_RETRIES);
+                        // Resend MODE_CHANGE with same parameters
+                        auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,
+                                                                       mode_change_seq_, pending_modulation_,
+                                                                       pending_code_rate_, pending_snr_db_,
+                                                                       pending_reason_);
+                        transmitFrame(frame.serialize());
+                        mode_change_timeout_ms_ = MODE_CHANGE_TIMEOUT_MS;
+                    }
+                } else {
+                    mode_change_timeout_ms_ -= elapsed_ms;
+                }
+            }
+
             arq_.tick(elapsed_ms);
             break;
 
@@ -538,6 +727,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     std::string old_remote = remote_call_;
     remote_call_.clear();
     pending_remote_call_.clear();
+    mode_change_pending_ = false;
     arq_.reset();
     file_transfer_.cancel();
 
@@ -610,6 +800,11 @@ void Connection::reset() {
     negotiated_mode_ = WaveformMode::OFDM;
     remote_capabilities_ = ModeCapabilities::OFDM;
     remote_preferred_ = WaveformMode::OFDM;
+    mode_change_pending_ = false;
+    mode_change_timeout_ms_ = 0;
+    mode_change_retry_count_ = 0;
+    data_modulation_ = Modulation::DQPSK;
+    data_code_rate_ = CodeRate::R1_4;
     arq_.reset();
     file_transfer_.cancel();
     LOG_MODEM(DEBUG, "Connection: Full reset");

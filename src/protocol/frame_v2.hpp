@@ -80,7 +80,8 @@ inline std::string sanitizeCallsign(const std::string& call) {
 
 // Check if callsign is valid
 inline bool isValidCallsign(const std::string& call) {
-    if (call.empty() || call.size() > CALLSIGN_LEN) return false;
+    // Ham callsigns are 3-10 characters (e.g., W1AW, VA2MVR, VE3ABC/P)
+    if (call.size() < 3 || call.size() > CALLSIGN_LEN) return false;
     for (char c : call) {
         if (!std::isalnum(static_cast<unsigned char>(c)) && c != '/' && c != '-') {
             return false;
@@ -162,6 +163,7 @@ enum class FrameType : uint8_t {
     CONNECT_NAK = 0x14,  // Connection rejected
     DISCONNECT  = 0x15,  // End connection
     KEEPALIVE   = 0x16,  // Maintain connection
+    MODE_CHANGE = 0x17,  // Request modulation/rate change
     ACK         = 0x20,  // Acknowledge frame
     NACK        = 0x21,  // Request retransmit (with codeword bitmap)
     BEACON      = 0x40,  // CQ broadcast
@@ -198,9 +200,27 @@ uint32_t hashCallsign(const std::string& callsign);
 // NOTE: CONNECT/CONNECT_ACK/CONNECT_NAK/DISCONNECT are now ConnectFrames (larger)
 inline bool isControlFrame(FrameType type) {
     return type == FrameType::PROBE || type == FrameType::PROBE_ACK ||
-           type == FrameType::KEEPALIVE ||
+           type == FrameType::KEEPALIVE || type == FrameType::MODE_CHANGE ||
            type == FrameType::ACK || type == FrameType::NACK ||
            type == FrameType::BEACON;
+}
+
+// MODE_CHANGE reason codes
+namespace ModeChangeReason {
+    constexpr uint8_t CHANNEL_IMPROVED = 0;  // SNR increased, can use faster mode
+    constexpr uint8_t CHANNEL_DEGRADED = 1;  // SNR decreased, need more robust mode
+    constexpr uint8_t USER_REQUEST     = 2;  // Manual mode selection
+    constexpr uint8_t INITIAL_SETUP    = 3;  // First mode negotiation after connect
+}
+
+// SNR encoding for MODE_CHANGE (maps 0-255 to -10 to +53.75 dB, 0.25 dB steps)
+inline uint8_t encodeSNR(float snr_db) {
+    float clamped = std::max(-10.0f, std::min(53.75f, snr_db));
+    return static_cast<uint8_t>((clamped + 10.0f) * 4.0f);
+}
+
+inline float decodeSNR(uint8_t encoded) {
+    return (encoded / 4.0f) - 10.0f;
 }
 
 // Check if a type is a connect frame (carries full callsigns, ~41 bytes = 3 codewords)
@@ -242,6 +262,12 @@ struct ControlFrame {
                                   uint16_t seq, uint32_t cw_bitmap);
     static ControlFrame makeBeacon(const std::string& src);
     static ControlFrame makeKeepalive(const std::string& src, const std::string& dst);
+    static ControlFrame makeModeChange(const std::string& src, const std::string& dst,
+                                        uint16_t seq, Modulation new_mod, CodeRate new_rate,
+                                        float snr_db, uint8_t reason);
+    static ControlFrame makeModeChangeByHash(const std::string& src, uint32_t dst_hash,
+                                              uint16_t seq, Modulation new_mod, CodeRate new_rate,
+                                              float snr_db, uint8_t reason);
     static ControlFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_capabilities, uint8_t preferred_mode);
     static ControlFrame makeConnectAck(const std::string& src, const std::string& dst,
@@ -266,6 +292,24 @@ struct ControlFrame {
 
     // Calculate CRC16
     static uint16_t calculateCRC(const uint8_t* data, size_t len);
+
+    // Helper to extract MODE_CHANGE payload
+    struct ModeChangeInfo {
+        Modulation modulation;
+        CodeRate code_rate;
+        float snr_db;
+        uint8_t reason;
+    };
+
+    // Parse MODE_CHANGE payload from a ControlFrame
+    ModeChangeInfo getModeChangeInfo() const {
+        ModeChangeInfo info;
+        info.modulation = static_cast<Modulation>(payload[0]);
+        info.code_rate = static_cast<CodeRate>(payload[1]);
+        info.snr_db = decodeSNR(payload[2]);
+        info.reason = payload[3];
+        return info;
+    }
 };
 
 // ============================================================================
