@@ -635,7 +635,9 @@ void Connection::tick(uint32_t elapsed_ms) {
                     LOG_MODEM(ERROR, "Connection: Connect failed after %d attempts",
                               config_.connect_retries);
                     stats_.connects_failed++;
-                    enterDisconnected("Connection timeout");
+                    char reason[64];
+                    snprintf(reason, sizeof(reason), "Connection timeout after %d attempts", config_.connect_retries);
+                    enterDisconnected(reason);
                 } else {
                     LOG_MODEM(WARN, "Connection: Connect timeout, retrying (%d/%d)",
                               connect_retry_count_ + 1, config_.connect_retries);

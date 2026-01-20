@@ -25,7 +25,7 @@ struct ConnectionConfig {
     ARQConfig arq;
     uint32_t connect_timeout_ms = 10000;
     uint32_t disconnect_timeout_ms = 5000;
-    int connect_retries = 3;
+    int connect_retries = 10;
     bool auto_accept = true;
 
     uint8_t mode_capabilities = ModeCapabilities::ALL;

@@ -124,7 +124,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 msg = "[SYS] Disconnecting...";
                 break;
             case protocol::ConnectionState::DISCONNECTED:
-                msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
+                if (info.find("timeout") != std::string::npos) {
+                    msg = "[FAILED] " + info;  // Make failures more visible
+                } else {
+                    msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
+                }
                 break;
         }
         rx_log_.push_back(msg);

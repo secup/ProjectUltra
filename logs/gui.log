@@ -1,0 +1,5 @@
+[09:30:46.868] === GUI Started ===
+[09:30:46.871] Virtual station initialized: callsign=SIM
+[09:30:54.356] Connect clicked: simulation=0, remote='TEST3434'
+[09:30:54.445] Connection state changed: 1 (TEST3434)
+[09:31:24.383] Connection state changed: 0 (Connection timeout)
