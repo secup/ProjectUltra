@@ -149,46 +149,9 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
         ImGui::TextColored(rate_color, "%.0f%%", success_rate);
     }
 
+    // Speed is automatically adapted based on channel conditions
     ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Speed profile selection (keep this - useful to change on the fly)
-    ImGui::Text("Speed Profile");
-    const char* profiles[] = { "Conservative", "Balanced", "Turbo", "Adaptive" };
-
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##profile", profiles[selected_profile_])) {
-        for (int i = 0; i < 4; ++i) {
-            bool is_selected = (selected_profile_ == i);
-            if (ImGui::Selectable(profiles[i], is_selected)) {
-                selected_profile_ = i;
-                config.speed_profile = static_cast<SpeedProfile>(i);
-                event = Event::ProfileChanged;
-            }
-            if (is_selected) {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-
-    // Show profile details
-    const char* profile_detail;
-    switch (selected_profile_) {
-        case 0: profile_detail = "QPSK R1/2"; break;
-        case 1: profile_detail = "64-QAM R3/4"; break;
-        case 2: profile_detail = "256-QAM R7/8"; break;
-        case 3: profile_detail = "AUTO - SNR based"; break;
-        default: profile_detail = "Unknown"; break;
-    }
-
-    if (selected_profile_ == 3) {
-        // Adaptive mode - show in cyan
-        ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), "(%s)", profile_detail);
-    } else {
-        ImGui::TextDisabled("(%s)", profile_detail);
-    }
+    ImGui::TextColored(ImVec4(0.3f, 0.9f, 1.0f, 1.0f), "Speed: Adaptive");
 
     return event;
 }

@@ -781,29 +781,11 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::TextDisabled("--");
     }
 
-    // Row 3: Frame stats + Speed Profile dropdown
+    // Row 3: Frame stats
     ImGui::Text("TX:%d RX:%d", stats.frames_sent, stats.frames_received);
     if (stats.frames_failed > 0) {
         ImGui::SameLine();
         ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "(%d fail)", stats.frames_failed);
-    }
-    ImGui::SameLine(150);
-
-    // Speed profile dropdown (compact)
-    const char* profiles[] = { "Conservative", "Balanced", "Turbo", "Adaptive" };
-    int profile_idx = static_cast<int>(config_.speed_profile);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    if (ImGui::BeginCombo("##profile", profiles[profile_idx])) {
-        for (int i = 0; i < 4; ++i) {
-            bool is_selected = (profile_idx == i);
-            if (ImGui::Selectable(profiles[i], is_selected)) {
-                config_.speed_profile = static_cast<SpeedProfile>(i);
-                config_ = presets::forProfile(config_.speed_profile);
-                modem_.setConfig(config_);
-            }
-            if (is_selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
     }
 
     ImGui::EndChild();
