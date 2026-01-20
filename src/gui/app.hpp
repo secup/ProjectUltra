@@ -128,6 +128,9 @@ private:
     // Add channel effects (AWGN, optional fading) to samples
     void applyChannelSimulation(std::vector<float>& samples);
 
+    // Prepend realistic PTT delay noise (100-500ms) before signal
+    void prependPttNoise(std::vector<float>& samples);
+
     // ========================================
     // UI Rendering
     // ========================================

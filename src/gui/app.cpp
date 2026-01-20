@@ -382,6 +382,33 @@ void App::applyChannelSimulation(std::vector<float>& samples) {
     }
 }
 
+void App::prependPttNoise(std::vector<float>& samples) {
+    // Simulate realistic PTT timing: 100-500ms of noise before signal
+    // This mimics radio key-up delay, AGC settling, etc.
+    std::uniform_int_distribution<size_t> delay_dist(4800, 24000);  // 100-500ms at 48kHz
+    size_t noise_samples = delay_dist(sim_rng_);
+
+    // Calculate noise level based on typical signal level (~0.1 RMS) and SNR
+    float typical_signal_rms = 0.1f;
+    float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+    float noise_power = (typical_signal_rms * typical_signal_rms) / snr_linear;
+    float noise_stddev = std::sqrt(noise_power);
+
+    std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+
+    // Create noise buffer and prepend to samples
+    std::vector<float> noise_buffer(noise_samples);
+    for (size_t i = 0; i < noise_samples; ++i) {
+        noise_buffer[i] = noise_dist(sim_rng_);
+    }
+
+    // Prepend noise to signal
+    samples.insert(samples.begin(), noise_buffer.begin(), noise_buffer.end());
+
+    guiLog("SIM: Prepended %zu samples (%.0fms) of PTT noise",
+           noise_samples, noise_samples * 1000.0f / 48000.0f);
+}
+
 void App::tickSimulation(uint32_t elapsed_ms) {
     if (!simulation_enabled_) return;
 
@@ -409,6 +436,9 @@ void App::tickSimulation(uint32_t elapsed_ms) {
         uint32_t tx_duration_ms = (sim_our_tx_queue_.size() * 1000) / 48000;
         sim_our_tx_delay_ = tx_duration_ms + 1000;  // TX time + 1s turnaround
         sim_virtual_tx_delay_ = std::max(sim_virtual_tx_delay_, tx_duration_ms + 500);
+
+        // Prepend PTT noise (simulates key-up delay, AGC settling)
+        prependPttNoise(sim_our_tx_queue_);
 
         // Apply channel effects
         applyChannelSimulation(sim_our_tx_queue_);
@@ -439,6 +469,9 @@ void App::tickSimulation(uint32_t elapsed_ms) {
         uint32_t tx_duration_ms = (sim_virtual_tx_queue_.size() * 1000) / 48000;
         sim_virtual_tx_delay_ = tx_duration_ms + 1000;
         sim_our_tx_delay_ = std::max(sim_our_tx_delay_, tx_duration_ms + 500);
+
+        // Prepend PTT noise (simulates key-up delay, AGC settling)
+        prependPttNoise(sim_virtual_tx_queue_);
 
         // Apply channel effects
         applyChannelSimulation(sim_virtual_tx_queue_);
