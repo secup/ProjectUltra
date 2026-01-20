@@ -764,11 +764,9 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     // Row 2: Mode + Throughput + BER
     ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
     ImGui::SameLine(100);
-    if (stats.throughput_bps >= 1000) {
-        ImGui::Text("%.1f kbps", stats.throughput_bps / 1000.0f);
-    } else {
-        ImGui::Text("%d bps", stats.throughput_bps);
-    }
+    // Calculate throughput from negotiated mode (not modem base config)
+    float throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
+    ImGui::Text("%.1f kbps", throughput_bps / 1000.0f);
     ImGui::SameLine(180);
     ImGui::TextDisabled("BER:");
     ImGui::SameLine();
