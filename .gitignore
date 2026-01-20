@@ -13,7 +13,6 @@ cmake-build-*/
 
 # Claude Code
 .claude/
-CLAUDE.md
 
 # Cache
 .cache/
@@ -44,5 +43,5 @@ cmake_install.cmake
 Makefile
 compile_commands.json
 packaging/dist/
-Claude.md
 imgui.ini
+CLAUDE.md

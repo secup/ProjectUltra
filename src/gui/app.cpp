@@ -270,6 +270,15 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     // Initialize virtual station for simulation mode
     initVirtualStation();
+
+    // Auto-initialize audio on startup
+    initAudio();
+    if (audio_initialized_) {
+        std::string output_dev = getOutputDeviceName();
+        audio_.openOutput(output_dev);
+        audio_.startPlayback();
+        startRadioRx();
+    }
 }
 
 App::~App() {
@@ -619,46 +628,44 @@ void App::render() {
 
     ImGui::Separator();
 
-    // Main content area
+    // Main content area - Two column layout
     float content_height = ImGui::GetContentRegionAvail().y - 30;
 
     ImGui::BeginChild("ContentArea", ImVec2(0, content_height), false);
 
     float total_width = ImGui::GetContentRegionAvail().x;
-    float constellation_width = total_width * 0.25f;
-    float controls_width = total_width * 0.30f;
+    float left_width = total_width * 0.32f;  // Monitoring column
 
-    // Left panel: Constellation + Waterfall
-    ImGui::BeginChild("LeftPanel", ImVec2(constellation_width, 0), true);
+    // ========================================
+    // LEFT COLUMN: Monitoring (Constellation + Channel Status + Waterfall)
+    // ========================================
+    ImGui::BeginChild("LeftPanel", ImVec2(left_width, 0), true);
 
-    ImGui::BeginChild("ConstellationArea", ImVec2(0, 200), false);
+    // Constellation diagram
+    ImGui::BeginChild("ConstellationArea", ImVec2(0, 180), false);
     auto symbols = modem_.getConstellationSymbols();
     constellation_.render(symbols, config_.modulation);
     ImGui::EndChild();
 
     ImGui::Separator();
+
+    // Compact Channel Status (horizontal layout)
+    auto modem_stats = modem_.getStats();
+    auto data_mod = protocol_.getDataModulation();
+    auto data_rate = protocol_.getDataCodeRate();
+    renderCompactChannelStatus(modem_stats, data_mod, data_rate);
+
+    ImGui::Separator();
+
+    // Waterfall (uses remaining space)
     waterfall_.render();
 
     ImGui::EndChild();
     ImGui::SameLine();
 
-    // Middle panel: Channel Status
-    ImGui::BeginChild("MiddlePanel", ImVec2(controls_width, 0), true);
-
-    auto modem_stats = modem_.getStats();
-    auto data_mod = protocol_.getDataModulation();
-    auto data_rate = protocol_.getDataCodeRate();
-    auto event = controls_.render(modem_stats, config_, data_mod, data_rate);
-
-    if (event == ControlsWidget::Event::ProfileChanged) {
-        config_ = presets::forProfile(config_.speed_profile);
-        modem_.setConfig(config_);
-    }
-
-    ImGui::EndChild();
-    ImGui::SameLine();
-
-    // Right panel: Operate controls
+    // ========================================
+    // RIGHT COLUMN: Operating (Controls + Message Log)
+    // ========================================
     ImGui::BeginChild("RightPanel", ImVec2(0, 0), true);
     renderOperateTab();
     ImGui::EndChild();
@@ -730,431 +737,284 @@ void App::stopRadioRx() {
     radio_rx_enabled_ = false;
 }
 
+void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate) {
+    // Compact horizontal Channel Status display
+    ImGui::BeginChild("ChannelStatus", ImVec2(0, 95), false);
+
+    // Row 1: Sync indicator + SNR bar
+    ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+    ImGui::TextColored(sync_color, "%s", stats.synced ? "SYNC" : "----");
+    ImGui::SameLine();
+    ImGui::Text("SNR:");
+    ImGui::SameLine();
+
+    // SNR bar
+    float snr_normalized = stats.snr_db / 40.0f;
+    snr_normalized = std::max(0.0f, std::min(1.0f, snr_normalized));
+    ImVec4 snr_color = (stats.snr_db >= 20.0f) ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) :
+                       (stats.snr_db >= 10.0f) ? ImVec4(1.0f, 1.0f, 0.2f, 1.0f) :
+                                                  ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
+    char snr_text[16];
+    snprintf(snr_text, sizeof(snr_text), "%.1f dB", stats.snr_db);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
+    ImGui::PopStyleColor();
+
+    // Row 2: Mode + Throughput + BER
+    ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
+    ImGui::SameLine(100);
+    if (stats.throughput_bps >= 1000) {
+        ImGui::Text("%.1f kbps", stats.throughput_bps / 1000.0f);
+    } else {
+        ImGui::Text("%d bps", stats.throughput_bps);
+    }
+    ImGui::SameLine(180);
+    ImGui::TextDisabled("BER:");
+    ImGui::SameLine();
+    if (stats.ber > 0.0f && stats.ber < 1.0f) {
+        ImVec4 ber_color = (stats.ber < 0.01f) ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) :
+                           (stats.ber < 0.1f)  ? ImVec4(1.0f, 1.0f, 0.2f, 1.0f) :
+                                                  ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+        ImGui::TextColored(ber_color, "%.1f%%", stats.ber * 100.0f);
+    } else {
+        ImGui::TextDisabled("--");
+    }
+
+    // Row 3: Frame stats + Speed Profile dropdown
+    ImGui::Text("TX:%d RX:%d", stats.frames_sent, stats.frames_received);
+    if (stats.frames_failed > 0) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "(%d fail)", stats.frames_failed);
+    }
+    ImGui::SameLine(150);
+
+    // Speed profile dropdown (compact)
+    const char* profiles[] = { "Conservative", "Balanced", "Turbo", "Adaptive" };
+    int profile_idx = static_cast<int>(config_.speed_profile);
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+    if (ImGui::BeginCombo("##profile", profiles[profile_idx])) {
+        for (int i = 0; i < 4; ++i) {
+            bool is_selected = (profile_idx == i);
+            if (ImGui::Selectable(profiles[i], is_selected)) {
+                config_.speed_profile = static_cast<SpeedProfile>(i);
+                config_ = presets::forProfile(config_.speed_profile);
+                modem_.setConfig(config_);
+            }
+            if (is_selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::EndChild();
+}
+
 void App::renderOperateTab() {
-    ImGui::Text("Operate Mode");
-    ImGui::Separator();
-    ImGui::Spacing();
+    // Calculate available height for layout
+    float total_height = ImGui::GetContentRegionAvail().y;
 
     // ========================================
-    // Simulation Mode Toggle
+    // TOP SECTION: Connection Controls (compact)
     // ========================================
-    // Virtual Station Simulator (only visible with -sim flag)
+
+    // Virtual Station Simulator (only visible with -sim flag, collapsible)
     if (sim_ui_visible_) {
         ImGui::PushStyleColor(ImGuiCol_Header, ImVec4(0.2f, 0.4f, 0.6f, 1.0f));
-        if (ImGui::CollapsingHeader("Virtual Station Simulator", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (ImGui::CollapsingHeader("Simulator", ImGuiTreeNodeFlags_None)) {
             ImGui::PopStyleColor();
-
-            ImGui::Indent();
-
-            if (ImGui::Checkbox("Enable Simulation", &simulation_enabled_)) {
+            if (ImGui::Checkbox("Enable", &simulation_enabled_)) {
                 guiLog("Simulation checkbox toggled: %d", simulation_enabled_);
                 if (simulation_enabled_) {
-                    // Entering simulation mode - stop real audio
-                    if (radio_rx_enabled_) {
-                        stopRadioRx();
-                        audio_.stopPlayback();
-                    }
+                    if (radio_rx_enabled_) { stopRadioRx(); audio_.stopPlayback(); }
                     guiLog("Simulation ENABLED - virtual station: %s", virtual_callsign_.c_str());
-                    rx_log_.push_back("[SIM] Simulation mode enabled - connect to '" + virtual_callsign_ + "'");
-
-                    // Reset modems and protocols for clean start
-                    modem_.reset();
-                    virtual_modem_->reset();
-                    virtual_protocol_.reset();
-
-                    // Start recording if -rec flag was passed
+                    rx_log_.push_back("[SIM] Simulation enabled - connect to '" + virtual_callsign_ + "'");
+                    modem_.reset(); virtual_modem_->reset(); virtual_protocol_.reset();
                     if (options_.record_audio) {
-                        recording_enabled_ = true;
-                        recorded_samples_.clear();
-                        guiLog("Recording ENABLED - will save to %s", options_.record_path.c_str());
+                        recording_enabled_ = true; recorded_samples_.clear();
                         rx_log_.push_back("[REC] Recording enabled");
                     }
                 } else {
-                    // Leaving simulation mode - restart real audio
-                    rx_log_.push_back("[SIM] Simulation mode disabled");
-
-                    // Stop recording and save
+                    rx_log_.push_back("[SIM] Simulation disabled");
                     if (recording_enabled_) {
                         recording_enabled_ = false;
                         if (!recorded_samples_.empty()) {
                             writeRecordingToFile();
-                            rx_log_.push_back("[REC] Recording saved: " + options_.record_path);
+                            rx_log_.push_back("[REC] Saved: " + options_.record_path);
                         }
                     }
-
                     modem_.reset();
                     if (audio_initialized_) {
                         audio_.openOutput(getOutputDeviceName());
-                        audio_.startPlayback();
-                        startRadioRx();
+                        audio_.startPlayback(); startRadioRx();
                     }
                 }
-                if (rx_log_.size() > MAX_RX_LOG) {
-                    rx_log_.pop_front();
-                }
+                if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
             }
-
             if (simulation_enabled_) {
-                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f),
-                    "Virtual station '%s' is active", virtual_callsign_.c_str());
-
-                // Show recording status
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4(0.3f, 1.0f, 0.3f, 1.0f), "'%s' active", virtual_callsign_.c_str());
                 if (recording_enabled_) {
                     ImGui::SameLine();
-                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "[REC %.1fs]",
-                        recorded_samples_.size() / 48000.0f);
+                    ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "[REC %.1fs]", recorded_samples_.size() / 48000.0f);
                 }
-
-                // SNR slider for simulation
-                ImGui::SetNextItemWidth(150);
-                ImGui::SliderFloat("Channel SNR", &simulation_snr_db_, 5.0f, 40.0f, "%.1f dB");
-                ImGui::SameLine();
-                ImGui::TextDisabled("(simulated)");
-
-                // Show what mode would be negotiated at this SNR
-                Modulation rec_mod;
-                CodeRate rec_rate;
-                ModemEngine::recommendDataMode(simulation_snr_db_, rec_mod, rec_rate);
-                ImGui::TextDisabled("Expected mode: %s %s",
-                    modulationToString(rec_mod), codeRateToString(rec_rate));
-            } else {
-                ImGui::TextDisabled("Enable to test without real radio");
+                ImGui::SetNextItemWidth(120);
+                ImGui::SliderFloat("SNR", &simulation_snr_db_, 5.0f, 40.0f, "%.0f dB");
             }
-
-            ImGui::Unindent();
         } else {
             ImGui::PopStyleColor();
         }
     }
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ========================================
-    // Audio Setup (only when not in simulation)
-    // ========================================
-    if (!simulation_enabled_) {
-        if (!audio_initialized_) {
-            if (ImGui::Button("Initialize Audio", ImVec2(-1, 35))) {
-                initAudio();
-            }
-            ImGui::TextDisabled("Click to scan audio devices");
-            return;
+    // Audio initialization (only when not in simulation)
+    if (!simulation_enabled_ && !audio_initialized_) {
+        if (ImGui::Button("Initialize Audio", ImVec2(-1, 28))) {
+            initAudio();
         }
-
-        ImGui::Text("Audio Devices");
-        ImGui::TextDisabled("Output: %s", settings_.output_device);
-        ImGui::TextDisabled("Input: %s", settings_.input_device);
-        if (ImGui::SmallButton("Configure Audio...")) {
-            settings_window_.open();
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
+        return;
     }
 
     // ========================================
-    // ARQ Connection Controls
+    // Connection Row: Callsign input + buttons
     // ========================================
-    ImGui::Text("ARQ Connection");
-
-    // Show local callsign
     bool has_callsign = strlen(settings_.callsign) >= 3;
-    if (has_callsign) {
-        ImGui::TextDisabled("My Call: %s", settings_.callsign);
+    auto conn_state = protocol_.getState();
+
+    // Status line
+    if (!simulation_enabled_ && !radio_rx_enabled_) {
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "OFFLINE");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Start RX")) {
+            if (!audio_initialized_) initAudio();
+            audio_.openOutput(getOutputDeviceName());
+            audio_.startPlayback();
+            startRadioRx();
+        }
     } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "Set callsign in Settings!");
-        if (ImGui::SmallButton("Open Settings")) {
-            settings_window_.open();
+        ImVec4 state_color;
+        const char* state_icon;
+        switch (conn_state) {
+            case protocol::ConnectionState::CONNECTED:
+                state_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+                state_icon = "CONNECTED";
+                break;
+            case protocol::ConnectionState::CONNECTING:
+                state_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);
+                state_icon = "CONNECTING...";
+                break;
+            case protocol::ConnectionState::DISCONNECTING:
+                state_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);
+                state_icon = "DISCONNECTING...";
+                break;
+            default:
+                state_color = ImVec4(0.3f, 0.8f, 1.0f, 1.0f);
+                state_icon = simulation_enabled_ ? "SIMULATION" : "LISTENING";
+                break;
+        }
+        ImGui::TextColored(state_color, "%s", state_icon);
+        if (conn_state == protocol::ConnectionState::CONNECTED) {
+            ImGui::SameLine();
+            ImGui::Text("to %s", protocol_.getRemoteCallsign().c_str());
         }
     }
 
-    // Remote callsign input
-    ImGui::Text("Connect to:");
-    ImGui::SetNextItemWidth(-1);
+    // My callsign
+    if (has_callsign) {
+        ImGui::SameLine(ImGui::GetContentRegionAvail().x - 100);
+        ImGui::TextDisabled("My: %s", settings_.callsign);
+    }
+
+    // Connect to row
+    ImGui::SetNextItemWidth(120);
     ImGui::InputText("##remotecall", remote_callsign_, sizeof(remote_callsign_),
                      ImGuiInputTextFlags_CharsUppercase);
+    ImGui::SameLine();
 
-    if (simulation_enabled_) {
-        ImGui::TextDisabled("Hint: Connect to '%s' for simulation", virtual_callsign_.c_str());
-    }
-
-    ImGui::Spacing();
-
-    // Connection status
-    auto conn_state = protocol_.getState();
-    const char* state_str = protocol::connectionStateToString(conn_state);
-
-    ImVec4 state_color;
-    switch (conn_state) {
-        case protocol::ConnectionState::CONNECTED:
-            state_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
-            break;
-        case protocol::ConnectionState::CONNECTING:
-        case protocol::ConnectionState::DISCONNECTING:
-            state_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);
-            break;
-        default:
-            state_color = ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
-            break;
-    }
-    ImGui::TextColored(state_color, "Status: %s", state_str);
-
-    if (conn_state == protocol::ConnectionState::CONNECTED) {
-        ImGui::SameLine();
-        ImGui::Text("to %s", protocol_.getRemoteCallsign().c_str());
-    }
-
-    // Always show current data mode (starts at DQPSK R1/4, changes after negotiation)
-    auto waveform = protocol_.getNegotiatedMode();
-    auto data_mod = protocol_.getDataModulation();
-    auto data_rate = protocol_.getDataCodeRate();
-    ImGui::Text("Mode: %s %s | Waveform: %s",
-        modulationToString(data_mod),
-        codeRateToString(data_rate),
-        protocol::waveformModeToString(waveform));
-
-    // Incoming call notification
-    if (!pending_incoming_call_.empty()) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
-                           "Incoming call from %s!", pending_incoming_call_.c_str());
-        if (ImGui::Button("Accept", ImVec2(80, 0))) {
-            protocol_.acceptCall();
-            pending_incoming_call_.clear();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Reject", ImVec2(80, 0))) {
-            protocol_.rejectCall();
-            pending_incoming_call_.clear();
-        }
-    }
-
-    // Connect/Disconnect buttons
-    float btn_width = ImGui::GetContentRegionAvail().x / 2 - 5;
-
+    float btn_w = 80;
     ImGui::BeginDisabled(conn_state != protocol::ConnectionState::DISCONNECTED ||
                          !has_callsign || strlen(remote_callsign_) < 3);
-    if (ImGui::Button("Connect", ImVec2(btn_width, 30))) {
+    if (ImGui::Button("Connect", ImVec2(btn_w, 0))) {
         guiLog("Connect clicked: simulation=%d, remote='%s'", simulation_enabled_, remote_callsign_);
-        if (!simulation_enabled_) {
-            // Start real audio if needed
-            if (!radio_rx_enabled_) {
-                if (!audio_initialized_) {
-                    initAudio();
-                }
-                audio_.openOutput(getOutputDeviceName());
-                audio_.startPlayback();
-                startRadioRx();
-            }
+        if (!simulation_enabled_ && !radio_rx_enabled_) {
+            if (!audio_initialized_) initAudio();
+            audio_.openOutput(getOutputDeviceName());
+            audio_.startPlayback();
+            startRadioRx();
         }
         protocol_.connect(remote_callsign_);
     }
     ImGui::EndDisabled();
-
     ImGui::SameLine();
 
     ImGui::BeginDisabled(conn_state == protocol::ConnectionState::DISCONNECTED);
-    if (ImGui::Button("Disconnect", ImVec2(btn_width, 30))) {
+    if (ImGui::Button("Disconnect", ImVec2(btn_w, 0))) {
         protocol_.disconnect();
     }
     ImGui::EndDisabled();
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ========================================
-    // Station Status (real audio only)
-    // ========================================
-    if (!simulation_enabled_) {
-        if (!radio_rx_enabled_) {
-            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "OFFLINE");
-            if (ImGui::Button("Start Listening", ImVec2(-1, 30))) {
-                if (!audio_initialized_) {
-                    initAudio();
-                }
-                audio_.openOutput(getOutputDeviceName());
-                audio_.startPlayback();
-                startRadioRx();
-            }
-        } else {
-            if (protocol_.isConnected()) {
-                ImGui::TextColored(ImVec4(0.2f, 1.0f, 0.2f, 1.0f), "CONNECTED to %s",
-                                   protocol_.getRemoteCallsign().c_str());
-            } else if (ptt_active_) {
-                ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), ">>> TRANSMITTING <<<");
-            } else {
-                ImGui::TextColored(ImVec4(0.3f, 0.8f, 1.0f, 1.0f), "LISTENING...");
-            }
-
-            if (ImGui::Button("Stop Listening", ImVec2(-1, 25))) {
-                stopRadioRx();
-                audio_.stopPlayback();
-                audio_.closeOutput();
-            }
-
-            // Audio level meter
-            ImGui::Spacing();
-            float input_level = audio_.getInputLevel();
-            float input_db = (input_level > 0.0001f) ? 20.0f * log10f(input_level) : -80.0f;
-            float level_normalized = (input_db + 60.0f) / 60.0f;
-            level_normalized = std::max(0.0f, std::min(1.0f, level_normalized));
-
-            ImVec4 level_color = (level_normalized > 0.8f) ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) :
-                                 (level_normalized > 0.5f) ? ImVec4(1.0f, 1.0f, 0.3f, 1.0f) :
-                                                             ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_PlotHistogram, level_color);
-            ImGui::ProgressBar(level_normalized, ImVec2(-1, 16), "");
-            ImGui::PopStyleColor();
-            ImGui::SameLine(10);
-            ImGui::Text("RX: %.0f dB", input_db);
-
-            // Sync indicator
-            bool synced = modem_.isSynced();
-            if (synced) {
-                ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), ">> SIGNAL DETECTED <<");
-            }
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-    }
-
-    // ========================================
-    // TX Message Input
-    // ========================================
-    ImGui::Text("Transmit Message");
-    ImGui::SetNextItemWidth(-1);
-    bool send = ImGui::InputText("##txinput_radio", tx_text_buffer_, sizeof(tx_text_buffer_),
-                                  ImGuiInputTextFlags_EnterReturnsTrue);
-
-    if (tx_in_progress_ && audio_.isTxQueueEmpty()) {
-        tx_in_progress_ = false;
-        if (!ptt_active_ && !simulation_enabled_) {
-            audio_.startCapture();
-        }
-    }
-
-    // Send button
-    const char* btn_label = "SEND";
-    if (protocol_.isConnected()) {
-        btn_label = protocol_.isReadyToSend() ? "SEND (ARQ)" : "Waiting for ACK...";
-    } else {
-        btn_label = "Connect first";
-    }
-
-    bool can_send = !tx_in_progress_ && strlen(tx_text_buffer_) > 0 &&
-                    protocol_.isConnected() && protocol_.isReadyToSend();
-
-    ImVec4 ptt_color = can_send ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f) : ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button, ptt_color);
-
-    ImGui::BeginDisabled(!can_send);
-    if (ImGui::Button(btn_label, ImVec2(-1, 40)) || (send && can_send)) {
-        std::string text(tx_text_buffer_);
-
-        if (protocol_.sendMessage(text)) {
-            rx_log_.push_back("[TX] " + text);
-            if (rx_log_.size() > MAX_RX_LOG) {
-                rx_log_.pop_front();
-            }
-            tx_text_buffer_[0] = '\0';
-        }
-    }
-    ImGui::EndDisabled();
-    ImGui::PopStyleColor();
-
-    if (tx_in_progress_) {
-        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Transmitting...");
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ========================================
-    // File Transfer
-    // ========================================
-    ImGui::Text("File Transfer");
-
-    if (protocol_.isFileTransferInProgress()) {
-        auto progress = protocol_.getFileProgress();
-
-        ImVec4 color = progress.is_sending
-            ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f)
-            : ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
-
-        ImGui::TextColored(color, "%s: %s",
-            progress.is_sending ? "Sending" : "Receiving",
-            progress.filename.c_str());
-
-        ImGui::ProgressBar(progress.percentage() / 100.0f, ImVec2(-1, 20));
-
-        ImGui::Text("%u / %u bytes (%.1f%%)",
-            progress.transferred_bytes,
-            progress.total_bytes,
-            progress.percentage());
-
-        if (ImGui::Button("Cancel Transfer", ImVec2(-1, 25))) {
-            protocol_.cancelFileTransfer();
-        }
-    } else {
-        ImGui::SetNextItemWidth(-80);
-        ImGui::InputText("##filepath", file_path_buffer_, sizeof(file_path_buffer_));
+    // Stop button for real audio
+    if (!simulation_enabled_ && radio_rx_enabled_) {
         ImGui::SameLine();
-        if (ImGui::Button("Browse", ImVec2(70, 0))) {
-            file_browser_.setTitle("Select File to Send");
-            file_browser_.open();
-        }
-
-        bool can_send_file = protocol_.isConnected() &&
-                             protocol_.isReadyToSend() &&
-                             strlen(file_path_buffer_) > 0 &&
-                             !protocol_.isFileTransferInProgress();
-
-        ImGui::BeginDisabled(!can_send_file);
-        if (ImGui::Button("Send File", ImVec2(-1, 30))) {
-            if (protocol_.sendFile(file_path_buffer_)) {
-                rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
-            } else {
-                rx_log_.push_back("[FILE] Failed to start transfer");
-            }
-            if (rx_log_.size() > MAX_RX_LOG) {
-                rx_log_.pop_front();
-            }
-        }
-        ImGui::EndDisabled();
-
-        if (!protocol_.isConnected()) {
-            ImGui::TextDisabled("Connect to send files");
+        if (ImGui::SmallButton("Stop RX")) {
+            stopRadioRx();
+            audio_.stopPlayback();
+            audio_.closeOutput();
         }
     }
 
-    ImGui::Spacing();
+    // Incoming call notification
+    if (!pending_incoming_call_.empty()) {
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f),
+                           "Incoming from %s!", pending_incoming_call_.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Accept")) { protocol_.acceptCall(); pending_incoming_call_.clear(); }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Reject")) { protocol_.rejectCall(); pending_incoming_call_.clear(); }
+    }
+
+    // Audio level meter (compact, only when RX active)
+    if (!simulation_enabled_ && radio_rx_enabled_) {
+        float input_level = audio_.getInputLevel();
+        float input_db = (input_level > 0.0001f) ? 20.0f * log10f(input_level) : -80.0f;
+        float level_normalized = (input_db + 60.0f) / 60.0f;
+        level_normalized = std::max(0.0f, std::min(1.0f, level_normalized));
+        ImVec4 level_color = (level_normalized > 0.8f) ? ImVec4(1.0f, 0.3f, 0.3f, 1.0f) :
+                             (level_normalized > 0.5f) ? ImVec4(1.0f, 1.0f, 0.3f, 1.0f) :
+                                                         ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, level_color);
+        ImGui::ProgressBar(level_normalized, ImVec2(100, 14), "");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%.0fdB", input_db);
+        if (modem_.isSynced()) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "SIGNAL");
+        }
+    }
+
     ImGui::Separator();
-    ImGui::Spacing();
 
     // ========================================
-    // Message Log
+    // MESSAGE LOG (takes most of the space)
     // ========================================
     ImGui::Text("Message Log");
     ImGui::SameLine();
-    if (ImGui::SmallButton("Clear")) {
-        rx_log_.clear();
-    }
+    if (ImGui::SmallButton("Clear")) rx_log_.clear();
     ImGui::SameLine();
     if (ImGui::SmallButton("Copy")) {
         std::string all_log;
-        for (const auto& msg : rx_log_) {
-            all_log += msg + "\n";
-        }
+        for (const auto& msg : rx_log_) all_log += msg + "\n";
         ImGui::SetClipboardText(all_log.c_str());
     }
+    ImGui::SameLine();
+    auto mstats = modem_.getStats();
+    ImGui::TextDisabled("TX:%d RX:%d", mstats.frames_sent, mstats.frames_received);
 
-    ImGui::BeginChild("RXLogRadio", ImVec2(-1, 150), true);
+    // Calculate remaining height for message log (leave space for TX and file transfer)
+    float bottom_section_height = 130;  // TX input + File transfer
+    float log_height = ImGui::GetContentRegionAvail().y - bottom_section_height;
+    if (log_height < 100) log_height = 100;  // Minimum height
+
+    ImGui::BeginChild("RXLogRadio", ImVec2(-1, log_height), true);
     for (const auto& msg : rx_log_) {
         ImVec4 color(0.7f, 0.7f, 0.7f, 1.0f);
         if (msg.size() >= 4 && msg.substr(0, 4) == "[TX]") {
@@ -1165,6 +1025,8 @@ void App::renderOperateTab() {
             color = ImVec4(1.0f, 0.8f, 0.3f, 1.0f);
         } else if (msg.size() >= 4 && msg.substr(0, 4) == "[SYS") {
             color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+        } else if (msg.find("[FAILED]") != std::string::npos) {
+            color = ImVec4(1.0f, 0.4f, 0.4f, 1.0f);
         }
         ImGui::PushStyleColor(ImGuiCol_Text, color);
         ImGui::TextWrapped("%s", msg.c_str());
@@ -1173,11 +1035,72 @@ void App::renderOperateTab() {
     if (!rx_log_.empty()) ImGui::SetScrollHereY(1.0f);
     ImGui::EndChild();
 
-    ImGui::Spacing();
+    // ========================================
+    // BOTTOM SECTION: TX Input + File Transfer
+    // ========================================
+    ImGui::Separator();
 
-    // Stats
-    auto mstats = modem_.getStats();
-    ImGui::Text("TX: %d frames | RX: %d frames", mstats.frames_sent, mstats.frames_received);
+    // TX Message Input
+    if (tx_in_progress_ && audio_.isTxQueueEmpty()) {
+        tx_in_progress_ = false;
+        if (!ptt_active_ && !simulation_enabled_) audio_.startCapture();
+    }
+
+    bool can_send = !tx_in_progress_ && strlen(tx_text_buffer_) > 0 &&
+                    protocol_.isConnected() && protocol_.isReadyToSend();
+
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90);
+    bool send = ImGui::InputText("##txinput", tx_text_buffer_, sizeof(tx_text_buffer_),
+                                  ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+
+    ImVec4 send_color = can_send ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f) : ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, send_color);
+    ImGui::BeginDisabled(!can_send);
+    if (ImGui::Button("Send##msg", ImVec2(80, 0)) || (send && can_send)) {
+        std::string text(tx_text_buffer_);
+        if (protocol_.sendMessage(text)) {
+            rx_log_.push_back("[TX] " + text);
+            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+            tx_text_buffer_[0] = '\0';
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor();
+
+    // File Transfer (compact row)
+    if (protocol_.isFileTransferInProgress()) {
+        auto progress = protocol_.getFileProgress();
+        ImGui::TextColored(progress.is_sending ? ImVec4(0.5f, 0.8f, 1.0f, 1.0f) : ImVec4(0.5f, 1.0f, 0.5f, 1.0f),
+            "%s: %s", progress.is_sending ? "TX" : "RX", progress.filename.c_str());
+        ImGui::SameLine();
+        ImGui::ProgressBar(progress.percentage() / 100.0f, ImVec2(100, 16));
+        ImGui::SameLine();
+        ImGui::Text("%.0f%%", progress.percentage());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Cancel")) protocol_.cancelFileTransfer();
+    } else {
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 160);
+        ImGui::InputText("##filepath", file_path_buffer_, sizeof(file_path_buffer_));
+        ImGui::SameLine();
+        if (ImGui::Button("Browse", ImVec2(60, 0))) {
+            file_browser_.setTitle("Select File");
+            file_browser_.open();
+        }
+        ImGui::SameLine();
+        bool can_send_file = protocol_.isConnected() && protocol_.isReadyToSend() &&
+                             strlen(file_path_buffer_) > 0;
+        ImGui::BeginDisabled(!can_send_file);
+        if (ImGui::Button("Send##file", ImVec2(60, 0))) {
+            if (protocol_.sendFile(file_path_buffer_)) {
+                rx_log_.push_back("[FILE] Sending: " + std::string(file_path_buffer_));
+            } else {
+                rx_log_.push_back("[FILE] Failed to start transfer");
+            }
+            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+        }
+        ImGui::EndDisabled();
+    }
 }
 
 } // namespace gui

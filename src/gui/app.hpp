@@ -135,6 +135,7 @@ private:
     // UI Rendering
     // ========================================
     void renderOperateTab();
+    void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate);
     void initAudio();
     void sendMessage();
     void onDataReceived(const std::string& text);

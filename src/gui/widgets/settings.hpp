@@ -17,8 +17,8 @@ struct AppSettings {
     static std::string getDefaultPath();
 
     // Station Info
-    char callsign[16] = "";
-    char grid_square[8] = "";  // Maidenhead locator
+    char callsign[16] = "N0CALL";  // Standard placeholder callsign
+    char grid_square[8] = "";      // Maidenhead locator
     char name[32] = "";
 
     // Radio Settings (for future Hamlib integration)
