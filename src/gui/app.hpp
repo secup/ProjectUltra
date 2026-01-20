@@ -21,15 +21,17 @@
 namespace ultra {
 namespace gui {
 
-// Operating mode
-enum class AppMode {
-    OPERATE,     // Real radio operation (mic input, speaker output)
-    TEST         // Local testing with audio loopback
-};
-
 class App {
 public:
-    App();
+    // Flags for developer features
+    struct Options {
+        bool enable_sim = false;      // -sim: Show simulation UI
+        bool record_audio = false;    // -rec: Record all audio to file
+        std::string record_path = "sim_recording.f32";  // Recording output path
+    };
+
+    App();  // Default constructor
+    explicit App(const Options& opts);
     ~App();
 
     void render();
@@ -54,18 +56,11 @@ private:
     ModemConfig config_;
     ultra::ModemStats stats_;  // From types.hpp for status widget
 
-    // UI state
-    float snr_slider_ = 20.0f;  // SNR in dB for channel simulation (default: moderate conditions)
-
-    // Mode selection
-    AppMode mode_ = AppMode::OPERATE;
-
-    // Loopback/Radio mode state
+    // Operate mode state
     char tx_text_buffer_[256] = "Hello from ProjectUltra!";
     std::deque<std::string> rx_log_;
     static const size_t MAX_RX_LOG = 20;
     bool audio_initialized_ = false;
-    AppMode audio_init_mode_ = AppMode::OPERATE;  // Which mode initialized audio
     bool tx_in_progress_ = false;
 
     // Radio mode state
@@ -74,7 +69,7 @@ private:
     bool ptt_active_ = false;      // Push-to-talk state
     bool radio_rx_enabled_ = false; // RX capture running
 
-    // ARQ Protocol state (always enabled in Radio mode)
+    // ARQ Protocol state
     protocol::ProtocolEngine protocol_;
     char remote_callsign_[16] = "";
     std::string pending_incoming_call_;  // Callsign of incoming caller
@@ -83,37 +78,61 @@ private:
     // File transfer state
     char file_path_buffer_[512] = "";
     std::string last_received_file_;  // Path of last received file
-    enum class FileBrowserTarget { OPERATE, TEST_LOCAL, TEST_REMOTE } file_browser_target_ = FileBrowserTarget::OPERATE;
+    bool file_browser_open_ = false;
 
-    // Protocol loopback test state (two virtual stations)
-    // Each station has its own protocol engine AND modem engine
-    protocol::ProtocolEngine test_local_;   // Local station in test mode
-    protocol::ProtocolEngine test_remote_;  // Remote station in test mode
-    std::unique_ptr<ModemEngine> test_modem_1_;  // Modem for TEST1 station
-    std::unique_ptr<ModemEngine> test_modem_2_;  // Modem for TEST2 station
+    // ========================================
+    // Developer Options
+    // ========================================
+    Options options_;                           // Command-line options
 
-    // TX sample queues for cross-wiring (TEST1 TX → TEST2 RX, TEST2 TX → TEST1 RX)
-    std::vector<float> test_tx_queue_1_;  // TEST1's pending TX samples
-    std::vector<float> test_tx_queue_2_;  // TEST2's pending TX samples
+    // ========================================
+    // Virtual Station Simulator (requires -sim flag)
+    // ========================================
+    // When enabled, a virtual station (callsign "SIM") responds to your
+    // transmissions through full modem simulation (LDPC, OFDM, channel effects).
+    // Connect to "SIM" to test the complete protocol flow in the real UI.
 
-    char test_local_tx_[256] = "Hello from TEST1!";
-    char test_remote_tx_[256] = "Hello from TEST2!";
-    char test_local_file_[512] = "";
-    char test_remote_file_[512] = "";
-    std::deque<std::string> test_local_log_;
-    std::deque<std::string> test_remote_log_;
-    std::string test_local_incoming_;   // Incoming call for local
-    std::string test_remote_incoming_;  // Incoming call for remote
-    bool test_protocol_mode_ = false;   // True = protocol test, False = raw modem test
+    bool sim_ui_visible_ = false;               // Show simulation UI (-sim flag)
+    bool simulation_enabled_ = false;           // Enable virtual station
+    float simulation_snr_db_ = 20.0f;           // Simulated channel SNR
 
-    void renderLoopbackControls();
-    void renderProtocolTestControls();
-    void initProtocolTest();
-    void tickProtocolTest(uint32_t elapsed_ms);
-    void processTestChannel(std::vector<float>& samples);  // Add noise to test channel
-    void renderRadioControls();
+    // Audio recording (requires -rec flag)
+    bool recording_enabled_ = false;            // Currently recording
+    std::vector<float> recorded_samples_;       // Accumulated samples
+    void writeRecordingToFile();                // Save recording to disk
+    std::string virtual_callsign_ = "SIM";      // Virtual station's callsign
+
+    // Virtual station's protocol and modem
+    protocol::ProtocolEngine virtual_protocol_;
+    std::unique_ptr<ModemEngine> virtual_modem_;
+
+    // Cross-wired sample queues (full modem simulation)
+    // Our TX samples → channel sim → virtual's RX
+    // Virtual's TX samples → channel sim → our RX
+    std::vector<float> sim_our_tx_queue_;       // Our pending TX → virtual RX
+    std::vector<float> sim_virtual_tx_queue_;   // Virtual's pending TX → our RX
+
+    // Channel simulation RNG
+    std::mt19937 sim_rng_{42};
+
+    // Simulated propagation delays (ms remaining)
+    uint32_t sim_our_tx_delay_ = 0;
+    uint32_t sim_virtual_tx_delay_ = 0;
+
+    // Virtual station initialization
+    void initVirtualStation();
+
+    // Process simulation (called from render loop)
+    void tickSimulation(uint32_t elapsed_ms);
+
+    // Add channel effects (AWGN, optional fading) to samples
+    void applyChannelSimulation(std::vector<float>& samples);
+
+    // ========================================
+    // UI Rendering
+    // ========================================
+    void renderOperateTab();
     void initAudio();
-    void initRadioAudio();
     void sendMessage();
     void onDataReceived(const std::string& text);
     void startRadioRx();

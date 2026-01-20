@@ -150,9 +150,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords", data.size(), encoded_cws.size());
 
-        // Concatenate all encoded codewords
+        // Concatenate all encoded codewords (with optional interleaving per-codeword)
         for (const auto& cw : encoded_cws) {
-            to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
+            if (interleaving_enabled_) {
+                Bytes interleaved = interleaver_.interleave(cw);
+                to_modulate.insert(to_modulate.end(), interleaved.begin(), interleaved.end());
+            } else {
+                to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
+            }
         }
 
         LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes", to_modulate.size());
@@ -482,7 +487,7 @@ void ModemEngine::processRxBuffer() {
 
     // Loop to process all available codewords (multi-codeword frames)
     bool frame_ready = ofdm_demodulator_->process(span);
-    LOG_MODEM(DEBUG, "RX: Demod returned frame_ready=%d, synced=%d", frame_ready, ofdm_demodulator_->isSynced());
+    LOG_MODEM(INFO, "RX: Demod returned frame_ready=%d, synced=%d", frame_ready, ofdm_demodulator_->isSynced());
 
     // Update SNR continuously when synced (not just after decode)
     if (ofdm_demodulator_->isSynced()) {
@@ -498,6 +503,8 @@ void ModemEngine::processRxBuffer() {
 
     while (frame_ready) {
         auto soft_bits = ofdm_demodulator_->getSoftBits();
+        LOG_MODEM(INFO, "RX: Got %zu soft bits from demod, codewords_collected=%d",
+                  soft_bits.size(), codewords_collected);
         if (!soft_bits.empty()) {
             codewords_collected++;
             auto to_accumulate = interleaving_enabled_ ? interleaver_.deinterleave(soft_bits) : soft_bits;
@@ -507,13 +514,22 @@ void ModemEngine::processRxBuffer() {
         SampleSpan empty_span;
         frame_ready = ofdm_demodulator_->process(empty_span);
     }
+    LOG_MODEM(INFO, "RX: Accumulated %zu soft bits, %d codewords",
+              accumulated_soft_bits.size(), codewords_collected);
 
     // Process accumulated soft bits codeword by codeword
-    if (accumulated_soft_bits.empty()) return;
+    if (accumulated_soft_bits.empty()) {
+        // Reset demodulator even when no data - prevents stuck state
+        ofdm_demodulator_->reset();
+        return;
+    }
 
     const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;  // 648 bits
     size_t num_codewords = accumulated_soft_bits.size() / LDPC_BLOCK;
-    if (num_codewords == 0) return;
+    if (num_codewords == 0) {
+        ofdm_demodulator_->reset();
+        return;
+    }
 
     // Decode each codeword individually using CodewordStatus for tracking
     v2::CodewordStatus cw_status;
@@ -527,15 +543,30 @@ void ModemEngine::processRxBuffer() {
                                     accumulated_soft_bits.begin() + LDPC_BLOCK);
         Bytes decoded = decoder_->decodeSoft(cw_bits);
         bool success = decoder_->lastDecodeSuccess();
+        LOG_MODEM(INFO, "RX: CW0 LDPC decode %s, decoded %zu bytes, first 8: %02X %02X %02X %02X %02X %02X %02X %02X",
+                  success ? "SUCCESS" : "FAILED", decoded.size(),
+                  decoded.size() > 0 ? decoded[0] : 0,
+                  decoded.size() > 1 ? decoded[1] : 0,
+                  decoded.size() > 2 ? decoded[2] : 0,
+                  decoded.size() > 3 ? decoded[3] : 0,
+                  decoded.size() > 4 ? decoded[4] : 0,
+                  decoded.size() > 5 ? decoded[5] : 0,
+                  decoded.size() > 6 ? decoded[6] : 0,
+                  decoded.size() > 7 ? decoded[7] : 0);
 
         if (success && decoded.size() >= v2::BYTES_PER_CODEWORD) {
             Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
             auto cw_info = v2::identifyCodeword(cw_data);
+            LOG_MODEM(INFO, "RX: CW0 type=%d, first bytes: %02X %02X %02X %02X",
+                      static_cast<int>(cw_info.type),
+                      cw_data[0], cw_data[1], cw_data[2], cw_data[3]);
 
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw_data);
                 if (header.valid) {
                     expected_total = header.total_cw;
+                    LOG_MODEM(INFO, "RX: Header valid, expected_total=%d, frame_type=%d",
+                              expected_total, static_cast<int>(header.type));
                 }
             }
         }
@@ -666,26 +697,25 @@ void ModemEngine::processRxBuffer() {
                 }
             }
 
-            // Update stats and call raw callback
+            // Update stats BEFORE callback (so protocol can read current SNR)
             {
                 std::lock_guard<std::mutex> lock(stats_mutex_);
                 stats_.frames_received++;
+                if (cw_failed > 0) stats_.frames_failed++;
+                ChannelQuality quality = ofdm_demodulator_->getChannelQuality();
+                stats_.snr_db = quality.snr_db;
+                stats_.ber = quality.ber_estimate;
+                stats_.synced = true;
                 rx_data_queue_.push(frame_data);
             }
             if (raw_data_callback_) {
                 raw_data_callback_(frame_data);
             }
         }
-    }
-
-    // Update stats
-    {
+    } else {
+        // No frame decoded - still update stats for failed codewords
         std::lock_guard<std::mutex> lock(stats_mutex_);
         if (cw_failed > 0) stats_.frames_failed++;
-        ChannelQuality quality = ofdm_demodulator_->getChannelQuality();
-        stats_.snr_db = quality.snr_db;
-        stats_.ber = quality.ber_estimate;
-        stats_.synced = true;
     }
 
     // Reset demodulator to look for next preamble
@@ -883,23 +913,37 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
 }
 
 void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
-    // Thresholds based on README performance targets (actual channel SNR)
-    // These match the Speed table in documentation
-    if (snr_db >= 25.0f) {
-        mod = Modulation::QAM64;
-        rate = CodeRate::R5_6;  // Excellent: ~10 kbps
-    } else if (snr_db >= 20.0f) {
+    // Conservative thresholds calibrated for REAL HF channels (not just AWGN)
+    // HF has multipath fading that requires 3-6 dB extra margin vs AWGN
+    // These match the thresholds in connection.cpp for consistency
+    if (snr_db >= 30.0f) {
+        // Excellent conditions (rare) - use high throughput
         mod = Modulation::QAM16;
-        rate = CodeRate::R3_4;  // Good: ~6 kbps
-    } else if (snr_db >= 15.0f) {
-        mod = Modulation::QPSK;
-        rate = CodeRate::R1_2;  // Moderate: ~2 kbps
-    } else if (snr_db >= 10.0f) {
+        rate = CodeRate::R3_4;
+    } else if (snr_db >= 25.0f) {
+        // Very good conditions
+        mod = Modulation::QAM16;
+        rate = CodeRate::R2_3;
+    } else if (snr_db >= 20.0f) {
+        // Good conditions - sweet spot for speed
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R2_3;
+    } else if (snr_db >= 16.0f) {
+        // Typical good HF - balanced speed/reliability
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_2;
+    } else if (snr_db >= 12.0f) {
+        // Typical HF - prioritize reliability
+        mod = Modulation::DQPSK;
+        rate = CodeRate::R1_4;
+    } else if (snr_db >= 8.0f) {
+        // Marginal conditions
         mod = Modulation::BPSK;
-        rate = CodeRate::R1_2;  // Poor: ~1 kbps
+        rate = CodeRate::R1_4;
     } else {
+        // Very poor conditions - maximum robustness
         mod = Modulation::BPSK;
-        rate = CodeRate::R1_4;  // Flutter: ~0.5 kbps
+        rate = CodeRate::R1_4;
     }
 }
 

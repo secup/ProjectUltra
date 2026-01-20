@@ -11,12 +11,28 @@
 #include <SDL_opengl.h>
 
 #include <cstdio>
+#include <string>
 #include <ultra/logging.hpp>
 
 int main(int argc, char* argv[]) {
     // Set log level to INFO to avoid DEBUG log spam slowing down UI
     // (DEBUG logs every frame in pollRxAudio() cause significant lag)
     ultra::setLogLevel(ultra::LogLevel::INFO);
+
+    // Parse command line arguments
+    ultra::gui::App::Options opts;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "-sim") {
+            opts.enable_sim = true;
+        } else if (arg == "-rec") {
+            opts.record_audio = true;
+            // Check if next arg is a path (doesn't start with -)
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                opts.record_path = argv[++i];
+            }
+        }
+    }
 
     // Initialize SDL
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER) != 0) {
@@ -77,8 +93,8 @@ int main(int argc, char* argv[]) {
     ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL2_Init();
 
-    // Create application
-    ultra::gui::App app;
+    // Create application with parsed options
+    ultra::gui::App app(opts);
 
     // Main loop
     bool running = true;

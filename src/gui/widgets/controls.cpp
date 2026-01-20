@@ -10,6 +10,7 @@ static const char* getModulationName(Modulation mod) {
     switch (mod) {
         case Modulation::BPSK:   return "BPSK";
         case Modulation::QPSK:   return "QPSK";
+        case Modulation::DQPSK:  return "DQPSK";
         case Modulation::QAM16:  return "16-QAM";
         case Modulation::QAM64:  return "64-QAM";
         case Modulation::QAM256: return "256-QAM";
@@ -20,6 +21,7 @@ static const char* getModulationName(Modulation mod) {
 // Helper to get code rate name
 static const char* getCodeRateName(CodeRate rate) {
     switch (rate) {
+        case CodeRate::R1_4: return "1/4";
         case CodeRate::R1_2: return "1/2";
         case CodeRate::R2_3: return "2/3";
         case CodeRate::R3_4: return "3/4";
@@ -29,7 +31,8 @@ static const char* getCodeRateName(CodeRate rate) {
     }
 }
 
-ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemConfig& config) {
+ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemConfig& config,
+                                             Modulation data_mod, CodeRate data_rate) {
     Event event = Event::None;
 
     ImGui::Text("Channel Status");
@@ -98,10 +101,10 @@ ControlsWidget::Event ControlsWidget::render(const LoopbackStats& stats, ModemCo
     ImGui::Separator();
     ImGui::Spacing();
 
-    // Current modulation and code rate
+    // Current modulation and code rate (from protocol negotiation)
     ImGui::Text("Modulation");
     ImGui::SameLine(80);
-    ImGui::Text("%s R%s", getModulationName(config.modulation), getCodeRateName(config.code_rate));
+    ImGui::Text("%s R%s", getModulationName(data_mod), getCodeRateName(data_rate));
 
     // Throughput
     ImGui::Text("Throughput");

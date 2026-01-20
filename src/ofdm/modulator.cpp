@@ -187,14 +187,14 @@ struct OFDMModulator::Impl {
         }
 
         // DEBUG: Log pilot configuration for comparison with RX
-        LOG_INFO("MOD", "Mod pilot config: %zu pilots, %zu data carriers",
+        LOG_DEBUG("MOD", "Mod pilot config: %zu pilots, %zu data carriers",
                  pilot_carrier_indices.size(), data_carrier_indices.size());
         if (pilot_carrier_indices.size() >= 3) {
-            LOG_INFO("MOD", "Mod pilot indices[0-2]: %d, %d, %d",
+            LOG_DEBUG("MOD", "Mod pilot indices[0-2]: %d, %d, %d",
                      pilot_carrier_indices[0], pilot_carrier_indices[1], pilot_carrier_indices[2]);
         }
         if (pilot_sequence.size() >= 3) {
-            LOG_INFO("MOD", "Mod pilot seq[0-2]: (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)",
+            LOG_DEBUG("MOD", "Mod pilot seq[0-2]: (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)",
                      pilot_sequence[0].real(), pilot_sequence[0].imag(),
                      pilot_sequence[1].real(), pilot_sequence[1].imag(),
                      pilot_sequence[2].real(), pilot_sequence[2].imag());
@@ -220,16 +220,16 @@ struct OFDMModulator::Impl {
             // DEBUG: Log first data symbol's TX pilot values (only once per transmission)
             // Note: g_logged_tx_pilots is defined and reset in generatePreamble()
             if (!g_logged_tx_pilots) {
-                LOG_INFO("MOD", "=== TX freq_domain before IFFT (first data symbol) ===");
+                LOG_DEBUG("MOD", "=== TX freq_domain before IFFT (first data symbol) ===");
                 for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
                     int idx = pilot_carrier_indices[i];
-                    LOG_INFO("MOD", "TX Pilot[%zu] idx=%d: freq_domain=(%.2f,%.2f) pilot_seq=(%.1f,%.1f)",
+                    LOG_DEBUG("MOD", "TX Pilot[%zu] idx=%d: freq_domain=(%.2f,%.2f) pilot_seq=(%.1f,%.1f)",
                              i, idx,
                              freq_domain[idx].real(), freq_domain[idx].imag(),
                              pilot_sequence[i].real(), pilot_sequence[i].imag());
                 }
                 // Also log a few data carriers
-                LOG_INFO("MOD", "TX Data[0-2]: idx=%d (%.2f,%.2f), idx=%d (%.2f,%.2f), idx=%d (%.2f,%.2f)",
+                LOG_DEBUG("MOD", "TX Data[0-2]: idx=%d (%.2f,%.2f), idx=%d (%.2f,%.2f), idx=%d (%.2f,%.2f)",
                          data_carrier_indices[0], freq_domain[data_carrier_indices[0]].real(), freq_domain[data_carrier_indices[0]].imag(),
                          data_carrier_indices[1], freq_domain[data_carrier_indices[1]].real(), freq_domain[data_carrier_indices[1]].imag(),
                          data_carrier_indices[2], freq_domain[data_carrier_indices[2]].real(), freq_domain[data_carrier_indices[2]].imag());

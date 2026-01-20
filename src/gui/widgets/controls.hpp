@@ -18,7 +18,9 @@ public:
 
     // Render channel status panel
     // Returns event if profile changed
-    Event render(const LoopbackStats& stats, ModemConfig& config);
+    // data_mod/data_rate are the protocol's negotiated mode (displayed as current mode)
+    Event render(const LoopbackStats& stats, ModemConfig& config,
+                 Modulation data_mod, CodeRate data_rate);
 
 private:
     int selected_profile_ = 1;  // Default to Balanced

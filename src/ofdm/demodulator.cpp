@@ -494,14 +494,14 @@ struct OFDMDemodulator::Impl {
         }
 
         // DEBUG: Log pilot configuration for comparison with TX
-        LOG_DEMOD(INFO, "Demod pilot config: %zu pilots, %zu data carriers",
+        LOG_DEMOD(DEBUG, "Demod pilot config: %zu pilots, %zu data carriers",
                   pilot_carrier_indices.size(), data_carrier_indices.size());
         if (pilot_carrier_indices.size() >= 3) {
-            LOG_DEMOD(INFO, "Demod pilot indices[0-2]: %d, %d, %d",
+            LOG_DEMOD(DEBUG, "Demod pilot indices[0-2]: %d, %d, %d",
                       pilot_carrier_indices[0], pilot_carrier_indices[1], pilot_carrier_indices[2]);
         }
         if (pilot_sequence.size() >= 3) {
-            LOG_DEMOD(INFO, "Demod pilot seq[0-2]: (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)",
+            LOG_DEMOD(DEBUG, "Demod pilot seq[0-2]: (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)",
                       pilot_sequence[0].real(), pilot_sequence[0].imag(),
                       pilot_sequence[1].real(), pilot_sequence[1].imag(),
                       pilot_sequence[2].real(), pilot_sequence[2].imag());

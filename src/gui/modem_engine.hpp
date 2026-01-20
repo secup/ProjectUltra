@@ -201,7 +201,7 @@ private:
     // - With 30 bits/OFDM symbol, bits spread across different carriers
     // Testing showed 43% improvement at marginal SNR (16dB Good channel)
     Interleaver interleaver_{6, 108};
-    bool interleaving_enabled_ = true;  // Enabled by default for HF fading channels
+    bool interleaving_enabled_ = true;  // 6×108 interleaver for HF frequency diversity
 
     // Audio filters (TX and RX share same settings but separate state)
     FilterConfig filter_config_;
