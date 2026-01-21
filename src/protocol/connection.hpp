@@ -23,9 +23,9 @@ const char* connectionStateToString(ConnectionState state);
 // Connection configuration
 struct ConnectionConfig {
     ARQConfig arq;
-    uint32_t connect_timeout_ms = 10000;
-    uint32_t disconnect_timeout_ms = 5000;
-    int connect_retries = 10;
+    uint32_t connect_timeout_ms = 60000;  // 60s for DPSK (16s TX + 16s RX + margin)
+    uint32_t disconnect_timeout_ms = 30000;
+    int connect_retries = 10;  // 5 DPSK attempts + 5 MFSK attempts (DPSK_ATTEMPTS = 5)
     bool auto_accept = true;
 
     uint8_t mode_capabilities = ModeCapabilities::ALL;
@@ -133,6 +133,22 @@ public:
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }
 
+    // Callback when handshake is confirmed (safe to switch to negotiated waveform)
+    // For initiator: called immediately after CONNECT_ACK received
+    // For responder: called when first frame received after sending CONNECT_ACK
+    using HandshakeConfirmedCallback = std::function<void()>;
+    void setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) { on_handshake_confirmed_ = cb; }
+
+    // Callback when connection attempt waveform changes (DPSK -> MFSK fallback)
+    using ConnectWaveformChangedCallback = std::function<void(WaveformMode mode)>;
+    void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) { on_connect_waveform_changed_ = cb; }
+
+    // Get current waveform being used for connection attempts
+    WaveformMode getConnectWaveform() const { return connect_waveform_; }
+
+    // Set initial waveform for next connection (for testing MFSK directly)
+    void setInitialConnectWaveform(WaveformMode mode) { connect_waveform_ = mode; }
+
     // --- Data Mode (modulation + code rate) ---
 
     Modulation getDataModulation() const { return data_modulation_; }
@@ -183,7 +199,7 @@ private:
     CodeRate pending_code_rate_ = CodeRate::R1_4;
     float pending_snr_db_ = 15.0f;
     uint8_t pending_reason_ = 0;
-    static constexpr uint32_t MODE_CHANGE_TIMEOUT_MS = 5000;
+    static constexpr uint32_t MODE_CHANGE_TIMEOUT_MS = 45000;  // 45s for DPSK round trip
     static constexpr int MODE_CHANGE_MAX_RETRIES = 2;
 
     // ARQ for reliable data transfer
@@ -196,6 +212,12 @@ private:
     uint32_t timeout_remaining_ms_ = 0;
     int connect_retry_count_ = 0;
     uint32_t connected_time_ms_ = 0;
+
+    // Adaptive calling waveform (DPSK first, fallback to MFSK)
+    // Start with DPSK medium (DQPSK 62b R1/4), switch to MFSK after 5 attempts
+    WaveformMode connect_waveform_ = WaveformMode::DPSK;
+    static constexpr int DPSK_ATTEMPTS = 5;  // Attempts 1-5 use DPSK
+    // Attempts 6-10 use MFSK (config_.connect_retries = 10)
 
     // Statistics
     ConnectionStats stats_;
@@ -210,6 +232,12 @@ private:
     DataReceivedCallback on_data_received_;
     ModeNegotiatedCallback on_mode_negotiated_;
     DataModeChangedCallback on_data_mode_changed_;
+    ConnectWaveformChangedCallback on_connect_waveform_changed_;
+    HandshakeConfirmedCallback on_handshake_confirmed_;
+
+    // Handshake state - responder waits for first frame before confirming
+    bool is_initiator_ = false;           // True if we initiated the connection
+    bool handshake_confirmed_ = false;    // True after handshake is fully confirmed
 
     // Internal handlers for v2 frames
     void handleConnect(const v2::ConnectFrame& frame, const std::string& src_call);

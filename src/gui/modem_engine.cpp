@@ -12,6 +12,11 @@ namespace gui {
 ModemEngine::ModemEngine() {
     config_ = presets::balanced();
 
+    // CRITICAL: Disable pilots for DQPSK mode - uses all 30 carriers for data
+    // This doubles throughput (30 data carriers vs 15 with pilots)
+    // DQPSK is differential and doesn't need pilots for channel estimation
+    config_.use_pilots = false;
+
     encoder_ = std::make_unique<LDPCEncoder>(config_.code_rate);
 
     // OFDM modulator uses config (TX modulation is determined per-frame)
@@ -22,6 +27,7 @@ ModemEngine::ModemEngine() {
     ModemConfig rx_config = config_;
     rx_config.modulation = Modulation::DQPSK;
     rx_config.code_rate = CodeRate::R1_4;
+    rx_config.use_pilots = false;  // DQPSK doesn't need pilots
     decoder_ = std::make_unique<LDPCDecoder>(rx_config.code_rate);
     ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
@@ -34,6 +40,19 @@ ModemEngine::ModemEngine() {
     otfs_config_.center_freq = config_.center_freq;
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
+
+    // MFSK modulator/demodulator (used for very low SNR: -17 to +5 dB reported)
+    // Default to 8FSK medium mode (47 bps, works at 0 dB actual = -17 dB reported)
+    mfsk_config_ = mfsk_presets::medium();
+    mfsk_modulator_ = std::make_unique<MFSKModulator>(mfsk_config_);
+    mfsk_demodulator_ = std::make_unique<MFSKDemodulator>(mfsk_config_);
+
+    // DPSK modulator/demodulator (used for low-mid SNR: 0-15 dB)
+    // Default to medium preset for connection attempts (DQPSK 62.5 baud)
+    // This matches the setConnectWaveform(DPSK) configuration
+    dpsk_config_ = dpsk_presets::medium();
+    dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
+    dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     // Initialize audio filters
     rebuildFilters();
@@ -133,7 +152,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     // Check for v2 frame magic "UL" (0x55, 0x4C)
     bool is_v2_frame = (data.size() >= 2 && data[0] == 0x55 && data[1] == 0x4C);
 
-    LOG_MODEM(INFO, "TX: Input %zu bytes, first 4: %02x %02x %02x %02x, v2=%d",
+    LOG_MODEM(INFO, "[%s] TX: Input %zu bytes, first 4: %02x %02x %02x %02x, v2=%d",
+              log_prefix_.c_str(),
               data.size(),
               data.size() > 0 ? data[0] : 0,
               data.size() > 1 ? data[1] : 0,
@@ -143,12 +163,92 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     Bytes to_modulate;
 
+    // Determine if this is a DATA frame (used for modulation selection later)
+    bool is_data_frame = false;
+    if (is_v2_frame && data.size() >= 3 && connected_) {
+        uint8_t frame_type = data[2];
+        is_data_frame = (frame_type >= 0x30 && frame_type <= 0x33);
+    }
+
     if (is_v2_frame) {
         // === V2 Frame Path ===
-        // Use v2::encodeFrameWithLDPC which handles multi-codeword frames correctly
-        auto encoded_cws = v2::encodeFrameWithLDPC(data);
+        // Encoding strategy:
+        // - Control frames: All CWs use R1/4 for reliability
+        // - DATA frames: CW0 uses R1/4 (header), CW1+ use negotiated rate for throughput
+        //
+        // This ensures the header (CW0) is always decodable, allowing the receiver
+        // to determine the frame type before decoding remaining codewords.
 
-        LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords", data.size(), encoded_cws.size());
+        // Make mutable copy for possible header modification
+        Bytes frame_data = data;
+
+        std::vector<Bytes> encoded_cws;
+
+        if (is_data_frame && data_code_rate_ != CodeRate::R1_4) {
+            // DATA frame with adaptive rate: CW0 at R1/4, CW1+ at data_code_rate_
+            size_t bytes_per_cw_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);  // 20
+            size_t bytes_per_cw_data = v2::getBytesPerCodeword(data_code_rate_);
+            size_t cw1_payload_size = bytes_per_cw_data - v2::DATA_CW_HEADER_SIZE;
+
+            // Calculate correct total_cw for this rate and update the serialized frame
+            // The frame was created with R1/4 calculation, but we need rate-aware count
+            // Header layout: [magic 2B][type 1B][flags 1B][seq 2B][src 3B][dst 3B][total_cw 1B][len 2B][hcrc 2B]
+            //                  0-1       2        3         4-5      6-8      9-11     12        13-14   15-16
+            if (frame_data.size() >= v2::DataFrame::HEADER_SIZE) {
+                uint16_t payload_len = (static_cast<uint16_t>(frame_data[13]) << 8) | frame_data[14];
+                uint8_t correct_total_cw = v2::DataFrame::calculateCodewords(payload_len, data_code_rate_);
+                uint8_t old_total_cw = frame_data[12];
+
+                if (correct_total_cw != old_total_cw) {
+                    // Update total_cw in the serialized frame
+                    frame_data[12] = correct_total_cw;
+
+                    // Recalculate header CRC (CRC of bytes 0-14)
+                    uint16_t new_hcrc = v2::ControlFrame::calculateCRC(frame_data.data(), 15);
+                    frame_data[15] = (new_hcrc >> 8) & 0xFF;
+                    frame_data[16] = new_hcrc & 0xFF;
+
+                    LOG_MODEM(DEBUG, "TX v2: Fixed total_cw %d -> %d for rate %s",
+                              old_total_cw, correct_total_cw, codeRateToString(data_code_rate_));
+                }
+            }
+
+            // Encode CW0 (header) at R1/4
+            LDPCEncoder encoder_r14(CodeRate::R1_4);
+            {
+                Bytes cw0(bytes_per_cw_r14, 0);
+                size_t cw0_bytes = std::min(bytes_per_cw_r14, frame_data.size());
+                std::memcpy(cw0.data(), frame_data.data(), cw0_bytes);
+                encoded_cws.push_back(encoder_r14.encode(cw0));
+            }
+
+            // Encode CW1+ at adaptive rate
+            LDPCEncoder encoder_data(data_code_rate_);
+            size_t offset = bytes_per_cw_r14;  // Start after CW0's data
+            uint8_t cw_index = 1;
+
+            while (offset < frame_data.size()) {
+                Bytes cw(bytes_per_cw_data, 0);
+                cw[0] = v2::DATA_CW_MARKER;
+                cw[1] = cw_index;
+
+                size_t remaining = frame_data.size() - offset;
+                size_t chunk_size = std::min(cw1_payload_size, remaining);
+                std::memcpy(cw.data() + v2::DATA_CW_HEADER_SIZE, frame_data.data() + offset, chunk_size);
+
+                encoded_cws.push_back(encoder_data.encode(cw));
+                offset += cw1_payload_size;
+                cw_index++;
+            }
+
+            LOG_MODEM(INFO, "TX v2: DATA frame %zu bytes -> %zu codewords (CW0: R1/4, CW1+: %s)",
+                      frame_data.size(), encoded_cws.size(), codeRateToString(data_code_rate_));
+        } else {
+            // Control frame or R1/4 data: use R1/4 for all codewords
+            encoded_cws = v2::encodeFrameWithLDPC(frame_data, CodeRate::R1_4);
+            LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords (all R1/4)",
+                      frame_data.size(), encoded_cws.size());
+        }
 
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
         for (const auto& cw : encoded_cws) {
@@ -175,17 +275,57 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         to_modulate = interleaving_enabled_ ? interleaver_.interleave(encoded) : encoded;
     }
 
-    // All v2 frames use DQPSK R1/4, legacy frames also default to DQPSK
+    // Modulation selection:
+    // - Control frames (CONNECT, ACK, etc.): Always DQPSK for reliability
+    // - DATA frames when connected: Use negotiated modulation for throughput
+    // - Legacy frames: Use negotiated modulation when connected
     Modulation tx_modulation = Modulation::DQPSK;
-    if (!is_v2_frame && connected_) {
+    if ((is_v2_frame && is_data_frame && connected_) || (!is_v2_frame && connected_)) {
         tx_modulation = data_modulation_;
+        LOG_MODEM(INFO, "[%s] TX: Using negotiated modulation %s for data",
+                  log_prefix_.c_str(), modulationToString(tx_modulation));
     }
 
-    // Step 2: Generate preamble
-    Samples preamble = ofdm_modulator_->generatePreamble();
+    // Determine which waveform to use for modulation:
+    // - When NOT connected: use connect_waveform_ (DPSK -> MFSK fallback)
+    // - When connected but handshake not complete: use last_rx_waveform_ (respond on same waveform)
+    // - When connected and handshake complete: use negotiated waveform_mode_
+    protocol::WaveformMode active_waveform;
+    if (!connected_) {
+        active_waveform = connect_waveform_;
+    } else if (!handshake_complete_) {
+        // Still in handshake - respond using same waveform we received on
+        active_waveform = last_rx_waveform_;
+        LOG_MODEM(DEBUG, "TX: Handshake mode, using last_rx_waveform_=%d", static_cast<int>(active_waveform));
+    } else {
+        active_waveform = waveform_mode_;
+    }
 
-    // Step 3: OFDM modulate with DQPSK
-    Samples modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
+    bool use_ofdm = (active_waveform == protocol::WaveformMode::OFDM);
+    bool use_dpsk = (active_waveform == protocol::WaveformMode::DPSK);
+    bool use_mfsk = (active_waveform == protocol::WaveformMode::MFSK);
+
+    Samples preamble, modulated;
+
+    if (use_dpsk) {
+        // DPSK modulation path
+        LOG_MODEM(INFO, "[%s] TX: Using DPSK modulation (%d-PSK, %d samples/sym)",
+                  log_prefix_.c_str(), dpsk_config_.num_phases(), dpsk_config_.samples_per_symbol);
+        preamble = dpsk_modulator_->generatePreamble();
+        modulated = dpsk_modulator_->modulate(to_modulate);
+    } else if (use_mfsk) {
+        // MFSK modulation path
+        LOG_MODEM(INFO, "[%s] TX: Using MFSK modulation (%d tones)",
+                  log_prefix_.c_str(), mfsk_config_.num_tones);
+        preamble = mfsk_modulator_->generatePreamble();
+        modulated = mfsk_modulator_->modulate(to_modulate);
+    } else {
+        // OFDM modulation path (default, also for control frames)
+        LOG_MODEM(INFO, "[%s] TX: Using OFDM modulation (%s)",
+                  log_prefix_.c_str(), is_v2_frame ? "control frame" : "data frame");
+        preamble = ofdm_modulator_->generatePreamble();
+        modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
+    }
 
     // Step 4: Combine preamble + data + tail guard
     // Tail guard ensures demodulator processes the last OFDM symbol
@@ -440,149 +580,324 @@ bool ModemEngine::pollRxAudio() {
         }
     }
 
-    if (new_samples.empty()) {
-        return false;  // Nothing to process
-    }
-
-    // Apply RX bandpass filter
-    if (filter_config_.enabled && rx_filter_) {
+    // Apply RX bandpass filter to new samples
+    if (!new_samples.empty() && filter_config_.enabled && rx_filter_) {
         SampleSpan span(new_samples.data(), new_samples.size());
         new_samples = rx_filter_->process(span);
     }
 
     // Update carrier sense energy detection
-    updateChannelEnergy(new_samples);
+    if (!new_samples.empty()) {
+        updateChannelEnergy(new_samples);
+    }
 
     // Now do the slow processing with rx_mutex_
     std::lock_guard<std::mutex> lock(rx_mutex_);
 
-    LOG_MODEM(DEBUG, "pollRxAudio: got %zu new samples, buffer=%zu", new_samples.size(), rx_sample_buffer_.size());
+    if (!new_samples.empty()) {
+        LOG_MODEM(DEBUG, "pollRxAudio: got %zu new samples, buffer=%zu", new_samples.size(), rx_sample_buffer_.size());
+        rx_sample_buffer_.insert(rx_sample_buffer_.end(), new_samples.begin(), new_samples.end());
+    }
 
-    rx_sample_buffer_.insert(rx_sample_buffer_.end(), new_samples.begin(), new_samples.end());
-
-    // Process buffer if we have enough samples
+    // ALWAYS call processRxBuffer() - even with no new samples, the demodulator
+    // may still have soft bits to deliver (e.g., in all-at-once processing mode)
     processRxBuffer();
-    return true;
+    return !new_samples.empty();
 }
 
 void ModemEngine::processRxBuffer() {
-    // Need at least one symbol worth of samples (or demodulator has pending data)
-    size_t symbol_samples = config_.getSymbolDuration();
-    if (rx_sample_buffer_.size() < symbol_samples * 2 && !ofdm_demodulator_->hasPendingData()) {
-        // Log when we skip processing (at TRACE level to avoid spam)
-        if (rx_sample_buffer_.size() > 0) {
-            LOG_MODEM(TRACE, "RX: Buffering %zu samples (need %zu)",
-                      rx_sample_buffer_.size(), symbol_samples * 2);
+    // Dispatch to appropriate waveform-specific processing
+    // When disconnected: use multi-waveform detection (DPSK + MFSK)
+    // When connected: use negotiated waveform
+
+    if (!connected_) {
+        // Disconnected - use multi-waveform detection for connection attempts
+        processRxBuffer_MultiDetect();
+        return;
+    }
+
+    // Connected - use negotiated waveform
+    if (waveform_mode_ == protocol::WaveformMode::DPSK) {
+        processRxBuffer_DPSK();
+    } else if (waveform_mode_ == protocol::WaveformMode::MFSK) {
+        processRxBuffer_MFSK();
+    } else {
+        // OFDM mode - process directly (buffer was cleared on connect, no transition check needed)
+        if (rx_sample_buffer_.size() > 1000) {
+            static int ofdm_call_count = 0;
+            if (++ofdm_call_count % 20 == 1) {
+                LOG_MODEM(INFO, "[%s] RX OFDM dispatch: %zu samples", log_prefix_.c_str(), rx_sample_buffer_.size());
+            }
+        }
+        processRxBuffer_OFDM();
+    }
+}
+
+void ModemEngine::processRxBuffer_MultiDetect() {
+    // Multi-waveform detection for incoming calls when disconnected
+    // Try to detect preambles from both DPSK and MFSK
+    // Whichever is found first, use that demodulator
+
+    // If we have a pending frame, skip detection and process directly
+    if (pending_frame_.active) {
+        LOG_MODEM(DEBUG, "[%s] RX Multi: Using pending frame (waveform=%d, preamble=%d)",
+                  log_prefix_.c_str(), static_cast<int>(pending_frame_.waveform), pending_frame_.data_start);
+        if (pending_frame_.waveform == protocol::WaveformMode::DPSK) {
+            processRxBuffer_DPSK(-1);  // Will use saved state
+        } else if (pending_frame_.waveform == protocol::WaveformMode::MFSK) {
+            processRxBuffer_MFSK(-1);  // Will use saved state
         }
         return;
     }
 
-    LOG_MODEM(DEBUG, "RX: Processing %zu samples (synced=%d)...", rx_sample_buffer_.size(), ofdm_demodulator_->isSynced());
+    // Need enough samples for preamble detection
+    int dpsk_preamble_samples = 32 * dpsk_config_.samples_per_symbol;
+    int mfsk_preamble_samples = 2 * mfsk_config_.num_tones * mfsk_config_.samples_per_symbol;
+    int min_samples = std::max(dpsk_preamble_samples, mfsk_preamble_samples) + 1000;
+
+    if (rx_sample_buffer_.size() < (size_t)min_samples) {
+        LOG_MODEM(TRACE, "RX Multi: Buffering %zu samples (need %d)",
+                  rx_sample_buffer_.size(), min_samples);
+        return;
+    }
+
+    // Rate limiting: only run expensive preamble detection when enough new samples arrived
+    // This prevents CPU-bound loops when processing large MFSK frames
+    size_t new_samples = rx_sample_buffer_.size() - last_multidetect_buffer_size_;
+    if (last_multidetect_buffer_size_ > 0 && new_samples < MULTIDETECT_MIN_NEW_SAMPLES) {
+        return;  // Not enough new samples to justify re-scanning
+    }
+    last_multidetect_buffer_size_ = rx_sample_buffer_.size();
+
+    SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());
+
+    // Try DPSK preamble detection first (it's the default for connection attempts)
+    int dpsk_start = dpsk_demodulator_->findPreamble(span);
+    if (dpsk_start >= 0) {
+        // Remember we received via DPSK - responses should use same waveform
+        last_rx_waveform_ = protocol::WaveformMode::DPSK;
+        last_multidetect_buffer_size_ = 0;  // Reset rate limit after detection
+        // DPSK will handle pending state tracking and logging internally
+        processRxBuffer_DPSK(dpsk_start);
+        return;
+    }
+
+    // Try MFSK preamble detection (fallback mode)
+    int mfsk_start = mfsk_demodulator_->findPreamble(span);
+    if (mfsk_start >= 0) {
+        LOG_MODEM(INFO, "RX Multi: MFSK preamble at sample %d", mfsk_start);
+        // Remember we received via MFSK - responses should use same waveform
+        last_rx_waveform_ = protocol::WaveformMode::MFSK;
+        last_multidetect_buffer_size_ = 0;  // Reset rate limit after detection
+        // Use MFSK demodulator for this frame, passing pre-detected position
+        processRxBuffer_MFSK(mfsk_start);
+        return;
+    }
+
+    // No preamble found - discard old samples to prevent buffer growth
+    size_t to_keep = std::min(rx_sample_buffer_.size(), (size_t)(min_samples * 2));
+    if (rx_sample_buffer_.size() > to_keep) {
+        rx_sample_buffer_.erase(rx_sample_buffer_.begin(),
+                                rx_sample_buffer_.end() - to_keep);
+        last_multidetect_buffer_size_ = rx_sample_buffer_.size();  // Update after trim
+    }
+}
+
+void ModemEngine::processRxBuffer_OFDM() {
+    namespace v2 = protocol::v2;
+    const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;  // 648 bits
+
+    // Log demod state for debugging
+    static int ofdm_rx_call = 0;
+    if (++ofdm_rx_call % 20 == 1) {  // Log every 20 calls
+        LOG_MODEM(INFO, "[%s] RX OFDM: data_modulation_=%d, connected=%d, waveform_mode_=%d",
+                  log_prefix_.c_str(), static_cast<int>(data_modulation_),
+                  connected_ ? 1 : 0, static_cast<int>(waveform_mode_));
+    }
+
+    // Need minimum samples for valid sync detection + some data
+    // Too little: false sync on noise. Too much: deadlock waiting.
+    // Preamble is ~4000 samples, need margin for detection window.
+    // 8000 samples = preamble + small margin, avoids deadlock.
+    constexpr size_t MIN_SAMPLES_FOR_SYNC = 8000;
+
+    if (!ofdm_demodulator_->isSynced() && !ofdm_demodulator_->hasPendingData()) {
+        if (rx_sample_buffer_.size() < MIN_SAMPLES_FOR_SYNC) {
+            return;  // Need enough for sync detection
+        }
+    }
+
+    // Track sync state to detect when demodulator gives up on a frame
+    bool was_synced = ofdm_demodulator_->isSynced();
 
     // Feed samples to demodulator (it maintains its own buffer)
     SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());
 
-    // Clear now - demodulator takes ownership
+    // Process and accumulate soft bits
+    bool frame_ready = ofdm_demodulator_->process(span);
+
+    // Clear buffer AFTER processing (demodulator copies what it needs)
     rx_sample_buffer_.clear();
 
-    // Loop to process all available codewords (multi-codeword frames)
-    bool frame_ready = ofdm_demodulator_->process(span);
-    if (frame_ready || ofdm_demodulator_->isSynced()) {
-        LOG_MODEM(INFO, "RX: Demod returned frame_ready=%d, synced=%d", frame_ready, ofdm_demodulator_->isSynced());
+    // Check if demodulator lost sync (went from synced to searching)
+    // If we had accumulated ANY incomplete data, we need to discard it
+    bool is_synced = ofdm_demodulator_->isSynced();
+    if (was_synced && !is_synced) {
+        // Lost sync - discard any accumulated bits (even if we haven't decoded CW0 yet)
+        if (!ofdm_accumulated_soft_bits_.empty() || ofdm_expected_codewords_ > 0) {
+            LOG_MODEM(INFO, "RX OFDM: Demodulator lost sync mid-frame, discarding %zu accumulated bits (expected %d CWs)",
+                      ofdm_accumulated_soft_bits_.size(), ofdm_expected_codewords_);
+            ofdm_accumulated_soft_bits_.clear();
+            ofdm_expected_codewords_ = 0;
+        }
     }
 
-    // Update SNR continuously when synced (not just after decode)
-    if (ofdm_demodulator_->isSynced()) {
+    // Update SNR when synced
+    if (is_synced) {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.snr_db = ofdm_demodulator_->getEstimatedSNR();
         stats_.synced = true;
     }
 
-    // Accumulate soft bits from all codewords
-    namespace v2 = protocol::v2;
-    std::vector<float> accumulated_soft_bits;
-    int codewords_collected = 0;
-
-    while (frame_ready) {
+    // If frame_ready, get all accumulated soft bits (don't loop with empty_span - that triggers reset!)
+    // The demodulator accumulates bits internally; getSoftBits() returns ALL of them
+    LOG_MODEM(INFO, "[%s] RX OFDM: frame_ready=%d, is_synced=%d",
+              log_prefix_.c_str(), frame_ready ? 1 : 0, is_synced ? 1 : 0);
+    if (frame_ready) {
         auto soft_bits = ofdm_demodulator_->getSoftBits();
-        LOG_MODEM(INFO, "RX: Got %zu soft bits from demod, codewords_collected=%d",
-                  soft_bits.size(), codewords_collected);
+        LOG_MODEM(INFO, "[%s] RX OFDM: Got %zu soft bits from demod",
+                  log_prefix_.c_str(), soft_bits.size());
         if (!soft_bits.empty()) {
-            codewords_collected++;
-            auto to_accumulate = interleaving_enabled_ ? interleaver_.deinterleave(soft_bits) : soft_bits;
-            accumulated_soft_bits.insert(accumulated_soft_bits.end(),
-                                         to_accumulate.begin(), to_accumulate.end());
+            // Deinterleave per-codeword (648 bits each) to match TX which interleaves per-codeword
+            // If we deinterleave all bits at once, bits beyond 648 would be corrupted (remain as zeros)
+            if (interleaving_enabled_) {
+                for (size_t i = 0; i + v2::LDPC_CODEWORD_BITS <= soft_bits.size(); i += v2::LDPC_CODEWORD_BITS) {
+                    std::vector<float> cw_bits(soft_bits.begin() + i, soft_bits.begin() + i + v2::LDPC_CODEWORD_BITS);
+                    auto deinterleaved = interleaver_.deinterleave(cw_bits);
+                    ofdm_accumulated_soft_bits_.insert(ofdm_accumulated_soft_bits_.end(),
+                                                       deinterleaved.begin(), deinterleaved.end());
+                }
+                // Handle any remaining bits (partial codeword) - don't deinterleave, just accumulate
+                size_t full_cws = (soft_bits.size() / v2::LDPC_CODEWORD_BITS) * v2::LDPC_CODEWORD_BITS;
+                if (full_cws < soft_bits.size()) {
+                    ofdm_accumulated_soft_bits_.insert(ofdm_accumulated_soft_bits_.end(),
+                                                       soft_bits.begin() + full_cws, soft_bits.end());
+                }
+            } else {
+                ofdm_accumulated_soft_bits_.insert(ofdm_accumulated_soft_bits_.end(),
+                                                   soft_bits.begin(), soft_bits.end());
+            }
+            LOG_MODEM(INFO, "[%s] RX OFDM: Accumulated %zu soft bits, total now %zu",
+                      log_prefix_.c_str(), soft_bits.size(), ofdm_accumulated_soft_bits_.size());
         }
-        SampleSpan empty_span;
-        frame_ready = ofdm_demodulator_->process(empty_span);
-    }
-    // Process accumulated soft bits codeword by codeword
-    if (accumulated_soft_bits.empty()) {
-        // Reset demodulator even when no data - prevents stuck state
-        ofdm_demodulator_->reset();
-        return;
     }
 
-    const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;  // 648 bits
-    size_t num_codewords = accumulated_soft_bits.size() / LDPC_BLOCK;
+    // Check if we have at least one codeword
+    size_t num_codewords = ofdm_accumulated_soft_bits_.size() / LDPC_BLOCK;
     if (num_codewords == 0) {
-        ofdm_demodulator_->reset();
-        return;
+        return;  // Wait for more data
     }
 
-    LOG_MODEM(INFO, "RX: Accumulated %zu soft bits, %zu codewords",
-              accumulated_soft_bits.size(), num_codewords);
-
-    // Decode each codeword individually using CodewordStatus for tracking
-    v2::CodewordStatus cw_status;
-    int cw_success = 0, cw_failed = 0;
-    int expected_total = 0;
-    std::string frame_type_str;
-
-    // First, decode CW0 to get expected codeword count
-    {
-        std::vector<float> cw_bits(accumulated_soft_bits.begin(),
-                                    accumulated_soft_bits.begin() + LDPC_BLOCK);
-        Bytes decoded = decoder_->decodeSoft(cw_bits);
-        bool success = decoder_->lastDecodeSuccess();
-        LOG_MODEM(INFO, "RX: CW0 LDPC decode %s, decoded %zu bytes, first 8: %02X %02X %02X %02X %02X %02X %02X %02X",
-                  success ? "SUCCESS" : "FAILED", decoded.size(),
-                  decoded.size() > 0 ? decoded[0] : 0,
-                  decoded.size() > 1 ? decoded[1] : 0,
-                  decoded.size() > 2 ? decoded[2] : 0,
-                  decoded.size() > 3 ? decoded[3] : 0,
-                  decoded.size() > 4 ? decoded[4] : 0,
-                  decoded.size() > 5 ? decoded[5] : 0,
-                  decoded.size() > 6 ? decoded[6] : 0,
-                  decoded.size() > 7 ? decoded[7] : 0);
-
-        if (success && decoded.size() >= v2::BYTES_PER_CODEWORD) {
+    // If we don't know expected count yet, decode CW0 to find out
+    if (ofdm_expected_codewords_ == 0 && num_codewords >= 1) {
+        std::vector<float> cw_bits(ofdm_accumulated_soft_bits_.begin(),
+                                    ofdm_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+        LDPCDecoder cw0_decoder(CodeRate::R1_4);
+        Bytes decoded = cw0_decoder.decodeSoft(cw_bits);
+        bool ldpc_ok = cw0_decoder.lastDecodeSuccess();
+        LOG_MODEM(INFO, "[%s] RX OFDM: CW0 probe: LDPC %s, decoded %zu bytes",
+                  log_prefix_.c_str(), ldpc_ok ? "OK" : "FAILED", decoded.size());
+        if (ldpc_ok && decoded.size() >= v2::BYTES_PER_CODEWORD) {
             Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
             auto cw_info = v2::identifyCodeword(cw_data);
-            LOG_MODEM(INFO, "RX: CW0 type=%d, first bytes: %02X %02X %02X %02X",
-                      static_cast<int>(cw_info.type),
+            LOG_MODEM(INFO, "[%s] RX OFDM: CW0 type=%d, first 4: %02x %02x %02x %02x",
+                      log_prefix_.c_str(), static_cast<int>(cw_info.type),
                       cw_data[0], cw_data[1], cw_data[2], cw_data[3]);
-
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw_data);
                 if (header.valid) {
-                    expected_total = header.total_cw;
-                    LOG_MODEM(INFO, "RX: Header valid, expected_total=%d, frame_type=%d",
-                              expected_total, static_cast<int>(header.type));
+                    ofdm_expected_codewords_ = header.total_cw;
+                    LOG_MODEM(INFO, "[%s] RX OFDM: CW0 decoded, expecting %d total codewords",
+                              log_prefix_.c_str(), ofdm_expected_codewords_);
+                } else {
+                    LOG_MODEM(INFO, "[%s] RX OFDM: CW0 header INVALID", log_prefix_.c_str());
                 }
             }
         }
     }
 
-    // Limit to expected codewords (or available if header failed)
+    // Wait until we have all expected codewords
+    if (ofdm_expected_codewords_ > 0 && num_codewords < (size_t)ofdm_expected_codewords_) {
+        LOG_MODEM(DEBUG, "RX OFDM: Have %zu/%d codewords, waiting", num_codewords, ofdm_expected_codewords_);
+        return;  // Wait for more
+    }
+
+    // If CW0 decode failed (ofdm_expected_codewords_ == 0), only process when
+    // demodulator loses sync (frame is definitely over). This prevents processing
+    // partial multi-CW frames when CW0 is corrupted. No arbitrary CW limit -
+    // the demod losing sync is the reliable signal that the frame ended.
+    if (ofdm_expected_codewords_ == 0 && is_synced) {
+        LOG_MODEM(DEBUG, "RX OFDM: CW0 decode failed, demod still synced, waiting (have %zu CWs)", num_codewords);
+        return;  // Wait for demod to lose sync (frame end)
+    }
+
+    // We have all codewords - now process the complete frame
+    // Move accumulated bits to local variable and reset accumulators
+    std::vector<float> accumulated_soft_bits = std::move(ofdm_accumulated_soft_bits_);
+    ofdm_accumulated_soft_bits_.clear();
+    int expected_total = ofdm_expected_codewords_;
+    ofdm_expected_codewords_ = 0;
+
+    num_codewords = accumulated_soft_bits.size() / LDPC_BLOCK;
     if (expected_total > 0 && (size_t)expected_total < num_codewords) {
         num_codewords = expected_total;
+    }
+
+    LOG_MODEM(INFO, "RX OFDM: Processing complete frame, %zu codewords", num_codewords);
+
+    // Decode each codeword individually using CodewordStatus for tracking
+    v2::CodewordStatus cw_status;
+    int cw_success = 0, cw_failed = 0;
+    std::string frame_type_str;
+
+    // First pass: decode CW0 to get frame type (we already know expected_total from accumulation phase)
+    // CW0 always uses R1/4 to allow frame type detection before knowing the rate
+    v2::FrameType detected_frame_type = v2::FrameType::PROBE;
+    {
+        std::vector<float> cw_bits(accumulated_soft_bits.begin(),
+                                    accumulated_soft_bits.begin() + LDPC_BLOCK);
+        LDPCDecoder cw0_decoder(CodeRate::R1_4);  // CW0 always R1/4
+        Bytes decoded = cw0_decoder.decodeSoft(cw_bits);
+        bool success = cw0_decoder.lastDecodeSuccess();
+
+        if (success && decoded.size() >= v2::BYTES_PER_CODEWORD) {
+            Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
+            auto cw_info = v2::identifyCodeword(cw_data);
+
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw_data);
+                if (header.valid) {
+                    detected_frame_type = header.type;  // Store for adaptive rate selection
+                }
+            }
+        }
     }
 
     // Notify start of frame
     if (status_callback_) {
         status_callback_("[FRAME] Received " + std::to_string(num_codewords) + " codewords");
     }
+
+    // Determine if we should use adaptive rate for CW1+
+    // DATA frames (0x30-0x33) use adaptive rate when connected
+    bool use_adaptive_for_data_cw = connected_ && v2::isDataFrame(detected_frame_type);
+    CodeRate cw1_rate = use_adaptive_for_data_cw ? data_code_rate_ : CodeRate::R1_4;
+    size_t cw0_bytes = v2::BYTES_PER_CODEWORD;  // Always 20 bytes for R1/4
+    size_t cw1_bytes = v2::getBytesPerCodeword(cw1_rate);
+
+    LOG_MODEM(INFO, "RX OFDM: Decoding %zu CWs, frame_type=%d, CW1+ rate=%s (%zu bytes/CW)",
+              num_codewords, static_cast<int>(detected_frame_type),
+              use_adaptive_for_data_cw ? "adaptive" : "R1/4", cw1_bytes);
 
     cw_status.decoded.resize(num_codewords, false);
     cw_status.data.resize(num_codewords);
@@ -591,12 +906,51 @@ void ModemEngine::processRxBuffer() {
         std::vector<float> cw_bits(accumulated_soft_bits.begin() + i * LDPC_BLOCK,
                                     accumulated_soft_bits.begin() + (i + 1) * LDPC_BLOCK);
 
-        Bytes decoded = decoder_->decodeSoft(cw_bits);
-        bool success = decoder_->lastDecodeSuccess();
+        // Select decoder based on codeword position
+        // CW0: Always R1/4 (header must be decodable for frame type detection)
+        // CW1+: Adaptive rate for DATA frames, R1/4 otherwise
+        CodeRate cw_rate = (i == 0) ? CodeRate::R1_4 : cw1_rate;
+        size_t expected_bytes = (i == 0) ? cw0_bytes : cw1_bytes;
 
-        if (success && decoded.size() >= v2::BYTES_PER_CODEWORD) {
+        LOG_MODEM(INFO, "RX OFDM: Decoding CW%zu with rate %s, expected %zu bytes",
+                  i, codeRateToString(cw_rate), expected_bytes);
+
+        // Diagnostic: log soft bit statistics for debugging
+        if (i > 0) {  // Only for CW1+
+            float sum_abs = 0.0f;
+            int pos_count = 0;
+            for (float llr : cw_bits) {
+                sum_abs += std::abs(llr);
+                if (llr > 0) pos_count++;
+            }
+            float avg_llr = sum_abs / cw_bits.size();
+
+            // Decode first 16 bytes to hex for comparison
+            std::string hex_str;
+            for (int byte_idx = 0; byte_idx < 16 && byte_idx * 8 < (int)cw_bits.size(); byte_idx++) {
+                uint8_t byte_val = 0;
+                for (int bit = 0; bit < 8 && byte_idx * 8 + bit < (int)cw_bits.size(); bit++) {
+                    if (cw_bits[byte_idx * 8 + bit] < 0) byte_val |= (1 << (7 - bit));
+                }
+                char buf[8];
+                snprintf(buf, sizeof(buf), "%02X ", byte_val);
+                hex_str += buf;
+            }
+
+            LOG_MODEM(INFO, "RX OFDM: CW%zu soft bits: avg_llr=%.2f, pos_ratio=%.2f, first16bytes=[%s]",
+                      i, avg_llr, (float)pos_count / cw_bits.size(), hex_str.c_str());
+        }
+
+        LDPCDecoder cw_decoder(cw_rate);
+        Bytes decoded = cw_decoder.decodeSoft(cw_bits);
+        bool success = cw_decoder.lastDecodeSuccess();
+
+        LOG_MODEM(INFO, "RX OFDM: CW%zu decode %s, got %zu bytes",
+                  i, success ? "SUCCESS" : "FAILED", decoded.size());
+
+        if (success && decoded.size() >= expected_bytes) {
             // Trim to codeword size and store
-            Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
+            Bytes cw_data(decoded.begin(), decoded.begin() + expected_bytes);
             cw_status.decoded[i] = true;
             cw_status.data[i] = cw_data;
             cw_success++;
@@ -646,8 +1000,12 @@ void ModemEngine::processRxBuffer() {
     }
 
     // Try to reassemble and parse the complete frame
+    LOG_MODEM(INFO, "RX OFDM: CW status - success=%zu, failed=%zu, allSuccess=%d",
+              cw_success, cw_failed, cw_status.allSuccess() ? 1 : 0);
+
     if (cw_status.allSuccess()) {
         Bytes frame_data = cw_status.reassemble();
+        LOG_MODEM(INFO, "RX OFDM: Reassembled %zu bytes", frame_data.size());
 
         if (!frame_data.empty()) {
             bool frame_parsed = false;
@@ -713,6 +1071,8 @@ void ModemEngine::processRxBuffer() {
             if (raw_data_callback_) {
                 raw_data_callback_(frame_data);
             }
+            // Update turnaround timestamp - we just finished receiving
+            last_rx_complete_time_ = std::chrono::steady_clock::now();
         }
     } else {
         // No frame decoded - still update stats for failed codewords
@@ -722,7 +1082,501 @@ void ModemEngine::processRxBuffer() {
 
     // Reset demodulator to look for next preamble
     // This ensures clean state between frames and prevents accumulated timing/phase errors
+    LOG_MODEM(INFO, "[%s] RX OFDM: Frame processing complete, calling demod reset()",
+              log_prefix_.c_str());
     ofdm_demodulator_->reset();
+}
+
+void ModemEngine::processRxBuffer_DPSK(int pre_detected_start) {
+    namespace v2 = protocol::v2;
+
+    // Need enough samples for preamble + at least 1 codeword
+    int preamble_samples = 32 * dpsk_config_.samples_per_symbol;  // 32-symbol preamble
+    int symbol_samples = dpsk_config_.samples_per_symbol;
+    int bits_per_sym = dpsk_config_.bits_per_symbol();
+    int samples_per_codeword = (v2::LDPC_CODEWORD_BITS / bits_per_sym) * symbol_samples;
+    int min_samples = preamble_samples + samples_per_codeword;
+
+    // === STATE TRACKING: If we're waiting for more samples for a known frame, skip detection ===
+    if (pending_frame_.active) {
+        // Check if buffer grew (new samples arrived)
+        if (rx_sample_buffer_.size() <= pending_frame_.buffer_size) {
+            return;  // No new samples, skip processing
+        }
+
+        int available = rx_sample_buffer_.size() - pending_frame_.data_start;
+        int needed = pending_frame_.expected_codewords * samples_per_codeword;
+
+        if (available < needed) {
+            // Still waiting for more samples
+            pending_frame_.buffer_size = rx_sample_buffer_.size();
+            return;
+        }
+
+        // We have enough samples now - continue with decoding
+        LOG_MODEM(INFO, "RX DPSK: Resuming pending frame, now have %d/%d samples",
+                  available, needed);
+    }
+
+    if (rx_sample_buffer_.size() < (size_t)min_samples) {
+        return;  // Not enough for even preamble detection
+    }
+
+    SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());
+
+    int data_start;
+    int expected_codewords;
+
+    v2::FrameType detected_frame_type = v2::FrameType::PROBE;  // For adaptive rate selection
+
+    if (pending_frame_.active) {
+        // Use saved state
+        data_start = pending_frame_.data_start;
+        expected_codewords = pending_frame_.expected_codewords;
+        detected_frame_type = pending_frame_.frame_type;
+        pending_frame_.active = false;  // Clear pending flag
+    } else {
+        // Fresh detection
+        data_start = pre_detected_start;
+        if (data_start < 0) {
+            data_start = dpsk_demodulator_->findPreamble(span);
+        }
+
+        if (data_start < 0) {
+            // No preamble found - discard old samples to prevent buffer growth
+            size_t to_keep = std::min(rx_sample_buffer_.size(), (size_t)(preamble_samples * 2));
+            if (rx_sample_buffer_.size() > to_keep) {
+                rx_sample_buffer_.erase(rx_sample_buffer_.begin(),
+                                        rx_sample_buffer_.end() - to_keep);
+            }
+            return;
+        }
+
+        int available_data_samples = rx_sample_buffer_.size() - data_start;
+
+        // Check if we have at least 1 codeword worth of samples for CW0 (header)
+        if (available_data_samples < samples_per_codeword) {
+            // Not enough for CW0 - don't set pending, just wait for more samples
+            // We'll re-detect next poll (preamble is still in buffer)
+            return;
+        }
+
+        LOG_MODEM(INFO, "[%s] RX DPSK: Data start at sample %d, available=%d samples",
+                  log_prefix_.c_str(), data_start, available_data_samples);
+
+        // Demodulate CW0 to determine frame size
+        SampleSpan cw0_span(rx_sample_buffer_.data() + data_start, samples_per_codeword);
+        auto cw0_soft = dpsk_demodulator_->demodulateSoft(cw0_span);
+
+        if (cw0_soft.size() < v2::LDPC_CODEWORD_BITS) {
+            LOG_MODEM(WARN, "RX DPSK: CW0 demod failed, got %zu bits (need %zu)",
+                      cw0_soft.size(), (size_t)v2::LDPC_CODEWORD_BITS);
+            pending_frame_.clear();  // Clear invalid pending state
+            rx_sample_buffer_.clear();
+            dpsk_demodulator_->reset();
+            return;
+        }
+
+        // Deinterleave CW0
+        std::vector<float> cw0_bits(cw0_soft.begin(), cw0_soft.begin() + v2::LDPC_CODEWORD_BITS);
+        if (interleaving_enabled_) {
+            cw0_bits = interleaver_.deinterleave(cw0_bits);
+        }
+
+        // Decode CW0 - ALWAYS use R1/4 for header (allows frame type detection)
+        LDPCDecoder cw0_decoder(CodeRate::R1_4);
+        Bytes cw0_decoded = cw0_decoder.decodeSoft(cw0_bits);
+        if (!cw0_decoder.lastDecodeSuccess() || cw0_decoded.size() < v2::BYTES_PER_CODEWORD) {
+            LOG_MODEM(INFO, "RX DPSK: CW0 LDPC decode FAILED");
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.frames_failed++;
+            pending_frame_.clear();  // Clear invalid pending state
+            rx_sample_buffer_.clear();
+            dpsk_demodulator_->reset();
+            return;
+        }
+
+        LOG_MODEM(INFO, "RX DPSK: CW0 LDPC decode SUCCESS, first 8: %02X %02X %02X %02X %02X %02X %02X %02X",
+                  cw0_decoded[0], cw0_decoded[1], cw0_decoded[2], cw0_decoded[3],
+                  cw0_decoded[4], cw0_decoded[5], cw0_decoded[6], cw0_decoded[7]);
+
+        // Parse CW0 to get frame info
+        Bytes cw0_data(cw0_decoded.begin(), cw0_decoded.begin() + v2::BYTES_PER_CODEWORD);
+        auto cw0_info = v2::identifyCodeword(cw0_data);
+
+        expected_codewords = 1;  // Default if not a header
+        if (cw0_info.type == v2::CodewordType::HEADER) {
+            auto header = v2::parseHeader(cw0_data);
+            if (header.valid) {
+                expected_codewords = header.total_cw;
+                detected_frame_type = header.type;  // Update outer variable
+                LOG_MODEM(INFO, "RX DPSK: Header valid, expecting %d codewords, frame_type=%d",
+                          expected_codewords, static_cast<int>(header.type));
+            }
+        }
+
+        // Check if we have all codewords
+        int total_samples_needed = expected_codewords * samples_per_codeword;
+        if (available_data_samples < total_samples_needed) {
+            // Save state and wait for more samples - include frame_type for adaptive rate
+            pending_frame_.set(protocol::WaveformMode::DPSK, data_start, expected_codewords,
+                              rx_sample_buffer_.size(), detected_frame_type);
+            LOG_MODEM(INFO, "RX DPSK: Need %d samples for %d CWs, have %d - waiting",
+                      total_samples_needed, expected_codewords, available_data_samples);
+            dpsk_demodulator_->reset();
+            return;
+        }
+    }
+
+    // === We have all samples needed - decode the full frame ===
+    int total_samples_needed = expected_codewords * samples_per_codeword;
+
+    // === Now demodulate and decode ALL codewords ===
+    // Re-run findPreamble to reset phase reference (prev_symbol_) before full demodulation.
+    // This ensures differential decoding starts with the correct reference from the preamble.
+    dpsk_demodulator_->reset();
+    dpsk_demodulator_->findPreamble(span);
+
+    SampleSpan full_data_span(rx_sample_buffer_.data() + data_start, total_samples_needed);
+    auto soft_bits = dpsk_demodulator_->demodulateSoft(full_data_span);
+
+    LOG_MODEM(INFO, "RX DPSK: Got %zu soft bits for %d codewords",
+              soft_bits.size(), expected_codewords);
+
+    // Apply deinterleaving per-codeword
+    if (interleaving_enabled_ && soft_bits.size() >= v2::LDPC_CODEWORD_BITS) {
+        std::vector<float> deinterleaved;
+        for (size_t i = 0; i + v2::LDPC_CODEWORD_BITS <= soft_bits.size();
+             i += v2::LDPC_CODEWORD_BITS) {
+            std::vector<float> cw_bits(soft_bits.begin() + i,
+                                       soft_bits.begin() + i + v2::LDPC_CODEWORD_BITS);
+            auto di = interleaver_.deinterleave(cw_bits);
+            deinterleaved.insert(deinterleaved.end(), di.begin(), di.end());
+        }
+        soft_bits = std::move(deinterleaved);
+    }
+
+    // Decode each codeword - CW0 always R1/4, CW1+ use adaptive rate for DATA frames
+    const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+    size_t num_codewords = std::min((size_t)expected_codewords, soft_bits.size() / LDPC_BLOCK);
+
+    // Determine if we should use adaptive rate for CW1+
+    // DATA frames (0x30-0x33) use adaptive rate when connected
+    bool use_adaptive_for_data_cw = connected_ && v2::isDataFrame(detected_frame_type);
+    CodeRate cw1_rate = use_adaptive_for_data_cw ? data_code_rate_ : CodeRate::R1_4;
+    size_t cw0_bytes = v2::BYTES_PER_CODEWORD;  // Always 20 bytes for R1/4
+    size_t cw1_bytes = v2::getBytesPerCodeword(cw1_rate);
+
+    LOG_MODEM(INFO, "RX DPSK: Decoding %zu CWs, frame_type=%d, CW1+ rate=%s (%zu bytes/CW)",
+              num_codewords, static_cast<int>(detected_frame_type),
+              use_adaptive_for_data_cw ? "adaptive" : "R1/4", cw1_bytes);
+
+    v2::CodewordStatus cw_status;
+    cw_status.decoded.resize(expected_codewords, false);
+    cw_status.data.resize(expected_codewords);
+    int cw_success = 0, cw_failed = 0;
+
+    for (size_t i = 0; i < num_codewords; i++) {
+        std::vector<float> cw_bits(soft_bits.begin() + i * LDPC_BLOCK,
+                                   soft_bits.begin() + (i + 1) * LDPC_BLOCK);
+
+        // Select decoder based on codeword position
+        // CW0: Always R1/4 (header must be decodable for frame type detection)
+        // CW1+: Adaptive rate for DATA frames, R1/4 otherwise
+        CodeRate cw_rate = (i == 0) ? CodeRate::R1_4 : cw1_rate;
+        size_t expected_bytes = (i == 0) ? cw0_bytes : cw1_bytes;
+
+        LDPCDecoder cw_decoder(cw_rate);
+        Bytes decoded = cw_decoder.decodeSoft(cw_bits);
+        bool success = cw_decoder.lastDecodeSuccess();
+
+        if (success && decoded.size() >= expected_bytes) {
+            Bytes cw_data(decoded.begin(), decoded.begin() + expected_bytes);
+            cw_status.decoded[i] = true;
+            cw_status.data[i] = cw_data;
+            cw_success++;
+            LOG_MODEM(INFO, "RX DPSK: CW%zu LDPC decode SUCCESS (rate=%s, %zu bytes)",
+                      i, (cw_rate == CodeRate::R1_4) ? "R1/4" : "adaptive", expected_bytes);
+        } else {
+            cw_failed++;
+            LOG_MODEM(INFO, "RX DPSK: CW%zu LDPC decode FAILED (rate=%s)", i,
+                      (cw_rate == CodeRate::R1_4) ? "R1/4" : "adaptive");
+        }
+    }
+
+    // Reassemble and deliver frame if all codewords decoded
+    if (cw_status.allSuccess()) {
+        Bytes frame_data = cw_status.reassemble();
+
+        if (!frame_data.empty()) {
+            LOG_MODEM(INFO, "[%s] RX DPSK: Frame reassembled, %zu bytes", log_prefix_.c_str(), frame_data.size());
+
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.frames_received++;
+                stats_.synced = true;
+                rx_data_queue_.push(frame_data);
+            }
+
+            if (raw_data_callback_) {
+                raw_data_callback_(frame_data);
+            }
+            // Update turnaround timestamp - we just finished receiving
+            last_rx_complete_time_ = std::chrono::steady_clock::now();
+        }
+    } else {
+        LOG_MODEM(WARN, "RX DPSK: Frame incomplete - %d/%d CWs decoded",
+                  cw_success, expected_codewords);
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.frames_failed++;
+    }
+
+    // Remove only the consumed samples (preamble might overlap with previous data)
+    // Include some margin for the preamble that led to data_start
+    int preamble_margin = 16 * dpsk_config_.samples_per_symbol;  // Half of 32-symbol preamble
+    int consumed = std::max(0, data_start - preamble_margin) + total_samples_needed;
+    consumed = std::min(consumed, (int)rx_sample_buffer_.size());
+
+    if (consumed > 0) {
+        rx_sample_buffer_.erase(rx_sample_buffer_.begin(),
+                                rx_sample_buffer_.begin() + consumed);
+        LOG_MODEM(DEBUG, "RX DPSK: Consumed %d samples, %zu remaining",
+                  consumed, rx_sample_buffer_.size());
+    }
+    dpsk_demodulator_->reset();
+}
+
+void ModemEngine::processRxBuffer_MFSK(int pre_detected_start) {
+    namespace v2 = protocol::v2;
+
+    // Need enough samples for preamble detection
+    int preamble_samples = 2 * mfsk_config_.num_tones * mfsk_config_.samples_per_symbol;  // 2-cycle preamble
+    int symbol_samples = mfsk_config_.samples_per_symbol * mfsk_config_.repetition;
+    int bits_per_symbol = mfsk_config_.bits_per_symbol();
+
+    // Check for pending frame state from previous call
+    int preamble_start = -1;
+    int expected_codewords = 0;
+    v2::FrameType detected_frame_type = v2::FrameType::PROBE;
+
+    if (pending_frame_.active && pending_frame_.waveform == protocol::WaveformMode::MFSK) {
+        // Resuming pending frame - use saved state
+        preamble_start = pending_frame_.data_start;  // Actually preamble start for MFSK
+        expected_codewords = pending_frame_.expected_codewords;
+        detected_frame_type = pending_frame_.frame_type;
+        LOG_MODEM(DEBUG, "[%s] RX MFSK: Resuming pending frame (preamble=%d, exp_cw=%d), have %zu samples",
+                  log_prefix_.c_str(), preamble_start, expected_codewords, rx_sample_buffer_.size());
+    } else if (pre_detected_start >= 0) {
+        // Called from multi-detect with pre-detected preamble position
+        preamble_start = pre_detected_start;
+    } else {
+        // Need enough samples for preamble detection
+        if (rx_sample_buffer_.size() < (size_t)(preamble_samples + symbol_samples * 10)) {
+            LOG_MODEM(TRACE, "RX MFSK: Buffering %zu samples (need %d)",
+                      rx_sample_buffer_.size(), preamble_samples + symbol_samples * 10);
+            return;
+        }
+
+        LOG_MODEM(DEBUG, "RX MFSK: Processing %zu samples...", rx_sample_buffer_.size());
+
+        SampleSpan span(rx_sample_buffer_.data(), rx_sample_buffer_.size());
+        preamble_start = mfsk_demodulator_->findPreamble(span);
+
+        if (preamble_start < 0) {
+            // No preamble found - discard old samples to prevent buffer growth
+            size_t to_keep = std::min(rx_sample_buffer_.size(), (size_t)(preamble_samples * 2));
+            if (rx_sample_buffer_.size() > to_keep) {
+                rx_sample_buffer_.erase(rx_sample_buffer_.begin(),
+                                        rx_sample_buffer_.end() - to_keep);
+            }
+            return;
+        }
+    }
+
+    // Skip preamble to get to data
+    int preamble_end = preamble_start + preamble_samples;
+    if (!pending_frame_.active) {
+        LOG_MODEM(INFO, "RX MFSK: Preamble found at sample %d, data starts at %d",
+                  preamble_start, preamble_end);
+    }
+
+    // Calculate samples needed for at least one codeword
+    // MFSK: 648 bits / bits_per_symbol = symbols needed, × repetition × samples_per_symbol
+    int samples_per_cw = (v2::LDPC_CODEWORD_BITS / bits_per_symbol) * symbol_samples;
+    int min_data_samples = samples_per_cw;  // At least 1 codeword
+
+    int data_available = (int)rx_sample_buffer_.size() - preamble_end;
+    if (data_available < min_data_samples) {
+        if (!pending_frame_.active) {
+            LOG_MODEM(INFO, "RX MFSK: Need %d data samples, have %d - waiting",
+                      min_data_samples, data_available);
+        }
+        // Set pending state and wait for more samples
+        pending_frame_.set(protocol::WaveformMode::MFSK, preamble_start, 0,
+                          rx_sample_buffer_.size(), v2::FrameType::PROBE);
+        return;
+    }
+
+    // Demodulate data portion to soft bits
+    SampleSpan data_span(rx_sample_buffer_.data() + preamble_end, data_available);
+
+    // MFSK demodulation to soft bits (tone powers -> LLRs)
+    auto soft_bits = mfsk_demodulator_->demodulateSoft(data_span);
+
+    if (soft_bits.empty()) {
+        // This shouldn't happen if we have enough samples, but wait if it does
+        LOG_MODEM(WARN, "RX MFSK: No soft bits from demodulation (unexpected)");
+        pending_frame_.set(protocol::WaveformMode::MFSK, preamble_start, 0,
+                          rx_sample_buffer_.size(), v2::FrameType::PROBE);
+        return;
+    }
+
+    LOG_MODEM(INFO, "RX MFSK: Got %zu soft bits from %d data samples", soft_bits.size(), data_available);
+
+    // Apply deinterleaving if enabled
+    if (interleaving_enabled_ && soft_bits.size() >= v2::LDPC_CODEWORD_BITS) {
+        std::vector<float> deinterleaved;
+        for (size_t i = 0; i + v2::LDPC_CODEWORD_BITS <= soft_bits.size();
+             i += v2::LDPC_CODEWORD_BITS) {
+            std::vector<float> cw_bits(soft_bits.begin() + i,
+                                       soft_bits.begin() + i + v2::LDPC_CODEWORD_BITS);
+            auto di = interleaver_.deinterleave(cw_bits);
+            deinterleaved.insert(deinterleaved.end(), di.begin(), di.end());
+        }
+        soft_bits = std::move(deinterleaved);
+    }
+
+    // Process codewords through LDPC decoder
+    const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+    size_t num_codewords = soft_bits.size() / LDPC_BLOCK;
+
+    if (num_codewords == 0) {
+        // Not enough bits yet - wait for more samples
+        LOG_MODEM(INFO, "RX MFSK: Got %zu bits, need %zu for 1 CW - waiting",
+                  soft_bits.size(), LDPC_BLOCK);
+        pending_frame_.set(protocol::WaveformMode::MFSK, preamble_start, 0,
+                          rx_sample_buffer_.size(), v2::FrameType::PROBE);
+        return;
+    }
+
+    LOG_MODEM(INFO, "RX MFSK: Decoding %zu codewords", num_codewords);
+
+    // First, decode CW0 to detect frame type (always R1/4)
+    // Skip if we already know from pending_frame_
+    if (detected_frame_type == v2::FrameType::PROBE && expected_codewords == 0) {
+        std::vector<float> cw0_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+        LDPCDecoder cw0_decoder(CodeRate::R1_4);
+        Bytes cw0_decoded = cw0_decoder.decodeSoft(cw0_bits);
+        if (cw0_decoder.lastDecodeSuccess() && cw0_decoded.size() >= v2::BYTES_PER_CODEWORD) {
+            Bytes cw0_data(cw0_decoded.begin(), cw0_decoded.begin() + v2::BYTES_PER_CODEWORD);
+            auto cw0_info = v2::identifyCodeword(cw0_data);
+            if (cw0_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw0_data);
+                if (header.valid) {
+                    detected_frame_type = header.type;
+                    expected_codewords = header.total_cw;
+                    LOG_MODEM(INFO, "RX MFSK: Header valid, expecting %d codewords, frame_type=%d",
+                              expected_codewords, static_cast<int>(detected_frame_type));
+                }
+            }
+        }
+    }
+
+    // If we know expected_codewords but don't have enough, wait for more samples
+    if (expected_codewords > 0 && num_codewords < (size_t)expected_codewords) {
+        // Calculate samples needed per codeword for MFSK
+        int samples_per_cw = (v2::LDPC_CODEWORD_BITS / bits_per_symbol) * symbol_samples;
+        int total_samples_needed = preamble_end + expected_codewords * samples_per_cw;
+
+        if ((int)rx_sample_buffer_.size() < total_samples_needed) {
+            // Set pending state with frame info
+            pending_frame_.set(protocol::WaveformMode::MFSK, preamble_start, expected_codewords,
+                              rx_sample_buffer_.size(), detected_frame_type);
+            LOG_MODEM(INFO, "[%s] RX MFSK: Need %d samples for %d CWs (preamble=%d), have %zu - waiting",
+                      log_prefix_.c_str(), total_samples_needed, expected_codewords,
+                      preamble_start, rx_sample_buffer_.size());
+            return;
+        }
+    }
+
+    // Limit codewords to expected count
+    if (expected_codewords > 0 && num_codewords > (size_t)expected_codewords) {
+        num_codewords = expected_codewords;
+    }
+
+    // Determine if we should use adaptive rate for CW1+
+    // DATA frames (0x30-0x33) use adaptive rate when connected
+    // Note: MFSK is typically used for low SNR where R1/4 is best, but support adaptive for consistency
+    bool use_adaptive_for_data_cw = connected_ && v2::isDataFrame(detected_frame_type);
+    CodeRate cw1_rate = use_adaptive_for_data_cw ? data_code_rate_ : CodeRate::R1_4;
+    size_t cw0_bytes = v2::BYTES_PER_CODEWORD;  // Always 20 bytes for R1/4
+    size_t cw1_bytes = v2::getBytesPerCodeword(cw1_rate);
+
+    LOG_MODEM(INFO, "RX MFSK: frame_type=%d, CW1+ rate=%s (%zu bytes/CW)",
+              static_cast<int>(detected_frame_type),
+              use_adaptive_for_data_cw ? "adaptive" : "R1/4", cw1_bytes);
+
+    // Decode each codeword
+    v2::CodewordStatus cw_status;
+    cw_status.decoded.resize(num_codewords, false);
+    cw_status.data.resize(num_codewords);
+    int cw_success = 0, cw_failed = 0;
+
+    for (size_t i = 0; i < num_codewords; i++) {
+        std::vector<float> cw_bits(soft_bits.begin() + i * LDPC_BLOCK,
+                                   soft_bits.begin() + (i + 1) * LDPC_BLOCK);
+
+        // Select decoder based on codeword position
+        // CW0: Always R1/4, CW1+: Adaptive rate for DATA frames
+        CodeRate cw_rate = (i == 0) ? CodeRate::R1_4 : cw1_rate;
+        size_t expected_bytes = (i == 0) ? cw0_bytes : cw1_bytes;
+
+        LDPCDecoder cw_decoder(cw_rate);
+        Bytes decoded = cw_decoder.decodeSoft(cw_bits);
+        bool success = cw_decoder.lastDecodeSuccess();
+
+        if (success && decoded.size() >= expected_bytes) {
+            Bytes cw_data(decoded.begin(), decoded.begin() + expected_bytes);
+            cw_status.decoded[i] = true;
+            cw_status.data[i] = cw_data;
+            cw_success++;
+            LOG_MODEM(INFO, "RX MFSK: CW%zu LDPC decode SUCCESS (rate=%s, %zu bytes)",
+                      i, (cw_rate == CodeRate::R1_4) ? "R1/4" : "adaptive", expected_bytes);
+        } else {
+            cw_failed++;
+            LOG_MODEM(INFO, "RX MFSK: CW%zu LDPC decode FAILED (rate=%s)", i,
+                      (cw_rate == CodeRate::R1_4) ? "R1/4" : "adaptive");
+        }
+    }
+
+    // Reassemble and deliver frame if all codewords decoded
+    if (cw_status.allSuccess()) {
+        Bytes frame_data = cw_status.reassemble();
+
+        if (!frame_data.empty()) {
+            LOG_MODEM(INFO, "RX MFSK: Frame reassembled, %zu bytes", frame_data.size());
+
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.frames_received++;
+                stats_.synced = true;
+                rx_data_queue_.push(frame_data);
+            }
+
+            if (raw_data_callback_) {
+                raw_data_callback_(frame_data);
+            }
+            // Update turnaround timestamp - we just finished receiving
+            last_rx_complete_time_ = std::chrono::steady_clock::now();
+        }
+    } else {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.frames_failed++;
+    }
+
+    // Clear pending frame state and buffer after processing
+    pending_frame_.clear();
+    rx_sample_buffer_.clear();
 }
 
 bool ModemEngine::hasReceivedData() const {
@@ -791,6 +1645,10 @@ void ModemEngine::reset() {
     ofdm_demodulator_->reset();
     adaptive_.reset();
 
+    // Reset pending frame state and multi-detect rate limiter
+    pending_frame_.clear();
+    last_multidetect_buffer_size_ = 0;
+
     // Reset carrier sense
     channel_energy_.store(0.0f);
 
@@ -839,27 +1697,121 @@ float ModemEngine::getCarrierSenseThreshold() const {
     return carrier_sense_threshold_;
 }
 
+bool ModemEngine::isTurnaroundActive() const {
+    if (turnaround_delay_ms_ == 0) return false;
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_rx_complete_time_).count();
+    return elapsed < turnaround_delay_ms_;
+}
+
+uint32_t ModemEngine::getTurnaroundRemaining() const {
+    if (turnaround_delay_ms_ == 0) return 0;
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_rx_complete_time_).count();
+    if (elapsed >= turnaround_delay_ms_) return 0;
+    return static_cast<uint32_t>(turnaround_delay_ms_ - elapsed);
+}
+
 // === Waveform Mode Control ===
 
 // Helper to get mode description string
 static const char* getModeDescription(Modulation mod, CodeRate rate) {
+    // Return a static description based on modulation and code rate
+    static char buf[32];
+    const char* mod_name;
     switch (mod) {
-        case Modulation::BPSK:
-            return rate == CodeRate::R1_4 ? "BPSK R1/4" : "BPSK R1/2";
-        case Modulation::QPSK:
-            return rate == CodeRate::R1_2 ? "QPSK R1/2" : "QPSK R2/3";
-        case Modulation::QAM16:
-            return rate == CodeRate::R2_3 ? "16-QAM R2/3" : "16-QAM R3/4";
-        case Modulation::QAM64:
-            return rate == CodeRate::R3_4 ? "64-QAM R3/4" : "64-QAM R5/6";
-        default:
-            return "Unknown";
+        case Modulation::DBPSK: mod_name = "DBPSK"; break;
+        case Modulation::BPSK:  mod_name = "BPSK"; break;
+        case Modulation::DQPSK: mod_name = "DQPSK"; break;
+        case Modulation::QPSK:  mod_name = "QPSK"; break;
+        case Modulation::D8PSK: mod_name = "D8PSK"; break;
+        case Modulation::QAM8:  mod_name = "8QAM"; break;
+        case Modulation::QAM16: mod_name = "16QAM"; break;
+        case Modulation::QAM32: mod_name = "32QAM"; break;
+        case Modulation::QAM64: mod_name = "64QAM"; break;
+        default: mod_name = "???"; break;
     }
+    const char* rate_name;
+    switch (rate) {
+        case CodeRate::R1_4: rate_name = "R1/4"; break;
+        case CodeRate::R1_2: rate_name = "R1/2"; break;
+        case CodeRate::R2_3: rate_name = "R2/3"; break;
+        case CodeRate::R3_4: rate_name = "R3/4"; break;
+        case CodeRate::R5_6: rate_name = "R5/6"; break;
+        default: rate_name = "R?"; break;
+    }
+    snprintf(buf, sizeof(buf), "%s %s", mod_name, rate_name);
+    return buf;
 }
 
 void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
+    if (waveform_mode_ == mode) return;
+
+    LOG_MODEM(INFO, "Switching waveform mode: %d -> %d",
+              static_cast<int>(waveform_mode_), static_cast<int>(mode));
+
     waveform_mode_ = mode;
-    // Future: Switch between OFDM and OTFS modulator/demodulator here
+
+    // Reset the appropriate demodulator for the new mode
+    switch (mode) {
+        case protocol::WaveformMode::DPSK:
+            dpsk_demodulator_->reset();
+            // Clear RX buffer when switching modes (no lock - may be called from RX path)
+            rx_sample_buffer_.clear();
+            pending_frame_.clear();
+            LOG_MODEM(INFO, "DPSK mode active: %d-PSK, %d samples/sym, %.1f bps (buffer cleared)",
+                      dpsk_config_.num_phases(),
+                      dpsk_config_.samples_per_symbol,
+                      dpsk_config_.raw_bps());
+            break;
+
+        case protocol::WaveformMode::MFSK:
+            mfsk_demodulator_->reset();
+            // Clear RX buffer when switching modes (no lock - may be called from RX path)
+            rx_sample_buffer_.clear();
+            pending_frame_.clear();
+            LOG_MODEM(INFO, "MFSK mode active: %d tones, %.1f effective bps (buffer cleared)",
+                      mfsk_config_.num_tones,
+                      mfsk_config_.effective_bps());
+            break;
+
+        case protocol::WaveformMode::OTFS_EQ:
+        case protocol::WaveformMode::OTFS_RAW:
+            otfs_demodulator_->reset();
+            LOG_MODEM(INFO, "OTFS mode active: M=%d, N=%d",
+                      otfs_config_.M, otfs_config_.N);
+            break;
+
+        case protocol::WaveformMode::OFDM:
+        default:
+            ofdm_demodulator_->reset();
+            // Clear RX buffer when switching to OFDM (no lock - may be called from RX path)
+            rx_sample_buffer_.clear();
+            pending_frame_.clear();
+            LOG_MODEM(INFO, "OFDM mode active: %d carriers, %s (buffer cleared)",
+                      config_.num_carriers,
+                      connected_ ? "connected" : "disconnected");
+            break;
+    }
+}
+
+void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
+    if (connect_waveform_ == mode) return;
+
+    LOG_MODEM(INFO, "Switching connect waveform: %s -> %s",
+              protocol::waveformModeToString(connect_waveform_),
+              protocol::waveformModeToString(mode));
+
+    connect_waveform_ = mode;
+
+    // Configure DPSK for medium preset (DQPSK 62b R1/4) for connection attempts
+    if (mode == protocol::WaveformMode::DPSK) {
+        dpsk_config_ = dpsk_presets::medium();  // DQPSK 62.5 baud
+        dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
+        dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
+        LOG_MODEM(INFO, "DPSK connect mode: %d-PSK, %.1f baud",
+                  dpsk_config_.num_phases(), dpsk_config_.symbol_rate());
+    }
 }
 
 void ModemEngine::setConnected(bool connected) {
@@ -868,22 +1820,23 @@ void ModemEngine::setConnected(bool connected) {
     connected_ = connected;
 
     if (connected) {
-        // Switching to connected state - use negotiated data mode for RX
-        // Create new config with data mode settings
-        ModemConfig rx_config = config_;
-        rx_config.modulation = data_modulation_;
-        rx_config.code_rate = data_code_rate_;
+        // Reset handshake state - we'll complete it when we receive first post-ACK frame
+        handshake_complete_ = false;
 
-        // Update decoder rate
-        decoder_->setRate(data_code_rate_);
+        // CRITICAL: Clear RX buffer when entering connected state
+        // Old samples from DPSK/MFSK handshake would corrupt OFDM preamble detection
+        // NOTE: Don't acquire rx_mutex_ here - we're called from within the RX processing
+        // path which already holds the lock. Just clear directly.
+        rx_sample_buffer_.clear();
+        pending_frame_.clear();
+        ofdm_demodulator_->reset();
 
-        // Recreate demodulator with new config (resets sync state)
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+        // NOTE: Don't overwrite waveform_mode_ here - it was already set to the negotiated
+        // mode (e.g., OFDM) by the on_mode_negotiated_ callback before setConnected() is called.
+        // During handshake, TX uses last_rx_waveform_ (set by RX path when we received CONNECT/CONNECT_ACK)
 
-        LOG_MODEM(INFO, "Switched to connected mode: %s (RX: %d-ary, R%d)",
-                  getModeDescription(data_modulation_, data_code_rate_),
-                  1 << static_cast<int>(data_modulation_),
-                  static_cast<int>(data_code_rate_));
+        LOG_MODEM(INFO, "Entered connected state, RX buffer cleared (negotiated=%d, TX uses last_rx=%d)",
+                  static_cast<int>(waveform_mode_), static_cast<int>(last_rx_waveform_));
     } else {
         // Switching to disconnected state - use robust mode for RX
         ModemConfig rx_config = config_;
@@ -894,6 +1847,18 @@ void ModemEngine::setConnected(bool connected) {
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
         LOG_MODEM(INFO, "Switched to disconnected mode (RX: DQPSK R1/4)");
+        handshake_complete_ = false;  // Reset for next connection
+    }
+}
+
+void ModemEngine::setHandshakeComplete(bool complete) {
+    if (handshake_complete_ == complete) return;
+
+    handshake_complete_ = complete;
+
+    if (complete) {
+        LOG_MODEM(INFO, "Handshake complete, TX now uses waveform_mode_=%d",
+                  static_cast<int>(waveform_mode_));
     }
 }
 
@@ -901,14 +1866,27 @@ void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
     data_modulation_ = mod;
     data_code_rate_ = rate;
 
-    // If already connected, update RX immediately
-    if (connected_) {
-        ModemConfig rx_config = config_;
-        rx_config.modulation = mod;
-        rx_config.code_rate = rate;
+    // Determine if modulation is differential (doesn't need pilots)
+    bool is_differential = (mod == Modulation::DBPSK ||
+                           mod == Modulation::DQPSK ||
+                           mod == Modulation::D8PSK);
 
+    // If already connected, update both TX and RX to match
+    if (connected_) {
+        // Update base config for TX modulator
+        config_.modulation = mod;
+        config_.code_rate = rate;
+        config_.use_pilots = !is_differential;  // QAM needs pilots, DQPSK doesn't
+
+        // Recreate modulator with new config
+        ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
+
+        // Recreate demodulator with matching config
         decoder_->setRate(rate);
-        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+        LOG_MODEM(INFO, "TX/RX OFDM updated: mod=%d, rate=%d, use_pilots=%d",
+                  static_cast<int>(mod), static_cast<int>(rate), config_.use_pilots ? 1 : 0);
     }
 
     LOG_MODEM(INFO, "Data mode set to: %s", getModeDescription(mod, rate));
@@ -947,6 +1925,82 @@ void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rat
         mod = Modulation::BPSK;
         rate = CodeRate::R1_4;
     }
+}
+
+protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
+    // MFSK vs OFDM switching based on actual SNR (in signal bandwidth)
+    // Convert from reported SNR (2500 Hz ref) to actual: actual = reported + 17 dB for 50 Hz MFSK
+    //
+    // Thresholds (actual SNR in signal bandwidth):
+    // - Below 5 dB:  Use MFSK (works at 0 dB actual = -17 dB reported)
+    // - 5 dB and up: Use OFDM (works reliably at 10+ dB actual)
+    //
+    // Note: There's a ~5 dB hysteresis zone (5-10 dB) where both work,
+    // so switching won't oscillate rapidly.
+
+    if (snr_db < 5.0f) {
+        // Very low SNR - MFSK required
+        // MFSK 8-tone works at 0 dB actual (-17 dB reported)
+        return protocol::WaveformMode::MFSK;
+    } else {
+        // Adequate SNR - OFDM provides higher throughput
+        return protocol::WaveformMode::OFDM;
+    }
+}
+
+void ModemEngine::setMFSKMode(int num_tones) {
+    // Select appropriate MFSK preset based on number of tones
+    switch (num_tones) {
+        case 2:
+            mfsk_config_ = mfsk_presets::robust();  // ~8 bps, most robust
+            break;
+        case 4:
+            mfsk_config_ = mfsk_presets::low_snr();  // ~21 bps
+            break;
+        case 8:
+            mfsk_config_ = mfsk_presets::medium();  // ~47 bps, default
+            break;
+        case 16:
+            mfsk_config_ = mfsk_presets::fast();  // ~62 bps
+            break;
+        case 32:
+            mfsk_config_ = mfsk_presets::turbo();  // ~156 bps, fastest MFSK
+            break;
+        default:
+            LOG_MODEM(WARN, "Invalid MFSK tones %d, using 8", num_tones);
+            mfsk_config_ = mfsk_presets::medium();
+            break;
+    }
+
+    // Recreate modulator/demodulator with new config
+    mfsk_modulator_ = std::make_unique<MFSKModulator>(mfsk_config_);
+    mfsk_demodulator_ = std::make_unique<MFSKDemodulator>(mfsk_config_);
+
+    LOG_MODEM(INFO, "MFSK mode set: %d tones, %.1f bps",
+              mfsk_config_.num_tones, mfsk_config_.effective_bps());
+}
+
+void ModemEngine::setDPSKMode(DPSKModulation mod, int samples_per_symbol) {
+    // Configure DPSK based on modulation type and symbol rate
+    dpsk_config_.modulation = mod;
+    dpsk_config_.samples_per_symbol = samples_per_symbol;
+
+    // Recreate modulator/demodulator with new config
+    dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
+    dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
+
+    const char* mod_name = "DQPSK";
+    switch (mod) {
+        case DPSKModulation::DBPSK: mod_name = "DBPSK"; break;
+        case DPSKModulation::DQPSK: mod_name = "DQPSK"; break;
+        case DPSKModulation::D8PSK: mod_name = "D8PSK"; break;
+    }
+
+    LOG_MODEM(INFO, "DPSK mode set: %s, %d samples/sym (%.1f baud), %.1f bps",
+              mod_name,
+              dpsk_config_.samples_per_symbol,
+              dpsk_config_.symbol_rate(),
+              dpsk_config_.raw_bps());
 }
 
 } // namespace gui

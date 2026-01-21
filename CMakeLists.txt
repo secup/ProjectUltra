@@ -105,6 +105,81 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
     )
     target_link_libraries(ultra_sim PRIVATE ultra_core)
+
+    # CLI Simulator - Command-line version of GUI test mode
+    add_executable(cli_simulator
+        tools/cli_simulator.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(cli_simulator PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(cli_simulator PRIVATE ultra_core)
+
+    # 32-byte frame isolated test
+    add_executable(test_32byte_isolated
+        tools/test_32byte_isolated.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(test_32byte_isolated PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_32byte_isolated PRIVATE ultra_core)
+
+    # Diagnostic for third message decode failure
+    add_executable(diagnose_third_msg
+        tools/diagnose_third_msg.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(diagnose_third_msg PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(diagnose_third_msg PRIVATE ultra_core)
+
+    # Deep systematic comparison tool
+    add_executable(deep_compare
+        tools/deep_compare.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(deep_compare PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(deep_compare PRIVATE ultra_core)
+
+    # Message 3 loopback test
+    add_executable(test_msg3_loopback
+        tools/test_msg3_loopback.cpp
+    )
+    target_include_directories(test_msg3_loopback PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_msg3_loopback PRIVATE ultra_core)
+
+    # ModemEngine loopback test
+    add_executable(test_modem_engine_loopback
+        tools/test_modem_engine_loopback.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(test_modem_engine_loopback PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_modem_engine_loopback PRIVATE ultra_core)
+
+    # Sync robustness test (comprehensive)
+    add_executable(test_sync_robustness
+        tools/test_sync_robustness.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(test_sync_robustness PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_sync_robustness PRIVATE ultra_core)
 endif()
 
 # GUI Application

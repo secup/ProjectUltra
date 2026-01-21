@@ -5,6 +5,8 @@
 #include "ultra/otfs.hpp"
 #include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
 #include "ultra/dsp.hpp"  // FIRFilter
+#include "fsk/mfsk.hpp"   // MFSKModulator, MFSKDemodulator
+#include "psk/dpsk.hpp"   // DPSKModulator, DPSKDemodulator
 #include "protocol/frame_v2.hpp"  // WaveformMode, FrameType
 #include "adaptive_mode.hpp"
 #include <memory>
@@ -46,6 +48,10 @@ class ModemEngine {
 public:
     ModemEngine();
     ~ModemEngine();
+
+    // Set a name/prefix for logging (e.g., "OUR" or "SIM")
+    void setLogPrefix(const std::string& prefix) { log_prefix_ = prefix; }
+    const std::string& getLogPrefix() const { return log_prefix_; }
 
     // Configuration
     void setConfig(const ModemConfig& config);
@@ -95,6 +101,12 @@ public:
     void setCarrierSenseThreshold(float threshold);  // Set energy threshold (default 0.05)
     float getCarrierSenseThreshold() const;
 
+    // Half-duplex turnaround delay (prevents TX too soon after RX)
+    void setTurnaroundDelay(uint32_t delay_ms) { turnaround_delay_ms_ = delay_ms; }
+    uint32_t getTurnaroundDelay() const { return turnaround_delay_ms_; }
+    bool isTurnaroundActive() const;      // True if we should wait before TX
+    uint32_t getTurnaroundRemaining() const;  // Milliseconds until TX allowed
+
     // Get symbols for constellation display
     std::vector<std::complex<float>> getConstellationSymbols() const;
 
@@ -137,6 +149,16 @@ public:
     void setConnected(bool connected);
     bool isConnected() const { return connected_; }
 
+    // Set waveform for connection attempts (DPSK -> MFSK fallback)
+    void setConnectWaveform(protocol::WaveformMode mode);
+    protocol::WaveformMode getConnectWaveform() const { return connect_waveform_; }
+
+    // Handshake state - responder stays on RX waveform until first post-ACK frame
+    void setLastRxWaveform(protocol::WaveformMode mode) { last_rx_waveform_ = mode; }
+    protocol::WaveformMode getLastRxWaveform() const { return last_rx_waveform_; }
+    void setHandshakeComplete(bool complete);
+    bool isHandshakeComplete() const { return handshake_complete_; }
+
     // Set negotiated data modulation (called after probing determines channel quality)
     // Both TX and RX will use this mode for DATA frames after connection
     void setDataMode(Modulation mod, CodeRate rate);
@@ -146,12 +168,30 @@ public:
     // Compute recommended data mode from SNR (uses AdaptiveModeController thresholds)
     static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate);
 
+    // Compute recommended waveform mode from SNR
+    // Returns MFSK for very low SNR (<5 dB actual = -12 dB reported)
+    // Returns OFDM for higher SNR
+    static protocol::WaveformMode recommendWaveformMode(float snr_db);
+
+    // Set MFSK mode based on conditions (2/4/8/16/32 tones)
+    void setMFSKMode(int num_tones);
+    int getMFSKTones() const { return mfsk_config_.num_tones; }
+
+    // Set DPSK mode (for mid-SNR range: 0-15 dB)
+    void setDPSKMode(DPSKModulation mod, int samples_per_symbol = 384);
+    DPSKModulation getDPSKModulation() const { return dpsk_config_.modulation; }
+    const DPSKConfig& getDPSKConfig() const { return dpsk_config_; }
+
 private:
     ModemConfig config_;
+    std::string log_prefix_ = "MODEM";  // Callsign used in log messages
 
     // Waveform mode state
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM;
+    protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::DPSK;  // For CONNECT frames
+    protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::DPSK;  // Last waveform we received on
     bool connected_ = false;
+    bool handshake_complete_ = false;  // True after first post-CONNECT_ACK frame received
 
     // Data frame modulation (negotiated after probing)
     // Link establishment frames always use BPSK R1/4
@@ -173,10 +213,51 @@ private:
     // RX chain - OTFS (used when negotiated)
     std::unique_ptr<OTFSDemodulator> otfs_demodulator_;
 
+    // TX/RX chain - MFSK (used for very low SNR, -17 to +5 dB reported)
+    std::unique_ptr<MFSKModulator> mfsk_modulator_;
+    std::unique_ptr<MFSKDemodulator> mfsk_demodulator_;
+    MFSKConfig mfsk_config_;  // Current MFSK mode (adaptive: 2/4/8/16/32 tones)
+
+    // TX/RX chain - DPSK (used for low-mid SNR, 0-15 dB)
+    std::unique_ptr<DPSKModulator> dpsk_modulator_;
+    std::unique_ptr<DPSKDemodulator> dpsk_demodulator_;
+    DPSKConfig dpsk_config_;  // Current DPSK mode (DBPSK, DQPSK, D8PSK)
+
     // RX state
     std::vector<float> rx_sample_buffer_;      // Main processing buffer
     std::vector<float> rx_pending_samples_;    // Pending samples from callback (fast push)
     mutable std::mutex rx_pending_mutex_;      // Protects pending buffer only (fast lock)
+
+    // Unified RX frame state (shared by DPSK/MFSK - OFDM has internal state)
+    struct PendingFrame {
+        bool active = false;                   // True if we detected a frame but need more samples
+        protocol::WaveformMode waveform = protocol::WaveformMode::OFDM;
+        int data_start = 0;                    // Position where data starts
+        int expected_codewords = 0;            // How many codewords we're expecting
+        size_t buffer_size = 0;                // Buffer size when frame was detected
+        protocol::v2::FrameType frame_type = protocol::v2::FrameType::PROBE;  // For adaptive rate selection
+
+        void clear() { active = false; frame_type = protocol::v2::FrameType::PROBE; }
+        void set(protocol::WaveformMode wf, int start, int cw, size_t buf_size,
+                 protocol::v2::FrameType ft = protocol::v2::FrameType::PROBE) {
+            active = true;
+            waveform = wf;
+            data_start = start;
+            expected_codewords = cw;
+            buffer_size = buf_size;
+            frame_type = ft;
+        }
+    };
+    PendingFrame pending_frame_;
+
+    // OFDM multi-codeword frame accumulation
+    // Accumulates soft bits across multiple process() calls until we have all expected CWs
+    std::vector<float> ofdm_accumulated_soft_bits_;
+    int ofdm_expected_codewords_ = 0;  // Set from CW0 header
+
+    // Multi-detect rate limiting (avoid repeated expensive preamble scans)
+    size_t last_multidetect_buffer_size_ = 0;  // Buffer size at last detection attempt
+    static constexpr size_t MULTIDETECT_MIN_NEW_SAMPLES = 4800;  // 100ms of new audio
 
     // Buffer limit (prevent unbounded growth if main loop stalls)
     static constexpr size_t MAX_PENDING_SAMPLES = 96000;  // 2 seconds at 48kHz
@@ -201,7 +282,7 @@ private:
     // - With 30 bits/OFDM symbol, bits spread across different carriers
     // Testing showed 43% improvement at marginal SNR (16dB Good channel)
     Interleaver interleaver_{6, 108};
-    bool interleaving_enabled_ = true;  // 6×108 interleaver for HF frequency diversity
+    bool interleaving_enabled_ = false;  // TESTING: disabled to debug CW1 decode issue
 
     // Audio filters (TX and RX share same settings but separate state)
     FilterConfig filter_config_;
@@ -213,6 +294,10 @@ private:
     float carrier_sense_threshold_ = 0.02f;        // Energy threshold for "busy"
     static constexpr float ENERGY_SMOOTHING = 0.3f; // Smoothing factor for energy calculation
 
+    // Half-duplex turnaround delay (prevents TX too soon after RX)
+    std::chrono::steady_clock::time_point last_rx_complete_time_;
+    uint32_t turnaround_delay_ms_ = 200;           // Delay after RX before TX allowed
+
     // Rebuild filters when config changes
     void rebuildFilters();
 
@@ -221,6 +306,12 @@ private:
 
     // Process accumulated samples through demodulator
     void processRxBuffer();
+
+    // Waveform-specific RX processing (called by processRxBuffer)
+    void processRxBuffer_OFDM();
+    void processRxBuffer_DPSK(int pre_detected_start = -1);   // -1 = detect, else use provided
+    void processRxBuffer_MFSK(int pre_detected_start = -1);   // -1 = detect, else use provided
+    void processRxBuffer_MultiDetect();  // Multi-waveform detection when disconnected
 };
 
 } // namespace gui

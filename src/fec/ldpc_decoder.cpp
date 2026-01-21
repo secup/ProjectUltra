@@ -539,4 +539,127 @@ std::vector<float> Interleaver::deinterleave(std::span<const float> soft_bits) {
     return output;
 }
 
+// ============ ChannelInterleaver ============
+// 2D time-frequency interleaver for OFDM on fading channels
+
+// Find a prime number >= n that's coprime with total_bits
+static size_t findCoprimeStep(size_t n, size_t total) {
+    // Start with a number slightly larger than n
+    size_t step = n + 1;
+
+    // Find next number coprime with total
+    while (step < total) {
+        // Check if coprime using GCD
+        size_t a = step, b = total;
+        while (b != 0) {
+            size_t t = b;
+            b = a % b;
+            a = t;
+        }
+        if (a == 1) return step;  // GCD is 1, coprime
+        step++;
+    }
+    return n + 1;  // Fallback
+}
+
+ChannelInterleaver::ChannelInterleaver(size_t bits_per_symbol, size_t total_bits)
+    : bits_per_symbol_(bits_per_symbol)
+    , total_bits_(total_bits)
+{
+    num_symbols_ = (total_bits + bits_per_symbol - 1) / bits_per_symbol;
+
+    // The key insight: we want consecutive input bits to land in DIFFERENT symbols.
+    // Use a step size that's coprime with total_bits to create a pseudo-random permutation.
+    // The step should be roughly equal to bits_per_symbol to spread across symbols.
+    size_t step = findCoprimeStep(bits_per_symbol, total_bits);
+
+    // Calculate actual symbol separation achieved
+    // Consecutive bits i and i+1 go to positions p and (p+step)%total
+    // Their symbols are p/bits_per_symbol and (p+step)/bits_per_symbol
+    symbol_separation_ = step / bits_per_symbol;
+    if (symbol_separation_ < 1) symbol_separation_ = 1;
+
+    // Build permutation: output[i] = input[(i * step) % total]
+    permutation_.resize(total_bits);
+    inverse_permutation_.resize(total_bits);
+
+    for (size_t i = 0; i < total_bits; ++i) {
+        size_t dest = (i * step) % total_bits;
+        permutation_[i] = dest;
+        inverse_permutation_[dest] = i;
+    }
+}
+
+std::vector<float> ChannelInterleaver::interleave(std::span<const float> soft_bits) {
+    size_t n = std::min(soft_bits.size(), total_bits_);
+    std::vector<float> output(total_bits_, 0.0f);
+
+    for (size_t i = 0; i < n; ++i) {
+        output[permutation_[i]] = soft_bits[i];
+    }
+    return output;
+}
+
+std::vector<float> ChannelInterleaver::deinterleave(std::span<const float> soft_bits) {
+    size_t n = std::min(soft_bits.size(), total_bits_);
+    std::vector<float> output(total_bits_, 0.0f);
+
+    for (size_t i = 0; i < n; ++i) {
+        output[inverse_permutation_[i]] = soft_bits[i];
+    }
+    return output;
+}
+
+Bytes ChannelInterleaver::interleave(ByteSpan data) {
+    // Convert to bits
+    std::vector<uint8_t> bits(total_bits_, 0);
+    for (size_t i = 0; i < data.size() && i * 8 < total_bits_; ++i) {
+        for (int b = 0; b < 8 && i * 8 + b < total_bits_; ++b) {
+            bits[i * 8 + b] = (data[i] >> (7 - b)) & 1;
+        }
+    }
+
+    // Apply permutation
+    std::vector<uint8_t> interleaved(total_bits_);
+    for (size_t i = 0; i < total_bits_; ++i) {
+        interleaved[permutation_[i]] = bits[i];
+    }
+
+    // Convert back to bytes
+    size_t byte_size = (total_bits_ + 7) / 8;
+    Bytes output(byte_size, 0);
+    for (size_t i = 0; i < total_bits_; ++i) {
+        if (interleaved[i]) {
+            output[i / 8] |= (1 << (7 - (i % 8)));
+        }
+    }
+    return output;
+}
+
+Bytes ChannelInterleaver::deinterleave(ByteSpan data) {
+    // Convert to bits
+    std::vector<uint8_t> bits(total_bits_, 0);
+    for (size_t i = 0; i < data.size() && i * 8 < total_bits_; ++i) {
+        for (int b = 0; b < 8 && i * 8 + b < total_bits_; ++b) {
+            bits[i * 8 + b] = (data[i] >> (7 - b)) & 1;
+        }
+    }
+
+    // Apply inverse permutation
+    std::vector<uint8_t> deinterleaved(total_bits_);
+    for (size_t i = 0; i < total_bits_; ++i) {
+        deinterleaved[inverse_permutation_[i]] = bits[i];
+    }
+
+    // Convert back to bytes
+    size_t byte_size = (total_bits_ + 7) / 8;
+    Bytes output(byte_size, 0);
+    for (size_t i = 0; i < total_bits_; ++i) {
+        if (deinterleaved[i]) {
+            output[i / 8] |= (1 << (7 - (i % 8)));
+        }
+    }
+    return output;
+}
+
 } // namespace ultra

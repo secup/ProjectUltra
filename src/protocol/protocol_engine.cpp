@@ -160,8 +160,8 @@ void ProtocolEngine::setFileSentCallback(FileSentCallback cb) {
 void ProtocolEngine::onRxData(const Bytes& data) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    LOG_MODEM(INFO, "Protocol RX: %zu bytes from modem (buffer now %zu)",
-              data.size(), rx_buffer_.size() + data.size());
+    LOG_MODEM(INFO, "[%s] Protocol RX: %zu bytes from modem (buffer now %zu)",
+              connection_.getLocalCallsign().c_str(), data.size(), rx_buffer_.size() + data.size());
 
     rx_buffer_.insert(rx_buffer_.end(), data.begin(), data.end());
 
@@ -245,7 +245,8 @@ void ProtocolEngine::processRxBuffer() {
         }
 
         if (crc_ok) {
-            LOG_MODEM(INFO, "RX << %s seq=%d (%zu bytes)",
+            LOG_MODEM(INFO, "[%s] RX << %s seq=%d (%zu bytes)",
+                      connection_.getLocalCallsign().c_str(),
                       v2::frameTypeToString(header.type), header.seq, frame_size);
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + frame_size);
             connection_.onFrameReceived(frame_data);
@@ -308,7 +309,8 @@ void ProtocolEngine::reset() {
 }
 
 void ProtocolEngine::handleTxFrame(const Bytes& frame_data) {
-    LOG_MODEM(INFO, "Protocol TX: %zu bytes -> modem%s", frame_data.size(),
+    LOG_MODEM(INFO, "[%s] Protocol TX: %zu bytes -> modem%s",
+              connection_.getLocalCallsign().c_str(), frame_data.size(),
               defer_tx_ ? " (queued)" : "");
 
     if (defer_tx_) {
@@ -338,6 +340,26 @@ void ProtocolEngine::setModeCapabilities(uint8_t caps) {
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.setModeNegotiatedCallback(std::move(cb));
+}
+
+void ProtocolEngine::setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setConnectWaveformChangedCallback(std::move(cb));
+}
+
+void ProtocolEngine::setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setHandshakeConfirmedCallback(std::move(cb));
+}
+
+WaveformMode ProtocolEngine::getConnectWaveform() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getConnectWaveform();
+}
+
+void ProtocolEngine::setInitialConnectWaveform(WaveformMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setInitialConnectWaveform(mode);
 }
 
 // --- Adaptive Data Mode ---

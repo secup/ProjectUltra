@@ -156,3 +156,22 @@ add_test(NAME FrameV2Modem COMMAND test_frame_v2_modem)
 add_executable(test_mode_change test_mode_change.cpp)
 target_link_libraries(test_mode_change PRIVATE ultra_core)
 add_test(NAME ModeChange COMMAND test_mode_change)
+
+# Throughput measurement tool
+add_executable(test_throughput ../tools/test_throughput.cpp)
+target_link_libraries(test_throughput PRIVATE ultra_core)
+
+# DQPSK HF channel test (verifies no-pilot mode works on HF)
+add_executable(test_dqpsk_hf ../tools/test_dqpsk_hf.cpp)
+target_include_directories(test_dqpsk_hf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim)
+target_link_libraries(test_dqpsk_hf PRIVATE ultra_core)
+
+# DQPSK comparison test (with vs without pilots)
+add_executable(test_dqpsk_comparison ../tools/test_dqpsk_comparison.cpp)
+target_include_directories(test_dqpsk_comparison PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim)
+target_link_libraries(test_dqpsk_comparison PRIVATE ultra_core)
+
+# Symbol rate investigation test
+add_executable(test_symbol_rate ../tools/test_symbol_rate.cpp)
+target_include_directories(test_symbol_rate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim)
+target_link_libraries(test_symbol_rate PRIVATE ultra_core)

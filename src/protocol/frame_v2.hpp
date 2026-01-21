@@ -26,9 +26,11 @@ namespace FrameFlags {
 
 // Modulation modes for adaptive selection (negotiated in CONNECT)
 enum class WaveformMode : uint8_t {
-    OFDM     = 0x00,  // Standard OFDM (best for Moderate channels)
+    OFDM     = 0x00,  // Standard OFDM (best for high SNR, +15 dB and up)
     OTFS_EQ  = 0x01,  // OTFS with TF equalization (best for Good channels)
     OTFS_RAW = 0x02,  // OTFS without TF eq (best for Poor channels)
+    MFSK     = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
+    DPSK     = 0x04,  // Single-carrier DPSK for mid SNR (0 dB to +15 dB)
     AUTO     = 0xFF,  // Automatic selection (let receiver decide)
 };
 
@@ -37,7 +39,9 @@ namespace ModeCapabilities {
     constexpr uint8_t OFDM     = 0x01;
     constexpr uint8_t OTFS_EQ  = 0x02;
     constexpr uint8_t OTFS_RAW = 0x04;
-    constexpr uint8_t ALL      = OFDM | OTFS_EQ | OTFS_RAW;
+    constexpr uint8_t MFSK     = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
+    constexpr uint8_t DPSK     = 0x10;  // Single-carrier DPSK for mid SNR (0 to +15 dB)
+    constexpr uint8_t ALL      = OFDM | OTFS_EQ | OTFS_RAW | MFSK | DPSK;
 }
 
 const char* waveformModeToString(WaveformMode mode);
@@ -333,9 +337,16 @@ struct DataFrame {
                                uint16_t seq, const Bytes& data);
     static DataFrame makeData(const std::string& src, const std::string& dst,
                                uint16_t seq, const std::string& text);
+    // Factory with explicit code rate for CW1+ (CW0 always R1/4)
+    static DataFrame makeData(const std::string& src, const std::string& dst,
+                               uint16_t seq, const Bytes& data, CodeRate cw1_rate);
+    static DataFrame makeData(const std::string& src, const std::string& dst,
+                               uint16_t seq, const std::string& text, CodeRate cw1_rate);
 
-    // Calculate number of codewords needed
+    // Calculate number of codewords needed (assumes R1/4 for all)
     static uint8_t calculateCodewords(size_t payload_size);
+    // Calculate with explicit rate for CW1+ (CW0 always R1/4 = 20 bytes)
+    static uint8_t calculateCodewords(size_t payload_size, CodeRate cw1_rate);
 
     // Serialize to bytes (will be split into codewords by encoder)
     // Returns: header + payload + frame_crc
@@ -355,15 +366,19 @@ struct DataFrame {
 // This ensures proper callsign identification per ham radio regulations.
 //
 // Payload format:
-// ┌────────────┬────────────┬──────┬──────┐
-// │ SRC_CALL   │ DST_CALL   │ CAPS │ PREF │
-// │ 10B (null) │ 10B (null) │  1B  │  1B  │  = 22 bytes payload
-// └────────────┴────────────┴──────┴──────┘
+// ┌────────────┬────────────┬──────┬──────┬─────┬──────┬─────┐
+// │ SRC_CALL   │ DST_CALL   │ CAPS │ WFMOD│ MOD │ RATE │ SNR │
+// │ 10B (null) │ 10B (null) │  1B  │  1B  │ 1B  │  1B  │ 1B  │  = 25 bytes payload
+// └────────────┴────────────┴──────┴──────┴─────┴──────┴─────┘
 //
-// Total frame: 17B header + 22B payload + 2B CRC = 41 bytes (3 codewords)
+// CONNECT uses: CAPS (our capabilities), WFMOD (preferred waveform), MOD/RATE/SNR=0
+// CONNECT_ACK uses: WFMOD (negotiated waveform), MOD (initial modulation),
+//                   RATE (initial code rate), SNR (measured SNR)
+//
+// Total frame: 17B header + 25B payload + 2B CRC = 44 bytes (3 codewords)
 struct ConnectFrame {
     static constexpr size_t MAX_CALLSIGN_LEN = 10;  // 9 chars + null terminator
-    static constexpr size_t PAYLOAD_SIZE = 22;       // 10 + 10 + 1 + 1
+    static constexpr size_t PAYLOAD_SIZE = 25;       // 10 + 10 + 1 + 1 + 1 + 1 + 1
 
     FrameType type = FrameType::CONNECT;
     uint8_t flags = Flags::VERSION_V2;
@@ -373,20 +388,27 @@ struct ConnectFrame {
 
     char src_callsign[MAX_CALLSIGN_LEN] = {0};  // Full source callsign
     char dst_callsign[MAX_CALLSIGN_LEN] = {0};  // Full destination callsign
-    uint8_t mode_capabilities = 0;               // Supported waveform modes
-    uint8_t negotiated_mode = 0;                 // Preferred/negotiated mode
+    uint8_t mode_capabilities = 0;               // Supported waveform modes (CONNECT)
+    uint8_t negotiated_mode = 0;                 // Preferred (CONNECT) / negotiated (CONNECT_ACK) waveform
+
+    // Initial data mode (CONNECT_ACK only) - eliminates separate MODE_CHANGE after connect
+    uint8_t initial_modulation = 0;              // Initial Modulation for DATA frames
+    uint8_t initial_code_rate = 0;               // Initial CodeRate for DATA frames
+    uint8_t measured_snr = 0;                    // Measured SNR (encoded: 0-255 = -10 to +53.75 dB)
 
     // Factory methods
     static ConnectFrame makeConnect(const std::string& src, const std::string& dst,
                                      uint8_t mode_caps, uint8_t pref_mode);
     static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
-                                        uint8_t neg_mode);
+                                        uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
+                                        float snr_db);
     static ConnectFrame makeConnectNak(const std::string& src, const std::string& dst);
     static ConnectFrame makeDisconnect(const std::string& src, const std::string& dst);
 
     // Hash-based factory (for responding when only hash is known, fills in our callsign)
     static ConnectFrame makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
-                                              uint8_t neg_mode);
+                                              uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
+                                              float snr_db);
     static ConnectFrame makeConnectNakByHash(const std::string& src, uint32_t dst_hash);
 
     // Serialize to bytes (uses DATA frame format)
@@ -464,15 +486,39 @@ struct CodewordStatus {
 // LDPC Integration (codeword-aware encoding/decoding)
 // ============================================================================
 
-// LDPC parameters for R1/4
-constexpr size_t LDPC_INFO_BITS = 162;      // k = info bits per codeword
-constexpr size_t LDPC_CODEWORD_BITS = 648;  // n = total bits per codeword
+// LDPC parameters
+constexpr size_t LDPC_CODEWORD_BITS = 648;  // n = total bits per codeword (all rates)
 constexpr size_t LDPC_CODEWORD_BYTES = 81;  // n/8 = bytes per encoded codeword
 
-// Encode a v2 frame into LDPC codewords
+// Get info bits per codeword for a given rate
+// R1/4=162, R1/2=324, R2/3=432, R3/4=486, R5/6=540
+inline size_t getInfoBitsForRate(CodeRate rate) {
+    switch (rate) {
+        case CodeRate::R1_4: return 162;
+        case CodeRate::R1_3: return 216;
+        case CodeRate::R1_2: return 324;
+        case CodeRate::R2_3: return 432;
+        case CodeRate::R3_4: return 486;
+        case CodeRate::R5_6: return 540;
+        default: return 162;  // Default to R1/4
+    }
+}
+
+// Get bytes per codeword for a given rate (info bits / 8, rounded down)
+inline size_t getBytesPerCodeword(CodeRate rate) {
+    return getInfoBitsForRate(rate) / 8;  // 162/8=20, 324/8=40, 432/8=54, etc.
+}
+
+// Legacy constant for R1/4 (used by control frames)
+constexpr size_t LDPC_INFO_BITS = 162;      // k = info bits per codeword (R1/4)
+
+// Encode a v2 frame into LDPC codewords (R1/4 - for control frames)
 // Input: serialized frame bytes
 // Output: vector of LDPC-encoded codewords (81 bytes each)
 std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data);
+
+// Encode a v2 frame into LDPC codewords with specified rate (for DATA frames)
+std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data, CodeRate rate);
 
 // Decode LDPC codewords into frame data with per-codeword status
 // Input: vector of soft bit vectors (648 floats per codeword)
@@ -480,9 +526,12 @@ std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data);
 // Note: Caller should first decode codeword 0, then read TOTAL_CW to know how many more
 CodewordStatus decodeCodewordsWithLDPC(const std::vector<std::vector<float>>& soft_bits);
 
-// Decode a single codeword from soft bits
+// Decode a single codeword from soft bits (R1/4 - for control frames)
 // Returns: (success, decoded_data)
 std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits);
+
+// Decode a single codeword from soft bits with specified rate (for DATA frames)
+std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits, CodeRate rate);
 
 // Parse header from first decoded codeword (20 bytes)
 // Returns: (is_valid, total_codewords, frame_type, payload_length)

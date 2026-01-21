@@ -5,6 +5,8 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/fec.hpp"
 #include "ultra/dsp.hpp"
+#include "psk/dpsk.hpp"
+#include "fsk/mfsk.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "protocol/frame_v2.hpp"
 
@@ -20,6 +22,16 @@ static std::atomic<bool> g_running{true};
 
 void signalHandler(int) {
     g_running = false;
+}
+
+// Waveform type for -w flag
+enum class WaveformType { OFDM, DPSK, MFSK, AUTO };
+
+WaveformType parseWaveform(const char* s) {
+    if (strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
+    if (strcmp(s, "mfsk") == 0) return WaveformType::MFSK;
+    if (strcmp(s, "auto") == 0) return WaveformType::AUTO;
+    return WaveformType::OFDM;
 }
 
 void printUsage(const char* prog) {
@@ -44,6 +56,7 @@ void printUsage(const char* prog) {
     std::cerr << "  -r <rate>       Sample rate (default: 48000)\n";
     std::cerr << "  -m <mod>        Modulation: dbpsk, dqpsk, qpsk, qam16, qam64\n";
     std::cerr << "  -c <rate>       Code rate: 1/4, 1/2, 2/3, 3/4, 5/6\n";
+    std::cerr << "  -w <waveform>   Waveform: ofdm, dpsk, mfsk, auto (default: ofdm)\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Send PROBE and play audio (Linux)\n";
     std::cerr << "  " << prog << " ptx -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000\n\n";
@@ -275,11 +288,15 @@ int runRx(ultra::ModemConfig& config, const char* input_file, const char* output
 // Protocol TX - transmit v2 frame (PROBE, CONNECT, or DATA with text message)
 // Usage: ultra ptx "Hello World" -o output.f32 -s MYCALL
 //        ultra ptx connect -s MYCALL -d THEIRCALL -o connect.f32
+//        ultra -w dpsk ptx "Hello" -o output.f32  (use DPSK waveform)
 int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* output_file,
-                  const std::string& src_call, const std::string& dst_call) {
+                  const std::string& src_call, const std::string& dst_call,
+                  WaveformType waveform) {
     namespace v2 = ultra::protocol::v2;
 
-    std::cerr << "Protocol TX v2 mode\n";
+    const char* waveform_name = (waveform == WaveformType::DPSK) ? "DPSK" :
+                                (waveform == WaveformType::MFSK) ? "MFSK" : "OFDM";
+    std::cerr << "Protocol TX v2 mode (" << waveform_name << ")\n";
     std::cerr << "  From: " << src_call << " To: " << dst_call << "\n";
 
     // Create the frame
@@ -325,23 +342,57 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
     }
     std::cerr << "  Total encoded: " << all_encoded.size() << " bytes\n";
 
-    // Create modulator (DQPSK for robust link establishment)
-    config.modulation = ultra::Modulation::DQPSK;
-    config.code_rate = ultra::CodeRate::R1_4;
-    ultra::OFDMModulator mod(config);
-
-    // Generate preamble + modulated data
-    auto preamble = mod.generatePreamble();
-    auto modulated = mod.modulate(all_encoded, config.modulation);
-
-    // Combine: preamble + data + tail guard
-    // Tail guard ensures demodulator processes the last OFDM symbol
-    const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols of silence
     std::vector<float> output;
-    output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
-    output.insert(output.end(), preamble.begin(), preamble.end());
-    output.insert(output.end(), modulated.begin(), modulated.end());
-    output.resize(output.size() + TAIL_SAMPLES, 0.0f);  // Add silence tail
+
+    if (waveform == WaveformType::DPSK) {
+        // DPSK modulation (medium preset: DQPSK 62.5 baud)
+        auto dpsk_config = ultra::dpsk_presets::medium();
+        ultra::DPSKModulator dpsk_mod(dpsk_config);
+
+        auto preamble = dpsk_mod.generatePreamble();
+        auto modulated = dpsk_mod.modulate(all_encoded);
+
+        const size_t TAIL_SAMPLES = dpsk_config.samples_per_symbol * 4;
+        output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
+        output.insert(output.end(), preamble.begin(), preamble.end());
+        output.insert(output.end(), modulated.begin(), modulated.end());
+        output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+
+        std::cerr << "  DPSK: " << dpsk_config.symbol_rate() << " baud, "
+                  << (dpsk_config.modulation == ultra::DPSKModulation::DQPSK ? "DQPSK" : "DBPSK") << "\n";
+    } else if (waveform == WaveformType::MFSK) {
+        // MFSK modulation (8-tone for robustness)
+        ultra::MFSKConfig mfsk_config;
+        mfsk_config.num_tones = 8;
+        mfsk_config.repetition = 2;
+        ultra::MFSKModulator mfsk_mod(mfsk_config);
+
+        auto preamble = mfsk_mod.generatePreamble();
+        auto modulated = mfsk_mod.modulate(all_encoded);
+
+        const size_t TAIL_SAMPLES = mfsk_config.samples_per_symbol * 4;
+        output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
+        output.insert(output.end(), preamble.begin(), preamble.end());
+        output.insert(output.end(), modulated.begin(), modulated.end());
+        output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+
+        std::cerr << "  MFSK: " << mfsk_config.num_tones << " tones, "
+                  << mfsk_config.effective_bps() << " bps effective\n";
+    } else {
+        // OFDM modulation (default)
+        config.modulation = ultra::Modulation::DQPSK;
+        config.code_rate = ultra::CodeRate::R1_4;
+        ultra::OFDMModulator mod(config);
+
+        auto preamble = mod.generatePreamble();
+        auto modulated = mod.modulate(all_encoded, config.modulation);
+
+        const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols
+        output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
+        output.insert(output.end(), preamble.begin(), preamble.end());
+        output.insert(output.end(), modulated.begin(), modulated.end());
+        output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+    }
 
     // Normalize
     float max_val = 0;
@@ -374,10 +425,14 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
 }
 
 // Protocol RX mode - decodes v2 frames with 2-byte magic "UL"
-int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std::string& callsign, int timing_offset = 0) {
+int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std::string& callsign,
+                  int timing_offset = 0, WaveformType waveform = WaveformType::OFDM) {
     namespace v2 = ultra::protocol::v2;
 
-    std::cerr << "Protocol RX v2 mode (looking for UL frames)...\n";
+    const char* waveform_name = (waveform == WaveformType::DPSK) ? "DPSK" :
+                                (waveform == WaveformType::MFSK) ? "MFSK" :
+                                (waveform == WaveformType::AUTO) ? "AUTO" : "OFDM";
+    std::cerr << "Protocol RX v2 mode (" << waveform_name << ", looking for UL frames)...\n";
     if (input_file) std::cerr << "Input: " << input_file << "\n";
     if (timing_offset != 0) std::cerr << "Timing offset: " << timing_offset << " samples\n";
     std::cerr << "Local callsign: " << callsign << "\n";
@@ -394,11 +449,35 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
         input = &infile;
     }
 
-    // Create demodulator and decoder (DQPSK R1/4 for link frames)
+    // Create demodulator and decoder based on waveform type
     config.modulation = ultra::Modulation::DQPSK;
     config.code_rate = ultra::CodeRate::R1_4;
-    ultra::OFDMDemodulator demod(config);
-    demod.setTimingOffset(timing_offset);  // Apply timing adjustment
+
+    // OFDM demod (also used as fallback)
+    std::unique_ptr<ultra::OFDMDemodulator> ofdm_demod;
+    // DPSK demod
+    std::unique_ptr<ultra::DPSKDemodulator> dpsk_demod;
+    ultra::DPSKConfig dpsk_config;
+    // MFSK demod
+    std::unique_ptr<ultra::MFSKDemodulator> mfsk_demod;
+    ultra::MFSKConfig mfsk_config;
+
+    if (waveform == WaveformType::DPSK || waveform == WaveformType::AUTO) {
+        dpsk_config = ultra::dpsk_presets::medium();
+        dpsk_demod = std::make_unique<ultra::DPSKDemodulator>(dpsk_config);
+        std::cerr << "  DPSK: " << dpsk_config.symbol_rate() << " baud\n";
+    }
+    if (waveform == WaveformType::MFSK || waveform == WaveformType::AUTO) {
+        mfsk_config.num_tones = 8;
+        mfsk_config.repetition = 2;
+        mfsk_demod = std::make_unique<ultra::MFSKDemodulator>(mfsk_config);
+        std::cerr << "  MFSK: " << mfsk_config.num_tones << " tones\n";
+    }
+    if (waveform == WaveformType::OFDM) {
+        ofdm_demod = std::make_unique<ultra::OFDMDemodulator>(config);
+        ofdm_demod->setTimingOffset(timing_offset);
+    }
+
     ultra::LDPCDecoder decoder(config.code_rate);
     ultra::Interleaver interleaver(6, 108);  // Match GUI settings for HF diversity
 
@@ -435,15 +514,84 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
 
     // Read audio in chunks
     std::vector<float> buffer(960);
+    std::vector<float> all_samples;  // For DPSK/MFSK batch processing
 
-    while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
-                                     buffer.size() * sizeof(float))) {
+    // DPSK/MFSK/AUTO use batch processing (read all, then demod)
+    if (waveform == WaveformType::DPSK || waveform == WaveformType::MFSK || waveform == WaveformType::AUTO) {
+        // Read all audio samples
+        while (g_running && input->read(reinterpret_cast<char*>(buffer.data()),
+                                         buffer.size() * sizeof(float))) {
+            all_samples.insert(all_samples.end(), buffer.begin(), buffer.end());
+        }
+        std::cerr << "  Read " << all_samples.size() << " samples ("
+                  << (all_samples.size() / 48000.0) << " sec)\n";
+
+        ultra::SampleSpan span(all_samples.data(), all_samples.size());
+
+        // For AUTO mode, try DPSK first, then MFSK
+        WaveformType detected_waveform = waveform;
+        int data_start = -1;
+
+        if (waveform == WaveformType::DPSK || waveform == WaveformType::AUTO) {
+            // Try DPSK preamble detection
+            data_start = dpsk_demod->findPreamble(span);
+            if (data_start >= 0) {
+                detected_waveform = WaveformType::DPSK;
+                std::cerr << "  [SYNC] DPSK data start at sample " << data_start << "\n";
+
+                // Demodulate data portion
+                ultra::SampleSpan data_span(all_samples.data() + data_start,
+                                             all_samples.size() - data_start);
+                accumulated_soft_bits = dpsk_demod->demodulateSoft(data_span);
+                std::cerr << "  [DEMOD] " << accumulated_soft_bits.size() << " soft bits\n";
+            } else if (waveform == WaveformType::DPSK) {
+                std::cerr << "  [ERROR] DPSK preamble not found\n";
+                return 1;
+            }
+        }
+
+        if ((waveform == WaveformType::MFSK || waveform == WaveformType::AUTO) && data_start < 0) {
+            // Try MFSK preamble detection
+            // findPreamble returns start of preamble, not data
+            int preamble_start = mfsk_demod->findPreamble(span);
+            if (preamble_start >= 0) {
+                detected_waveform = WaveformType::MFSK;
+                // Skip past preamble to get to data
+                int preamble_len = 2 * mfsk_config.num_tones * mfsk_config.samples_per_symbol;
+                data_start = preamble_start + preamble_len;
+                std::cerr << "  [SYNC] MFSK preamble at " << preamble_start
+                          << ", data starts at " << data_start << "\n";
+
+                // Demodulate data portion
+                ultra::SampleSpan data_span(all_samples.data() + data_start,
+                                             all_samples.size() - data_start);
+                accumulated_soft_bits = mfsk_demod->demodulateSoft(data_span);
+                std::cerr << "  [DEMOD] " << accumulated_soft_bits.size() << " soft bits\n";
+            } else if (waveform == WaveformType::MFSK) {
+                std::cerr << "  [ERROR] MFSK preamble not found\n";
+                return 1;
+            }
+        }
+
+        if (waveform == WaveformType::AUTO && data_start < 0) {
+            std::cerr << "  [ERROR] No DPSK or MFSK preamble found\n";
+            return 1;
+        }
+
+        // Fall through to decode accumulated soft bits
+        cw_sync_state = CwSyncState::SYNCED;
+    }
+
+    // OFDM uses streaming processing
+    while (waveform == WaveformType::OFDM && g_running &&
+           input->read(reinterpret_cast<char*>(buffer.data()),
+                       buffer.size() * sizeof(float))) {
         ultra::SampleSpan span(buffer.data(), buffer.size());
-        demod.process(span);
+        ofdm_demod->process(span);
 
-        if (demod.isSynced()) {
+        if (ofdm_demod->isSynced()) {
             // Get soft bits produced by this chunk
-            auto soft_bits = demod.getSoftBits();
+            auto soft_bits = ofdm_demod->getSoftBits();
             if (!soft_bits.empty()) {
                 accumulated_soft_bits.insert(accumulated_soft_bits.end(),
                                              soft_bits.begin(), soft_bits.end());
@@ -545,7 +693,7 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                         current_cw_index = 0;
                         buffered_data_cws.clear();
                         accumulated_soft_bits.clear();  // Clear stale soft bits
-                        demod.reset();  // Reset OFDM demod to look for new preamble
+                        if (ofdm_demod) ofdm_demod->reset();  // Reset OFDM demod to look for new preamble
                     }
                     continue;
                 }
@@ -609,7 +757,7 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                 expected_codewords = 0;
                                 current_cw_index = 0;
                                 accumulated_soft_bits.clear();
-                                demod.reset();  // Look for next preamble
+                                if (ofdm_demod) ofdm_demod->reset();  // Look for next preamble
                             } else if (current_frame.allSuccess()) {
                                 // All codewords already received (from buffer)
                                 auto reassembled = current_frame.reassemble();
@@ -636,7 +784,7 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                 expected_codewords = 0;
                                 current_cw_index = 0;
                                 accumulated_soft_bits.clear();
-                                demod.reset();  // Look for next preamble
+                                if (ofdm_demod) ofdm_demod->reset();  // Look for next preamble
                             }
                         } else {
                             std::cerr << "  [INVALID HEADER] magic OK but header CRC failed\n";
@@ -725,8 +873,94 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                         expected_codewords = 0;
                         current_cw_index = 0;
                         accumulated_soft_bits.clear();
-                        demod.reset();  // Look for next preamble
+                        if (ofdm_demod) ofdm_demod->reset();  // Look for next preamble
                     }
+                }
+            }
+        }
+    }
+
+    // DPSK/MFSK: Process accumulated soft bits from batch demodulation
+    if (waveform != WaveformType::OFDM && !accumulated_soft_bits.empty()) {
+        // The soft bits were already accumulated above, now decode them
+        while (accumulated_soft_bits.size() >= LDPC_BLOCK_SIZE) {
+            std::vector<float> block(accumulated_soft_bits.begin(),
+                                     accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
+            accumulated_soft_bits.erase(accumulated_soft_bits.begin(),
+                                        accumulated_soft_bits.begin() + LDPC_BLOCK_SIZE);
+
+            // Deinterleave before LDPC decode
+            auto deinterleaved = interleaver.deinterleave(block);
+
+            // LDPC decode this codeword
+            auto decoded = decoder.decodeSoft(std::span<const float>(deinterleaved));
+
+            if (!decoder.lastDecodeSuccess()) {
+                std::cerr << "  [CW] LDPC decode failed\n";
+                continue;
+            }
+
+            // Trim to 20 bytes (info portion of codeword)
+            ultra::Bytes cw_data(decoded.begin(),
+                                 decoded.begin() + std::min(decoded.size(), size_t(v2::BYTES_PER_CODEWORD)));
+
+            // Identify codeword type using marker bytes
+            auto cw_info = v2::identifyCodeword(cw_data);
+
+            if (expected_codewords == 0) {
+                if (cw_info.type == v2::CodewordType::HEADER) {
+                    auto header = v2::parseHeader(cw_data);
+                    if (header.valid) {
+                        expected_codewords = header.total_cw;
+                        current_frame.initForFrame(expected_codewords);
+                        current_frame.decoded[0] = true;
+                        current_frame.data[0] = cw_data;
+                        current_cw_index = 1;
+                        std::cerr << "  [FRAME START] type=" << v2::frameTypeToString(header.type)
+                                  << " codewords=" << (int)header.total_cw << "\n";
+
+                        if (expected_codewords == 1) {
+                            auto ctrl = v2::ControlFrame::deserialize(cw_data);
+                            if (ctrl) {
+                                frames_received++;
+                                control_frames++;
+                                std::cerr << "  [CONTROL] " << v2::frameTypeToString(ctrl->type) << "\n";
+                            }
+                            expected_codewords = 0;
+                        }
+                    }
+                }
+            } else {
+                if (cw_info.type == v2::CodewordType::DATA) {
+                    uint8_t idx = cw_info.index;
+                    if (idx > 0 && idx < expected_codewords) {
+                        current_frame.decoded[idx] = true;
+                        current_frame.data[idx] = cw_data;
+                        std::cerr << "  [CW " << (int)idx << "/" << expected_codewords << "] OK\n";
+                    }
+                }
+
+                if (current_frame.allSuccess()) {
+                    auto reassembled = current_frame.reassemble();
+                    auto connect_frame = v2::ConnectFrame::deserialize(reassembled);
+                    if (connect_frame) {
+                        frames_received++;
+                        control_frames++;
+                        std::cerr << "  [" << v2::frameTypeToString(connect_frame->type) << "] "
+                                  << connect_frame->getSrcCallsign() << " -> "
+                                  << connect_frame->getDstCallsign() << "\n";
+                    } else {
+                        auto data_frame = v2::DataFrame::deserialize(reassembled);
+                        if (data_frame) {
+                            frames_received++;
+                            data_frames++;
+                            std::cerr << "  [DATA] seq=" << data_frame->seq
+                                      << " payload=" << data_frame->payload_len << " bytes\n";
+                            std::cerr << "  [MESSAGE] \"" << data_frame->payloadAsText() << "\"\n";
+                        }
+                    }
+                    expected_codewords = 0;
+                    current_cw_index = 0;
                 }
             }
         }
@@ -1062,6 +1296,7 @@ int main(int argc, char* argv[]) {
     std::string callsign = "TEST";
     std::string dst_callsign = "CQ";
     int timing_offset = 0;
+    WaveformType waveform = WaveformType::OFDM;
 
     // Parse all arguments - options can appear before or after command
     // This allows both: "ultra -m dqpsk rawdecode file" and "ultra rawdecode -m dqpsk file"
@@ -1072,6 +1307,8 @@ int main(int argc, char* argv[]) {
             config.modulation = parseModulation(argv[++i]);
         } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
             config.code_rate = parseCodeRate(argv[++i]);
+        } else if (strcmp(argv[i], "-w") == 0 && i + 1 < argc) {
+            waveform = parseWaveform(argv[++i]);
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             output_file = argv[++i];
         } else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) {
@@ -1114,10 +1351,10 @@ int main(int argc, char* argv[]) {
     } else if (strcmp(command, "rx") == 0) {
         return runRx(config, input_file, output_file);
     } else if (strcmp(command, "prx") == 0) {
-        return runProtocolRx(config, input_file, callsign, timing_offset);
+        return runProtocolRx(config, input_file, callsign, timing_offset, waveform);
     } else if (strcmp(command, "ptx") == 0) {
         // input_file is actually the message for ptx
-        return runProtocolTx(config, input_file, output_file, callsign, dst_callsign);
+        return runProtocolTx(config, input_file, output_file, callsign, dst_callsign, waveform);
     } else if (strcmp(command, "decode") == 0) {
         return runDecode(config, input_file, output_file, timing_offset);
     } else if (strcmp(command, "rawdecode") == 0) {

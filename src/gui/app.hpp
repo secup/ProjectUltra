@@ -17,6 +17,10 @@
 #include <string>
 #include <deque>
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <condition_variable>
 
 namespace ultra {
 namespace gui {
@@ -109,20 +113,38 @@ private:
     // Cross-wired sample queues (full modem simulation)
     // Our TX samples → channel sim → virtual's RX
     // Virtual's TX samples → channel sim → our RX
-    std::vector<float> sim_our_tx_queue_;       // Our pending TX → virtual RX
-    std::vector<float> sim_virtual_tx_queue_;   // Virtual's pending TX → our RX
+    std::vector<float> sim_our_tx_queue_;       // Our pending TX (raw from modem)
+    std::vector<float> sim_virtual_tx_queue_;   // Virtual's pending TX (raw from modem)
+
+    // Streaming buffers - samples being transmitted at real audio rate (48kHz)
+    std::vector<float> sim_our_streaming_;      // Our samples streaming to virtual
+    std::vector<float> sim_virtual_streaming_;  // Virtual's samples streaming to us
 
     // Channel simulation RNG
     std::mt19937 sim_rng_{42};
 
-    // Simulated propagation delays (ms remaining)
-    uint32_t sim_our_tx_delay_ = 0;
-    uint32_t sim_virtual_tx_delay_ = 0;
+    // PTT turnaround delay (ms remaining before TX can start)
+    uint32_t sim_our_ptt_delay_ = 0;
+    uint32_t sim_virtual_ptt_delay_ = 0;
+    static constexpr uint32_t PTT_DELAY_MS = 200;  // Realistic PTT turnaround
+
+    // Simulator audio thread - delivers samples at 48kHz like real soundcard
+    std::thread sim_thread_;
+    std::mutex sim_mutex_;                          // Protects streaming buffers
+    std::condition_variable sim_cv_;                // Signals new data available
+    std::atomic<bool> sim_thread_running_{false};   // Thread control flag
 
     // Virtual station initialization
     void initVirtualStation();
 
-    // Process simulation (called from render loop)
+    // Start/stop simulator audio thread
+    void startSimThread();
+    void stopSimThread();
+
+    // Simulator thread main loop (runs at 48kHz)
+    void simThreadLoop();
+
+    // Process simulation (called from render loop - manages TX queues/PTT only)
     void tickSimulation(uint32_t elapsed_ms);
 
     // Add channel effects (AWGN, optional fading) to samples

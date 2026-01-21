@@ -17,6 +17,8 @@ const char* waveformModeToString(WaveformMode mode) {
         case WaveformMode::OFDM:     return "OFDM";
         case WaveformMode::OTFS_EQ:  return "OTFS-EQ";
         case WaveformMode::OTFS_RAW: return "OTFS-RAW";
+        case WaveformMode::MFSK:     return "MFSK";
+        case WaveformMode::DPSK:     return "DPSK";
         case WaveformMode::AUTO:     return "AUTO";
         default:                     return "UNKNOWN";
     }
@@ -431,6 +433,28 @@ uint8_t DataFrame::calculateCodewords(size_t payload_size) {
     return static_cast<uint8_t>(1 + additional_cws);
 }
 
+uint8_t DataFrame::calculateCodewords(size_t payload_size, CodeRate cw1_rate) {
+    // Total frame size = header (17) + payload + frame_CRC (2)
+    size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
+
+    // CW0 always uses R1/4 = 20 bytes
+    if (total <= BYTES_PER_CODEWORD) {
+        return 1;
+    }
+
+    // Remaining bytes after CW0
+    size_t remaining = total - BYTES_PER_CODEWORD;
+
+    // CW1+ use the specified rate
+    // Each CW1+ has 2-byte header (marker + index), rest is payload
+    size_t cw1_total_bytes = getBytesPerCodeword(cw1_rate);  // e.g., 40 for R1/2
+    size_t cw1_payload_bytes = cw1_total_bytes - DATA_CW_HEADER_SIZE;  // e.g., 38 for R1/2
+
+    size_t additional_cws = (remaining + cw1_payload_bytes - 1) / cw1_payload_bytes;
+
+    return static_cast<uint8_t>(1 + additional_cws);
+}
+
 DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
                                uint16_t seq, const Bytes& data) {
     DataFrame f;
@@ -449,6 +473,26 @@ DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
                                uint16_t seq, const std::string& text) {
     Bytes data(text.begin(), text.end());
     return makeData(src, dst, seq, data);
+}
+
+DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
+                               uint16_t seq, const Bytes& data, CodeRate cw1_rate) {
+    DataFrame f;
+    f.type = FrameType::DATA;
+    f.flags = Flags::VERSION_V2;
+    f.seq = seq;
+    f.src_hash = hashCallsign(src);
+    f.dst_hash = hashCallsign(dst);
+    f.payload = data;
+    f.payload_len = static_cast<uint16_t>(data.size());
+    f.total_cw = calculateCodewords(data.size(), cw1_rate);
+    return f;
+}
+
+DataFrame DataFrame::makeData(const std::string& src, const std::string& dst,
+                               uint16_t seq, const std::string& text, CodeRate cw1_rate) {
+    Bytes data(text.begin(), text.end());
+    return makeData(src, dst, seq, data, cw1_rate);
 }
 
 Bytes DataFrame::serialize() const {
@@ -588,7 +632,8 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
 }
 
 ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::string& dst,
-                                           uint8_t neg_mode) {
+                                           uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
+                                           float snr_db) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -603,6 +648,11 @@ ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::str
 
     f.mode_capabilities = 0;  // Not used in ACK
     f.negotiated_mode = neg_mode;
+
+    // Initial data mode - eliminates separate MODE_CHANGE after connect
+    f.initial_modulation = static_cast<uint8_t>(init_mod);
+    f.initial_code_rate = static_cast<uint8_t>(init_rate);
+    f.measured_snr = encodeSNR(snr_db);
     return f;
 }
 
@@ -643,7 +693,8 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
 }
 
 ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t dst_hash,
-                                                 uint8_t neg_mode) {
+                                                 uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
+                                                 float snr_db) {
     ConnectFrame f;
     f.type = FrameType::CONNECT_ACK;
     f.flags = Flags::VERSION_V2;
@@ -658,6 +709,11 @@ ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t
 
     f.mode_capabilities = 0;
     f.negotiated_mode = neg_mode;
+
+    // Initial data mode - eliminates separate MODE_CHANGE after connect
+    f.initial_modulation = static_cast<uint8_t>(init_mod);
+    f.initial_code_rate = static_cast<uint8_t>(init_rate);
+    f.measured_snr = encodeSNR(snr_db);
     return f;
 }
 
@@ -714,7 +770,7 @@ Bytes ConnectFrame::serialize() const {
     out.push_back((hcrc >> 8) & 0xFF);
     out.push_back(hcrc & 0xFF);
 
-    // Payload: src_callsign (10B) + dst_callsign (10B) + caps (1B) + mode (1B)
+    // Payload: src_callsign (10B) + dst_callsign (10B) + caps (1B) + wfmode (1B) + mod (1B) + rate (1B) + snr (1B)
     for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
         out.push_back(static_cast<uint8_t>(src_callsign[i]));
     }
@@ -723,6 +779,9 @@ Bytes ConnectFrame::serialize() const {
     }
     out.push_back(mode_capabilities);
     out.push_back(negotiated_mode);
+    out.push_back(initial_modulation);
+    out.push_back(initial_code_rate);
+    out.push_back(measured_snr);
 
     // Frame CRC (2 bytes)
     uint16_t fcrc = ControlFrame::calculateCRC(out.data(), out.size());
@@ -788,8 +847,12 @@ std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
     }
     f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
-    f.mode_capabilities = data[payload_offset + 2 * MAX_CALLSIGN_LEN];
-    f.negotiated_mode = data[payload_offset + 2 * MAX_CALLSIGN_LEN + 1];
+    size_t field_offset = payload_offset + 2 * MAX_CALLSIGN_LEN;
+    f.mode_capabilities = data[field_offset];
+    f.negotiated_mode = data[field_offset + 1];
+    f.initial_modulation = data[field_offset + 2];
+    f.initial_code_rate = data[field_offset + 3];
+    f.measured_snr = data[field_offset + 4];
 
     return f;
 }
@@ -1001,19 +1064,54 @@ void CodewordStatus::initForFrame(uint8_t total_cw) {
 // ============================================================================
 
 std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data) {
-    // Split frame into 20-byte chunks
-    auto chunks = splitIntoCodewords(frame_data);
+    // Default to R1/4 for control frames
+    return encodeFrameWithLDPC(frame_data, CodeRate::R1_4);
+}
 
-    // Create LDPC encoder (R1/4)
-    LDPCEncoder encoder(CodeRate::R1_4);
+std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data, CodeRate rate) {
+    // Get bytes per codeword for this rate
+    size_t bytes_per_cw = getBytesPerCodeword(rate);
+    size_t data_payload_size = bytes_per_cw - DATA_CW_HEADER_SIZE;  // Payload bytes in CW1+
+
+    // Split frame into chunks based on rate
+    std::vector<Bytes> chunks;
+
+    // CW0: First bytes_per_cw bytes of frame data (contains header with 0x554C magic)
+    {
+        Bytes cw0(bytes_per_cw, 0);  // Zero-pad if needed
+        size_t cw0_data = std::min(bytes_per_cw, frame_data.size());
+        std::memcpy(cw0.data(), frame_data.data(), cw0_data);
+        chunks.push_back(std::move(cw0));
+    }
+
+    // CW1+: Add marker + index header before payload data
+    size_t offset = bytes_per_cw;  // Start after CW0's data
+    uint8_t cw_index = 1;
+
+    while (offset < frame_data.size()) {
+        Bytes cw(bytes_per_cw, 0);  // Zero-pad if needed
+
+        // Add marker and index
+        cw[0] = DATA_CW_MARKER;
+        cw[1] = cw_index;
+
+        // Copy payload data
+        size_t remaining = frame_data.size() - offset;
+        size_t chunk_size = std::min(data_payload_size, remaining);
+        std::memcpy(cw.data() + DATA_CW_HEADER_SIZE, frame_data.data() + offset, chunk_size);
+
+        chunks.push_back(std::move(cw));
+        offset += data_payload_size;
+        cw_index++;
+    }
+
+    // Create LDPC encoder with specified rate
+    LDPCEncoder encoder(rate);
 
     std::vector<Bytes> encoded_codewords;
     encoded_codewords.reserve(chunks.size());
 
     for (const auto& chunk : chunks) {
-        // Each chunk is 20 bytes, but LDPC R1/4 expects exactly k/8 bytes
-        // k=162 bits = 20.25 bytes, so we encode 20 bytes (160 bits) + 2 bits padding
-        // The encoder handles this internally
         auto encoded = encoder.encode(chunk);
         encoded_codewords.push_back(std::move(encoded));
     }
@@ -1022,23 +1120,31 @@ std::vector<Bytes> encodeFrameWithLDPC(const Bytes& frame_data) {
 }
 
 std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits) {
+    // Default to R1/4 for control frames
+    return decodeSingleCodeword(soft_bits, CodeRate::R1_4);
+}
+
+std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits, CodeRate rate) {
     if (soft_bits.size() < LDPC_CODEWORD_BITS) {
         return {false, {}};
     }
 
-    // Create LDPC decoder (R1/4)
-    LDPCDecoder decoder(CodeRate::R1_4);
+    // Get bytes per codeword for this rate
+    size_t bytes_per_cw = getBytesPerCodeword(rate);
 
-    // Decode - returns k/8 bytes (rounded up)
+    // Create LDPC decoder with specified rate
+    LDPCDecoder decoder(rate);
+
+    // Decode - returns k/8 bytes
     auto decoded = decoder.decodeSoft(soft_bits);
     bool success = decoder.lastDecodeSuccess();
 
-    if (!success || decoded.size() < BYTES_PER_CODEWORD) {
+    if (!success || decoded.size() < bytes_per_cw) {
         return {false, {}};
     }
 
-    // Return exactly 20 bytes (the info portion)
-    Bytes result(decoded.begin(), decoded.begin() + BYTES_PER_CODEWORD);
+    // Return exactly bytes_per_cw bytes (the info portion)
+    Bytes result(decoded.begin(), decoded.begin() + bytes_per_cw);
     return {true, result};
 }
 

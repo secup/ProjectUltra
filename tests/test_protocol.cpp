@@ -131,7 +131,7 @@ bool test_control_frame_types() {
     // Test ConnectFrames (3 codewords)
     std::vector<std::pair<v2::ConnectFrame, v2::FrameType>> connect_cases = {
         { v2::ConnectFrame::makeConnect("CALLSIGN1", "CALLSIGN2", 0x07, 0), v2::FrameType::CONNECT },
-        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0), v2::FrameType::CONNECT_ACK },
+        { v2::ConnectFrame::makeConnectAck("CALLSIGN1", "CALLSIGN2", 0, ultra::Modulation::DQPSK, ultra::CodeRate::R1_4, 15.0f), v2::FrameType::CONNECT_ACK },
         { v2::ConnectFrame::makeConnectNak("CALLSIGN1", "CALLSIGN2"), v2::FrameType::CONNECT_NAK },
         { v2::ConnectFrame::makeDisconnect("CALLSIGN1", "CALLSIGN2"), v2::FrameType::DISCONNECT },
     };

@@ -103,4 +103,42 @@ private:
     std::vector<size_t> permutation_;
 };
 
+/**
+ * ChannelInterleaver
+ *
+ * 2D time-frequency interleaver designed for OFDM on fading channels.
+ * Spreads bits across BOTH OFDM symbols (time) AND carriers (frequency)
+ * to provide diversity against HF frequency-selective fading.
+ *
+ * Key insight: The basic 6x108 interleaver spreads bits within a codeword,
+ * but with 60+ bits per OFDM symbol, consecutive bits still land in the
+ * SAME symbol - providing frequency diversity but NO time diversity.
+ *
+ * This interleaver ensures consecutive LDPC bits are spread across
+ * different OFDM symbols, critical for fading channels.
+ */
+class ChannelInterleaver {
+public:
+    // bits_per_symbol = num_carriers * bits_per_carrier (e.g., 58*2=116 for DQPSK)
+    // total_bits = LDPC codeword size (648)
+    ChannelInterleaver(size_t bits_per_symbol, size_t total_bits = 648);
+
+    std::vector<float> interleave(std::span<const float> soft_bits);
+    std::vector<float> deinterleave(std::span<const float> soft_bits);
+
+    Bytes interleave(ByteSpan data);
+    Bytes deinterleave(ByteSpan data);
+
+    // Get the minimum symbol separation between consecutive input bits
+    size_t getSymbolSeparation() const { return symbol_separation_; }
+
+private:
+    size_t bits_per_symbol_;
+    size_t total_bits_;
+    size_t num_symbols_;
+    size_t symbol_separation_;
+    std::vector<size_t> permutation_;
+    std::vector<size_t> inverse_permutation_;
+};
+
 } // namespace ultra

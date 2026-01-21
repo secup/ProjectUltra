@@ -30,6 +30,7 @@ public:
     using FileSentCallback = Connection::FileSentCallback;
 
     using ModeNegotiatedCallback = Connection::ModeNegotiatedCallback;
+    using ConnectWaveformChangedCallback = Connection::ConnectWaveformChangedCallback;
 
     explicit ProtocolEngine(const ConnectionConfig& config = ConnectionConfig{});
 
@@ -93,6 +94,13 @@ public:
     void setPreferredMode(WaveformMode mode);
     void setModeCapabilities(uint8_t caps);
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb);
+    void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb);
+    WaveformMode getConnectWaveform() const;
+    void setInitialConnectWaveform(WaveformMode mode);
+
+    // Callback when handshake is confirmed (safe to switch to negotiated waveform)
+    using HandshakeConfirmedCallback = Connection::HandshakeConfirmedCallback;
+    void setHandshakeConfirmedCallback(HandshakeConfirmedCallback cb);
 
     // --- Adaptive Data Mode ---
 

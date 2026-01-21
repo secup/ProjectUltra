@@ -69,14 +69,17 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     // Initialize protocol with saved callsign
     if (strlen(settings_.callsign) > 0) {
         protocol_.setLocalCallsign(settings_.callsign);
+        modem_.setLogPrefix(settings_.callsign);
     }
 
     // Set up raw data callback for protocol layer
     modem_.setRawDataCallback([this](const Bytes& data) {
-        guiLog("SIM: Our modem decoded %zu bytes", data.size());
+        guiLog("Our modem decoded %zu bytes", data.size());
         // Update protocol layer with current SNR before processing frame
-        auto stats = modem_.getStats();
-        protocol_.setMeasuredSNR(stats.snr_db);
+        // In simulation mode, use the known simulation SNR (DPSK doesn't measure SNR)
+        // In real mode, use measured SNR from OFDM demodulator
+        float snr_db = simulation_enabled_ ? simulation_snr_db_ : modem_.getStats().snr_db;
+        protocol_.setMeasuredSNR(snr_db);
         protocol_.onRxData(data);
     });
 
@@ -112,6 +115,11 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
     protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
         guiLog("Connection state changed: %d (%s)", static_cast<int>(state), info.c_str());
+
+        // Update modem engine connection state (affects waveform selection)
+        bool connected = (state == protocol::ConnectionState::CONNECTED);
+        modem_.setConnected(connected);
+
         std::string msg;
         switch (state) {
             case protocol::ConnectionState::CONNECTING:
@@ -129,6 +137,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 } else {
                     msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
                 }
+                // Reset waveform mode to OFDM when disconnected
+                modem_.setWaveformMode(protocol::WaveformMode::OFDM);
                 break;
         }
         rx_log_.push_back(msg);
@@ -151,6 +161,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                modulationToString(mod),
                codeRateToString(rate),
                snr_db);
+
+        // Update modem engine with new data mode
+        modem_.setDataMode(mod, rate);
+
         std::string msg = "[MODE] " + std::string(modulationToString(mod)) + " " +
                           std::string(codeRateToString(rate)) + " (SNR=" +
                           std::to_string(static_cast<int>(snr_db)) + " dB)";
@@ -158,6 +172,41 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         if (rx_log_.size() > MAX_RX_LOG) {
             rx_log_.pop_front();
         }
+    });
+
+    // Waveform mode negotiation callback (OFDM, DPSK, MFSK switching)
+    protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
+        const char* mode_name = "OFDM";
+        switch (mode) {
+            case protocol::WaveformMode::DPSK: mode_name = "DPSK"; break;
+            case protocol::WaveformMode::MFSK: mode_name = "MFSK"; break;
+            case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS-EQ"; break;
+            case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS-RAW"; break;
+            default: mode_name = "OFDM"; break;
+        }
+        guiLog("WAVEFORM_CHANGE: %s", mode_name);
+
+        // Update modem engine with new waveform mode
+        modem_.setWaveformMode(mode);
+
+        std::string msg = "[WAVEFORM] " + std::string(mode_name);
+        rx_log_.push_back(msg);
+        if (rx_log_.size() > MAX_RX_LOG) {
+            rx_log_.pop_front();
+        }
+    });
+
+    // Connect waveform fallback callback (DPSK -> MFSK when connection attempts fail)
+    protocol_.setConnectWaveformChangedCallback([this](protocol::WaveformMode mode) {
+        const char* mode_name = (mode == protocol::WaveformMode::MFSK) ? "MFSK" : "DPSK";
+        guiLog("CONNECT_WAVEFORM: Switching to %s for connection attempts", mode_name);
+        modem_.setConnectWaveform(mode);
+    });
+
+    // Handshake confirmed callback - now safe to use negotiated waveform
+    protocol_.setHandshakeConfirmedCallback([this]() {
+        guiLog("HANDSHAKE: Confirmed, switching to negotiated waveform");
+        modem_.setHandshakeComplete(true);
     });
 
     // File transfer callbacks
@@ -203,6 +252,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     // Settings window callbacks
     settings_window_.setCallsignChangedCallback([this](const std::string& call) {
         protocol_.setLocalCallsign(call);
+        modem_.setLogPrefix(call);
         settings_.save();
     });
 
@@ -282,6 +332,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 }
 
 App::~App() {
+    // Stop simulator thread first
+    stopSimThread();
+
     settings_.save();
     audio_.shutdown();
 
@@ -311,6 +364,7 @@ void App::initVirtualStation() {
 
     // Set up virtual station's protocol
     virtual_protocol_.setLocalCallsign(virtual_callsign_);
+    virtual_modem_->setLogPrefix(virtual_callsign_);
     virtual_protocol_.setAutoAccept(true);  // Auto-accept incoming calls
 
     // Virtual station TX → channel sim → our RX
@@ -325,14 +379,20 @@ void App::initVirtualStation() {
     // Virtual modem RX → virtual protocol
     virtual_modem_->setRawDataCallback([this](const Bytes& data) {
         guiLog("SIM: Virtual modem decoded %zu bytes", data.size());
-        auto stats = virtual_modem_->getStats();
-        virtual_protocol_.setMeasuredSNR(stats.snr_db);
+        // Use simulation SNR - DPSK demodulator doesn't measure SNR
+        // The virtual station sees the same channel as our station
+        virtual_protocol_.setMeasuredSNR(simulation_snr_db_);
         virtual_protocol_.onRxData(data);
     });
 
     // Log virtual station events
     virtual_protocol_.setConnectionChangedCallback([this](protocol::ConnectionState state, const std::string& info) {
         guiLog("SIM: Virtual station connection state: %d (%s)", static_cast<int>(state), info.c_str());
+
+        // Update virtual modem engine connection state
+        bool connected = (state == protocol::ConnectionState::CONNECTED);
+        virtual_modem_->setConnected(connected);
+
         std::string msg = "[SIM] ";
         switch (state) {
             case protocol::ConnectionState::CONNECTED:
@@ -340,6 +400,8 @@ void App::initVirtualStation() {
                 break;
             case protocol::ConnectionState::DISCONNECTED:
                 msg += "Virtual station disconnected";
+                // Reset waveform mode to OFDM when disconnected
+                virtual_modem_->setWaveformMode(protocol::WaveformMode::OFDM);
                 break;
             default:
                 return;  // Don't log intermediate states
@@ -355,6 +417,35 @@ void App::initVirtualStation() {
                modulationToString(mod),
                codeRateToString(rate),
                snr_db);
+        // Update virtual modem engine with new data mode
+        virtual_modem_->setDataMode(mod, rate);
+    });
+
+    virtual_protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
+        const char* mode_name = "OFDM";
+        switch (mode) {
+            case protocol::WaveformMode::DPSK: mode_name = "DPSK"; break;
+            case protocol::WaveformMode::MFSK: mode_name = "MFSK"; break;
+            case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS-EQ"; break;
+            case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS-RAW"; break;
+            default: mode_name = "OFDM"; break;
+        }
+        guiLog("SIM: Virtual WAVEFORM_CHANGE: %s", mode_name);
+        // Update virtual modem engine with new waveform mode
+        virtual_modem_->setWaveformMode(mode);
+    });
+
+    // Connect waveform fallback for virtual station
+    virtual_protocol_.setConnectWaveformChangedCallback([this](protocol::WaveformMode mode) {
+        const char* mode_name = (mode == protocol::WaveformMode::MFSK) ? "MFSK" : "DPSK";
+        guiLog("SIM: Virtual CONNECT_WAVEFORM: Switching to %s", mode_name);
+        virtual_modem_->setConnectWaveform(mode);
+    });
+
+    // Virtual station handshake confirmed callback
+    virtual_protocol_.setHandshakeConfirmedCallback([this]() {
+        guiLog("SIM: Virtual HANDSHAKE confirmed");
+        virtual_modem_->setHandshakeComplete(true);
     });
 
     virtual_protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
@@ -422,107 +513,186 @@ void App::prependPttNoise(std::vector<float>& samples) {
            noise_samples, noise_samples * 1000.0f / 48000.0f);
 }
 
+void App::startSimThread() {
+    if (sim_thread_running_) return;
+
+    guiLog("SIM: Starting audio thread");
+    sim_thread_running_ = true;
+    sim_thread_ = std::thread(&App::simThreadLoop, this);
+}
+
+void App::stopSimThread() {
+    if (!sim_thread_running_) return;
+
+    guiLog("SIM: Stopping audio thread");
+    sim_thread_running_ = false;
+    sim_cv_.notify_all();
+
+    if (sim_thread_.joinable()) {
+        sim_thread_.join();
+    }
+    guiLog("SIM: Audio thread stopped");
+}
+
+void App::simThreadLoop() {
+    guiLog("SIM: Audio thread started");
+
+    // Deliver samples at ~48kHz (10ms chunks = 480 samples for efficiency)
+    // Larger chunks reduce lock contention while still being responsive
+    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
+    constexpr auto CHUNK_DURATION = std::chrono::milliseconds(10);
+
+    auto next_tick = std::chrono::steady_clock::now();
+    size_t total_our_streamed = 0;
+    size_t total_virtual_streamed = 0;
+
+    while (sim_thread_running_) {
+        // Wait until next tick time
+        std::this_thread::sleep_until(next_tick);
+        next_tick += CHUNK_DURATION;
+
+        std::vector<float> our_chunk;
+        std::vector<float> virtual_chunk;
+        bool our_tx_complete = false;
+        bool virtual_tx_complete = false;
+
+        // Grab chunks under lock (minimize lock time)
+        {
+            std::lock_guard<std::mutex> lock(sim_mutex_);
+
+            // Grab chunk from our streaming buffer
+            if (!sim_our_streaming_.empty()) {
+                size_t to_send = std::min(CHUNK_SIZE, sim_our_streaming_.size());
+                our_chunk.assign(sim_our_streaming_.begin(),
+                                 sim_our_streaming_.begin() + to_send);
+                sim_our_streaming_.erase(sim_our_streaming_.begin(),
+                                         sim_our_streaming_.begin() + to_send);
+                our_tx_complete = sim_our_streaming_.empty();
+            }
+
+            // Grab chunk from virtual's streaming buffer
+            if (!sim_virtual_streaming_.empty()) {
+                size_t to_send = std::min(CHUNK_SIZE, sim_virtual_streaming_.size());
+                virtual_chunk.assign(sim_virtual_streaming_.begin(),
+                                     sim_virtual_streaming_.begin() + to_send);
+                sim_virtual_streaming_.erase(sim_virtual_streaming_.begin(),
+                                             sim_virtual_streaming_.begin() + to_send);
+                virtual_tx_complete = sim_virtual_streaming_.empty();
+            }
+        }
+
+        // Process chunks outside lock (slow operations)
+
+        // Stream our samples → virtual modem
+        if (!our_chunk.empty()) {
+            total_our_streamed += our_chunk.size();
+
+            // Record samples if enabled
+            if (recording_enabled_) {
+                recorded_samples_.insert(recorded_samples_.end(), our_chunk.begin(), our_chunk.end());
+            }
+
+            // Show on waterfall
+            waterfall_.addSamples(our_chunk.data(), our_chunk.size());
+
+            // Feed to virtual modem
+            virtual_modem_->receiveAudio(our_chunk);
+            virtual_modem_->pollRxAudio();
+
+            if (our_tx_complete) {
+                guiLog("SIM: TX -> virtual complete (thread, %zu samples)", total_our_streamed);
+                total_our_streamed = 0;
+                sim_virtual_ptt_delay_ = PTT_DELAY_MS;
+            }
+        }
+
+        // Stream virtual's samples → our modem
+        if (!virtual_chunk.empty()) {
+            total_virtual_streamed += virtual_chunk.size();
+
+            // Record samples if enabled
+            if (recording_enabled_) {
+                recorded_samples_.insert(recorded_samples_.end(), virtual_chunk.begin(), virtual_chunk.end());
+            }
+
+            // Show on waterfall
+            waterfall_.addSamples(virtual_chunk.data(), virtual_chunk.size());
+
+            // Feed to our modem
+            modem_.receiveAudio(virtual_chunk);
+            modem_.pollRxAudio();
+
+            if (virtual_tx_complete) {
+                guiLog("SIM: TX <- virtual complete (thread, %zu samples)", total_virtual_streamed);
+                total_virtual_streamed = 0;
+                sim_our_ptt_delay_ = PTT_DELAY_MS;
+            }
+        }
+
+        // Also poll modems to process any accumulated samples
+        virtual_modem_->pollRxAudio();
+        modem_.pollRxAudio();
+    }
+
+    guiLog("SIM: Audio thread exiting");
+}
+
 void App::tickSimulation(uint32_t elapsed_ms) {
     if (!simulation_enabled_) return;
 
-    // Update propagation delays
-    if (sim_our_tx_delay_ > 0) {
-        sim_our_tx_delay_ = (elapsed_ms >= sim_our_tx_delay_) ? 0 : sim_our_tx_delay_ - elapsed_ms;
+    // Update PTT delays
+    if (sim_our_ptt_delay_ > 0) {
+        sim_our_ptt_delay_ = (elapsed_ms >= sim_our_ptt_delay_) ? 0 : sim_our_ptt_delay_ - elapsed_ms;
     }
-    if (sim_virtual_tx_delay_ > 0) {
-        sim_virtual_tx_delay_ = (elapsed_ms >= sim_virtual_tx_delay_) ? 0 : sim_virtual_tx_delay_ - elapsed_ms;
-    }
-
-    // Debug: Log queue status
-    static uint32_t log_counter = 0;
-    if (++log_counter % 60 == 0 || !sim_our_tx_queue_.empty() || !sim_virtual_tx_queue_.empty()) {  // ~1/sec or when queues have data
-        guiLog("TICK: our_q=%zu our_d=%u virt_q=%zu virt_d=%u",
-               sim_our_tx_queue_.size(), sim_our_tx_delay_,
-               sim_virtual_tx_queue_.size(), sim_virtual_tx_delay_);
+    if (sim_virtual_ptt_delay_ > 0) {
+        sim_virtual_ptt_delay_ = (elapsed_ms >= sim_virtual_ptt_delay_) ? 0 : sim_virtual_ptt_delay_ - elapsed_ms;
     }
 
-    // Process our TX → virtual station RX (batched with delay)
-    if (!sim_our_tx_queue_.empty() && sim_our_tx_delay_ == 0) {
-        guiLog("SIM: Processing %zu samples -> virtual", sim_our_tx_queue_.size());
+    // === Move pending TX to streaming buffers (with PTT delay) ===
+    // Note: Actual sample streaming is done by simThreadLoop() at 48kHz
 
-        // Calculate delay based on samples (realistic transmission time)
-        uint32_t tx_duration_ms = (sim_our_tx_queue_.size() * 1000) / 48000;
-        sim_our_tx_delay_ = tx_duration_ms + 1000;  // TX time + 1s turnaround
-        sim_virtual_tx_delay_ = std::max(sim_virtual_tx_delay_, tx_duration_ms + 500);
+    std::lock_guard<std::mutex> lock(sim_mutex_);
 
-        // Prepend PTT noise (simulates key-up delay, AGC settling)
+    // Our TX → streaming to virtual
+    if (!sim_our_tx_queue_.empty() && sim_our_streaming_.empty() && sim_our_ptt_delay_ == 0) {
+        guiLog("SIM: Starting TX -> virtual (%zu samples, %.1fs)",
+               sim_our_tx_queue_.size(), sim_our_tx_queue_.size() / 48000.0f);
+
+        // Prepend PTT noise and apply channel effects
         prependPttNoise(sim_our_tx_queue_);
-
-        // Apply channel effects
         applyChannelSimulation(sim_our_tx_queue_);
 
-        // Record samples if enabled
-        if (recording_enabled_) {
-            recorded_samples_.insert(recorded_samples_.end(),
-                                     sim_our_tx_queue_.begin(), sim_our_tx_queue_.end());
-        }
-
-        // Show on waterfall
-        waterfall_.addSamples(sim_our_tx_queue_.data(), sim_our_tx_queue_.size());
-
-        // Feed ALL samples to virtual modem and process (limit polls)
-        virtual_modem_->receiveAudio(sim_our_tx_queue_);
+        // Move to streaming buffer (thread will stream at 48kHz)
+        sim_our_streaming_ = std::move(sim_our_tx_queue_);
         sim_our_tx_queue_.clear();
-        for (int i = 0; i < 5 && virtual_modem_->pollRxAudio(); i++) {}
 
-        guiLog("SIM: Virtual processed, next delays: our=%u virtual=%u",
-               sim_our_tx_delay_, sim_virtual_tx_delay_);
-        return;  // Only process one direction per tick
+        // Virtual can't TX until we're done (half-duplex)
+        sim_virtual_ptt_delay_ = PTT_DELAY_MS;
     }
 
-    // Process virtual station TX → our RX (batched with delay)
-    if (!sim_virtual_tx_queue_.empty() && sim_virtual_tx_delay_ == 0) {
-        guiLog("SIM: Processing %zu samples <- virtual", sim_virtual_tx_queue_.size());
+    // Virtual's TX → streaming to us
+    if (!sim_virtual_tx_queue_.empty() && sim_virtual_streaming_.empty() && sim_virtual_ptt_delay_ == 0) {
+        guiLog("SIM: Starting TX <- virtual (%zu samples, %.1fs)",
+               sim_virtual_tx_queue_.size(), sim_virtual_tx_queue_.size() / 48000.0f);
 
-        uint32_t tx_duration_ms = (sim_virtual_tx_queue_.size() * 1000) / 48000;
-        sim_virtual_tx_delay_ = tx_duration_ms + 1000;
-        sim_our_tx_delay_ = std::max(sim_our_tx_delay_, tx_duration_ms + 500);
-
-        // Prepend PTT noise (simulates key-up delay, AGC settling)
+        // Prepend PTT noise and apply channel effects
         prependPttNoise(sim_virtual_tx_queue_);
-
-        // Apply channel effects
         applyChannelSimulation(sim_virtual_tx_queue_);
 
-        // Record samples if enabled
-        if (recording_enabled_) {
-            recorded_samples_.insert(recorded_samples_.end(),
-                                     sim_virtual_tx_queue_.begin(), sim_virtual_tx_queue_.end());
-        }
-
-        // Show on waterfall
-        waterfall_.addSamples(sim_virtual_tx_queue_.data(), sim_virtual_tx_queue_.size());
-
-        // Feed ALL samples to our modem and process (limit polls)
-        modem_.receiveAudio(sim_virtual_tx_queue_);
+        // Move to streaming buffer (thread will stream at 48kHz)
+        sim_virtual_streaming_ = std::move(sim_virtual_tx_queue_);
         sim_virtual_tx_queue_.clear();
-        guiLog("SIM: Starting modem polls...");
-        for (int i = 0; i < 5; i++) {
-            guiLog("SIM: Poll %d starting", i);
-            bool more = modem_.pollRxAudio();
-            guiLog("SIM: Poll %d done, more=%d", i, more);
-            if (!more) break;
-        }
 
-        guiLog("SIM: Our modem processed, next delays: our=%u virtual=%u",
-               sim_our_tx_delay_, sim_virtual_tx_delay_);
-        return;  // Only process one direction per tick
+        // We can't TX until virtual is done (half-duplex)
+        sim_our_ptt_delay_ = PTT_DELAY_MS;
     }
 
-    // Tick both protocol engines (this may generate new TX samples)
+    // NOTE: Streaming and modem polling now done by simThreadLoop()
+
+    // === Tick protocol engines ===
+    // This may generate new TX samples into the queues
     virtual_protocol_.tick(elapsed_ms);
     protocol_.tick(elapsed_ms);
-
-    // Log if TX was generated
-    if (!sim_our_tx_queue_.empty() || !sim_virtual_tx_queue_.empty()) {
-        guiLog("TICK END: our_q=%zu virt_q=%zu (after protocol tick)",
-               sim_our_tx_queue_.size(), sim_virtual_tx_queue_.size());
-    }
 }
 
 void App::initAudio() {
@@ -737,13 +907,45 @@ void App::stopRadioRx() {
     radio_rx_enabled_ = false;
 }
 
+// Helper function to classify channel quality based on SNR
+static const char* getChannelQuality(float snr_db, ImVec4& color) {
+    if (snr_db >= 30.0f) {
+        color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Bright cyan-green
+        return "Outstanding";
+    } else if (snr_db >= 20.0f) {
+        color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Bright green
+        return "Excellent";
+    } else if (snr_db >= 15.0f) {
+        color = ImVec4(0.4f, 0.9f, 0.2f, 1.0f);  // Light green
+        return "Very Good";
+    } else if (snr_db >= 10.0f) {
+        color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
+        return "Good";
+    } else if (snr_db >= 5.0f) {
+        color = ImVec4(1.0f, 0.6f, 0.0f, 1.0f);  // Orange
+        return "Fair";
+    } else if (snr_db >= 0.0f) {
+        color = ImVec4(1.0f, 0.3f, 0.0f, 1.0f);  // Red-orange
+        return "Poor";
+    } else {
+        color = ImVec4(1.0f, 0.1f, 0.1f, 1.0f);  // Red
+        return "Very Poor";
+    }
+}
+
 void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate) {
     // Compact horizontal Channel Status display
-    ImGui::BeginChild("ChannelStatus", ImVec2(0, 95), false);
+    ImGui::BeginChild("ChannelStatus", ImVec2(0, 110), false);
 
-    // Row 1: Sync indicator + SNR bar
+    // Row 1: Sync indicator + Channel Quality + SNR bar
     ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
     ImGui::TextColored(sync_color, "%s", stats.synced ? "SYNC" : "----");
+    ImGui::SameLine();
+
+    // Channel quality classification
+    ImVec4 quality_color;
+    const char* quality_str = getChannelQuality(stats.snr_db, quality_color);
+    ImGui::TextColored(quality_color, "[%s]", quality_str);
     ImGui::SameLine();
     ImGui::Text("SNR:");
     ImGui::SameLine();
@@ -761,12 +963,20 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
     ImGui::PopStyleColor();
 
-    // Row 2: Mode + Theoretical max speed + BER
+    // Row 2: Waveform + Mode + Theoretical max speed
+    auto waveform = modem_.getWaveformMode();
+    const char* wf_str = protocol::waveformModeToString(waveform);
+    ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+                      (waveform == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
+                      (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
+                                                                   ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+    ImGui::TextColored(wf_color, "%s", wf_str);
+    ImGui::SameLine();
     ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
-    ImGui::SameLine(100);
+    ImGui::SameLine(160);
     float throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
     ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
-    ImGui::SameLine(180);
+    ImGui::SameLine(240);
     ImGui::TextDisabled("BER:");
     ImGui::SameLine();
     if (stats.ber > 0.0f && stats.ber < 1.0f) {
@@ -812,7 +1022,11 @@ void App::renderOperateTab() {
                         recording_enabled_ = true; recorded_samples_.clear();
                         rx_log_.push_back("[REC] Recording enabled");
                     }
+                    // Start audio thread for realistic sample delivery
+                    startSimThread();
                 } else {
+                    // Stop audio thread first
+                    stopSimThread();
                     rx_log_.push_back("[SIM] Simulation disabled");
                     if (recording_enabled_) {
                         recording_enabled_ = false;

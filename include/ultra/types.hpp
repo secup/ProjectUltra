@@ -154,7 +154,9 @@ struct ModemConfig {
     // Pilot configuration for frequency-selective channel estimation
     // Coherence BW for 1ms delay ≈ 159 Hz, carrier spacing = 93.75 Hz
     // pilot_spacing=2 gives 15 pilots, 15 data (50% overhead) - best fading performance
-    uint32_t pilot_spacing = 2;        // Pilot every 2 carriers (15 pilots, 15 data)
+    // NOTE: For differential modulation (DQPSK), set use_pilots=false to use ALL carriers
+    uint32_t pilot_spacing = 2;        // Pilot every 2 carriers (when use_pilots=true)
+    bool use_pilots = true;            // false = all carriers are data (for DQPSK)
     bool scattered_pilots = true;      // Rotate pilot positions each symbol
 
     // Initial modulation/coding (will adapt)
@@ -202,8 +204,11 @@ struct ModemConfig {
         return static_cast<float>(sample_rate) / getSymbolDuration();
     }
 
-    // Estimate data carriers (excludes pilots)
+    // Estimate data carriers (excludes pilots if use_pilots=true)
     uint32_t getDataCarriers() const {
+        if (!use_pilots) {
+            return num_carriers;  // All carriers are data (for DQPSK)
+        }
         uint32_t pilots = (num_carriers + pilot_spacing - 1) / pilot_spacing;
         return num_carriers - pilots;
     }

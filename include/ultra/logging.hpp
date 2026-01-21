@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <chrono>
 
 // Windows headers define ERROR as a macro - undefine it
 #ifdef ERROR
@@ -9,6 +10,9 @@
 #endif
 
 namespace ultra {
+
+// Start time for relative timestamps
+inline auto g_log_start_time = std::chrono::steady_clock::now();
 
 // Log levels
 enum class LogLevel {
@@ -48,6 +52,12 @@ inline void setLogLevel(LogLevel level) {
 inline void log(LogLevel level, const char* category, const char* format, ...) {
     if (level > g_log_level) return;
 
+    // Get elapsed time in milliseconds
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - g_log_start_time).count();
+    int secs = static_cast<int>(elapsed / 1000);
+    int ms = static_cast<int>(elapsed % 1000);
+
     const char* level_str = "";
     switch (level) {
         case LogLevel::ERROR: level_str = "ERROR"; break;
@@ -58,7 +68,7 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
         default: break;
     }
 
-    fprintf(stderr, "[%s][%s] ", level_str, category);
+    fprintf(stderr, "[%3d.%03d][%s][%s] ", secs, ms, level_str, category);
 
     va_list args;
     va_start(args, format);

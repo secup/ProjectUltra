@@ -106,13 +106,20 @@ bool Connection::connect(const std::string& remote_call) {
 
     LOG_MODEM(INFO, "Connection: Connecting to %s", remote_call_.c_str());
 
+    // Use current connect_waveform_ (can be pre-set via setInitialConnectWaveform)
+    // Notify the modem of the waveform to use
+    if (on_connect_waveform_changed_) {
+        on_connect_waveform_changed_(connect_waveform_);
+    }
+
     // Send CONNECT directly (no PROBE phase)
     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                         config_.mode_capabilities,
                                                         static_cast<uint8_t>(config_.preferred_mode));
     Bytes connect_data = connect_frame.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending CONNECT (%zu bytes)", connect_data.size());
+    LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes)",
+              waveformModeToString(connect_waveform_), connect_data.size());
     transmitFrame(connect_data);
 
     state_ = ConnectionState::CONNECTING;
@@ -134,17 +141,37 @@ void Connection::acceptCall() {
 
     negotiated_mode_ = negotiateMode(remote_capabilities_, remote_preferred_);
 
-    LOG_MODEM(INFO, "Connection: Accepting call from %s (mode=%s)",
-              remote_call_.c_str(), waveformModeToString(negotiated_mode_));
+    // Recommend data mode based on measured SNR
+    Modulation rec_mod;
+    CodeRate rec_rate;
+    recommendDataMode(measured_snr_db_, rec_mod, rec_rate);
+
+    // Set our local data mode immediately
+    data_modulation_ = rec_mod;
+    data_code_rate_ = rec_rate;
+
+    LOG_MODEM(INFO, "Connection: Accepting call from %s (waveform=%s, data=%s %s)",
+              remote_call_.c_str(), waveformModeToString(negotiated_mode_),
+              modulationToString(data_modulation_), codeRateToString(data_code_rate_));
 
     auto ack = v2::ConnectFrame::makeConnectAck(local_call_, remote_call_,
-                                                 static_cast<uint8_t>(negotiated_mode_));
+                                                 static_cast<uint8_t>(negotiated_mode_),
+                                                 rec_mod, rec_rate, measured_snr_db_);
     Bytes ack_data = ack.serialize();
 
     LOG_MODEM(INFO, "Connection: Sending CONNECT_ACK (%zu bytes)", ack_data.size());
     transmitFrame(ack_data);
 
     enterConnected();
+
+    // We are the responder - we received CONNECT and are sending CONNECT_ACK
+    is_initiator_ = false;
+    handshake_confirmed_ = false;  // Responder waits for first frame to confirm
+
+    // Notify application of initial data mode
+    if (on_data_mode_changed_) {
+        on_data_mode_changed_(data_modulation_, data_code_rate_, measured_snr_db_);
+    }
 }
 
 void Connection::rejectCall() {
@@ -299,6 +326,17 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data) {
 void Connection::onFrameReceived(const Bytes& frame_data) {
     if (frame_data.size() < 2) {
         return;
+    }
+
+    // Responder handshake confirmation: when we receive first frame after CONNECT_ACK
+    // This means the initiator got our CONNECT_ACK and the handshake is complete
+    if (state_ == ConnectionState::CONNECTED && !is_initiator_ && !handshake_confirmed_) {
+        LOG_MODEM(INFO, "Connection: Handshake confirmed (received first frame from initiator)");
+        handshake_confirmed_ = true;
+        if (on_handshake_confirmed_) {
+            on_handshake_confirmed_();
+        }
+        // NOTE: Initial data mode is now carried in CONNECT_ACK, no separate MODE_CHANGE needed
     }
 
     // Check v2 magic
@@ -466,22 +504,34 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         LOG_MODEM(INFO, "Connection: Negotiated waveform mode: %s",
                   waveformModeToString(negotiated_mode_));
 
-        // Use hash-based method since we may not know the actual callsign
-        auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
-                                                           static_cast<uint8_t>(negotiated_mode_));
-        transmitFrame(ack.serialize());
-        enterConnected();
+        // We are the responder - we received CONNECT and are sending CONNECT_ACK
+        is_initiator_ = false;
+        handshake_confirmed_ = false;  // Responder waits for first frame to confirm
 
-        // After connection is established, recommend data mode based on measured SNR
+        // Recommend data mode based on measured SNR
         Modulation rec_mod;
         CodeRate rec_rate;
         recommendDataMode(snr_db, rec_mod, rec_rate);
 
-        // Only send MODE_CHANGE if different from default (DQPSK R1/4)
-        if (rec_mod != Modulation::DQPSK || rec_rate != CodeRate::R1_4) {
-            LOG_MODEM(INFO, "Connection: Recommending %s %s based on SNR=%.1f dB",
-                      modulationToString(rec_mod), codeRateToString(rec_rate), snr_db);
-            requestModeChange(rec_mod, rec_rate, snr_db, v2::ModeChangeReason::INITIAL_SETUP);
+        LOG_MODEM(INFO, "Connection: Initial data mode %s %s based on SNR=%.1f dB",
+                  modulationToString(rec_mod), codeRateToString(rec_rate), snr_db);
+
+        // Set our local data mode immediately
+        data_modulation_ = rec_mod;
+        data_code_rate_ = rec_rate;
+
+        // Use hash-based method since we may not know the actual callsign
+        // CONNECT_ACK now carries the initial data mode - no separate MODE_CHANGE needed!
+        auto ack = v2::ConnectFrame::makeConnectAckByHash(local_call_, frame.src_hash,
+                                                           static_cast<uint8_t>(negotiated_mode_),
+                                                           rec_mod, rec_rate, snr_db);
+        transmitFrame(ack.serialize());
+        enterConnected();
+        // NOTE: Don't call on_handshake_confirmed_ yet - wait for first frame from initiator
+
+        // Notify application of initial data mode
+        if (on_data_mode_changed_) {
+            on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db);
         }
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
@@ -499,19 +549,43 @@ void Connection::handleConnectAck(const v2::ConnectFrame& frame, const std::stri
         return;
     }
 
-    // Get negotiated mode from ConnectFrame
+    // Get negotiated waveform mode from ConnectFrame
     WaveformMode mode = static_cast<WaveformMode>(frame.negotiated_mode);
     negotiated_mode_ = mode;
+
+    // Get initial data mode from CONNECT_ACK (eliminates separate MODE_CHANGE)
+    Modulation init_mod = static_cast<Modulation>(frame.initial_modulation);
+    CodeRate init_rate = static_cast<CodeRate>(frame.initial_code_rate);
+    float snr_db = v2::decodeSNR(frame.measured_snr);
+
+    // Apply the initial data mode immediately
+    data_modulation_ = init_mod;
+    data_code_rate_ = init_rate;
 
     // Update remote callsign if we got it from the frame
     if (!src_call.empty() && (remote_call_.empty() || remote_call_ == "REMOTE")) {
         remote_call_ = src_call;
     }
 
-    LOG_MODEM(INFO, "Connection: Connected to %s (mode=%s)",
-              remote_call_.c_str(), waveformModeToString(negotiated_mode_));
+    LOG_MODEM(INFO, "Connection: Connected to %s (waveform=%s, data=%s %s, SNR=%.1f dB)",
+              remote_call_.c_str(), waveformModeToString(negotiated_mode_),
+              modulationToString(data_modulation_), codeRateToString(data_code_rate_), snr_db);
+
+    // We are the initiator - we sent CONNECT and received CONNECT_ACK
+    is_initiator_ = true;
+    handshake_confirmed_ = true;  // Handshake complete for initiator
 
     enterConnected();
+
+    // Initiator can switch to negotiated waveform immediately
+    if (on_handshake_confirmed_) {
+        on_handshake_confirmed_();
+    }
+
+    // Notify application of initial data mode
+    if (on_data_mode_changed_) {
+        on_data_mode_changed_(data_modulation_, data_code_rate_, snr_db);
+    }
 }
 
 void Connection::handleConnectNak(const v2::ConnectFrame& frame, const std::string& src_call) {
@@ -639,7 +713,19 @@ void Connection::tick(uint32_t elapsed_ms) {
                     snprintf(reason, sizeof(reason), "Connection timeout after %d attempts", config_.connect_retries);
                     enterDisconnected(reason);
                 } else {
-                    LOG_MODEM(WARN, "Connection: Connect timeout, retrying (%d/%d)",
+                    // Check if we need to fall back to MFSK after DPSK_ATTEMPTS
+                    if (connect_retry_count_ == DPSK_ATTEMPTS &&
+                        connect_waveform_ == WaveformMode::DPSK) {
+                        connect_waveform_ = WaveformMode::MFSK;
+                        LOG_MODEM(WARN, "Connection: Falling back to MFSK after %d DPSK attempts",
+                                  DPSK_ATTEMPTS);
+                        if (on_connect_waveform_changed_) {
+                            on_connect_waveform_changed_(connect_waveform_);
+                        }
+                    }
+
+                    LOG_MODEM(WARN, "Connection: Connect timeout, retrying via %s (%d/%d)",
+                              waveformModeToString(connect_waveform_),
                               connect_retry_count_ + 1, config_.connect_retries);
                     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                                         config_.mode_capabilities,
@@ -807,6 +893,7 @@ void Connection::reset() {
     mode_change_retry_count_ = 0;
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
+    connect_waveform_ = WaveformMode::DPSK;  // Reset to DPSK for next connect attempt
     arq_.reset();
     file_transfer_.cancel();
     LOG_MODEM(DEBUG, "Connection: Full reset");
@@ -820,35 +907,65 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         return WaveformMode::OFDM;
     }
 
-    if (remote_pref != WaveformMode::AUTO) {
-        uint8_t pref_bit = 0;
-        switch (remote_pref) {
-            case WaveformMode::OFDM:     pref_bit = ModeCapabilities::OFDM; break;
-            case WaveformMode::OTFS_EQ:  pref_bit = ModeCapabilities::OTFS_EQ; break;
-            case WaveformMode::OTFS_RAW: pref_bit = ModeCapabilities::OTFS_RAW; break;
-            default: break;
+    // Helper to convert WaveformMode to capability bit
+    auto modeToBit = [](WaveformMode mode) -> uint8_t {
+        switch (mode) {
+            case WaveformMode::OFDM:     return ModeCapabilities::OFDM;
+            case WaveformMode::OTFS_EQ:  return ModeCapabilities::OTFS_EQ;
+            case WaveformMode::OTFS_RAW: return ModeCapabilities::OTFS_RAW;
+            case WaveformMode::MFSK:     return ModeCapabilities::MFSK;
+            case WaveformMode::DPSK:     return ModeCapabilities::DPSK;
+            default: return 0;
         }
+    };
+
+    // If remote has explicit preference, honor it if we support it
+    if (remote_pref != WaveformMode::AUTO) {
+        uint8_t pref_bit = modeToBit(remote_pref);
         if (common & pref_bit) {
+            LOG_MODEM(INFO, "Connection: Using remote preferred mode: %s",
+                      waveformModeToString(remote_pref));
             return remote_pref;
         }
     }
 
+    // If we have explicit preference, use it if remote supports it
     if (config_.preferred_mode != WaveformMode::AUTO) {
-        uint8_t pref_bit = 0;
-        switch (config_.preferred_mode) {
-            case WaveformMode::OFDM:     pref_bit = ModeCapabilities::OFDM; break;
-            case WaveformMode::OTFS_EQ:  pref_bit = ModeCapabilities::OTFS_EQ; break;
-            case WaveformMode::OTFS_RAW: pref_bit = ModeCapabilities::OTFS_RAW; break;
-            default: break;
-        }
+        uint8_t pref_bit = modeToBit(config_.preferred_mode);
         if (common & pref_bit) {
+            LOG_MODEM(INFO, "Connection: Using local preferred mode: %s",
+                      waveformModeToString(config_.preferred_mode));
             return config_.preferred_mode;
         }
     }
 
-    if (common & ModeCapabilities::OFDM) return WaveformMode::OFDM;
+    // AUTO mode: Select based on measured SNR
+    // Thresholds based on testing (see CLAUDE.md):
+    //   < 0 dB:  MFSK (works at -17 dB reported)
+    //   0-10 dB: DPSK (single-carrier, robust on flutter)
+    //   > 10 dB: OFDM (highest throughput)
+    float snr = measured_snr_db_;
+    LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB", snr);
+
+    if (snr < 0.0f && (common & ModeCapabilities::MFSK)) {
+        LOG_MODEM(INFO, "Connection: Selected MFSK for very low SNR (%.1f dB)", snr);
+        return WaveformMode::MFSK;
+    }
+
+    if (snr < 10.0f && (common & ModeCapabilities::DPSK)) {
+        LOG_MODEM(INFO, "Connection: Selected DPSK for low SNR (%.1f dB)", snr);
+        return WaveformMode::DPSK;
+    }
+
+    // Default priority for adequate SNR: OFDM > OTFS > DPSK > MFSK
+    if (common & ModeCapabilities::OFDM) {
+        LOG_MODEM(INFO, "Connection: Selected OFDM (SNR=%.1f dB)", snr);
+        return WaveformMode::OFDM;
+    }
     if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
     if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
+    if (common & ModeCapabilities::DPSK) return WaveformMode::DPSK;
+    if (common & ModeCapabilities::MFSK) return WaveformMode::MFSK;
 
     return WaveformMode::OFDM;
 }
