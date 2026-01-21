@@ -156,11 +156,16 @@ struct OFDMModulator::Impl {
 
             int fft_idx = (i + config.fft_size) % config.fft_size;
 
-            // Every pilot_spacing carrier is a pilot
-            if (pilot_count % config.pilot_spacing == 0) {
-                pilot_carrier_indices.push_back(fft_idx);
-            } else {
+            // If use_pilots=false (e.g., DQPSK), all carriers are data
+            if (!config.use_pilots) {
                 data_carrier_indices.push_back(fft_idx);
+            } else {
+                // Every pilot_spacing carrier is a pilot
+                if (pilot_count % config.pilot_spacing == 0) {
+                    pilot_carrier_indices.push_back(fft_idx);
+                } else {
+                    data_carrier_indices.push_back(fft_idx);
+                }
             }
             ++pilot_count;
         }
@@ -265,6 +270,53 @@ struct OFDMModulator::Impl {
             real_signal[i] = mixed.real();
         }
         return real_signal;
+    }
+
+    // ========================================================================
+    // SCHMIDL-COX PREAMBLE
+    // ========================================================================
+    //
+    // Creates an STS symbol using only EVEN FFT bins. This produces a time-domain
+    // signal where the second half is identical to the first half:
+    //   x[n] = x[n + N/2]  for n in [0, N/2-1]
+    //
+    // Benefits:
+    // - CFO range doubles: ±fs/N = ±93.75 Hz (vs ±42.9 Hz with full-symbol correlation)
+    // - Schmidl-Cox timing metric: M(d) = |P(d)|² / R(d)²
+    // - More robust plateau-shaped timing metric
+    //
+    std::vector<Complex> createSchmidlCoxSTS() {
+        std::vector<Complex> freq_domain(config.fft_size, Complex(0, 0));
+
+        // Place sync sequence on EVEN FFT bins only
+        // This creates two identical halves in time domain
+        size_t seq_idx = 0;
+        for (int carrier_idx : data_carrier_indices) {
+            // Only use even FFT bin indices
+            if (carrier_idx % 2 == 0) {
+                freq_domain[carrier_idx] = sync_sequence[seq_idx % sync_sequence.size()];
+            }
+            seq_idx++;
+        }
+
+        // IFFT to time domain
+        std::vector<Complex> time_domain;
+        fft.inverse(freq_domain, time_domain);
+
+        // Add cyclic prefix
+        std::vector<Complex> symbol_with_cp;
+        uint32_t cp_len = config.getCyclicPrefix();
+        symbol_with_cp.reserve(config.fft_size + cp_len);
+
+        // CP is copy of end of symbol
+        for (size_t i = config.fft_size - cp_len; i < config.fft_size; ++i) {
+            symbol_with_cp.push_back(time_domain[i]);
+        }
+        for (const auto& s : time_domain) {
+            symbol_with_cp.push_back(s);
+        }
+
+        return symbol_with_cp;
     }
 };
 
@@ -394,19 +446,26 @@ Samples OFDMModulator::generatePreamble() {
     // Initialize DBPSK state: all carriers start at +1 (reference symbol)
     impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
-    // Preamble structure:
-    // 1. Short training sequence (STS) - for AGC, coarse timing
-    // 2. Long training sequence (LTS) - for fine timing, channel est
-    // 3. Signal field - modulation/coding info
+    // Preamble structure (Schmidl-Cox):
+    // 0. Guard prefix - silence before signal for sync detector headroom
+    // 1. Short training sequence (STS) - Schmidl-Cox style (even subcarriers only)
+    //    Each STS symbol has two identical halves for wide-range CFO estimation
+    //    CFO range: ±fs/N = ±93.75 Hz (for N=512)
+    // 2. Long training sequence (LTS) - for fine timing, channel estimation
+    //    Uses all subcarriers for proper channel estimation
 
     Samples preamble;
 
-    // Generate STS: repeated short symbol
-    auto short_sym = impl_->createOFDMSymbol(
-        std::vector<Complex>(impl_->sync_sequence.begin(),
-                            impl_->sync_sequence.begin() + impl_->data_carrier_indices.size()),
-        false  // no pilots
-    );
+    // Guard prefix: 1 OFDM symbol worth of silence (~12ms at 48kHz)
+    // This ensures sync detector always has "before" samples to correlate against
+    // In real HF, radio PTT delay provides this naturally (50-300ms)
+    // We add minimal guard so TX works even in direct loopback tests
+    constexpr size_t GUARD_SAMPLES = 560;  // CP + FFT = one symbol period
+    preamble.resize(GUARD_SAMPLES, 0.0f);
+
+    // Generate Schmidl-Cox STS: only even subcarriers
+    // Time-domain: x[n] = x[n + N/2], enabling half-symbol correlation
+    auto short_sym = impl_->createSchmidlCoxSTS();
 
     // Repeat STS 4 times for robust sync
     auto sts_real = impl_->complexToReal(short_sym);

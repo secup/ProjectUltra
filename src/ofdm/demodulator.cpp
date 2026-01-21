@@ -386,7 +386,7 @@ struct OFDMDemodulator::Impl {
     // We need at least this much data to detect a preamble
     static constexpr size_t MIN_SEARCH_SAMPLES = 4000;   // Minimum buffer before searching
     static constexpr size_t MAX_BUFFER_SAMPLES = 240000; // ~5 seconds at 48kHz
-    static constexpr size_t OVERLAP_SAMPLES = 4000;      // Keep for boundary-spanning preambles
+    static constexpr size_t OVERLAP_SAMPLES = 20000;     // Keep for boundary-spanning preambles (~400ms PTT)
 
     // Pre-computed interpolation lookup (avoids O(n²) per symbol)
     struct InterpInfo {
@@ -465,10 +465,15 @@ struct OFDMDemodulator::Impl {
 
             int fft_idx = (i + config.fft_size) % config.fft_size;
 
-            if (pilot_count % config.pilot_spacing == 0) {
-                pilot_carrier_indices.push_back(fft_idx);
-            } else {
+            // If use_pilots=false (e.g., DQPSK), all carriers are data
+            if (!config.use_pilots) {
                 data_carrier_indices.push_back(fft_idx);
+            } else {
+                if (pilot_count % config.pilot_spacing == 0) {
+                    pilot_carrier_indices.push_back(fft_idx);
+                } else {
+                    data_carrier_indices.push_back(fft_idx);
+                }
             }
             ++pilot_count;
         }
@@ -669,8 +674,78 @@ struct OFDMDemodulator::Impl {
         return P / normalization;  // Safe now that we've checked energy
     }
 
-    // Analytic signal correlation for CFO estimation (phase-preserving)
-    // The angle of P gives CFO estimate, but timing has ~10-12 sample bias due to Hilbert edge effects
+    // ========================================================================
+    // SCHMIDL-COX SYNCHRONIZATION
+    // ========================================================================
+    //
+    // The Schmidl-Cox preamble uses only EVEN subcarriers, creating a time-domain
+    // symbol where the second half equals the first half: x[n] = x[n + N/2]
+    //
+    // This enables HALF-SYMBOL correlation:
+    //   P(d) = Σ r*(d+n) × r(d+n+N/2)  for n in [0, N/2-1]
+    //   R(d) = Σ |r(d+n+N/2)|²          for n in [0, N/2-1]
+    //
+    // Benefits:
+    // 1. CFO range DOUBLES: ±fs/N = ±93.75 Hz (vs ±42.9 Hz with full-symbol)
+    // 2. More robust timing metric with plateau shape
+    // 3. CFO doesn't degrade correlation magnitude (phase-invariant)
+
+    // Schmidl-Cox correlation: correlate first half with second half of FFT portion
+    // Returns normalized correlation magnitude (amplitude-invariant)
+    float measureSchmidlCoxCorrelation(size_t offset, Complex* out_P = nullptr, float* out_energy = nullptr) {
+        size_t cp_len = config.getCyclicPrefix();
+        size_t fft_len = config.fft_size;
+        size_t half_len = fft_len / 2;
+
+        // We need: CP + FFT samples
+        if (offset + cp_len + fft_len > rx_buffer.size()) {
+            if (out_energy) *out_energy = 0.0f;
+            return 0.0f;
+        }
+
+        // Skip CP, correlate within FFT portion (which has two identical halves)
+        size_t data_start = offset + cp_len;
+
+        // Remove DC offset before correlation (handles receiver DC bias)
+        float dc_sum = 0.0f;
+        for (size_t i = 0; i < fft_len; ++i) {
+            dc_sum += rx_buffer[data_start + i];
+        }
+        float dc_offset = dc_sum / fft_len;
+
+        std::vector<float> dc_removed(fft_len);
+        for (size_t i = 0; i < fft_len; ++i) {
+            dc_removed[i] = rx_buffer[data_start + i] - dc_offset;
+        }
+
+        // Use analytic signal for CFO-invariant correlation magnitude
+        auto analytic = toAnalytic(dc_removed.data(), fft_len);
+
+        Complex P(0.0f, 0.0f);
+        float R1 = 0.0f;  // Energy of first half
+        float R2 = 0.0f;  // Energy of second half
+
+        for (size_t i = 0; i < half_len; ++i) {
+            P += std::conj(analytic[i]) * analytic[i + half_len];
+            R1 += std::norm(analytic[i]);
+            R2 += std::norm(analytic[i + half_len]);
+        }
+
+        if (out_P) *out_P = P;
+        if (out_energy) *out_energy = R2;  // Return second half energy for backward compat
+
+        // Symmetric normalization: |P| / sqrt(R1 * R2)
+        // This is amplitude-invariant - works even if two halves have different amplitudes
+        // (e.g., during AGC ramp-up)
+        float normalization = std::sqrt(R1 * R2);
+        if (normalization < 1e-10f) {
+            return 0.0f;
+        }
+
+        return std::abs(P) / normalization;
+    }
+
+    // Legacy full-symbol correlation for comparison/fallback
     float measureAnalyticCorrelation(size_t offset, Complex* out_P = nullptr, float* out_energy = nullptr) {
         if (offset + symbol_samples * 2 > rx_buffer.size()) return 0.0f;
 
@@ -695,16 +770,10 @@ struct OFDMDemodulator::Impl {
     }
 
     float measureCorrelation(size_t offset, float* out_energy = nullptr) {
-        // Use REAL correlation for sync detection timing
-        // Real correlation gives a sharp peak at the true position without Hilbert edge effects.
-        // Analytic correlation has edge effects that cause ~10-12 sample timing bias and lower
-        // correlation at the true position (especially at signal boundaries).
-        //
-        // Note: Real correlation IS sensitive to CFO, but:
-        // 1. For sync TIMING, we just need the peak position - CFO affects magnitude, not position
-        // 2. CFO estimation is done separately using the analytic signal after sync is found
-        // 3. At reasonable CFO (<50Hz), correlation reduction is small (~1-2%)
-        return measureRealCorrelation(offset, out_energy);
+        // Use Schmidl-Cox half-symbol correlation for sync detection
+        // This works because our STS uses only even subcarriers,
+        // creating two identical halves within each symbol.
+        return measureSchmidlCoxCorrelation(offset, nullptr, out_energy);
     }
 
     bool detectSync(size_t offset) {
@@ -712,10 +781,9 @@ struct OFDMDemodulator::Impl {
         float normalized = measureCorrelation(offset, &energy);
 
         // Require minimum energy to avoid false triggers on transients/noise
-        // Energy is sum of squares over ~560 samples * 2 windows
-        // For 0.3 RMS signal: energy = 560 * 0.3^2 * 2 = 100.8
-        // Use high threshold to reject finger snaps and other transients
-        constexpr float MIN_ENERGY = 80.0f;  // Require substantial sustained signal
+        // Energy is sum of squares over N/2 = 256 samples
+        // For 0.3 RMS signal: energy = 256 * 0.3^2 = 23
+        constexpr float MIN_ENERGY = 20.0f;
         if (energy < MIN_ENERGY) {
             return false;
         }
@@ -729,48 +797,44 @@ struct OFDMDemodulator::Impl {
         return normalized > sync_threshold;
     }
 
-    // Coarse CFO estimation using analytic signal correlation
-    // Uses adjacent STS symbols to estimate frequency offset from phase rotation
-    // Phase difference between symbols = 2π × (fc + δf) × L / fs
-    // Returns estimated frequency offset in Hz
+    // Schmidl-Cox CFO estimation
+    // Uses half-symbol correlation within a single STS symbol
+    // CFO range: ±fs/N = ±93.75 Hz (for N=512)
     float estimateCoarseCFO(size_t sync_offset) {
-        size_t sym_len = config.fft_size + config.getCyclicPrefix();
+        size_t cp_len = config.getCyclicPrefix();
+        size_t fft_len = config.fft_size;
+        size_t half_len = fft_len / 2;
 
-        // Need at least 2 symbols for estimate
-        if (sync_offset + sym_len * 2 > rx_buffer.size()) {
+        // Skip CP, work with FFT portion
+        size_t data_start = sync_offset + cp_len;
+
+        if (data_start + fft_len > rx_buffer.size()) {
             return 0.0f;
         }
 
-        // Compute analytic signal on the COMBINED window (both symbols together)
-        // This preserves the phase relationship between the two symbols
-        auto analytic = toAnalytic(&rx_buffer[sync_offset], sym_len * 2);
+        // Compute analytic signal for phase-preserving correlation
+        auto analytic = toAnalytic(&rx_buffer[data_start], fft_len);
 
-        // Complex correlation between first symbol and second symbol
+        // Schmidl-Cox correlation: first half with second half
         Complex P(0.0f, 0.0f);
-        float R = 0.0f;
-
-        for (size_t i = 0; i < sym_len; ++i) {
-            P += std::conj(analytic[i]) * analytic[i + sym_len];
-            R += std::norm(analytic[i + sym_len]);
+        for (size_t i = 0; i < half_len; ++i) {
+            P += std::conj(analytic[i]) * analytic[i + half_len];
         }
 
-        if (R < 1e-10f) {
-            return 0.0f;
-        }
-
-        // Extract phase angle - this is the phase rotation between symbols
-        // The Hilbert transform creates an analytic signal effectively at baseband,
-        // so the phase directly represents the frequency offset (no carrier subtraction needed)
+        // Extract phase angle
         float phase = std::atan2(P.imag(), P.real());
 
-        // Convert phase to frequency: CFO = phase / (2π × L / fs)
-        // The phase represents the rotation over sym_len samples
-        float T_sym = static_cast<float>(sym_len) / config.sample_rate;
-        float cfo_hz = phase / (2.0f * M_PI * T_sym);
+        // Schmidl-Cox CFO formula:
+        // Phase rotation over N/2 samples = 2π × CFO × (N/2) / fs
+        // Therefore: CFO = phase × fs / (π × N)
+        float cfo_hz = phase * config.sample_rate / (M_PI * fft_len);
 
-        // Clamp to reasonable range
-        // Maximum unambiguous range: ±fs/(2*L) = ±42.9 Hz for our params
-        cfo_hz = std::max(-40.0f, std::min(40.0f, cfo_hz));
+        // Clamp to unambiguous range: ±fs/N = ±93.75 Hz
+        float max_cfo = config.sample_rate / fft_len;
+        cfo_hz = std::max(-max_cfo, std::min(max_cfo, cfo_hz));
+
+        LOG_DEMOD(DEBUG, "Schmidl-Cox CFO: phase=%.3f rad, cfo=%.1f Hz (max ±%.1f Hz)",
+                  phase, cfo_hz, max_cfo);
 
         return cfo_hz;
     }
@@ -1222,8 +1286,8 @@ struct OFDMDemodulator::Impl {
                 freq_offset_filtered = adaptive_alpha * total_cfo +
                                       (1.0f - adaptive_alpha) * freq_offset_filtered;
 
-                // Clamp to reasonable range (±50 Hz for HF)
-                freq_offset_hz = std::max(-50.0f, std::min(50.0f, freq_offset_filtered));
+                // Clamp to Schmidl-Cox unambiguous range (±fs/N ≈ ±93 Hz for N=512)
+                freq_offset_hz = std::max(-90.0f, std::min(90.0f, freq_offset_filtered));
 
                 LOG_DEMOD(TRACE, "Freq offset: residual=%.2f Hz, total=%.2f Hz, filtered=%.2f Hz",
                          residual_cfo, total_cfo, freq_offset_hz);
@@ -1941,39 +2005,15 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 if (plateau_count >= MIN_PLATEAU_SAMPLES) {
                     found_sync = true;
 
-                    // Sync timing depends on how we detected the preamble:
-                    //
-                    // The "improvement" (peak_corr - coarse_corr) indicates whether we
-                    // detected during ramp-up or on the plateau:
-                    //
-                    // improvement > 0.03: Detected on RAMP-UP (real audio with leading silence)
-                    //   - Coarse detection is early, during correlation ramp-up
-                    //   - Apply 4.5×CP offset to reach optimal FFT window position
-                    //   - This was empirically verified with Mac→Linux hardware recordings
-                    //
-                    // improvement <= 0.03: Detected on PLATEAU (clean signal or already optimal)
-                    //   - Coarse detection is already at or near optimal position
-                    //   - Use peak position (same as coarse for truly clean signals)
-                    //
-                    constexpr float RAMP_THRESHOLD = 0.03f;
-
+                    // Schmidl-Cox timing: use peak position directly
+                    // The half-symbol correlation peaks at the optimal symbol boundary
+                    // (where the CP starts). No additional offset needed.
                     float improvement = peak_corr - corr;
+                    sync_offset = peak_pos;
+                    sync_corr = peak_corr;
 
-                    if (improvement > RAMP_THRESHOLD) {
-                        // Real audio detected on ramp-up - apply 4.5×CP offset
-                        sync_offset = i + CP_TIMING_OFFSET;
-                        sync_corr = corr;
-                    } else {
-                        // On plateau - use COARSE position (first above threshold)
-                        // Don't use peak because noise fluctuations on plateau can
-                        // cause the "peak" to be at random positions
-                        sync_offset = i;
-                        sync_corr = corr;
-                    }
-
-                    LOG_SYNC(INFO, "Preamble: coarse=%zu, peak=%zu, sync=%zu, corr=%.3f/%.3f, impr=%.3f, ramp=%d",
-                             i, peak_pos, sync_offset, corr, peak_corr, improvement,
-                             improvement > RAMP_THRESHOLD ? 1 : 0);
+                    LOG_SYNC(INFO, "Preamble: coarse=%zu, peak=%zu, sync=%zu, corr=%.3f/%.3f, impr=%.3f",
+                             i, peak_pos, sync_offset, corr, peak_corr, improvement);
                     break;
                 }
             }
