@@ -157,13 +157,17 @@ public:
         }
     }
 
-    // Find preamble (tone sweep pattern)
+    // Find preamble (tone sweep pattern) - optimized for low SNR
     // Returns offset to start of preamble, or -1 if not found
     //
-    // Detection requires:
-    // 1. At least 80% of expected tone sequence matches (strict to avoid false positives)
-    // 2. Minimum signal energy (reject noise/silence)
-    // 3. Dominant tone has significantly more power than others (reject broadband signals)
+    // Uses two-stage detection:
+    // 1. Coarse: Find regions with narrowband energy (any tone activity)
+    // 2. Fine: Verify tone sweep pattern matches expected sequence
+    //
+    // At very low SNR (-17 dB reported = 0 dB actual), we need:
+    // - Lower thresholds
+    // - More integration (longer preamble)
+    // - Robust energy detection
     int findPreamble(SampleSpan samples, int cycles = 2) {
         int symbol_len = config_.samples_per_symbol;
         int preamble_len = cycles * config_.num_tones * symbol_len;
@@ -174,35 +178,51 @@ public:
         int best_offset = -1;
 
         int search_step = symbol_len / 4;
-        int max_search = std::min((int)samples.size() - preamble_len, preamble_len);
+        int max_search = std::min((int)samples.size() - preamble_len, preamble_len * 2);
 
-        // Minimum energy threshold per symbol (sum of squares)
-        constexpr float MIN_ENERGY = 10.0f;
+        // Very low energy threshold (for -17 dB operation)
+        // Signal power is ~0.02 at 0 dB actual SNR in narrowband
+        constexpr float MIN_ENERGY = 1.0f;
 
-        // Minimum ratio of dominant tone power to total power
-        // Real MFSK has most energy in one tone; DPSK/OFDM spreads energy
-        constexpr float MIN_DOMINANCE_RATIO = 0.3f;
+        // Lower dominance ratio for low SNR (noise raises baseline)
+        constexpr float MIN_DOMINANCE_RATIO = 0.2f;
 
+        // Stage 1: Coarse search - find regions with narrowband activity
+        std::vector<int> candidate_offsets;
         for (int offset = 0; offset <= max_search; offset += search_step) {
+            // Check first symbol for any tone activity
+            SampleSpan first_sym(samples.data() + offset, symbol_len);
+            auto powers = getTonePowers(first_sym);
+
+            float max_power = 0;
+            float total_power = 0;
+            for (int i = 0; i < config_.num_tones; i++) {
+                total_power += powers[i];
+                if (powers[i] > max_power) max_power = powers[i];
+            }
+
+            // Check if there's significant narrowband energy
+            if (total_power > MIN_ENERGY && max_power / (total_power + 1e-10f) > MIN_DOMINANCE_RATIO) {
+                candidate_offsets.push_back(offset);
+            }
+        }
+
+        // Stage 2: Fine search - verify tone sequence at candidates
+        for (int offset : candidate_offsets) {
             float score = 0;
             int valid_symbols = 0;
 
             for (int c = 0; c < cycles; c++) {
                 for (int t = 0; t < config_.num_tones; t++) {
                     int sym_offset = offset + (c * config_.num_tones + t) * symbol_len;
-                    SampleSpan sym(samples.data() + sym_offset, symbol_len);
+                    if (sym_offset + symbol_len > (int)samples.size()) continue;
 
-                    // Check symbol energy first
-                    float energy = 0;
-                    for (int i = 0; i < symbol_len; i++) {
-                        energy += sym[i] * sym[i];
-                    }
-                    if (energy < MIN_ENERGY) continue;
+                    SampleSpan sym(samples.data() + sym_offset, symbol_len);
 
                     // Get all tone powers
                     auto powers = getTonePowers(sym);
 
-                    // Find max and total power
+                    // Find max tone
                     float max_power = 0;
                     int max_idx = 0;
                     float total_power = 0;
@@ -214,19 +234,24 @@ public:
                         }
                     }
 
-                    // Check dominance ratio (single tone should dominate)
-                    if (total_power > 0 && max_power / total_power < MIN_DOMINANCE_RATIO) {
-                        continue;  // Energy too spread out (likely DPSK or noise)
-                    }
+                    // At low SNR, we may not always detect the right tone
+                    // but we should detect SOMETHING narrowband
+                    if (total_power > MIN_ENERGY * 0.5f) {
+                        valid_symbols++;
 
-                    valid_symbols++;
-                    if (max_idx == t) score += 1.0f;
+                        // Score based on how close detected tone is to expected
+                        // Perfect match = 1.0, adjacent = 0.5, farther = 0
+                        int tone_error = std::abs(max_idx - t);
+                        if (tone_error == 0) score += 1.0f;
+                        else if (tone_error == 1) score += 0.5f;
+                        else if (tone_error == 2) score += 0.25f;
+                    }
                 }
             }
 
-            // Require at least 50% valid symbols (with good energy and dominance)
+            // Require at least 30% valid symbols for low SNR operation
             int total_symbols = cycles * config_.num_tones;
-            if (valid_symbols < total_symbols / 2) continue;
+            if (valid_symbols < total_symbols * 3 / 10) continue;
 
             score /= total_symbols;
 
@@ -236,8 +261,9 @@ public:
             }
         }
 
-        // Require 80% match rate (strict threshold to avoid false positives)
-        if (best_score < 0.8f) return -1;
+        // Lower threshold for low SNR (60% instead of 80%)
+        // False positives are handled by LDPC decode failure
+        if (best_score < 0.6f) return -1;
         return best_offset;
     }
 

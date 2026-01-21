@@ -99,28 +99,53 @@ public:
         buildPulseShape();
     }
 
-    // Generate preamble for sync and phase reference
-    // Constant carrier provides energy detection and phase reference
-    // No envelope shaping - RF filtering handles spectral shaping
-    Samples generatePreamble(int num_symbols = 32) {
+    // Generate preamble for sync using Barker-13 code
+    // Barker codes have excellent autocorrelation: peak=13, max sidelobe=1
+    // This enables robust matched-filter detection at low SNR
+    //
+    // Structure: [Barker-13 × 3 repeats] = 39 symbols
+    // Using DBPSK modulation for maximum robustness
+    Samples generatePreamble(int /* num_symbols */ = 32) {
         Samples out;
-        out.reserve(num_symbols * config_.samples_per_symbol);
 
-        // Generate a constant-carrier preamble (no modulation)
+        // Barker-13 code: +1 +1 +1 +1 +1 -1 -1 +1 +1 -1 +1 -1 +1
+        static const int BARKER13[] = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
+        static const int BARKER_LEN = 13;
+        static const int REPEATS = 3;  // Repeat for longer integration
+
+        int total_symbols = BARKER_LEN * REPEATS;
+        out.reserve(total_symbols * config_.samples_per_symbol);
+
         float carrier_inc = 2.0f * M_PI * config_.carrier_freq / config_.sample_rate;
         float phase = 0.0f;
+        float symbol_phase = 0.0f;  // DBPSK: 0 for +1, π for -1
 
-        for (int i = 0; i < num_symbols * config_.samples_per_symbol; i++) {
-            out.push_back(std::cos(phase));
-            phase += carrier_inc;
-            if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+        for (int rep = 0; rep < REPEATS; rep++) {
+            for (int s = 0; s < BARKER_LEN; s++) {
+                // DBPSK: phase change of π for -1, 0 for +1
+                if (BARKER13[s] < 0) {
+                    symbol_phase += M_PI;
+                }
+
+                // Generate one symbol
+                for (int i = 0; i < config_.samples_per_symbol; i++) {
+                    out.push_back(std::cos(phase + symbol_phase));
+                    phase += carrier_inc;
+                    if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+                }
+            }
         }
 
         // Reset modulator state to start data at known phase
         carrier_phase_ = phase;
-        symbol_phase_ = 0.0f;
+        symbol_phase_ = symbol_phase;
 
         return out;
+    }
+
+    // Get expected preamble length in samples
+    int getPreambleLength() const {
+        return 13 * 3 * config_.samples_per_symbol;  // Barker-13 × 3 repeats
     }
 
     // Modulate data bytes
@@ -238,112 +263,153 @@ public:
         }
     }
 
-    // Find preamble using OFDM-style autocorrelation
+    // Find preamble using matched-filter correlation
     //
-    // Same technique as OFDM sync detection:
-    // - Correlate signal with delayed copy of itself (delay = 1 symbol period)
-    // - During preamble: symbols identical → autocorrelation ≈ 1.0
-    // - During data: DQPSK has corr ≈ 0.7 (adjacent symbols have correlated phases)
-    // - Detect TRANSITION from ~1.0 to ~0.7, not a drop to 0.4
+    // Matched filter approach:
+    // 1. Generate expected preamble waveform (Barker-13 × 3)
+    // 2. Cross-correlate received signal with template
+    // 3. Find peak of normalized correlation
+    // 4. Peak location indicates sync point
+    //
+    // This is optimal for low SNR detection (matched filter = optimal detector)
     //
     // Returns offset to first sample after preamble (start of data)
-    int findPreamble(SampleSpan samples, int num_symbols = 32) {
+    int findPreamble(SampleSpan samples, int /* num_symbols */ = 32) {
+        // Generate preamble template if not cached
+        if (preamble_template_.empty()) {
+            buildPreambleTemplate();
+        }
+
+        int preamble_len = preamble_template_.size();
         int symbol_len = config_.samples_per_symbol;
-        int preamble_len = num_symbols * symbol_len;
 
-        if (samples.size() < (size_t)preamble_len + symbol_len * 2) return -1;
+        if ((int)samples.size() < preamble_len + symbol_len) return -1;
 
-        // Thresholds tuned for DQPSK
-        // Preamble has corr ≈ 1.0, DQPSK data has corr ≈ 0.7
-        // Detect transition when corr drops from ~1.0 to <0.9
-        constexpr float CORR_PREAMBLE = 0.95f;  // Clear preamble (near-perfect)
-        constexpr float CORR_TRANSITION = 0.75f; // Below this = data started (closer to 0.7 data corr)
-        // Require significant preamble length to avoid MFSK false positives
-        // MFSK tones last ~3 DPSK symbols, so require 16+ symbols of sustained high corr
-        const int MIN_PREAMBLE_SAMPLES = 16 * symbol_len;  // ~16 symbols worth
+        // Detection threshold - normalized correlation must exceed this
+        // At 0 dB SNR, expect ~0.5 correlation; at 10 dB expect ~0.9
+        constexpr float DETECTION_THRESHOLD = 0.35f;
 
-        // Minimum energy threshold (sum of squares)
-        constexpr float MIN_ENERGY = 50.0f;
+        // Minimum energy threshold (reject silence)
+        constexpr float MIN_ENERGY = 10.0f;
 
-        int max_search = std::min((int)samples.size() - preamble_len - symbol_len, preamble_len * 3);
+        // Pre-compute template energy
+        float template_energy = 0;
+        for (float t : preamble_template_) {
+            template_energy += t * t;
+        }
 
-        // Sliding window autocorrelation
-        int preamble_start = -1;
+        int max_search = samples.size() - preamble_len;
+        int search_step = symbol_len / 4;  // Coarse search first
 
-        for (int i = 0; i <= max_search; i++) {
-            // Autocorrelation: correlate samples[i..i+N] with samples[i+N..i+2N]
-            float P = 0;
-            float E1 = 0, E2 = 0;
+        float best_corr = 0;
+        int best_offset = -1;
 
-            for (int j = 0; j < symbol_len; j++) {
-                float s1 = samples[i + j];
-                float s2 = samples[i + symbol_len + j];
-                P += s1 * s2;
-                E1 += s1 * s1;
-                E2 += s2 * s2;
+        // Coarse search
+        for (int i = 0; i < max_search; i += search_step) {
+            // Quick energy check
+            float energy = 0;
+            for (int j = 0; j < preamble_len; j += 8) {
+                energy += samples[i + j] * samples[i + j];
+            }
+            energy *= 8;  // Approximate total energy
+
+            if (energy < MIN_ENERGY) continue;
+
+            // Cross-correlate with template
+            float corr = 0;
+            float sig_energy = 0;
+            for (int j = 0; j < preamble_len; j++) {
+                corr += samples[i + j] * preamble_template_[j];
+                sig_energy += samples[i + j] * samples[i + j];
             }
 
-            // Energy must exceed threshold (reject noise/silence)
-            if (E2 < MIN_ENERGY) {
-                preamble_start = -1;
-                continue;
-            }
+            // Normalize
+            float norm = std::sqrt(sig_energy * template_energy);
+            if (norm < 1e-10f) continue;
+            float norm_corr = std::abs(corr) / norm;
 
-            // Compute normalized correlation
-            float corr = std::abs(P) / (std::sqrt(E1 * E2) + 1e-10f);
-
-            if (corr >= CORR_PREAMBLE) {
-                // In preamble region - start tracking if not already
-                if (preamble_start < 0) {
-                    preamble_start = i;
-                }
-            } else if (corr < CORR_TRANSITION && preamble_start >= 0) {
-                // Transition detected - correlation dropped from preamble level
-                // Check we had enough preamble to avoid MFSK false positives
-                int preamble_len_detected = i - preamble_start;
-                if (preamble_len_detected < MIN_PREAMBLE_SAMPLES) {
-                    // Too short - likely MFSK tone, reset and continue
-                    preamble_start = -1;
-                    continue;
-                }
-
-                // Data starts at current position + 1.5 symbols (compensate for early detection)
-                // The correlation drops ~0.5 symbols before actual data boundary
-                int data_start = i + symbol_len + symbol_len / 2;
-
-                // Set phase reference from last preamble symbol
-                int ref_offset = data_start - symbol_len;
-                if (ref_offset >= 0 && ref_offset + symbol_len <= (int)samples.size()) {
-                    SampleSpan ref_sym(samples.data() + ref_offset, symbol_len);
-                    prev_symbol_ = correlateSymbol(ref_sym);
-                }
-
-                return data_start;
-            } else if (corr < CORR_TRANSITION) {
-                // Low correlation but no preamble seen - reset
-                preamble_start = -1;
+            if (norm_corr > best_corr) {
+                best_corr = norm_corr;
+                best_offset = i;
             }
         }
 
-        // Fallback: if we found preamble start but no clear end, use expected length
-        // Also verify we had enough preamble samples
-        if (preamble_start >= 0 && (max_search - preamble_start) >= MIN_PREAMBLE_SAMPLES) {
-            int data_start = preamble_start + preamble_len;
+        // Fine search around best coarse position
+        if (best_offset >= 0 && best_corr > DETECTION_THRESHOLD * 0.8f) {
+            int fine_start = std::max(0, best_offset - search_step);
+            int fine_end = std::min(max_search, best_offset + search_step);
 
-            // Set phase reference
-            int ref_offset = data_start - symbol_len;
-            if (ref_offset >= 0 && ref_offset + symbol_len <= (int)samples.size()) {
-                SampleSpan ref_sym(samples.data() + ref_offset, symbol_len);
-                prev_symbol_ = correlateSymbol(ref_sym);
-            }
+            for (int i = fine_start; i < fine_end; i++) {
+                float corr = 0;
+                float sig_energy = 0;
+                for (int j = 0; j < preamble_len; j++) {
+                    corr += samples[i + j] * preamble_template_[j];
+                    sig_energy += samples[i + j] * samples[i + j];
+                }
 
-            if (data_start + symbol_len <= (int)samples.size()) {
-                return data_start;
+                float norm = std::sqrt(sig_energy * template_energy);
+                if (norm < 1e-10f) continue;
+                float norm_corr = std::abs(corr) / norm;
+
+                if (norm_corr > best_corr) {
+                    best_corr = norm_corr;
+                    best_offset = i;
+                }
             }
         }
 
-        return -1;
+        // Check if we found a valid sync
+        if (best_corr < DETECTION_THRESHOLD) {
+            return -1;
+        }
+
+        // Data starts after preamble
+        int data_start = best_offset + preamble_len;
+
+        // Set phase reference from last preamble symbol
+        int ref_offset = data_start - symbol_len;
+        if (ref_offset >= 0 && ref_offset + symbol_len <= (int)samples.size()) {
+            SampleSpan ref_sym(samples.data() + ref_offset, symbol_len);
+            prev_symbol_ = correlateSymbol(ref_sym);
+        }
+
+        return data_start;
     }
+
+private:
+    // Build preamble template for matched filter
+    void buildPreambleTemplate() {
+        // Barker-13 code
+        static const int BARKER13[] = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
+        static const int BARKER_LEN = 13;
+        static const int REPEATS = 3;
+
+        int total_symbols = BARKER_LEN * REPEATS;
+        preamble_template_.clear();
+        preamble_template_.reserve(total_symbols * config_.samples_per_symbol);
+
+        float carrier_inc = 2.0f * M_PI * config_.carrier_freq / config_.sample_rate;
+        float phase = 0.0f;
+        float symbol_phase = 0.0f;
+
+        for (int rep = 0; rep < REPEATS; rep++) {
+            for (int s = 0; s < BARKER_LEN; s++) {
+                if (BARKER13[s] < 0) {
+                    symbol_phase += M_PI;
+                }
+
+                for (int i = 0; i < config_.samples_per_symbol; i++) {
+                    preamble_template_.push_back(std::cos(phase + symbol_phase));
+                    phase += carrier_inc;
+                    if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+                }
+            }
+        }
+    }
+
+    Samples preamble_template_;  // Cached preamble for matched filter
+
+public:
 
     // Correlate samples to get complex symbol value (I/Q)
     // Note: Q uses -sin for proper quadrature demodulation
