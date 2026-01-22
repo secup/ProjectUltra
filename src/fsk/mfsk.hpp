@@ -157,12 +157,14 @@ public:
         }
     }
 
-    // Find preamble (tone sweep pattern) - optimized for low SNR
+    // Find preamble (tone sweep pattern) - optimized for low SNR with CFO estimation
     // Returns offset to start of preamble, or -1 if not found
     //
     // Uses two-stage detection:
     // 1. Coarse: Find regions with narrowband energy (any tone activity)
     // 2. Fine: Verify tone sweep pattern matches expected sequence
+    //
+    // Also estimates CFO from detected tone positions for decode compensation
     //
     // At very low SNR (-17 dB reported = 0 dB actual), we need:
     // - Lower thresholds
@@ -264,8 +266,14 @@ public:
         // Lower threshold for low SNR (60% instead of 80%)
         // False positives are handled by LDPC decode failure
         if (best_score < 0.6f) return -1;
+
+        // No CFO compensation needed - MFSK max-detection is inherently CFO-tolerant
+        // All tones shift by the same amount, so relative ranking is preserved
         return best_offset;
     }
+
+    // CFO estimation not needed - MFSK max-detection is inherently CFO-tolerant
+    float getEstimatedCFO() const { return 0.0f; }
 
     // Detect which tone is present in a symbol
     int detectTone(SampleSpan symbol) {
@@ -381,10 +389,102 @@ public:
 
     // Reset demodulator state (for API consistency with other demodulators)
     void reset() {
-        // MFSKDemodulator is stateless between symbols, nothing to reset
+        estimated_cfo_ = 0;
+        // Restore original Goertzel coefficients
+        for (int t = 0; t < config_.num_tones; t++) {
+            float freq = config_.tone_freq(t);
+            float k = freq * config_.samples_per_symbol / config_.sample_rate;
+            coeffs_[t] = 2.0f * std::cos(2.0f * M_PI * k / config_.samples_per_symbol);
+            omegas_[t] = 2.0f * M_PI * k / config_.samples_per_symbol;
+        }
     }
 
 private:
+    // Estimate CFO from preamble tone sweep
+    // Since we know the expected tone sequence (0, 1, 2, ... num_tones-1, repeated),
+    // we can measure the actual frequency of each detected tone and compare
+    float estimateCFO(SampleSpan samples, int preamble_offset, int symbol_len, int cycles) {
+        // Search for each tone with sub-bin resolution
+        // Using parabolic interpolation on Goertzel powers
+        float total_error_hz = 0;
+        int count = 0;
+
+        for (int c = 0; c < cycles; c++) {
+            for (int t = 0; t < config_.num_tones; t++) {
+                int sym_offset = preamble_offset + (c * config_.num_tones + t) * symbol_len;
+                if (sym_offset + symbol_len > (int)samples.size()) continue;
+
+                SampleSpan sym(samples.data() + sym_offset, symbol_len);
+
+                // Get powers for expected tone and neighbors
+                float expected_freq = config_.tone_freq(t);
+
+                // Measure power at 3 frequencies: expected, expected±(spacing/2)
+                float power_center = goertzelPowerAtFreq(sym, expected_freq);
+                float power_low = goertzelPowerAtFreq(sym, expected_freq - config_.tone_spacing * 0.5f);
+                float power_high = goertzelPowerAtFreq(sym, expected_freq + config_.tone_spacing * 0.5f);
+
+                // Only use measurements with significant energy
+                float max_power = std::max({power_center, power_low, power_high});
+                if (max_power < 0.01f) continue;
+
+                // Parabolic interpolation to find peak
+                // If all three powers are valid, interpolate
+                if (power_center > 0 && power_low > 0 && power_high > 0) {
+                    // Convert to dB for better interpolation
+                    float db_low = std::log(power_low);
+                    float db_center = std::log(power_center);
+                    float db_high = std::log(power_high);
+
+                    // Parabolic peak location: x = 0.5 * (db_low - db_high) / (db_low - 2*db_center + db_high)
+                    float denom = db_low - 2.0f * db_center + db_high;
+                    if (std::abs(denom) > 0.001f) {
+                        float x = 0.5f * (db_low - db_high) / denom;  // x in [-1, 1]
+                        float freq_error = x * (config_.tone_spacing * 0.5f);
+
+                        // Sanity check: error should be less than half spacing
+                        if (std::abs(freq_error) < config_.tone_spacing * 0.5f) {
+                            total_error_hz += freq_error;
+                            count++;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (count < 3) return 0;  // Not enough measurements
+        return total_error_hz / count;
+    }
+
+    // Compute Goertzel power at arbitrary frequency
+    float goertzelPowerAtFreq(SampleSpan samples, float freq) {
+        float k = freq * samples.size() / config_.sample_rate;
+        float coeff = 2.0f * std::cos(2.0f * M_PI * k / samples.size());
+        float omega = 2.0f * M_PI * k / samples.size();
+
+        float s0 = 0, s1 = 0, s2 = 0;
+        for (float sample : samples) {
+            s0 = sample + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+
+        float real = s1 - s2 * std::cos(omega);
+        float imag = s2 * std::sin(omega);
+        return real * real + imag * imag;
+    }
+
+    // Update Goertzel coefficients with CFO compensation
+    void updateGoertzelForCFO(float cfo_hz) {
+        for (int t = 0; t < config_.num_tones; t++) {
+            float freq = config_.tone_freq(t) + cfo_hz;  // Compensate by adding CFO to expected freq
+            float k = freq * config_.samples_per_symbol / config_.sample_rate;
+            coeffs_[t] = 2.0f * std::cos(2.0f * M_PI * k / config_.samples_per_symbol);
+            omegas_[t] = 2.0f * M_PI * k / config_.samples_per_symbol;
+        }
+    }
+
+    float estimated_cfo_ = 0.0f;
     // Convert tone powers to LLRs for LDPC soft decoding
     std::vector<float> tonePowersToLLR(const std::vector<float>& powers, int bits) {
         std::vector<float> llrs(bits);

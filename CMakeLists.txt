@@ -138,6 +138,15 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(test_sync_robustness PRIVATE ultra_core)
+
+    # Low SNR sync test (DPSK/MFSK)
+    add_executable(test_lowsnr_sync
+        tools/test_lowsnr_sync.cpp
+    )
+    target_include_directories(test_lowsnr_sync PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_lowsnr_sync PRIVATE ultra_core)
 endif()
 
 # GUI Application
