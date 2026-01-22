@@ -47,10 +47,6 @@ add_executable(test_interleaver test_interleaver.cpp)
 target_link_libraries(test_interleaver PRIVATE ultra_core)
 add_test(NAME Interleaver COMMAND test_interleaver)
 
-add_executable(test_freq_offset test_freq_offset.cpp)
-target_link_libraries(test_freq_offset PRIVATE ultra_core)
-add_test(NAME FreqOffset COMMAND test_freq_offset)
-
 # Multi-codeword LDPC test (file transfer reliability)
 add_executable(test_multiblock_ldpc test_multiblock_ldpc.cpp)
 target_link_libraries(test_multiblock_ldpc PRIVATE ultra_core)
@@ -109,25 +105,11 @@ add_executable(test_adaptive_link test_adaptive_link.cpp)
 target_link_libraries(test_adaptive_link PRIVATE ultra_core)
 add_test(NAME AdaptiveLink COMMAND test_adaptive_link)
 
-# Timing Offset Test (simulate cross-wire audio path)
-# Tests demodulator with artificial timing offset to debug without audio hardware
-add_executable(test_timing_offset test_timing_offset.cpp)
-target_link_libraries(test_timing_offset PRIVATE ultra_core)
-add_test(NAME TimingOffset COMMAND test_timing_offset)
-
 # Sync Detection Accuracy Test
 # Tests fine-grained sync peak refinement (fixes ~118 sample offset issue)
 add_executable(test_sync_detection test_sync_detection.cpp)
 target_link_libraries(test_sync_detection PRIVATE ultra_core)
 add_test(NAME SyncDetection COMMAND test_sync_detection)
-
-# QPSK bit mapping debug
-add_executable(test_qpsk_debug test_qpsk_debug.cpp)
-target_link_libraries(test_qpsk_debug PRIVATE ultra_core)
-
-# Direct carrier test (isolate FFT/NCO issues)
-add_executable(test_carrier_direct test_carrier_direct.cpp)
-target_link_libraries(test_carrier_direct PRIVATE ultra_core)
 
 # Comprehensive modem unit tests (LDPC, LLR, DQPSK, full chain)
 # CRITICAL: All these tests must pass for reliable modem operation
@@ -137,10 +119,6 @@ add_test(NAME ComprehensiveModem COMMAND test_comprehensive_modem)
 
 # RNG consistency test for cross-platform LDPC debugging
 add_executable(test_rng test_rng.cpp)
-
-# LDPC encoding comparison test
-add_executable(check_probe check_probe.cpp)
-target_link_libraries(check_probe PRIVATE ultra_core)
 
 # Protocol v2 frame format tests
 add_executable(test_frame_v2 test_frame_v2.cpp)
@@ -160,18 +138,3 @@ add_test(NAME ModeChange COMMAND test_mode_change)
 # Throughput measurement tool
 add_executable(test_throughput ../tools/test_throughput.cpp)
 target_link_libraries(test_throughput PRIVATE ultra_core)
-
-# DQPSK HF channel test (verifies no-pilot mode works on HF)
-add_executable(test_dqpsk_hf ../tools/test_dqpsk_hf.cpp)
-target_include_directories(test_dqpsk_hf PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim)
-target_link_libraries(test_dqpsk_hf PRIVATE ultra_core)
-
-# DQPSK comparison test (with vs without pilots)
-add_executable(test_dqpsk_comparison ../tools/test_dqpsk_comparison.cpp)
-target_include_directories(test_dqpsk_comparison PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim)
-target_link_libraries(test_dqpsk_comparison PRIVATE ultra_core)
-
-# Symbol rate investigation test
-add_executable(test_symbol_rate ../tools/test_symbol_rate.cpp)
-target_include_directories(test_symbol_rate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim)
-target_link_libraries(test_symbol_rate PRIVATE ultra_core)

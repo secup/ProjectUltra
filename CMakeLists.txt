@@ -147,6 +147,17 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(test_lowsnr_sync PRIVATE ultra_core)
+
+    # Threaded simulator - proper real-time audio simulation
+    add_executable(threaded_simulator
+        tools/threaded_simulator.cpp
+        src/gui/modem_engine.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(threaded_simulator PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(threaded_simulator PRIVATE ultra_core)
 endif()
 
 # GUI Application
