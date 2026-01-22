@@ -22,6 +22,8 @@ namespace {
 // LLR clipping to prevent overconfident decisions
 // On fading channels, channel estimation errors can produce huge LLRs
 // that are confidently WRONG. Clipping allows LDPC to correct them.
+// LLR clipping: lower values help LDPC converge when first-symbol errors exist
+// LLR clipping to prevent numerical issues in LDPC decoder
 constexpr float MAX_LLR = 10.0f;
 
 // Minimum LLR magnitude to prevent complete erasures
@@ -404,6 +406,10 @@ struct OFDMDemodulator::Impl {
     // Carrier phase recovery - corrects arbitrary phase offset after sync
     Complex carrier_phase_correction = Complex(1, 0);  // Rotation to apply
     bool carrier_phase_initialized = false;
+
+    // Per-carrier phase from LTS (for DQPSK without pilots)
+    // Each carrier may have different phase due to timing offset
+    std::vector<Complex> lts_carrier_phases;
 
     // Phase inversion detection (for audio paths with inverted polarity)
     bool llr_sign_flip = false;  // Flip LLR signs if inverted
@@ -1757,19 +1763,11 @@ struct OFDMDemodulator::Impl {
         float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
 
         // DQPSK/D8PSK: Initialize reference for differential decoding
-        // When dqpsk_skip_first_symbol is true, use actual received symbols as reference
-        // (sacrifices first symbol's data but makes decoding robust to timing/phase errors)
+        // DQPSK/D8PSK: Initialize reference for differential decoding
+        // TX starts with reference (1,0), so RX should too
         if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
-            if (dqpsk_skip_first_symbol) {
-                // Use received symbols as reference - don't decode this symbol
-                dbpsk_prev_equalized = equalized;
-                dqpsk_skip_first_symbol = false;  // Only skip the first one
-                LOG_DEMOD(DEBUG, "DQPSK: Using first symbol as reference (skipped data)");
-                return;  // Don't add soft bits from this symbol
-            } else {
-                // Original behavior: TX starts with dbpsk_prev_symbols = [1+0j, ...]
-                dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
-            }
+            dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
+            LOG_DEMOD(DEBUG, "DQPSK: Initialized reference with (1,0)");
         }
 
         for (size_t i = 0; i < equalized.size(); ++i) {
@@ -2061,44 +2059,57 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             // If baseline is much lower than signal, there's likely a guard region - find the transition
             // The guard (silence) + noise should be significantly lower than STS (signal) + noise
             if (baseline_energy < signal_energy * 0.3f) {
-                // Search for energy transition from baseline level to signal level
-                float threshold = std::max(baseline_energy * TRANSITION_RATIO, signal_energy * 0.1f);
-
-                // Search limit: normally up to sync_offset, but if sync_offset is suspiciously small
-                // (could be a false sync in guard region), extend the search
-                // Minimum expected sync_offset = guard(560) + some STS samples = ~800
-                size_t expected_min_sync = preamble_symbol_len * 2;  // ~1120 samples
-                size_t search_limit;
-                if (sync_offset < expected_min_sync) {
-                    // sync_offset might be in guard - search further
-                    search_limit = std::min(sync_offset + preamble_symbol_len * 2,
-                                            impl_->rx_buffer.size() - ENERGY_WINDOW);
+                // Special case: if baseline is VERY low (long silence before preamble),
+                // the Schmidl-Cox peak detection should give us the STS start position.
+                // However, the peak position can vary by up to a symbol length depending on
+                // signal content (the correlation search has inherent uncertainty).
+                // Round to the nearest symbol boundary to ensure consistent timing.
+                if (baseline_energy < 1e-5f && signal_energy > 1e-3f) {
+                    // Long silence detected - round sync_offset to nearest symbol boundary
+                    size_t symbol_size = preamble_symbol_len;
+                    size_t rounded = ((sync_offset + symbol_size / 2) / symbol_size) * symbol_size;
+                    guard_end = rounded;
+                    found_guard = true;
+                    LOG_SYNC(DEBUG, "Long silence detected, sync_offset=%zu rounded to %zu",
+                            sync_offset, rounded);
                 } else {
-                    // Normal case - sync_offset is in STS, search up to it
-                    search_limit = sync_offset;
-                }
+                    // Normal case: search for energy transition
+                    float threshold = std::max(baseline_energy * TRANSITION_RATIO, signal_energy * 0.1f);
 
-                if (search_limit <= search_start + ENERGY_WINDOW) {
-                    LOG_SYNC(DEBUG, "search_limit too small, using fallback");
-                } else {
-                    for (size_t i = search_start; i + ENERGY_WINDOW < search_limit; i += SEARCH_STEP) {
-                        float energy = 0;
-                        for (size_t j = 0; j < ENERGY_WINDOW; j++) {
-                            float s = impl_->rx_buffer[i + j];
-                            energy += s * s;
-                        }
-                        energy /= ENERGY_WINDOW;
+                    // Search limit: we need to search PAST sync_offset because:
+                    // 1. sync_offset is in the middle of STS plateau
+                    // 2. With some noise, the transition might be AT or NEAR sync_offset
+                    size_t search_limit = std::min(sync_offset + preamble_symbol_len * 2,
+                                                   impl_->rx_buffer.size() - ENERGY_WINDOW);
 
-                        if (energy > threshold) {
-                            // Found transition - use this position as STS start
-                            // Round UP to nearest symbol boundary to avoid partial overlaps
-                            size_t symbol_size = preamble_symbol_len;
-                            guard_end = ((i + symbol_size - 1) / symbol_size) * symbol_size;
-                            if (guard_end > i + symbol_size) guard_end = i;  // Safety: don't overshoot too much
-                            found_guard = true;
-                            LOG_SYNC(DEBUG, "Found guard→STS transition at %zu (rounded to %zu), energy=%.6f, threshold=%.6f",
-                                    i, guard_end, energy, threshold);
-                            break;
+                    if (search_limit <= search_start + ENERGY_WINDOW) {
+                        LOG_SYNC(DEBUG, "search_limit too small, using fallback");
+                    } else {
+                        for (size_t i = search_start; i + ENERGY_WINDOW < search_limit; i += SEARCH_STEP) {
+                            float energy = 0;
+                            for (size_t j = 0; j < ENERGY_WINDOW; j++) {
+                                float s = impl_->rx_buffer[i + j];
+                                energy += s * s;
+                            }
+                            energy /= ENERGY_WINDOW;
+
+                            if (energy > threshold) {
+                                // Found transition - use this position as STS start
+                                // Round to NEAREST symbol boundary (not always UP)
+                                size_t symbol_size = preamble_symbol_len;
+                                size_t rounded_down = (i / symbol_size) * symbol_size;
+                                size_t rounded_up = rounded_down + symbol_size;
+                                // Pick whichever is closer to detected position
+                                if (i - rounded_down <= rounded_up - i) {
+                                    guard_end = rounded_down;
+                                } else {
+                                    guard_end = rounded_up;
+                                }
+                                found_guard = true;
+                                LOG_SYNC(DEBUG, "Found guard→STS transition at %zu (rounded to %zu), energy=%.6f, threshold=%.6f",
+                                        i, guard_end, energy, threshold);
+                                break;
+                            }
                         }
                     }
                 }
@@ -2120,6 +2131,78 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
             size_t sts_start = guard_end;
 
+            // === Extract carrier phase from LTS (for DQPSK without pilots) ===
+            // LTS starts after 4 STS symbols: sts_start + 4*symbol_samples
+            // We use the first LTS symbol to estimate carrier phase
+            bool is_differential = (impl_->config.modulation == Modulation::DQPSK ||
+                                    impl_->config.modulation == Modulation::D8PSK ||
+                                    impl_->config.modulation == Modulation::DBPSK);
+            LOG_SYNC(DEBUG, "LTS phase check: is_differential=%d, use_pilots=%d",
+                    is_differential, impl_->config.use_pilots);
+            // DISABLED: LTS phase extraction doesn't improve first symbol accuracy
+            // The timing offset between LTS and data causes phase mismatch
+            if (false && is_differential && !impl_->config.use_pilots) {
+                size_t lts_start = sts_start + 4 * impl_->symbol_samples;
+                size_t cp_len = impl_->config.getCyclicPrefix();
+                size_t symbol_size = impl_->config.fft_size + cp_len;
+                LOG_SYNC(DEBUG, "LTS extraction: lts_start=%zu, symbol_size=%zu, buffer_size=%zu",
+                        lts_start, symbol_size, impl_->rx_buffer.size());
+
+                if (lts_start + symbol_size <= impl_->rx_buffer.size()) {
+                    // Mix LTS to baseband (same as data symbols)
+                    impl_->mixer.reset();  // Start from known phase
+                    std::vector<Complex> lts_mixed(impl_->config.fft_size);
+                    for (size_t i = 0; i < impl_->config.fft_size; ++i) {
+                        size_t idx = lts_start + cp_len + i;
+                        float sample = impl_->rx_buffer[idx];
+                        Complex osc = impl_->mixer.next();
+                        lts_mixed[i] = sample * std::conj(osc);
+                    }
+
+                    // FFT to frequency domain
+                    std::vector<Complex> lts_freq;
+                    impl_->fft.forward(lts_mixed, lts_freq);
+
+                    // Extract per-carrier phases from LTS
+                    // With timing offset, each carrier has different phase
+                    impl_->lts_carrier_phases.clear();
+                    impl_->lts_carrier_phases.resize(impl_->data_carrier_indices.size(), Complex(1, 0));
+
+                    int count = 0;
+                    for (size_t i = 0; i < impl_->data_carrier_indices.size(); ++i) {
+                        int idx = impl_->data_carrier_indices[i];
+                        Complex rx = lts_freq[idx];
+                        Complex tx = impl_->sync_sequence[i % impl_->sync_sequence.size()];
+
+                        if (std::abs(rx) > 0.1f && std::abs(tx) > 0.1f) {
+                            Complex h = rx / tx;  // Channel estimate
+                            // Store normalized phase for this carrier
+                            impl_->lts_carrier_phases[i] = h / std::abs(h);
+                            count++;
+                        }
+                    }
+
+                    // Debug: show first few phases
+                    if (count >= 5) {
+                        LOG_SYNC(DEBUG, "LTS carrier phases[0-4]: %.1f° %.1f° %.1f° %.1f° %.1f°",
+                                std::arg(impl_->lts_carrier_phases[0]) * 180.0f / M_PI,
+                                std::arg(impl_->lts_carrier_phases[1]) * 180.0f / M_PI,
+                                std::arg(impl_->lts_carrier_phases[2]) * 180.0f / M_PI,
+                                std::arg(impl_->lts_carrier_phases[3]) * 180.0f / M_PI,
+                                std::arg(impl_->lts_carrier_phases[4]) * 180.0f / M_PI);
+                    }
+
+                    LOG_SYNC(DEBUG, "LTS phase extraction: %d carriers processed", count);
+                    if (count >= 10) {  // Need enough carriers for reliable estimate
+                        impl_->carrier_phase_initialized = true;
+                        LOG_SYNC(DEBUG, "LTS per-carrier phases stored for DQPSK reference");
+                    } else {
+                        LOG_SYNC(DEBUG, "LTS: Not enough carriers for phase estimation (%d)", count);
+                        impl_->lts_carrier_phases.clear();
+                    }
+                }
+            }
+
             // Consume samples: from STS start + full preamble length (4 STS + 2 LTS)
             // Note: preamble_total_len = 6 * symbol_samples covers STS + LTS but NOT guard
             size_t consume = sts_start + preamble_total_len + impl_->manual_timing_offset;
@@ -2133,8 +2216,12 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             impl_->synced_symbol_count.store(0);
             impl_->mixer.reset();
             impl_->dbpsk_prev_equalized.clear();
-            impl_->carrier_phase_initialized = false;
-            impl_->carrier_phase_correction = Complex(1, 0);
+            // Note: carrier_phase_correction may have been set above from LTS
+            // Don't clear it here if already initialized
+            if (!is_differential || impl_->config.use_pilots) {
+                impl_->carrier_phase_initialized = false;
+                impl_->carrier_phase_correction = Complex(1, 0);
+            }
             impl_->dqpsk_skip_first_symbol = false;
         } else {
             // No preamble found - if buffer is large, trim old data but keep overlap
