@@ -157,14 +157,14 @@ public:
         }
     }
 
-    // Find preamble (tone sweep pattern) - optimized for low SNR with CFO estimation
-    // Returns offset to start of preamble, or -1 if not found
+    // Find preamble (tone sweep pattern) - optimized for low SNR
+    //
+    // Returns: DATA START position (first sample after preamble), or -1 if not found
+    //          This is consistent with DPSK/BFSK findPreamble() interface.
     //
     // Uses two-stage detection:
     // 1. Coarse: Find regions with narrowband energy (any tone activity)
     // 2. Fine: Verify tone sweep pattern matches expected sequence
-    //
-    // Also estimates CFO from detected tone positions for decode compensation
     //
     // At very low SNR (-17 dB reported = 0 dB actual), we need:
     // - Lower thresholds
@@ -269,7 +269,16 @@ public:
 
         // No CFO compensation needed - MFSK max-detection is inherently CFO-tolerant
         // All tones shift by the same amount, so relative ranking is preserved
-        return best_offset;
+
+        // Return DATA start position (after preamble), not preamble start
+        // This is consistent with DPSK findPreamble() interface
+        int data_start = best_offset + preamble_len;
+        return data_start;
+    }
+
+    // Get preamble length in samples (useful for callers that need it)
+    int getPreambleLength(int cycles = 2) const {
+        return cycles * config_.num_tones * config_.samples_per_symbol;
     }
 
     // CFO estimation not needed - MFSK max-detection is inherently CFO-tolerant

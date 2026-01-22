@@ -385,6 +385,16 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                 }
             }
 
+            // Debug: log first few symbols' bit extraction
+            static size_t symbol_count = 0;
+            if (symbol_count < 5 && c < 3) {
+                LOG_DEBUG("MOD", "Sym %zu Car %zu: bits=%d (0x%02x) from byte=%d idx=%zu",
+                         symbol_count, c, bits, bits,
+                         data_idx > 0 ? (int)data[data_idx-1] : (int)data[0],
+                         bit_idx);
+            }
+            if (c == carriers_per_symbol - 1) symbol_count++;
+
             // Differential encoding: multiply previous symbol by phase rotation
             if (mod == Modulation::DBPSK) {
                 // 1 bit: 0 → 0° (+1), 1 → 180° (-1)
@@ -403,6 +413,16 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                 };
                 Complex phase_change = dqpsk_phases[bits & 3];
                 Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
+
+                // Debug: log first few DQPSK encodings
+                if (symbol_count < 2 && c < 3) {
+                    LOG_DEBUG("MOD", "DQPSK Sym %zu Car %zu: bits=%d -> phase=(%.2f,%.2f), prev=(%.2f,%.2f), new=(%.2f,%.2f)",
+                             symbol_count, c, bits & 3,
+                             phase_change.real(), phase_change.imag(),
+                             impl_->dbpsk_prev_symbols[c].real(), impl_->dbpsk_prev_symbols[c].imag(),
+                             new_symbol.real(), new_symbol.imag());
+                }
+
                 impl_->dbpsk_prev_symbols[c] = new_symbol;
                 symbol_data.push_back(new_symbol);
             } else if (mod == Modulation::D8PSK) {

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ultra/types.hpp"
-#include "../modem_engine.hpp"
+#include "../modem/modem_engine.hpp"
 
 namespace ultra {
 namespace gui {

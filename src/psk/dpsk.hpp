@@ -293,6 +293,24 @@ public:
 
         if ((int)samples.size() < preamble_samples + symbol_len) return -1;
 
+        // === OPTIMIZATION 1: Energy detection pre-filter ===
+        // Skip expensive correlation if channel is quiet (just noise)
+        float energy = 0;
+        size_t energy_check_len = std::min(samples.size(), (size_t)(preamble_samples * 2));
+        for (size_t i = 0; i < energy_check_len; i++) {
+            energy += samples[i] * samples[i];
+        }
+        float rms = std::sqrt(energy / energy_check_len);
+        if (rms < 0.01f) {
+            // Channel is quiet - no signal present
+            return -1;
+        }
+
+        // === OPTIMIZATION 2: Limit search range ===
+        // Preamble should be near the start of the buffer (within first 4x preamble length)
+        // This prevents searching through 100K+ samples when we only need to check the beginning
+        int max_search_limit = preamble_samples * 4;  // ~160K samples max at 768 samp/sym
+
         // Build expected differential pattern
         // The differential from symbol i to i+1 is the Barker code value used for symbol i+1
         // +1 means "no phase change", -1 means "180° phase change"
@@ -308,8 +326,11 @@ public:
         constexpr float DETECTION_THRESHOLD = 0.55f;
         constexpr float MIN_SYMBOL_ENERGY = 0.001f;
 
-        int max_search = samples.size() - preamble_samples;
-        int search_step = symbol_len / 4;
+        // Limit search range for performance (use optimization 2)
+        int max_search = std::min((int)samples.size() - preamble_samples, max_search_limit);
+        // Coarse step = 1 symbol (was symbol_len/4 = too slow)
+        // Fine search will refine the position
+        int search_step = symbol_len;
 
         float best_score = 0;
         int best_offset = -1;
@@ -340,6 +361,7 @@ public:
         }
 
         if (best_score < DETECTION_THRESHOLD) {
+            // No preamble found - this is normal when monitoring silence/noise
             return -1;
         }
 

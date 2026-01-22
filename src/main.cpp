@@ -552,15 +552,11 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
 
         if ((waveform == WaveformType::MFSK || waveform == WaveformType::AUTO) && data_start < 0) {
             // Try MFSK preamble detection
-            // findPreamble returns start of preamble, not data
-            int preamble_start = mfsk_demod->findPreamble(span);
-            if (preamble_start >= 0) {
+            // findPreamble returns data start position (after preamble)
+            data_start = mfsk_demod->findPreamble(span);
+            if (data_start >= 0) {
                 detected_waveform = WaveformType::MFSK;
-                // Skip past preamble to get to data
-                int preamble_len = 2 * mfsk_config.num_tones * mfsk_config.samples_per_symbol;
-                data_start = preamble_start + preamble_len;
-                std::cerr << "  [SYNC] MFSK preamble at " << preamble_start
-                          << ", data starts at " << data_start << "\n";
+                std::cerr << "  [SYNC] MFSK data starts at " << data_start << "\n";
 
                 // Demodulate data portion
                 ultra::SampleSpan data_span(all_samples.data() + data_start,

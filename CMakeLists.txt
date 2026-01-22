@@ -109,7 +109,10 @@ if(ULTRA_BUILD_TOOLS)
     # CLI Simulator - Command-line version of GUI test mode
     add_executable(cli_simulator
         tools/cli_simulator.cpp
-        src/gui/modem_engine.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(cli_simulator PRIVATE
@@ -120,7 +123,10 @@ if(ULTRA_BUILD_TOOLS)
     # ModemEngine loopback test
     add_executable(test_modem_engine_loopback
         tools/test_modem_engine_loopback.cpp
-        src/gui/modem_engine.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(test_modem_engine_loopback PRIVATE
@@ -131,7 +137,10 @@ if(ULTRA_BUILD_TOOLS)
     # Sync robustness test (comprehensive)
     add_executable(test_sync_robustness
         tools/test_sync_robustness.cpp
-        src/gui/modem_engine.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(test_sync_robustness PRIVATE
@@ -171,7 +180,10 @@ if(ULTRA_BUILD_TOOLS)
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
-        src/gui/modem_engine.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
     )
     target_include_directories(threaded_simulator PRIVATE
@@ -202,7 +214,10 @@ if(ULTRA_BUILD_GUI)
             src/gui/main_gui.cpp
             src/gui/app.cpp
             src/gui/audio_engine.cpp
-            src/gui/modem_engine.cpp
+            src/gui/modem/modem_engine.cpp
+            src/gui/modem/modem_rx.cpp
+            src/gui/modem/modem_mode.cpp
+            src/gui/modem/modem_carrier_sense.cpp
             src/gui/adaptive_mode.cpp
             src/gui/widgets/constellation.cpp
             src/gui/widgets/controls.cpp

@@ -22,7 +22,7 @@
 #include <random>
 #include <cmath>
 
-#include "gui/modem_engine.hpp"
+#include "gui/modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "ultra/logging.hpp"
 
@@ -257,8 +257,7 @@ private:
             auto samples = rx_channel_.read(480, 10);
 
             if (!samples.empty()) {
-                modem_.receiveAudio(samples);
-                modem_.pollRxAudio();
+                modem_.feedAudio(samples);
             }
         }
 

@@ -22,7 +22,9 @@
 #include <vector>
 #include <cmath>
 #include <complex>
-#include "gui/modem_engine.hpp"
+#include <thread>
+#include <chrono>
+#include "gui/modem/modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
 
 using namespace ultra;
@@ -277,23 +279,10 @@ TestResult runSingleTest(const TestConfig& cfg, int msg_idx) {
     applyAmplitudeRamp(full_signal, cfg.amplitude_ramp_ms, SAMPLE_RATE, signal_start);
     applyDCOffset(full_signal, cfg.dc_offset);
 
-    // Process audio
-    if (cfg.chunked_processing) {
-        const size_t CHUNK_SIZE = 768;
-        for (size_t offset = 0; offset < full_signal.size(); offset += CHUNK_SIZE) {
-            size_t chunk_end = std::min(offset + CHUNK_SIZE, full_signal.size());
-            std::vector<float> chunk(full_signal.begin() + offset, full_signal.begin() + chunk_end);
-            rx_modem->receiveAudio(chunk);
-            rx_modem->pollRxAudio();
-        }
-    } else {
-        rx_modem->receiveAudio(full_signal);
-    }
-    // Extra polls to flush any remaining data
-    // Need enough polls for multi-codeword frames to complete
-    for (int i = 0; i < 10; i++) {
-        rx_modem->pollRxAudio();
-    }
+    // Feed all audio - modem threads process automatically
+    rx_modem->feedAudio(full_signal);
+    // Give threads time to process
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // Check result
     if (received_frames.empty()) {

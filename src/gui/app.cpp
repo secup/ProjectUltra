@@ -366,7 +366,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
 App::~App() {
     // Stop simulator threads first
-    stopSimThreads();
+    stopSimulator();
 
     settings_.save();
     audio_.shutdown();
@@ -508,16 +508,15 @@ void App::initVirtualStation() {
 }
 
 // ========================================
-// Threaded Simulation (matches threaded_simulator.cpp)
+// Simplified Simulator (single thread model like cli_simulator)
 // ========================================
 
 std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
-    // Only adds AWGN - PTT noise is added separately at TX start
     if (samples.empty()) return samples;
 
     std::vector<float> result = samples;
 
-    // Apply AWGN to signal
+    // Apply AWGN
     if (simulation_snr_db_ < 50.0f) {
         float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
 
@@ -526,8 +525,7 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
         float signal_rms = std::sqrt(sum_sq / samples.size());
 
         if (signal_rms > 1e-6f) {
-            float signal_power = signal_rms * signal_rms;
-            float noise_power = signal_power / snr_linear;
+            float noise_power = (signal_rms * signal_rms) / snr_linear;
             float noise_stddev = std::sqrt(noise_power);
             std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
 
@@ -540,60 +538,23 @@ std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
     return result;
 }
 
-void App::writeToVirtualChannel(const std::vector<float>& samples) {
-    auto noisy = applyChannelEffects(samples);
-    std::lock_guard<std::mutex> lock(channel_to_virtual_mutex_);
-    channel_to_virtual_.insert(channel_to_virtual_.end(), noisy.begin(), noisy.end());
-    guiLog("SIM: Our TX -> virtual channel (%zu samples)", noisy.size());
-}
-
-void App::writeToOurChannel(const std::vector<float>& samples) {
-    auto noisy = applyChannelEffects(samples);
-    std::lock_guard<std::mutex> lock(channel_to_us_mutex_);
-    channel_to_us_.insert(channel_to_us_.end(), noisy.begin(), noisy.end());
-    guiLog("SIM: Virtual TX -> our channel (%zu samples)", noisy.size());
-}
-
-void App::startSimThreads() {
+void App::startSimulator() {
     if (sim_thread_running_) return;
 
-    guiLog("SIM: Starting simulation threads");
+    guiLog("SIM: Starting simulator");
     sim_thread_running_ = true;
-
-    // Start TX threads (stream audio at 48kHz like real radio)
-    sim_our_tx_thread_ = std::thread(&App::ourTxLoop, this);
-    sim_virtual_tx_thread_ = std::thread(&App::virtualTxLoop, this);
-
-    // Start RX threads (continuous audio processing like real radios)
-    sim_our_rx_thread_ = std::thread(&App::ourRxLoop, this);
-    sim_virtual_rx_thread_ = std::thread(&App::virtualRxLoop, this);
-    sim_virtual_protocol_thread_ = std::thread(&App::virtualProtocolLoop, this);
-
-    guiLog("SIM: All threads started");
+    sim_thread_ = std::thread(&App::simulationLoop, this);
 }
 
-void App::stopSimThreads() {
+void App::stopSimulator() {
     if (!sim_thread_running_) return;
 
-    guiLog("SIM: Stopping simulation threads");
+    guiLog("SIM: Stopping simulator");
     sim_thread_running_ = false;
 
-    // Join all threads
-    if (sim_our_tx_thread_.joinable()) sim_our_tx_thread_.join();
-    if (sim_virtual_tx_thread_.joinable()) sim_virtual_tx_thread_.join();
-    if (sim_our_rx_thread_.joinable()) sim_our_rx_thread_.join();
-    if (sim_virtual_rx_thread_.joinable()) sim_virtual_rx_thread_.join();
-    if (sim_virtual_protocol_thread_.joinable()) sim_virtual_protocol_thread_.join();
+    if (sim_thread_.joinable()) sim_thread_.join();
 
-    // Clear all buffers
-    {
-        std::lock_guard<std::mutex> lock(channel_to_virtual_mutex_);
-        channel_to_virtual_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lock(channel_to_us_mutex_);
-        channel_to_us_.clear();
-    }
+    // Clear buffers
     {
         std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
         our_tx_pending_.clear();
@@ -603,196 +564,113 @@ void App::stopSimThreads() {
         virtual_tx_pending_.clear();
     }
 
-    guiLog("SIM: All threads stopped");
+    guiLog("SIM: Simulator stopped");
 }
 
-void App::ourRxLoop() {
-    guiLog("SIM: Our RX thread started");
-    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
+void App::simulationLoop() {
+    guiLog("SIM: Simulation loop started");
+
+    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz for waterfall display
+    auto last_protocol_tick = std::chrono::steady_clock::now();
 
     while (sim_thread_running_) {
-        std::vector<float> chunk;
+        bool had_activity = false;
 
-        // Read from channel
-        {
-            std::lock_guard<std::mutex> lock(channel_to_us_mutex_);
-            if (channel_to_us_.size() >= CHUNK_SIZE) {
-                chunk.assign(channel_to_us_.begin(), channel_to_us_.begin() + CHUNK_SIZE);
-                channel_to_us_.erase(channel_to_us_.begin(), channel_to_us_.begin() + CHUNK_SIZE);
-            }
-        }
-
-        // Check if TX is still active
-        if (tx_in_progress_ && std::chrono::steady_clock::now() >= tx_end_time_) {
-            tx_in_progress_ = false;  // TX finished
-        }
-
-        if (!chunk.empty()) {
-            // Record if enabled
-            if (recording_enabled_) {
-                recorded_samples_.insert(recorded_samples_.end(), chunk.begin(), chunk.end());
-            }
-
-            // Show on waterfall only when not transmitting (TX signal takes priority)
-            if (!tx_in_progress_) {
-                waterfall_.addSamples(chunk.data(), chunk.size());
-            }
-
-            // Feed to our modem (always process RX even during TX display)
-            modem_.receiveAudio(chunk);
-            modem_.pollRxAudio();
-        } else {
-            // No RX data - generate noise floor for waterfall (like real radio)
-            if (!tx_in_progress_) {
-                // Generate noise at current SNR level
-                float typical_rms = 0.1f;
-                float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-                float noise_power = (typical_rms * typical_rms) / snr_linear;
-                float noise_stddev = std::sqrt(noise_power);
-                std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
-
-                std::vector<float> noise(CHUNK_SIZE);
-                for (float& s : noise) s = noise_dist(sim_rng_);
-                waterfall_.addSamples(noise.data(), noise.size());
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
-
-    guiLog("SIM: Our RX thread stopped");
-}
-
-void App::ourTxLoop() {
-    guiLog("SIM: Our TX thread started");
-    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
-    auto last_time = std::chrono::steady_clock::now();
-
-    while (sim_thread_running_) {
-        // Wait for real-time (10ms chunks at 48kHz)
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_time).count();
-        if (elapsed < 10000) {  // 10ms = 10000us
-            std::this_thread::sleep_for(std::chrono::microseconds(10000 - elapsed));
-            now = std::chrono::steady_clock::now();
-        }
-        last_time = now;
-
-        std::vector<float> chunk;
-
-        // Get pending TX samples
+        // === Our TX -> Virtual RX ===
+        // Batch process all pending samples (like cli_simulator)
+        std::vector<float> our_samples;
         {
             std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
-            if (our_tx_pending_.size() >= CHUNK_SIZE) {
-                chunk.assign(our_tx_pending_.begin(), our_tx_pending_.begin() + CHUNK_SIZE);
-                our_tx_pending_.erase(our_tx_pending_.begin(), our_tx_pending_.begin() + CHUNK_SIZE);
-            } else if (!our_tx_pending_.empty()) {
-                // Send remaining samples (end of transmission)
-                chunk = std::move(our_tx_pending_);
+            if (!our_tx_pending_.empty()) {
+                our_samples = std::move(our_tx_pending_);
                 our_tx_pending_.clear();
             }
         }
 
-        if (!chunk.empty()) {
-            // Show on waterfall (real-time, like actual TX)
-            waterfall_.addSamples(chunk.data(), chunk.size());
+        if (!our_samples.empty()) {
+            had_activity = true;
+            guiLog("SIM: Processing %zu TX samples -> virtual", our_samples.size());
 
-            // Send through channel to virtual station
-            writeToVirtualChannel(chunk);
-        }
-    }
-
-    guiLog("SIM: Our TX thread stopped");
-}
-
-void App::virtualRxLoop() {
-    guiLog("SIM: Virtual RX thread started");
-    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
-
-    while (sim_thread_running_) {
-        std::vector<float> chunk;
-
-        // Read from channel
-        {
-            std::lock_guard<std::mutex> lock(channel_to_virtual_mutex_);
-            if (channel_to_virtual_.size() >= CHUNK_SIZE) {
-                chunk.assign(channel_to_virtual_.begin(), channel_to_virtual_.begin() + CHUNK_SIZE);
-                channel_to_virtual_.erase(channel_to_virtual_.begin(), channel_to_virtual_.begin() + CHUNK_SIZE);
+            // Show on waterfall in chunks (for display)
+            for (size_t i = 0; i < our_samples.size(); i += CHUNK_SIZE) {
+                size_t chunk_size = std::min(CHUNK_SIZE, our_samples.size() - i);
+                waterfall_.addSamples(our_samples.data() + i, chunk_size);
             }
-        }
 
-        if (!chunk.empty()) {
+            // Apply channel effects and feed ALL to virtual modem at once
+            auto noisy = applyChannelEffects(our_samples);
+            virtual_modem_->feedAudio(noisy);
+
             // Record if enabled
             if (recording_enabled_) {
-                recorded_samples_.insert(recorded_samples_.end(), chunk.begin(), chunk.end());
+                recorded_samples_.insert(recorded_samples_.end(), noisy.begin(), noisy.end());
             }
-
-            // Feed to virtual modem
-            virtual_modem_->receiveAudio(chunk);
-            virtual_modem_->pollRxAudio();
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
-    }
 
-    guiLog("SIM: Virtual RX thread stopped");
-}
-
-void App::virtualTxLoop() {
-    guiLog("SIM: Virtual TX thread started");
-    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
-    auto last_time = std::chrono::steady_clock::now();
-
-    while (sim_thread_running_) {
-        // Wait for real-time (10ms chunks at 48kHz)
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_time).count();
-        if (elapsed < 10000) {  // 10ms = 10000us
-            std::this_thread::sleep_for(std::chrono::microseconds(10000 - elapsed));
-            now = std::chrono::steady_clock::now();
-        }
-        last_time = now;
-
-        std::vector<float> chunk;
-
-        // Get pending TX samples from virtual station
+        // === Virtual TX -> Our RX ===
+        std::vector<float> virtual_samples;
         {
             std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
-            if (virtual_tx_pending_.size() >= CHUNK_SIZE) {
-                chunk.assign(virtual_tx_pending_.begin(), virtual_tx_pending_.begin() + CHUNK_SIZE);
-                virtual_tx_pending_.erase(virtual_tx_pending_.begin(), virtual_tx_pending_.begin() + CHUNK_SIZE);
-            } else if (!virtual_tx_pending_.empty()) {
-                // Send remaining samples (end of transmission)
-                chunk = std::move(virtual_tx_pending_);
+            if (!virtual_tx_pending_.empty()) {
+                virtual_samples = std::move(virtual_tx_pending_);
                 virtual_tx_pending_.clear();
             }
         }
 
-        if (!chunk.empty()) {
-            // Send through channel to us
-            writeToOurChannel(chunk);
+        if (!virtual_samples.empty()) {
+            had_activity = true;
+            guiLog("SIM: Processing %zu RX samples <- virtual", virtual_samples.size());
+
+            // Apply channel effects and feed ALL to our modem at once
+            auto noisy = applyChannelEffects(virtual_samples);
+            modem_.feedAudio(noisy);
+
+            // Show on waterfall in chunks (RX from virtual)
+            if (!tx_in_progress_) {
+                for (size_t i = 0; i < noisy.size(); i += CHUNK_SIZE) {
+                    size_t chunk_size = std::min(CHUNK_SIZE, noisy.size() - i);
+                    waterfall_.addSamples(noisy.data() + i, chunk_size);
+                }
+            }
+
+            // Record if enabled
+            if (recording_enabled_) {
+                recorded_samples_.insert(recorded_samples_.end(), noisy.begin(), noisy.end());
+            }
         }
-    }
 
-    guiLog("SIM: Virtual TX thread stopped");
-}
+        // Check if TX finished
+        if (tx_in_progress_ && std::chrono::steady_clock::now() >= tx_end_time_) {
+            tx_in_progress_ = false;
+        }
 
-void App::virtualProtocolLoop() {
-    guiLog("SIM: Virtual protocol thread started");
-    auto last_tick = std::chrono::steady_clock::now();
-
-    while (sim_thread_running_) {
+        // Tick virtual protocol (~60Hz)
         auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick).count();
-
-        if (elapsed >= 16) {  // ~60Hz tick rate
-            virtual_protocol_.tick(elapsed);
-            last_tick = now;
+        auto protocol_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_protocol_tick).count();
+        if (protocol_elapsed >= 16) {
+            virtual_protocol_.tick(protocol_elapsed);
+            last_protocol_tick = now;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Generate noise floor for waterfall when idle (once per tick)
+        if (!had_activity && !tx_in_progress_) {
+            float typical_rms = 0.1f;
+            float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+            float noise_power = (typical_rms * typical_rms) / snr_linear;
+            float noise_stddev = std::sqrt(noise_power);
+            std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+
+            std::vector<float> noise(CHUNK_SIZE);
+            for (float& s : noise) s = noise_dist(sim_rng_);
+            waterfall_.addSamples(noise.data(), noise.size());
+        }
+
+        // Small sleep to avoid busy-waiting (1ms like cli_simulator)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
 
-    guiLog("SIM: Virtual protocol thread stopped");
+    guiLog("SIM: Simulation loop stopped");
 }
 
 void App::initAudio() {
@@ -827,11 +705,6 @@ void App::onDataReceived(const std::string& text) {
 }
 
 void App::render() {
-    // Poll modem for received data
-    if (!simulation_enabled_) {
-        modem_.pollRxAudio();
-    }
-
     // === DEBUG: Test signal keys (F1-F7) ===
     if (ImGui::IsKeyPressed(ImGuiKey_F1)) {
         auto tone = modem_.generateTestTone(1.0f);
@@ -993,7 +866,7 @@ void App::startRadioRx() {
     }
 
     audio_.setRxCallback([this](const std::vector<float>& samples) {
-        modem_.receiveAudio(samples);
+        modem_.feedAudio(samples);
         waterfall_.addSamples(samples.data(), samples.size());
     });
 
@@ -1208,10 +1081,10 @@ void App::renderOperateTab() {
                         rx_log_.push_back("[REC] Recording enabled");
                     }
                     // Start simulation threads for realistic audio streaming
-                    startSimThreads();
+                    startSimulator();
                 } else {
                     // Stop simulation threads
-                    stopSimThreads();
+                    stopSimulator();
                     rx_log_.push_back("[SIM] Simulation disabled");
                     if (recording_enabled_) {
                         recording_enabled_ = false;

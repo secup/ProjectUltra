@@ -104,7 +104,10 @@ public:
         omega_space_ = 2.0f * M_PI * k_space / config_.samples_per_symbol;
     }
 
-    // Find preamble and return offset, or -1 if not found
+    // Find preamble (alternating mark/space pattern)
+    //
+    // Returns: DATA START position (first sample after preamble), or -1 if not found
+    //          This is consistent with DPSK/MFSK findPreamble() interface.
     int findPreamble(SampleSpan samples, int num_preamble_symbols = 16) {
         int symbol_len = config_.samples_per_symbol;
         int preamble_len = num_preamble_symbols * symbol_len;
@@ -148,7 +151,15 @@ public:
         // Require minimum score
         if (best_score < 0.3f) return -1;
 
-        return best_offset;
+        // Return DATA start position (after preamble), not preamble start
+        // This is consistent with DPSK findPreamble() interface
+        int data_start = best_offset + preamble_len;
+        return data_start;
+    }
+
+    // Get preamble length in samples
+    int getPreambleLength(int num_preamble_symbols = 16) const {
+        return num_preamble_symbols * config_.samples_per_symbol;
     }
 
     // Demodulate symbols to soft bits (LLR-like values)

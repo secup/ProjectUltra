@@ -2015,121 +2015,32 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
             impl_->last_sync_offset = sync_offset;
 
-            // Find where STS actually starts by detecting the guard-to-STS transition.
-            // The guard is silence (or noise-only), STS has signal energy.
+            // === ROBUST SYNC TIMING ===
             //
-            // Strategy: Scan forward looking for a sharp energy transition.
-            // This works for both clean signals (0→signal) and noisy signals (noise→signal+noise).
-            constexpr size_t ENERGY_WINDOW = 64;  // Window for energy measurement
-            constexpr size_t SEARCH_STEP = 8;  // Step size for scanning
-            constexpr float TRANSITION_RATIO = 3.0f;  // Signal should be 3x higher than guard/noise
+            // Preamble structure: [GUARD 560][STS×4][LTS×2] then [DATA...]
+            //
+            // The Schmidl-Cox half-symbol correlation has this key property:
+            // - GUARD period: LOW correlation (no repeated halves)
+            // - STS period: HIGH correlation (each symbol has two identical halves)
+            //
+            // The coarse detection loop scans with STEP=64 and finds the FIRST position
+            // where correlation > threshold. This is at or near the guard→STS boundary.
+            //
+            // The peak search then refines within a 300-sample window. But for timing,
+            // we want the TRANSITION point (guard→STS), not the plateau peak.
+            //
+            // Solution: sync_offset is already the best estimate of STS start.
+            // The search found the first high-correlation region, which is where STS begins.
+            // Do NOT round - rounding to symbol boundaries fails when leading silence
+            // isn't aligned to symbol size (e.g., 4800 samples / 560 = 8.57).
+            //
+            // The sync_offset may be slightly INTO the STS (by up to STEP samples),
+            // but that's fine - we're consuming STS + LTS, not using STS data.
 
-            // Measure signal energy at sync_offset (we know signal is there)
-            float signal_energy = 0;
-            for (size_t j = 0; j < ENERGY_WINDOW && sync_offset + j < impl_->rx_buffer.size(); j++) {
-                float s = impl_->rx_buffer[sync_offset + j];
-                signal_energy += s * s;
-            }
-            signal_energy /= ENERGY_WINDOW;
+            size_t sts_start = sync_offset;
 
-            // The guard is BEFORE sync_offset. Search backward to find the guard-to-STS transition.
-            // We expect: [noise/silence] [guard=560] [STS=2240] <- sync_offset is somewhere here
-            // The guard should be approximately 560-2800 samples before sync_offset.
-
-            // Start search from well before sync_offset (account for STS length + margin)
-            size_t search_start = (sync_offset > preamble_symbol_len * 6) ?
-                                  sync_offset - preamble_symbol_len * 6 : 0;
-
-            // Measure baseline energy from the start of search region (likely in guard or pre-signal noise)
-            float baseline_energy = 0;
-            size_t baseline_samples = std::min((size_t)256, sync_offset - search_start);
-            for (size_t j = 0; j < baseline_samples && search_start + j < impl_->rx_buffer.size(); j++) {
-                float s = impl_->rx_buffer[search_start + j];
-                baseline_energy += s * s;
-            }
-            if (baseline_samples > 0) baseline_energy /= baseline_samples;
-
-            LOG_SYNC(DEBUG, "Guard search: sync_offset=%zu, search_start=%zu, signal_energy=%.6f, baseline_energy=%.6f, ratio=%.1f",
-                    sync_offset, search_start, signal_energy, baseline_energy,
-                    baseline_energy > 1e-12f ? signal_energy / baseline_energy : 999.0f);
-
-            size_t guard_end = 0;
-            bool found_guard = false;
-
-            // If baseline is much lower than signal, there's likely a guard region - find the transition
-            // The guard (silence) + noise should be significantly lower than STS (signal) + noise
-            if (baseline_energy < signal_energy * 0.3f) {
-                // Special case: if baseline is VERY low (long silence before preamble),
-                // the Schmidl-Cox peak detection should give us the STS start position.
-                // However, the peak position can vary by up to a symbol length depending on
-                // signal content (the correlation search has inherent uncertainty).
-                // Round to the nearest symbol boundary to ensure consistent timing.
-                if (baseline_energy < 1e-5f && signal_energy > 1e-3f) {
-                    // Long silence detected - round sync_offset to nearest symbol boundary
-                    size_t symbol_size = preamble_symbol_len;
-                    size_t rounded = ((sync_offset + symbol_size / 2) / symbol_size) * symbol_size;
-                    guard_end = rounded;
-                    found_guard = true;
-                    LOG_SYNC(DEBUG, "Long silence detected, sync_offset=%zu rounded to %zu",
-                            sync_offset, rounded);
-                } else {
-                    // Normal case: search for energy transition
-                    float threshold = std::max(baseline_energy * TRANSITION_RATIO, signal_energy * 0.1f);
-
-                    // Search limit: we need to search PAST sync_offset because:
-                    // 1. sync_offset is in the middle of STS plateau
-                    // 2. With some noise, the transition might be AT or NEAR sync_offset
-                    size_t search_limit = std::min(sync_offset + preamble_symbol_len * 2,
-                                                   impl_->rx_buffer.size() - ENERGY_WINDOW);
-
-                    if (search_limit <= search_start + ENERGY_WINDOW) {
-                        LOG_SYNC(DEBUG, "search_limit too small, using fallback");
-                    } else {
-                        for (size_t i = search_start; i + ENERGY_WINDOW < search_limit; i += SEARCH_STEP) {
-                            float energy = 0;
-                            for (size_t j = 0; j < ENERGY_WINDOW; j++) {
-                                float s = impl_->rx_buffer[i + j];
-                                energy += s * s;
-                            }
-                            energy /= ENERGY_WINDOW;
-
-                            if (energy > threshold) {
-                                // Found transition - use this position as STS start
-                                // Round to NEAREST symbol boundary (not always UP)
-                                size_t symbol_size = preamble_symbol_len;
-                                size_t rounded_down = (i / symbol_size) * symbol_size;
-                                size_t rounded_up = rounded_down + symbol_size;
-                                // Pick whichever is closer to detected position
-                                if (i - rounded_down <= rounded_up - i) {
-                                    guard_end = rounded_down;
-                                } else {
-                                    guard_end = rounded_up;
-                                }
-                                found_guard = true;
-                                LOG_SYNC(DEBUG, "Found guard→STS transition at %zu (rounded to %zu), energy=%.6f, threshold=%.6f",
-                                        i, guard_end, energy, threshold);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!found_guard) {
-                // No clear guard region found - estimate STS start from sync_offset
-                // sync_offset points somewhere in the middle of the STS plateau (M metric window)
-                // The Schmidl-Cox M metric peaks at approximately STS_start + 2*symbol_len
-                // So: STS_start ≈ sync_offset - 2*symbol_len
-                // Round UP to be conservative - better to consume slightly more than leave preamble bits
-                size_t estimated_sts_start = (sync_offset > preamble_symbol_len * 2) ?
-                                             sync_offset - preamble_symbol_len * 2 : 0;
-                // Round UP to nearest symbol boundary to ensure we don't leave any preamble
-                guard_end = ((estimated_sts_start + preamble_symbol_len - 1) / preamble_symbol_len) * preamble_symbol_len;
-                LOG_SYNC(DEBUG, "No guard detected, estimating STS start at %zu (from sync_offset=%zu)",
-                        guard_end, sync_offset);
-            }
-
-            size_t sts_start = guard_end;
+            LOG_SYNC(DEBUG, "Schmidl-Cox sync: sync_offset=%zu used directly as sts_start (no rounding)",
+                    sync_offset);
 
             // === Extract carrier phase from LTS (for DQPSK without pilots) ===
             // LTS starts after 4 STS symbols: sts_start + 4*symbol_samples

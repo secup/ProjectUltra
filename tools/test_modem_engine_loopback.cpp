@@ -7,7 +7,9 @@
 #include <iomanip>
 #include <cstring>
 #include <random>
-#include "gui/modem_engine.hpp"
+#include <thread>
+#include <chrono>
+#include "gui/modem/modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/protocol_engine.hpp"
 
@@ -152,16 +154,11 @@ int main() {
         //     full_signal[i] += noise_dist(rng);
         // }
 
-        // Process in chunks (like real streaming)
+        // Feed all samples - modem threads process automatically
         received_frames.clear();
-        const size_t CHUNK_SIZE = 1536;
-        for (size_t offset = 0; offset < full_signal.size(); offset += CHUNK_SIZE) {
-            size_t chunk_end = std::min(offset + CHUNK_SIZE, full_signal.size());
-            std::vector<float> chunk(full_signal.begin() + offset, full_signal.begin() + chunk_end);
-            rx_modem->receiveAudio(chunk);
-            rx_modem->pollRxAudio();
-        }
-        rx_modem->pollRxAudio();
+        rx_modem->feedAudio(full_signal);
+        // Give threads time to process
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
         if (received_frames.empty()) {
             std::cout << "  RESULT: ✗ FAILED (no frame received)\n";

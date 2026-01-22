@@ -415,15 +415,12 @@ public:
             }
         } else if (rx_waveform == WaveformMode::MFSK) {
             // MFSK demodulation
+            // findPreamble returns data start position (after preamble)
             SampleSpan span(audio.data(), audio.size());
-            int preamble_start = mfsk_demodulator->findPreamble(span);
-            if (preamble_start >= 0) {
-                int preamble_len = 2 * mfsk_config.num_tones * mfsk_config.samples_per_symbol;
-                int data_start = preamble_start + preamble_len;
-                if ((size_t)data_start < audio.size()) {
-                    SampleSpan data_span(audio.data() + data_start, audio.size() - data_start);
-                    all_soft_bits = mfsk_demodulator->demodulateSoft(data_span);
-                }
+            int data_start = mfsk_demodulator->findPreamble(span);
+            if (data_start >= 0 && (size_t)data_start < audio.size()) {
+                SampleSpan data_span(audio.data() + data_start, audio.size() - data_start);
+                all_soft_bits = mfsk_demodulator->demodulateSoft(data_span);
             }
         } else {
             // OFDM demodulation (default)

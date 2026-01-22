@@ -8,7 +8,7 @@
 #include "widgets/waterfall.hpp"
 #include "widgets/file_browser.hpp"
 #include "audio_engine.hpp"
-#include "modem_engine.hpp"
+#include "modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
 
 #include <vector>
@@ -112,52 +112,36 @@ private:
     std::unique_ptr<ModemEngine> virtual_modem_;
 
     // ========================================
-    // Threaded Audio Channels (like real radios)
+    // Simplified Simulator (single thread model)
     // ========================================
-    // ALPHA TX -> channel_to_virtual_ -> BRAVO RX
-    // BRAVO TX -> channel_to_us_ -> ALPHA RX
+    // Our TX -> channel effects -> virtual modem
+    // Virtual TX -> channel effects -> our modem
 
-    // Thread-safe audio buffers
-    std::mutex channel_to_virtual_mutex_;
-    std::vector<float> channel_to_virtual_;         // Our TX samples for virtual
-    std::mutex channel_to_us_mutex_;
-    std::vector<float> channel_to_us_;              // Virtual's TX samples for us
-
-    // TX streaming buffers (for real-time waterfall display)
+    // TX pending buffers (queued by protocol TX callbacks)
     std::mutex our_tx_pending_mutex_;
-    std::vector<float> our_tx_pending_;             // Our TX samples waiting to be streamed
+    std::vector<float> our_tx_pending_;
     std::mutex virtual_tx_pending_mutex_;
-    std::vector<float> virtual_tx_pending_;         // Virtual's TX samples waiting to be streamed
+    std::vector<float> virtual_tx_pending_;
 
     // Channel simulation RNG
     std::mt19937 sim_rng_{42};
 
-    // Threads for continuous audio processing
-    std::thread sim_our_rx_thread_;                 // Our RX thread (reads from channel_to_us_)
-    std::thread sim_our_tx_thread_;                 // Our TX thread (streams our_tx_pending_ to channel)
-    std::thread sim_virtual_rx_thread_;             // Virtual's RX thread (reads from channel_to_virtual_)
-    std::thread sim_virtual_tx_thread_;             // Virtual's TX thread (streams virtual_tx_pending_)
-    std::thread sim_virtual_protocol_thread_;       // Virtual's protocol tick thread
-    std::atomic<bool> sim_thread_running_{false};   // Thread control flag
+    // Single simulation thread handles everything
+    std::thread sim_thread_;
+    std::atomic<bool> sim_thread_running_{false};
 
     // Virtual station initialization
     void initVirtualStation();
 
-    // Start/stop simulator threads
-    void startSimThreads();
-    void stopSimThreads();
+    // Start/stop simulator
+    void startSimulator();
+    void stopSimulator();
 
-    // Thread loops
-    void ourRxLoop();                               // Our RX thread (reads channel_to_us_)
-    void ourTxLoop();                               // Our TX thread (streams to channel at 48kHz)
-    void virtualRxLoop();                           // Virtual's RX thread (reads channel_to_virtual_)
-    void virtualTxLoop();                           // Virtual's TX thread (streams to channel at 48kHz)
-    void virtualProtocolLoop();                     // Virtual's protocol tick
+    // Main simulation loop (runs in sim_thread_)
+    void simulationLoop();
 
-    // Channel simulation helpers
-    void writeToVirtualChannel(const std::vector<float>& samples);  // Our TX -> virtual
-    void writeToOurChannel(const std::vector<float>& samples);      // Virtual TX -> us
-    std::vector<float> applyChannelEffects(const std::vector<float>& samples);  // AWGN + PTT noise
+    // Channel simulation
+    std::vector<float> applyChannelEffects(const std::vector<float>& samples);
 
     // ========================================
     // UI Rendering
