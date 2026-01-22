@@ -345,11 +345,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
     }
 
-    // Step 4: Combine preamble + data + tail guard
-    // Tail guard ensures demodulator processes the last OFDM symbol
-    const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols of silence
+    // Step 4: Combine lead-in + preamble + data + tail guard
+    // Lead-in: silence for radio AGC settling and VOX keying (150ms)
+    // Tail guard: ensures demodulator processes the last OFDM symbol
+    const size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 150ms at 48kHz = 7200 samples
+    const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols of silence (~24ms)
     std::vector<float> output;
-    output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
+    output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+
+    // Add lead-in silence (for AGC/VOX)
+    output.resize(LEAD_IN_SAMPLES, 0.0f);
 
     // Add preamble
     output.insert(output.end(), preamble.begin(), preamble.end());
