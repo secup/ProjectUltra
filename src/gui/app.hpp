@@ -65,7 +65,8 @@ private:
     std::deque<std::string> rx_log_;
     static const size_t MAX_RX_LOG = 20;
     bool audio_initialized_ = false;
-    bool tx_in_progress_ = false;
+    std::atomic<bool> tx_in_progress_{false};  // Thread-safe TX flag for waterfall control
+    std::chrono::steady_clock::time_point tx_end_time_;  // When current TX finishes
 
     // Radio mode state
     std::vector<std::string> input_devices_;
@@ -110,48 +111,53 @@ private:
     protocol::ProtocolEngine virtual_protocol_;
     std::unique_ptr<ModemEngine> virtual_modem_;
 
-    // Cross-wired sample queues (full modem simulation)
-    // Our TX samples → channel sim → virtual's RX
-    // Virtual's TX samples → channel sim → our RX
-    std::vector<float> sim_our_tx_queue_;       // Our pending TX (raw from modem)
-    std::vector<float> sim_virtual_tx_queue_;   // Virtual's pending TX (raw from modem)
+    // ========================================
+    // Threaded Audio Channels (like real radios)
+    // ========================================
+    // ALPHA TX -> channel_to_virtual_ -> BRAVO RX
+    // BRAVO TX -> channel_to_us_ -> ALPHA RX
 
-    // Streaming buffers - samples being transmitted at real audio rate (48kHz)
-    std::vector<float> sim_our_streaming_;      // Our samples streaming to virtual
-    std::vector<float> sim_virtual_streaming_;  // Virtual's samples streaming to us
+    // Thread-safe audio buffers
+    std::mutex channel_to_virtual_mutex_;
+    std::vector<float> channel_to_virtual_;         // Our TX samples for virtual
+    std::mutex channel_to_us_mutex_;
+    std::vector<float> channel_to_us_;              // Virtual's TX samples for us
+
+    // TX streaming buffers (for real-time waterfall display)
+    std::mutex our_tx_pending_mutex_;
+    std::vector<float> our_tx_pending_;             // Our TX samples waiting to be streamed
+    std::mutex virtual_tx_pending_mutex_;
+    std::vector<float> virtual_tx_pending_;         // Virtual's TX samples waiting to be streamed
 
     // Channel simulation RNG
     std::mt19937 sim_rng_{42};
 
-    // PTT turnaround delay (ms remaining before TX can start)
-    uint32_t sim_our_ptt_delay_ = 0;
-    uint32_t sim_virtual_ptt_delay_ = 0;
-    static constexpr uint32_t PTT_DELAY_MS = 200;  // Realistic PTT turnaround
-
-    // Simulator audio thread - delivers samples at 48kHz like real soundcard
-    std::thread sim_thread_;
-    std::mutex sim_mutex_;                          // Protects streaming buffers
-    std::condition_variable sim_cv_;                // Signals new data available
+    // Threads for continuous audio processing
+    std::thread sim_our_rx_thread_;                 // Our RX thread (reads from channel_to_us_)
+    std::thread sim_our_tx_thread_;                 // Our TX thread (streams our_tx_pending_ to channel)
+    std::thread sim_virtual_rx_thread_;             // Virtual's RX thread (reads from channel_to_virtual_)
+    std::thread sim_virtual_tx_thread_;             // Virtual's TX thread (streams virtual_tx_pending_)
+    std::thread sim_virtual_protocol_thread_;       // Virtual's protocol tick thread
     std::atomic<bool> sim_thread_running_{false};   // Thread control flag
 
     // Virtual station initialization
     void initVirtualStation();
 
-    // Start/stop simulator audio thread
-    void startSimThread();
-    void stopSimThread();
+    // Start/stop simulator threads
+    void startSimThreads();
+    void stopSimThreads();
 
-    // Simulator thread main loop (runs at 48kHz)
-    void simThreadLoop();
+    // Thread loops
+    void ourRxLoop();                               // Our RX thread (reads channel_to_us_)
+    void ourTxLoop();                               // Our TX thread (streams to channel at 48kHz)
+    void virtualRxLoop();                           // Virtual's RX thread (reads channel_to_virtual_)
+    void virtualTxLoop();                           // Virtual's TX thread (streams to channel at 48kHz)
+    void virtualProtocolLoop();                     // Virtual's protocol tick
 
-    // Process simulation (called from render loop - manages TX queues/PTT only)
-    void tickSimulation(uint32_t elapsed_ms);
-
-    // Add channel effects (AWGN, optional fading) to samples
-    void applyChannelSimulation(std::vector<float>& samples);
-
-    // Prepend realistic PTT delay noise (100-500ms) before signal
-    void prependPttNoise(std::vector<float>& samples);
+    // Channel simulation helpers
+    void writeToVirtualChannel(const std::vector<float>& samples);  // Our TX -> virtual
+    void writeToOurChannel(const std::vector<float>& samples);      // Virtual TX -> us
+    std::vector<float> applyChannelEffects(const std::vector<float>& samples);  // AWGN + PTT noise
 
     // ========================================
     // UI Rendering

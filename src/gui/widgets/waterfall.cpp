@@ -186,8 +186,8 @@ void WaterfallWidget::addSamples(const float* samples, size_t count) {
     std::lock_guard<std::mutex> lock(input_mutex_);
     input_buffer_.insert(input_buffer_.end(), samples, samples + count);
 
-    // Keep buffer from growing too large
-    size_t max_buffer = fft_size_ * 4;
+    // Keep buffer from growing too large (allow up to 20 seconds of audio for TX display)
+    size_t max_buffer = static_cast<size_t>(sample_rate_ * 20);  // 20 seconds
     if (input_buffer_.size() > max_buffer) {
         input_buffer_.erase(input_buffer_.begin(),
                            input_buffer_.begin() + (input_buffer_.size() - max_buffer));
@@ -195,72 +195,80 @@ void WaterfallWidget::addSamples(const float* samples, size_t count) {
 }
 
 void WaterfallWidget::processFFT() {
-    std::vector<float> samples;
+    // Process multiple FFTs to drain the buffer (important for TX signal display)
+    // Limit iterations to prevent blocking the UI for too long
+    constexpr int MAX_FFTS_PER_FRAME = 500;  // ~5 seconds of audio at 50% overlap
+    int ffts_processed = 0;
 
-    {
-        std::lock_guard<std::mutex> lock(input_mutex_);
-        if (input_buffer_.size() < static_cast<size_t>(fft_size_)) {
-            return;  // Not enough samples
+    while (ffts_processed < MAX_FFTS_PER_FRAME) {
+        std::vector<float> samples;
+
+        {
+            std::lock_guard<std::mutex> lock(input_mutex_);
+            if (input_buffer_.size() < static_cast<size_t>(fft_size_)) {
+                break;  // Not enough samples, done for this frame
+            }
+
+            // Take fft_size samples, leave overlap
+            samples.assign(input_buffer_.begin(), input_buffer_.begin() + fft_size_);
+
+            // Remove half (50% overlap)
+            input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + fft_size_ / 2);
         }
 
-        // Take fft_size samples, leave overlap
-        samples.assign(input_buffer_.begin(), input_buffer_.begin() + fft_size_);
+        // Apply window
+        std::vector<Complex> fft_in(fft_size_);
+        for (int i = 0; i < fft_size_; i++) {
+            fft_in[i] = Complex(samples[i] * window_[i], 0.0f);
+        }
 
-        // Remove half (50% overlap)
-        input_buffer_.erase(input_buffer_.begin(), input_buffer_.begin() + fft_size_ / 2);
+        // FFT
+        std::vector<Complex> fft_out(fft_size_);
+        fft_->forward(fft_in, fft_out);
+
+        // Convert to magnitude (dB) and map to colors
+        int min_bin = freqToBin(min_freq_);
+        int max_bin = std::min(freqToBin(max_freq_), fft_size_ / 2);
+        int display_bins = max_bin - min_bin;
+
+        if (display_bins <= 0) break;
+
+        // Ensure waterfall data is sized correctly
+        int texture_w = display_bins;
+        int texture_h = history_depth_;
+
+        if (waterfall_data_.size() != static_cast<size_t>(texture_w * texture_h)) {
+            waterfall_data_.resize(texture_w * texture_h, 0xFF000000);
+            current_line_ = 0;
+        }
+
+        // Scroll: shift all lines down, new data goes at top (line 0)
+        std::memmove(waterfall_data_.data() + texture_w,
+                     waterfall_data_.data(),
+                     (texture_h - 1) * texture_w * sizeof(uint32_t));
+
+        // Calculate magnitude for top line (newest data)
+        uint32_t* line = waterfall_data_.data();  // Line 0 = top
+        float db_range = max_db_ - min_db_;
+        float fft_norm = 2.0f / fft_size_;  // Normalize FFT output
+
+        for (int i = 0; i < display_bins; i++) {
+            int bin = min_bin + i;
+            float mag = std::abs(fft_out[bin]) * fft_norm;
+            float db = 20.0f * std::log10(mag + 1e-10f);
+
+            // Normalize to 0-1
+            float normalized = (db - min_db_) / db_range;
+            normalized = std::max(0.0f, std::min(1.0f, normalized));
+
+            // Map to color
+            int color_idx = static_cast<int>(normalized * (WaterfallPalette::NUM_COLORS - 1));
+            line[i] = palette_.colors[color_idx];
+        }
+
+        texture_dirty_ = true;
+        ffts_processed++;
     }
-
-    // Apply window
-    std::vector<Complex> fft_in(fft_size_);
-    for (int i = 0; i < fft_size_; i++) {
-        fft_in[i] = Complex(samples[i] * window_[i], 0.0f);
-    }
-
-    // FFT
-    std::vector<Complex> fft_out(fft_size_);
-    fft_->forward(fft_in, fft_out);
-
-    // Convert to magnitude (dB) and map to colors
-    int min_bin = freqToBin(min_freq_);
-    int max_bin = std::min(freqToBin(max_freq_), fft_size_ / 2);
-    int display_bins = max_bin - min_bin;
-
-    if (display_bins <= 0) return;
-
-    // Ensure waterfall data is sized correctly
-    int texture_w = display_bins;
-    int texture_h = history_depth_;
-
-    if (waterfall_data_.size() != static_cast<size_t>(texture_w * texture_h)) {
-        waterfall_data_.resize(texture_w * texture_h, 0xFF000000);
-        current_line_ = 0;
-    }
-
-    // Scroll: shift all lines down, new data goes at top (line 0)
-    std::memmove(waterfall_data_.data() + texture_w,
-                 waterfall_data_.data(),
-                 (texture_h - 1) * texture_w * sizeof(uint32_t));
-
-    // Calculate magnitude for top line (newest data)
-    uint32_t* line = waterfall_data_.data();  // Line 0 = top
-    float db_range = max_db_ - min_db_;
-    float fft_norm = 2.0f / fft_size_;  // Normalize FFT output
-
-    for (int i = 0; i < display_bins; i++) {
-        int bin = min_bin + i;
-        float mag = std::abs(fft_out[bin]) * fft_norm;
-        float db = 20.0f * std::log10(mag + 1e-10f);
-
-        // Normalize to 0-1
-        float normalized = (db - min_db_) / db_range;
-        normalized = std::max(0.0f, std::min(1.0f, normalized));
-
-        // Map to color
-        int color_idx = static_cast<int>(normalized * (WaterfallPalette::NUM_COLORS - 1));
-        line[i] = palette_.colors[color_idx];
-    }
-
-    texture_dirty_ = true;
 }
 
 void WaterfallWidget::createTexture() {

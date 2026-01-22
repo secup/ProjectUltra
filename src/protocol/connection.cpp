@@ -819,6 +819,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     arq_.reset();
     file_transfer_.cancel();
 
+    // Reset connect waveform to DPSK for next connection attempt
+    connect_waveform_ = WaveformMode::DPSK;
+
     LOG_MODEM(INFO, "Connection: Disconnected from %s (%s)",
               old_remote.c_str(), reason.c_str());
 

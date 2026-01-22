@@ -21,7 +21,8 @@ namespace ultra {
 namespace gui {
 
 // File logger for GUI debugging - writes to logs/gui.log next to binary
-static std::ofstream g_log_file;
+// ALL logging (including modem, protocol, etc.) goes to this file
+static FILE* g_gui_log_file = nullptr;
 static bool g_log_initialized = false;
 
 static void initLog() {
@@ -30,21 +31,24 @@ static void initLog() {
 
     // Create logs directory next to binary
     MKDIR("logs");
-    g_log_file.open("logs/gui.log", std::ios::out | std::ios::trunc);
+    g_gui_log_file = fopen("logs/gui.log", "w");
+
+    if (g_gui_log_file) {
+        // Redirect ALL logging (modem, protocol, etc.) to this file
+        ultra::setLogFile(g_gui_log_file);
+    }
 }
 
 static void guiLog(const char* fmt, ...) {
     initLog();
-    if (!g_log_file.is_open()) return;
+    if (!g_gui_log_file) return;
 
-    // Timestamp
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        now.time_since_epoch()) % 1000;
-
-    char timebuf[32];
-    std::strftime(timebuf, sizeof(timebuf), "%H:%M:%S", std::localtime(&time));
+    // Use the same timestamp format as the global logger
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - ultra::g_log_start_time).count();
+    int secs = static_cast<int>(elapsed / 1000);
+    int ms = static_cast<int>(elapsed % 1000);
 
     // Format message
     char buf[1024];
@@ -53,8 +57,8 @@ static void guiLog(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    g_log_file << "[" << timebuf << "." << ms.count() << "] " << buf << std::endl;
-    g_log_file.flush();
+    fprintf(g_gui_log_file, "[%3d.%03d][INFO ][GUI  ] %s\n", secs, ms, buf);
+    fflush(g_gui_log_file);
 }
 
 App::App() : App(Options{}) {}
@@ -94,11 +98,36 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         auto samples = modem_.transmit(data);
         if (!samples.empty()) {
             if (simulation_enabled_) {
-                // Simulation mode: queue samples for virtual station
-                sim_our_tx_queue_.insert(sim_our_tx_queue_.end(),
-                                         samples.begin(), samples.end());
+                // Add PTT noise once at start of transmission (100-300ms)
+                std::uniform_int_distribution<size_t> ptt_dist(4800, 14400);
+                size_t ptt_samples = ptt_dist(sim_rng_);
+
+                float typical_rms = 0.1f;
+                float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+                float noise_power = (typical_rms * typical_rms) / snr_linear;
+                float noise_stddev = std::sqrt(noise_power);
+                std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+
+                std::vector<float> ptt_noise(ptt_samples);
+                for (float& s : ptt_noise) s = noise_dist(sim_rng_);
+
+                // Mark TX active (include PTT noise in duration)
+                size_t total_samples = ptt_samples + samples.size();
+                size_t tx_duration_ms = (total_samples * 1000) / 48000;
+                tx_in_progress_ = true;
+                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+
+                // Queue PTT noise + signal for real-time streaming
+                std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+                our_tx_pending_.insert(our_tx_pending_.end(), ptt_noise.begin(), ptt_noise.end());
+                our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
+                guiLog("SIM: Queued %zu TX samples (+ %zu PTT noise) for streaming", samples.size(), ptt_samples);
             } else {
-                // Normal mode: send to real audio
+                // Normal mode: send to real audio device (it streams at 48kHz)
+                size_t tx_duration_ms = (samples.size() * 1000) / 48000;
+                tx_in_progress_ = true;
+                tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
+                waterfall_.addSamples(samples.data(), samples.size());
                 audio_.queueTxSamples(samples);
             }
         }
@@ -117,8 +146,10 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         guiLog("Connection state changed: %d (%s)", static_cast<int>(state), info.c_str());
 
         // Update modem engine connection state (affects waveform selection)
-        bool connected = (state == protocol::ConnectionState::CONNECTED);
-        modem_.setConnected(connected);
+        // Stay "connected" during DISCONNECTING so we can receive the ACK via OFDM
+        bool modem_connected = (state == protocol::ConnectionState::CONNECTED ||
+                                state == protocol::ConnectionState::DISCONNECTING);
+        modem_.setConnected(modem_connected);
 
         std::string msg;
         switch (state) {
@@ -139,6 +170,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 }
                 // Reset waveform mode to OFDM when disconnected
                 modem_.setWaveformMode(protocol::WaveformMode::OFDM);
+                // Reset connect waveform to DPSK for next connection attempt
+                modem_.setConnectWaveform(protocol::WaveformMode::DPSK);
                 break;
         }
         rx_log_.push_back(msg);
@@ -332,8 +365,8 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 }
 
 App::~App() {
-    // Stop simulator thread first
-    stopSimThread();
+    // Stop simulator threads first
+    stopSimThreads();
 
     settings_.save();
     audio_.shutdown();
@@ -367,13 +400,30 @@ void App::initVirtualStation() {
     virtual_modem_->setLogPrefix(virtual_callsign_);
     virtual_protocol_.setAutoAccept(true);  // Auto-accept incoming calls
 
-    // Virtual station TX → channel sim → our RX
+    // Virtual station TX → queue for real-time streaming → our RX
     virtual_protocol_.setTxDataCallback([this](const Bytes& data) {
         guiLog("SIM: Virtual station TX %zu bytes", data.size());
         auto samples = virtual_modem_->transmit(data);
-        guiLog("SIM: Virtual modem produced %zu samples", samples.size());
-        sim_virtual_tx_queue_.insert(sim_virtual_tx_queue_.end(),
-                                      samples.begin(), samples.end());
+
+        // Add PTT noise once at start of transmission (100-300ms)
+        std::uniform_int_distribution<size_t> ptt_dist(4800, 14400);
+        size_t ptt_samples = ptt_dist(sim_rng_);
+
+        float typical_rms = 0.1f;
+        float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+        float noise_power = (typical_rms * typical_rms) / snr_linear;
+        float noise_stddev = std::sqrt(noise_power);
+        std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+
+        std::vector<float> ptt_noise(ptt_samples);
+        for (float& s : ptt_noise) s = noise_dist(sim_rng_);
+
+        guiLog("SIM: Virtual modem produced %zu samples (+ %zu PTT noise), queuing for stream", samples.size(), ptt_samples);
+
+        // Queue PTT noise + signal for real-time streaming
+        std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
+        virtual_tx_pending_.insert(virtual_tx_pending_.end(), ptt_noise.begin(), ptt_noise.end());
+        virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
     });
 
     // Virtual modem RX → virtual protocol
@@ -457,242 +507,292 @@ void App::initVirtualStation() {
     guiLog("Virtual station initialized: callsign=%s", virtual_callsign_.c_str());
 }
 
-void App::applyChannelSimulation(std::vector<float>& samples) {
-    if (simulation_snr_db_ >= 50.0f || samples.empty()) {
-        return;  // No noise for very high SNR
+// ========================================
+// Threaded Simulation (matches threaded_simulator.cpp)
+// ========================================
+
+std::vector<float> App::applyChannelEffects(const std::vector<float>& samples) {
+    // Only adds AWGN - PTT noise is added separately at TX start
+    if (samples.empty()) return samples;
+
+    std::vector<float> result = samples;
+
+    // Apply AWGN to signal
+    if (simulation_snr_db_ < 50.0f) {
+        float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+
+        float sum_sq = 0.0f;
+        for (float s : samples) sum_sq += s * s;
+        float signal_rms = std::sqrt(sum_sq / samples.size());
+
+        if (signal_rms > 1e-6f) {
+            float signal_power = signal_rms * signal_rms;
+            float noise_power = signal_power / snr_linear;
+            float noise_stddev = std::sqrt(noise_power);
+            std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
+
+            for (float& s : result) {
+                s += noise_dist(sim_rng_);
+            }
+        }
     }
 
-    // Calculate signal RMS
-    float sum_sq = 0.0f;
-    for (float s : samples) {
-        sum_sq += s * s;
-    }
-    float signal_rms = std::sqrt(sum_sq / samples.size());
-
-    if (signal_rms < 1e-6f) {
-        return;  // Silent buffer
-    }
-
-    // Calculate noise level for target SNR
-    float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-    float signal_power = signal_rms * signal_rms;
-    float noise_power = signal_power / snr_linear;
-    float noise_stddev = std::sqrt(noise_power);
-
-    std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
-
-    for (float& sample : samples) {
-        sample += noise_dist(sim_rng_);
-    }
+    return result;
 }
 
-void App::prependPttNoise(std::vector<float>& samples) {
-    // Simulate realistic PTT timing: 100-500ms of noise before signal
-    // This mimics radio key-up delay, AGC settling, etc.
-    std::uniform_int_distribution<size_t> delay_dist(4800, 24000);  // 100-500ms at 48kHz
-    size_t noise_samples = delay_dist(sim_rng_);
-
-    // Calculate noise level based on typical signal level (~0.1 RMS) and SNR
-    float typical_signal_rms = 0.1f;
-    float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
-    float noise_power = (typical_signal_rms * typical_signal_rms) / snr_linear;
-    float noise_stddev = std::sqrt(noise_power);
-
-    std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
-
-    // Create noise buffer and prepend to samples
-    std::vector<float> noise_buffer(noise_samples);
-    for (size_t i = 0; i < noise_samples; ++i) {
-        noise_buffer[i] = noise_dist(sim_rng_);
-    }
-
-    // Prepend noise to signal
-    samples.insert(samples.begin(), noise_buffer.begin(), noise_buffer.end());
-
-    guiLog("SIM: Prepended %zu samples (%.0fms) of PTT noise",
-           noise_samples, noise_samples * 1000.0f / 48000.0f);
+void App::writeToVirtualChannel(const std::vector<float>& samples) {
+    auto noisy = applyChannelEffects(samples);
+    std::lock_guard<std::mutex> lock(channel_to_virtual_mutex_);
+    channel_to_virtual_.insert(channel_to_virtual_.end(), noisy.begin(), noisy.end());
+    guiLog("SIM: Our TX -> virtual channel (%zu samples)", noisy.size());
 }
 
-void App::startSimThread() {
+void App::writeToOurChannel(const std::vector<float>& samples) {
+    auto noisy = applyChannelEffects(samples);
+    std::lock_guard<std::mutex> lock(channel_to_us_mutex_);
+    channel_to_us_.insert(channel_to_us_.end(), noisy.begin(), noisy.end());
+    guiLog("SIM: Virtual TX -> our channel (%zu samples)", noisy.size());
+}
+
+void App::startSimThreads() {
     if (sim_thread_running_) return;
 
-    guiLog("SIM: Starting audio thread");
+    guiLog("SIM: Starting simulation threads");
     sim_thread_running_ = true;
-    sim_thread_ = std::thread(&App::simThreadLoop, this);
+
+    // Start TX threads (stream audio at 48kHz like real radio)
+    sim_our_tx_thread_ = std::thread(&App::ourTxLoop, this);
+    sim_virtual_tx_thread_ = std::thread(&App::virtualTxLoop, this);
+
+    // Start RX threads (continuous audio processing like real radios)
+    sim_our_rx_thread_ = std::thread(&App::ourRxLoop, this);
+    sim_virtual_rx_thread_ = std::thread(&App::virtualRxLoop, this);
+    sim_virtual_protocol_thread_ = std::thread(&App::virtualProtocolLoop, this);
+
+    guiLog("SIM: All threads started");
 }
 
-void App::stopSimThread() {
+void App::stopSimThreads() {
     if (!sim_thread_running_) return;
 
-    guiLog("SIM: Stopping audio thread");
+    guiLog("SIM: Stopping simulation threads");
     sim_thread_running_ = false;
-    sim_cv_.notify_all();
 
-    if (sim_thread_.joinable()) {
-        sim_thread_.join();
+    // Join all threads
+    if (sim_our_tx_thread_.joinable()) sim_our_tx_thread_.join();
+    if (sim_virtual_tx_thread_.joinable()) sim_virtual_tx_thread_.join();
+    if (sim_our_rx_thread_.joinable()) sim_our_rx_thread_.join();
+    if (sim_virtual_rx_thread_.joinable()) sim_virtual_rx_thread_.join();
+    if (sim_virtual_protocol_thread_.joinable()) sim_virtual_protocol_thread_.join();
+
+    // Clear all buffers
+    {
+        std::lock_guard<std::mutex> lock(channel_to_virtual_mutex_);
+        channel_to_virtual_.clear();
     }
-    guiLog("SIM: Audio thread stopped");
+    {
+        std::lock_guard<std::mutex> lock(channel_to_us_mutex_);
+        channel_to_us_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+        our_tx_pending_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
+        virtual_tx_pending_.clear();
+    }
+
+    guiLog("SIM: All threads stopped");
 }
 
-void App::simThreadLoop() {
-    guiLog("SIM: Audio thread started");
-
-    // Deliver samples at ~48kHz (10ms chunks = 480 samples for efficiency)
-    // Larger chunks reduce lock contention while still being responsive
+void App::ourRxLoop() {
+    guiLog("SIM: Our RX thread started");
     constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
-    constexpr auto CHUNK_DURATION = std::chrono::milliseconds(10);
-
-    auto next_tick = std::chrono::steady_clock::now();
-    size_t total_our_streamed = 0;
-    size_t total_virtual_streamed = 0;
 
     while (sim_thread_running_) {
-        // Wait until next tick time
-        std::this_thread::sleep_until(next_tick);
-        next_tick += CHUNK_DURATION;
+        std::vector<float> chunk;
 
-        std::vector<float> our_chunk;
-        std::vector<float> virtual_chunk;
-        bool our_tx_complete = false;
-        bool virtual_tx_complete = false;
-
-        // Grab chunks under lock (minimize lock time)
+        // Read from channel
         {
-            std::lock_guard<std::mutex> lock(sim_mutex_);
-
-            // Grab chunk from our streaming buffer
-            if (!sim_our_streaming_.empty()) {
-                size_t to_send = std::min(CHUNK_SIZE, sim_our_streaming_.size());
-                our_chunk.assign(sim_our_streaming_.begin(),
-                                 sim_our_streaming_.begin() + to_send);
-                sim_our_streaming_.erase(sim_our_streaming_.begin(),
-                                         sim_our_streaming_.begin() + to_send);
-                our_tx_complete = sim_our_streaming_.empty();
-            }
-
-            // Grab chunk from virtual's streaming buffer
-            if (!sim_virtual_streaming_.empty()) {
-                size_t to_send = std::min(CHUNK_SIZE, sim_virtual_streaming_.size());
-                virtual_chunk.assign(sim_virtual_streaming_.begin(),
-                                     sim_virtual_streaming_.begin() + to_send);
-                sim_virtual_streaming_.erase(sim_virtual_streaming_.begin(),
-                                             sim_virtual_streaming_.begin() + to_send);
-                virtual_tx_complete = sim_virtual_streaming_.empty();
+            std::lock_guard<std::mutex> lock(channel_to_us_mutex_);
+            if (channel_to_us_.size() >= CHUNK_SIZE) {
+                chunk.assign(channel_to_us_.begin(), channel_to_us_.begin() + CHUNK_SIZE);
+                channel_to_us_.erase(channel_to_us_.begin(), channel_to_us_.begin() + CHUNK_SIZE);
             }
         }
 
-        // Process chunks outside lock (slow operations)
-
-        // Stream our samples → virtual modem
-        if (!our_chunk.empty()) {
-            total_our_streamed += our_chunk.size();
-
-            // Record samples if enabled
-            if (recording_enabled_) {
-                recorded_samples_.insert(recorded_samples_.end(), our_chunk.begin(), our_chunk.end());
-            }
-
-            // Show on waterfall
-            waterfall_.addSamples(our_chunk.data(), our_chunk.size());
-
-            // Feed to virtual modem
-            virtual_modem_->receiveAudio(our_chunk);
-            virtual_modem_->pollRxAudio();
-
-            if (our_tx_complete) {
-                guiLog("SIM: TX -> virtual complete (thread, %zu samples)", total_our_streamed);
-                total_our_streamed = 0;
-                sim_virtual_ptt_delay_ = PTT_DELAY_MS;
-            }
+        // Check if TX is still active
+        if (tx_in_progress_ && std::chrono::steady_clock::now() >= tx_end_time_) {
+            tx_in_progress_ = false;  // TX finished
         }
 
-        // Stream virtual's samples → our modem
-        if (!virtual_chunk.empty()) {
-            total_virtual_streamed += virtual_chunk.size();
-
-            // Record samples if enabled
+        if (!chunk.empty()) {
+            // Record if enabled
             if (recording_enabled_) {
-                recorded_samples_.insert(recorded_samples_.end(), virtual_chunk.begin(), virtual_chunk.end());
+                recorded_samples_.insert(recorded_samples_.end(), chunk.begin(), chunk.end());
             }
 
-            // Show on waterfall
-            waterfall_.addSamples(virtual_chunk.data(), virtual_chunk.size());
+            // Show on waterfall only when not transmitting (TX signal takes priority)
+            if (!tx_in_progress_) {
+                waterfall_.addSamples(chunk.data(), chunk.size());
+            }
 
-            // Feed to our modem
-            modem_.receiveAudio(virtual_chunk);
+            // Feed to our modem (always process RX even during TX display)
+            modem_.receiveAudio(chunk);
             modem_.pollRxAudio();
+        } else {
+            // No RX data - generate noise floor for waterfall (like real radio)
+            if (!tx_in_progress_) {
+                // Generate noise at current SNR level
+                float typical_rms = 0.1f;
+                float snr_linear = std::pow(10.0f, simulation_snr_db_ / 10.0f);
+                float noise_power = (typical_rms * typical_rms) / snr_linear;
+                float noise_stddev = std::sqrt(noise_power);
+                std::normal_distribution<float> noise_dist(0.0f, noise_stddev);
 
-            if (virtual_tx_complete) {
-                guiLog("SIM: TX <- virtual complete (thread, %zu samples)", total_virtual_streamed);
-                total_virtual_streamed = 0;
-                sim_our_ptt_delay_ = PTT_DELAY_MS;
+                std::vector<float> noise(CHUNK_SIZE);
+                for (float& s : noise) s = noise_dist(sim_rng_);
+                waterfall_.addSamples(noise.data(), noise.size());
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
-
-        // Also poll modems to process any accumulated samples
-        virtual_modem_->pollRxAudio();
-        modem_.pollRxAudio();
     }
 
-    guiLog("SIM: Audio thread exiting");
+    guiLog("SIM: Our RX thread stopped");
 }
 
-void App::tickSimulation(uint32_t elapsed_ms) {
-    if (!simulation_enabled_) return;
+void App::ourTxLoop() {
+    guiLog("SIM: Our TX thread started");
+    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
+    auto last_time = std::chrono::steady_clock::now();
 
-    // Update PTT delays
-    if (sim_our_ptt_delay_ > 0) {
-        sim_our_ptt_delay_ = (elapsed_ms >= sim_our_ptt_delay_) ? 0 : sim_our_ptt_delay_ - elapsed_ms;
-    }
-    if (sim_virtual_ptt_delay_ > 0) {
-        sim_virtual_ptt_delay_ = (elapsed_ms >= sim_virtual_ptt_delay_) ? 0 : sim_virtual_ptt_delay_ - elapsed_ms;
-    }
+    while (sim_thread_running_) {
+        // Wait for real-time (10ms chunks at 48kHz)
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_time).count();
+        if (elapsed < 10000) {  // 10ms = 10000us
+            std::this_thread::sleep_for(std::chrono::microseconds(10000 - elapsed));
+            now = std::chrono::steady_clock::now();
+        }
+        last_time = now;
 
-    // === Move pending TX to streaming buffers (with PTT delay) ===
-    // Note: Actual sample streaming is done by simThreadLoop() at 48kHz
+        std::vector<float> chunk;
 
-    std::lock_guard<std::mutex> lock(sim_mutex_);
+        // Get pending TX samples
+        {
+            std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+            if (our_tx_pending_.size() >= CHUNK_SIZE) {
+                chunk.assign(our_tx_pending_.begin(), our_tx_pending_.begin() + CHUNK_SIZE);
+                our_tx_pending_.erase(our_tx_pending_.begin(), our_tx_pending_.begin() + CHUNK_SIZE);
+            } else if (!our_tx_pending_.empty()) {
+                // Send remaining samples (end of transmission)
+                chunk = std::move(our_tx_pending_);
+                our_tx_pending_.clear();
+            }
+        }
 
-    // Our TX → streaming to virtual
-    if (!sim_our_tx_queue_.empty() && sim_our_streaming_.empty() && sim_our_ptt_delay_ == 0) {
-        guiLog("SIM: Starting TX -> virtual (%zu samples, %.1fs)",
-               sim_our_tx_queue_.size(), sim_our_tx_queue_.size() / 48000.0f);
+        if (!chunk.empty()) {
+            // Show on waterfall (real-time, like actual TX)
+            waterfall_.addSamples(chunk.data(), chunk.size());
 
-        // Prepend PTT noise and apply channel effects
-        prependPttNoise(sim_our_tx_queue_);
-        applyChannelSimulation(sim_our_tx_queue_);
-
-        // Move to streaming buffer (thread will stream at 48kHz)
-        sim_our_streaming_ = std::move(sim_our_tx_queue_);
-        sim_our_tx_queue_.clear();
-
-        // Virtual can't TX until we're done (half-duplex)
-        sim_virtual_ptt_delay_ = PTT_DELAY_MS;
-    }
-
-    // Virtual's TX → streaming to us
-    if (!sim_virtual_tx_queue_.empty() && sim_virtual_streaming_.empty() && sim_virtual_ptt_delay_ == 0) {
-        guiLog("SIM: Starting TX <- virtual (%zu samples, %.1fs)",
-               sim_virtual_tx_queue_.size(), sim_virtual_tx_queue_.size() / 48000.0f);
-
-        // Prepend PTT noise and apply channel effects
-        prependPttNoise(sim_virtual_tx_queue_);
-        applyChannelSimulation(sim_virtual_tx_queue_);
-
-        // Move to streaming buffer (thread will stream at 48kHz)
-        sim_virtual_streaming_ = std::move(sim_virtual_tx_queue_);
-        sim_virtual_tx_queue_.clear();
-
-        // We can't TX until virtual is done (half-duplex)
-        sim_our_ptt_delay_ = PTT_DELAY_MS;
+            // Send through channel to virtual station
+            writeToVirtualChannel(chunk);
+        }
     }
 
-    // NOTE: Streaming and modem polling now done by simThreadLoop()
+    guiLog("SIM: Our TX thread stopped");
+}
 
-    // === Tick protocol engines ===
-    // This may generate new TX samples into the queues
-    virtual_protocol_.tick(elapsed_ms);
-    protocol_.tick(elapsed_ms);
+void App::virtualRxLoop() {
+    guiLog("SIM: Virtual RX thread started");
+    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
+
+    while (sim_thread_running_) {
+        std::vector<float> chunk;
+
+        // Read from channel
+        {
+            std::lock_guard<std::mutex> lock(channel_to_virtual_mutex_);
+            if (channel_to_virtual_.size() >= CHUNK_SIZE) {
+                chunk.assign(channel_to_virtual_.begin(), channel_to_virtual_.begin() + CHUNK_SIZE);
+                channel_to_virtual_.erase(channel_to_virtual_.begin(), channel_to_virtual_.begin() + CHUNK_SIZE);
+            }
+        }
+
+        if (!chunk.empty()) {
+            // Record if enabled
+            if (recording_enabled_) {
+                recorded_samples_.insert(recorded_samples_.end(), chunk.begin(), chunk.end());
+            }
+
+            // Feed to virtual modem
+            virtual_modem_->receiveAudio(chunk);
+            virtual_modem_->pollRxAudio();
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
+    guiLog("SIM: Virtual RX thread stopped");
+}
+
+void App::virtualTxLoop() {
+    guiLog("SIM: Virtual TX thread started");
+    constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
+    auto last_time = std::chrono::steady_clock::now();
+
+    while (sim_thread_running_) {
+        // Wait for real-time (10ms chunks at 48kHz)
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - last_time).count();
+        if (elapsed < 10000) {  // 10ms = 10000us
+            std::this_thread::sleep_for(std::chrono::microseconds(10000 - elapsed));
+            now = std::chrono::steady_clock::now();
+        }
+        last_time = now;
+
+        std::vector<float> chunk;
+
+        // Get pending TX samples from virtual station
+        {
+            std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
+            if (virtual_tx_pending_.size() >= CHUNK_SIZE) {
+                chunk.assign(virtual_tx_pending_.begin(), virtual_tx_pending_.begin() + CHUNK_SIZE);
+                virtual_tx_pending_.erase(virtual_tx_pending_.begin(), virtual_tx_pending_.begin() + CHUNK_SIZE);
+            } else if (!virtual_tx_pending_.empty()) {
+                // Send remaining samples (end of transmission)
+                chunk = std::move(virtual_tx_pending_);
+                virtual_tx_pending_.clear();
+            }
+        }
+
+        if (!chunk.empty()) {
+            // Send through channel to us
+            writeToOurChannel(chunk);
+        }
+    }
+
+    guiLog("SIM: Virtual TX thread stopped");
+}
+
+void App::virtualProtocolLoop() {
+    guiLog("SIM: Virtual protocol thread started");
+    auto last_tick = std::chrono::steady_clock::now();
+
+    while (sim_thread_running_) {
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick).count();
+
+        if (elapsed >= 16) {  // ~60Hz tick rate
+            virtual_protocol_.tick(elapsed);
+            last_tick = now;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    guiLog("SIM: Virtual protocol thread stopped");
 }
 
 void App::initAudio() {
@@ -758,17 +858,14 @@ void App::render() {
         }
     }
 
-    // Protocol engine tick
+    // Protocol engine tick (our protocol always ticks in main thread for UI responsiveness)
+    // Virtual station's protocol ticks in its own thread (virtualProtocolLoop)
     uint32_t now = SDL_GetTicks();
     uint32_t elapsed = (last_tick_time_ == 0) ? 0 : (now - last_tick_time_);
     last_tick_time_ = now;
 
     if (elapsed > 0 && elapsed < 1000) {
-        if (simulation_enabled_) {
-            tickSimulation(elapsed);
-        } else {
-            protocol_.tick(elapsed);
-        }
+        protocol_.tick(elapsed);
     }
 
     // Create main window
@@ -821,6 +918,10 @@ void App::render() {
 
     // Compact Channel Status (horizontal layout)
     auto modem_stats = modem_.getStats();
+    // In simulation mode, use the slider SNR (that's the actual channel quality)
+    if (simulation_enabled_) {
+        modem_stats.snr_db = simulation_snr_db_;
+    }
     auto data_mod = protocol_.getDataModulation();
     auto data_rate = protocol_.getDataCodeRate();
     renderCompactChannelStatus(modem_stats, data_mod, data_rate);
@@ -907,26 +1008,53 @@ void App::stopRadioRx() {
     radio_rx_enabled_ = false;
 }
 
-// Helper function to classify channel quality based on SNR
+// Helper function to get implied channel condition from negotiated mode
+// (what channel the remote station measured to choose this mode)
+static const char* getModeImpliedQuality(Modulation mod, CodeRate rate, ImVec4& color) {
+    // Based on mode selection thresholds - using standard HF terms
+    // High rates = AWGN-like, Low rates = Poor channel
+    if (mod == Modulation::QAM16) {
+        if (rate == CodeRate::R3_4 || rate == CodeRate::R5_6) {
+            color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
+            return "AWGN";  // Lab-like conditions
+        } else {
+            color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
+            return "Good";
+        }
+    } else if (mod == Modulation::DQPSK || mod == Modulation::QPSK) {
+        if (rate == CodeRate::R2_3) {
+            color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
+            return "Good";
+        } else if (rate == CodeRate::R1_2) {
+            color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
+            return "Moderate";
+        } else {
+            color = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);  // Orange
+            return "Poor";
+        }
+    } else {
+        color = ImVec4(1.0f, 0.3f, 0.0f, 1.0f);  // Red
+        return "Very Poor";
+    }
+}
+
+// Helper function to classify channel quality based on SNR (standard HF terms)
 static const char* getChannelQuality(float snr_db, ImVec4& color) {
     if (snr_db >= 30.0f) {
-        color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Bright cyan-green
-        return "Outstanding";
+        color = ImVec4(0.0f, 1.0f, 0.5f, 1.0f);  // Cyan
+        return "AWGN";  // Lab-like, ideal conditions
     } else if (snr_db >= 20.0f) {
-        color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Bright green
-        return "Excellent";
-    } else if (snr_db >= 15.0f) {
-        color = ImVec4(0.4f, 0.9f, 0.2f, 1.0f);  // Light green
-        return "Very Good";
-    } else if (snr_db >= 10.0f) {
-        color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
+        color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);  // Green
         return "Good";
-    } else if (snr_db >= 5.0f) {
-        color = ImVec4(1.0f, 0.6f, 0.0f, 1.0f);  // Orange
-        return "Fair";
+    } else if (snr_db >= 15.0f) {
+        color = ImVec4(0.8f, 0.8f, 0.0f, 1.0f);  // Yellow
+        return "Moderate";
+    } else if (snr_db >= 10.0f) {
+        color = ImVec4(1.0f, 0.5f, 0.0f, 1.0f);  // Orange
+        return "Poor";
     } else if (snr_db >= 0.0f) {
         color = ImVec4(1.0f, 0.3f, 0.0f, 1.0f);  // Red-orange
-        return "Poor";
+        return "Very Poor";
     } else {
         color = ImVec4(1.0f, 0.1f, 0.1f, 1.0f);  // Red
         return "Very Poor";
@@ -937,62 +1065,119 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
     // Compact horizontal Channel Status display
     ImGui::BeginChild("ChannelStatus", ImVec2(0, 110), false);
 
-    // Row 1: Sync indicator + Channel Quality + SNR bar
-    ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
-    ImGui::TextColored(sync_color, "%s", stats.synced ? "SYNC" : "----");
-    ImGui::SameLine();
+    auto conn_state = protocol_.getState();
 
-    // Channel quality classification
-    ImVec4 quality_color;
-    const char* quality_str = getChannelQuality(stats.snr_db, quality_color);
-    ImGui::TextColored(quality_color, "[%s]", quality_str);
-    ImGui::SameLine();
-    ImGui::Text("SNR:");
-    ImGui::SameLine();
-
-    // SNR bar
-    float snr_normalized = stats.snr_db / 40.0f;
-    snr_normalized = std::max(0.0f, std::min(1.0f, snr_normalized));
-    ImVec4 snr_color = (stats.snr_db >= 20.0f) ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) :
-                       (stats.snr_db >= 10.0f) ? ImVec4(1.0f, 1.0f, 0.2f, 1.0f) :
-                                                  ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
-    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, snr_color);
-    char snr_text[16];
-    snprintf(snr_text, sizeof(snr_text), "%.1f dB", stats.snr_db);
-    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
-    ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
-    ImGui::PopStyleColor();
-
-    // Row 2: Waveform + Mode + Theoretical max speed
-    auto waveform = modem_.getWaveformMode();
-    const char* wf_str = protocol::waveformModeToString(waveform);
-    ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
-                      (waveform == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
-                      (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
-                                                                   ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
-    ImGui::TextColored(wf_color, "%s", wf_str);
-    ImGui::SameLine();
-    ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
-    ImGui::SameLine(160);
-    float throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
-    ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
-    ImGui::SameLine(240);
-    ImGui::TextDisabled("BER:");
-    ImGui::SameLine();
-    if (stats.ber > 0.0f && stats.ber < 1.0f) {
-        ImVec4 ber_color = (stats.ber < 0.01f) ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) :
-                           (stats.ber < 0.1f)  ? ImVec4(1.0f, 1.0f, 0.2f, 1.0f) :
-                                                  ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
-        ImGui::TextColored(ber_color, "%.1f%%", stats.ber * 100.0f);
+    // Row 1: Connection state + Channel Quality (only when connected) + SNR bar
+    if (conn_state == protocol::ConnectionState::DISCONNECTED) {
+        // Not connected - show idle state
+        ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "IDLE");
+        ImGui::SameLine();
+        ImGui::TextDisabled("[Standby]");
+        ImGui::SameLine();
+        ImGui::Text("SNR:");
+        ImGui::SameLine();
+        // Empty SNR bar
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::ProgressBar(0.0f, ImVec2(-1, 16), "-- dB");
+        ImGui::PopStyleColor();
+    } else if (conn_state == protocol::ConnectionState::CONNECTING) {
+        // Connecting - show our outgoing mode, no channel quality yet
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "CALL");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[Connecting...]");
+        ImGui::SameLine();
+        ImGui::Text("SNR:");
+        ImGui::SameLine();
+        // Animated/pulsing bar to show activity
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(1.0f, 0.8f, 0.2f, 1.0f));
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::ProgressBar(0.3f, ImVec2(-1, 16), "awaiting...");
+        ImGui::PopStyleColor();
+    } else if (conn_state == protocol::ConnectionState::DISCONNECTING) {
+        // Disconnecting
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "DISC");
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.2f, 1.0f), "[Disconnecting...]");
+        ImGui::SameLine();
+        ImGui::Text("SNR:");
+        ImGui::SameLine();
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, ImVec4(1.0f, 0.5f, 0.2f, 1.0f));
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::ProgressBar(0.5f, ImVec2(-1, 16), "closing...");
+        ImGui::PopStyleColor();
     } else {
-        ImGui::TextDisabled("--");
+        // CONNECTED - show remote mode (their view) AND our SNR (our view)
+        // Row 1: Remote's negotiated mode + implied channel condition
+        auto waveform = modem_.getWaveformMode();
+        const char* wf_str = protocol::waveformModeToString(waveform);
+        ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+                          (waveform == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
+                          (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
+                                                                       ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+        ImGui::Text("RX:");
+        ImGui::SameLine();
+        ImGui::TextColored(wf_color, "%s", wf_str);
+        ImGui::SameLine();
+        ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
+        ImGui::SameLine();
+        // Show implied channel condition from their mode choice
+        ImVec4 mode_quality_color;
+        const char* mode_quality = getModeImpliedQuality(data_mod, data_rate, mode_quality_color);
+        ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
+        ImGui::SameLine();
+        float throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
+        ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
+
+        // Row 2: Our SNR measurement
+        ImVec4 sync_color = stats.synced ? ImVec4(0.2f, 1.0f, 0.2f, 1.0f) : ImVec4(0.5f, 0.5f, 0.5f, 1.0f);
+        ImGui::TextColored(sync_color, "%s", stats.synced ? "SYNC" : "----");
+        ImGui::SameLine();
+        ImGui::Text("SNR:");
+        ImGui::SameLine();
+        ImVec4 quality_color;
+        const char* quality_str = getChannelQuality(stats.snr_db, quality_color);
+        ImGui::TextColored(quality_color, "[%s]", quality_str);
+        ImGui::SameLine();
+
+        // SNR bar
+        float snr_normalized = stats.snr_db / 40.0f;
+        snr_normalized = std::max(0.0f, std::min(1.0f, snr_normalized));
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, quality_color);
+        char snr_text[16];
+        snprintf(snr_text, sizeof(snr_text), "%.1f dB", stats.snr_db);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+        ImGui::ProgressBar(snr_normalized, ImVec2(-1, 16), snr_text);
+        ImGui::PopStyleColor();
     }
 
-    // Row 3: Frame stats
-    ImGui::Text("TX:%d RX:%d", stats.frames_sent, stats.frames_received);
-    if (stats.frames_failed > 0) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "(%d fail)", stats.frames_failed);
+    // Row 2: Waveform + Mode (for non-connected states only)
+    if (conn_state == protocol::ConnectionState::DISCONNECTED) {
+        // Show default connect waveform (DPSK R1/4)
+        auto connect_wf = protocol_.getConnectWaveform();
+        const char* wf_str = protocol::waveformModeToString(connect_wf);
+        ImGui::TextDisabled("%s R1/4 (default)", wf_str);
+    } else if (conn_state == protocol::ConnectionState::CONNECTING) {
+        // Show actual waveform being used for connection attempt (always R1/4)
+        auto connect_wf = protocol_.getConnectWaveform();
+        const char* wf_str = protocol::waveformModeToString(connect_wf);
+        ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+                          (connect_wf == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
+                          (connect_wf == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
+                                                                         ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
+        ImGui::TextColored(wf_color, "%s R1/4 (calling)", wf_str);
+    }
+    // Connected state already shows mode in Row 1
+
+    // Row 3: Frame stats (only show when we have activity)
+    if (stats.frames_sent > 0 || stats.frames_received > 0) {
+        ImGui::Text("TX:%d RX:%d", stats.frames_sent, stats.frames_received);
+        if (stats.frames_failed > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "(%d fail)", stats.frames_failed);
+        }
+    } else if (conn_state == protocol::ConnectionState::DISCONNECTED) {
+        ImGui::TextDisabled("Ready to connect");
     }
 
     ImGui::EndChild();
@@ -1022,11 +1207,11 @@ void App::renderOperateTab() {
                         recording_enabled_ = true; recorded_samples_.clear();
                         rx_log_.push_back("[REC] Recording enabled");
                     }
-                    // Start audio thread for realistic sample delivery
-                    startSimThread();
+                    // Start simulation threads for realistic audio streaming
+                    startSimThreads();
                 } else {
-                    // Stop audio thread first
-                    stopSimThread();
+                    // Stop simulation threads
+                    stopSimThreads();
                     rx_log_.push_back("[SIM] Simulation disabled");
                     if (recording_enabled_) {
                         recording_enabled_ = false;
@@ -1140,6 +1325,8 @@ void App::renderOperateTab() {
 
     ImGui::BeginDisabled(conn_state == protocol::ConnectionState::DISCONNECTED);
     if (ImGui::Button("Disconnect", ImVec2(btn_w, 0))) {
+        guiLog("DISCONNECT BUTTON: Pressed, modem connected_=%d, waveform_mode_=%d",
+               modem_.isConnected() ? 1 : 0, static_cast<int>(modem_.getWaveformMode()));
         protocol_.disconnect();
     }
     ImGui::EndDisabled();

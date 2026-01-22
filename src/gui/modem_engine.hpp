@@ -149,6 +149,10 @@ public:
     void setConnected(bool connected);
     bool isConnected() const { return connected_; }
 
+    // Tell modem to use connected waveform for the next TX even if disconnected
+    // Used for DISCONNECT ACK - protocol sets this before sending ACK
+    void setUseConnectedWaveformOnce() { use_connected_waveform_once_ = true; }
+
     // Set waveform for connection attempts (DPSK -> MFSK fallback)
     void setConnectWaveform(protocol::WaveformMode mode);
     protocol::WaveformMode getConnectWaveform() const { return connect_waveform_; }
@@ -192,6 +196,7 @@ private:
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::DPSK;  // Last waveform we received on
     bool connected_ = false;
     bool handshake_complete_ = false;  // True after first post-CONNECT_ACK frame received
+    bool use_connected_waveform_once_ = false;  // Use connected waveform for next TX (for DISCONNECT ACK)
 
     // Data frame modulation (negotiated after probing)
     // Link establishment frames always use BPSK R1/4

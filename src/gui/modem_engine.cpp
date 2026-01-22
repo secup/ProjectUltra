@@ -287,18 +287,36 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     // Determine which waveform to use for modulation:
+    // - use_connected_waveform_once_: use waveform_mode_ (for DISCONNECT ACK)
     // - When NOT connected: use connect_waveform_ (DPSK -> MFSK fallback)
     // - When connected but handshake not complete: use last_rx_waveform_ (respond on same waveform)
     // - When connected and handshake complete: use negotiated waveform_mode_
+    LOG_MODEM(INFO, "[%s] TX WAVEFORM DECISION: connected_=%d, handshake_complete_=%d, "
+              "waveform_mode_=%d, connect_waveform_=%d, last_rx_waveform_=%d, use_once_=%d",
+              log_prefix_.c_str(), connected_ ? 1 : 0, handshake_complete_ ? 1 : 0,
+              static_cast<int>(waveform_mode_), static_cast<int>(connect_waveform_),
+              static_cast<int>(last_rx_waveform_), use_connected_waveform_once_ ? 1 : 0);
+
     protocol::WaveformMode active_waveform;
-    if (!connected_) {
+    if (use_connected_waveform_once_) {
+        // DISCONNECT ACK - use negotiated waveform even though we just disconnected
+        active_waveform = waveform_mode_;
+        use_connected_waveform_once_ = false;  // Clear flag after use
+        LOG_MODEM(INFO, "[%s] TX: use_connected_waveform_once_ -> using waveform_mode_=%d",
+                  log_prefix_.c_str(), static_cast<int>(active_waveform));
+    } else if (!connected_) {
         active_waveform = connect_waveform_;
+        LOG_MODEM(INFO, "[%s] TX: NOT connected -> using connect_waveform_=%d",
+                  log_prefix_.c_str(), static_cast<int>(active_waveform));
     } else if (!handshake_complete_) {
         // Still in handshake - respond using same waveform we received on
         active_waveform = last_rx_waveform_;
-        LOG_MODEM(DEBUG, "TX: Handshake mode, using last_rx_waveform_=%d", static_cast<int>(active_waveform));
+        LOG_MODEM(INFO, "[%s] TX: Handshake mode -> using last_rx_waveform_=%d",
+                  log_prefix_.c_str(), static_cast<int>(active_waveform));
     } else {
         active_waveform = waveform_mode_;
+        LOG_MODEM(INFO, "[%s] TX: Connected+handshake -> using waveform_mode_=%d",
+                  log_prefix_.c_str(), static_cast<int>(active_waveform));
     }
 
     bool use_ofdm = (active_waveform == protocol::WaveformMode::OFDM);
@@ -1648,6 +1666,7 @@ void ModemEngine::reset() {
     // Reset pending frame state and multi-detect rate limiter
     pending_frame_.clear();
     last_multidetect_buffer_size_ = 0;
+    use_connected_waveform_once_ = false;
 
     // Reset carrier sense
     channel_energy_.store(0.0f);
@@ -1815,6 +1834,9 @@ void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
 }
 
 void ModemEngine::setConnected(bool connected) {
+    LOG_MODEM(INFO, "[%s] setConnected(%d) called, was connected_=%d",
+              log_prefix_.c_str(), connected ? 1 : 0, connected_ ? 1 : 0);
+
     if (connected_ == connected) return;
 
     connected_ = connected;
@@ -1822,6 +1844,7 @@ void ModemEngine::setConnected(bool connected) {
     if (connected) {
         // Reset handshake state - we'll complete it when we receive first post-ACK frame
         handshake_complete_ = false;
+        use_connected_waveform_once_ = false;  // Clear any leftover flag
 
         // CRITICAL: Clear RX buffer when entering connected state
         // Old samples from DPSK/MFSK handshake would corrupt OFDM preamble detection
@@ -1846,7 +1869,10 @@ void ModemEngine::setConnected(bool connected) {
         decoder_->setRate(CodeRate::R1_4);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
-        LOG_MODEM(INFO, "Switched to disconnected mode (RX: DQPSK R1/4)");
+        // Keep using connected waveform for the next TX (DISCONNECT ACK)
+        // This handles the case where the ACK is queued before setConnected(false) is called
+        use_connected_waveform_once_ = true;
+        LOG_MODEM(INFO, "Switched to disconnected mode (RX: DQPSK R1/4, next TX uses connected waveform)");
         handshake_complete_ = false;  // Reset for next connection
     }
 }

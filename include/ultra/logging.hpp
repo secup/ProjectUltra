@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <chrono>
+#include <mutex>
 
 // Windows headers define ERROR as a macro - undefine it
 #ifdef ERROR
@@ -13,6 +14,10 @@ namespace ultra {
 
 // Start time for relative timestamps
 inline auto g_log_start_time = std::chrono::steady_clock::now();
+
+// Log output file (nullptr = stderr)
+inline FILE* g_log_file = nullptr;
+inline std::mutex g_log_mutex;
 
 // Log levels
 enum class LogLevel {
@@ -48,9 +53,18 @@ inline void setLogLevel(LogLevel level) {
     g_log_level = level;
 }
 
+// Set log output file (call with nullptr to use stderr)
+inline void setLogFile(FILE* file) {
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    g_log_file = file;
+}
+
 // Core logging function
 inline void log(LogLevel level, const char* category, const char* format, ...) {
     if (level > g_log_level) return;
+
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    FILE* out = g_log_file ? g_log_file : stderr;
 
     // Get elapsed time in milliseconds
     auto now = std::chrono::steady_clock::now();
@@ -68,14 +82,15 @@ inline void log(LogLevel level, const char* category, const char* format, ...) {
         default: break;
     }
 
-    fprintf(stderr, "[%3d.%03d][%s][%s] ", secs, ms, level_str, category);
+    fprintf(out, "[%3d.%03d][%s][%s] ", secs, ms, level_str, category);
 
     va_list args;
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    vfprintf(out, format, args);
     va_end(args);
 
-    fprintf(stderr, "\n");
+    fprintf(out, "\n");
+    fflush(out);
 }
 
 // Convenience macros - these compile to nothing when ULTRA_LOG_DISABLE is defined
