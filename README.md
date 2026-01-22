@@ -1,95 +1,59 @@
 # ProjectUltra
 
-**An adaptive HF modem for amateur radio digital communication**
+**High-performance HF modem for amateur radio**
 
-> ⚠️ **Work in Progress** — This project is under active development. No official release yet. APIs and protocols may change. Use for experimentation and testing only.
+*Last updated: 2026-01-22*
 
-ProjectUltra is a software modem designed for reliable data transfer over HF radio. It combines modern signal processing techniques—OFDM, OTFS, LDPC codes, and adaptive equalization—to maintain communication across challenging ionospheric conditions including multipath fading, Doppler spread, and interference.
+> **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
+>
+> This project is under active development and is **not ready for production use**.
+> Features may be incomplete, untested, or broken. APIs and protocols may change
+> without notice. Performance numbers are from simulation only - real-world HF
+> testing is ongoing. **Use at your own risk for experimentation and development only.**
+
+ProjectUltra is a software modem that achieves reliable, high-speed data transfer over HF radio. It uses adaptive waveform selection to maintain communication across varying ionospheric conditions - from quiet bands to disturbed polar paths.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Status: WIP](https://img.shields.io/badge/Status-Work%20in%20Progress-yellow.svg)]()
+[![Status: Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)]()
 
 ---
 
-## Key Features
+## Features
 
-- **Dual Waveform Support:** OFDM for stable channels, OTFS for harsh conditions
-- **Strong Error Correction:** LDPC codes with rates from 1/4 to 5/6
-- **Selective Repeat ARQ:** Improved efficiency over stop-and-wait
-- **Adaptive Equalization:** LMS/RLS tracking for time-varying channels
-- **Implicit Channel Probing:** Automatic link adaptation without overhead
-- **File Transfer:** Compressed transfers with integrity verification
+- **Adaptive Waveforms**: Automatically selects optimal waveform based on channel conditions
+- **Wide SNR Range**: Operates from -17 dB (reported) to 30+ dB
+- **Strong FEC**: LDPC codes with rates from R1/4 to R5/6
+- **ARQ Protocol**: Reliable delivery with automatic retransmission
+- **GUI Application**: Real-time waterfall, constellation display, and message log
+- **CLI Tools**: Scriptable transmit/receive for automation
 
 ---
 
 ## Performance
 
-> **Experimental** — Performance measured through simulation (Watterson HF channel model). Real-world on-air testing is in progress.
+| Channel Condition | Waveform | Throughput | Min SNR |
+|-------------------|----------|------------|---------|
+| Very low SNR | MFSK | 47 bps | -17 dB* |
+| Poor/Flutter HF | Single-carrier DPSK | 300-1100 bps | 0-15 dB |
+| Good HF | OFDM DQPSK | 1.1-2.3 kbps | 17-25 dB |
+| Excellent | OFDM D8PSK | 3.4 kbps | 25+ dB |
 
-### Simulation Results (ultra_sim)
+*Reported SNR in 2500 Hz bandwidth; actual SNR in signal bandwidth is higher.
 
-| Condition | Best Mode | Success Rate | Throughput |
-|-----------|-----------|--------------|------------|
-| AWGN 20-30 dB | 64-QAM R3/4 | 100% | **8.5 kbps** |
-| Good (25 dB, 0.5ms delay) | 16-QAM R2/3 | 96% | 4.9 kbps |
-| Moderate (15 dB, 1ms delay) | 16-QAM R1/2 | 76% | 2.9 kbps |
-| Moderate (15 dB) | QPSK R1/2 | 89% | 1.1 kbps |
-| Poor/Flutter | Under development | — | — |
+### Waveform Strategy
 
-**Notes:**
-- Poor and flutter channel conditions require OTFS mode (in development)
-- Supports modulation from BPSK to 256-QAM with LDPC rates R1/4 to R5/6
-- Real-world performance depends on actual ionospheric conditions
+ProjectUltra uses three waveform types, each optimized for different conditions:
 
----
+```
+SNR Range           Waveform              Why
+─────────────────────────────────────────────────────────────
+< 0 dB              MFSK 8-tone           Narrow bandwidth, long integration
+0-17 dB             Single-carrier DPSK   Full power concentration, no ICI
+17+ dB              OFDM                  High throughput, parallel carriers
+```
 
-## Technology
-
-### OTFS (Orthogonal Time Frequency Space)
-
-OTFS is a 2D modulation scheme designed for doubly-selective channels—those with both multipath (delay spread) and Doppler spread. Unlike OFDM which suffers from inter-carrier interference under fast fading, OTFS spreads each data symbol across the entire time-frequency grid, providing diversity against both delay and Doppler.
-
-**When to use OTFS:**
-- Polar/auroral paths with flutter fading
-- Mobile or aeronautical HF
-- Long paths with significant Doppler shift
-- Disturbed ionospheric conditions
-
-### Selective Repeat ARQ
-
-The protocol supports both Stop-and-Wait and Selective Repeat ARQ modes:
-
-| Metric | Stop-and-Wait | Selective Repeat |
-|--------|---------------|------------------|
-| Window Size | 1 | 4-8 configurable |
-| Efficiency | Baseline | Improved |
-| Complexity | Simple | Moderate |
-
-Selective Repeat uses a sliding window with per-frame acknowledgments, improving efficiency on paths with long round-trip times.
-
-### Adaptive Equalization
-
-Two equalizer algorithms track time-varying channel responses:
-
-- **LMS (Least Mean Squares):** Lower complexity, good for slow fading
-- **RLS (Recursive Least Squares):** Faster convergence, better for flutter
-
-Decision-directed mode uses decoded symbols as references between pilots, enabling continuous channel tracking.
-
-### Implicit Channel Probing
-
-Link adaptation happens automatically without explicit probing overhead:
-
-1. When station B decodes any frame from station A, the demodulator measures:
-   - SNR (from pilot symbols)
-   - Delay spread (from channel impulse response)
-   - Doppler spread (from channel time variation)
-
-2. Station B includes these measurements in its response (ACK or CONNECT_ACK)
-
-3. Station A adjusts modulation/coding for subsequent transmissions
-
-This eliminates dedicated probe frames while maintaining accurate channel awareness.
+**Key insight**: On challenging HF channels (multipath, flutter), single-carrier DPSK achieves 100% success where multi-carrier schemes fail. This is because DPSK concentrates all power in one carrier and differential encoding cancels phase distortion.
 
 ---
 
@@ -97,216 +61,228 @@ This eliminates dedicated probe frames while maintaining accurate channel awaren
 
 ### Requirements
 
-- macOS, Linux, or Windows
-- HF transceiver with audio I/O
-- **SSB filter width: 2.8 kHz or wider** (signal bandwidth is ~2.8 kHz)
-- Sound card interface (SignaLink, RigBlaster, etc.) or direct connection
+- Linux, macOS, or Windows
+- CMake 3.16+
+- SDL2 (for GUI)
+- C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 
 ### Building
 
 ```bash
 # Install dependencies
+# Ubuntu/Debian: sudo apt install libsdl2-dev cmake build-essential
 # macOS: brew install sdl2 cmake
-# Linux: sudo apt install libsdl2-dev cmake build-essential
+# Windows: vcpkg install sdl2
 
-git clone --recursive https://github.com/secup/ProjectUltra.git
+git clone https://github.com/mfrigerio/ProjectUltra.git
 cd ProjectUltra
 mkdir build && cd build
 cmake ..
-cmake --build .
-
-# If you already cloned without --recursive:
-git submodule update --init --recursive
+make -j4
 ```
 
 ### Running
 
+**GUI Application:**
 ```bash
-./ultra_gui
+./ultra_gui              # Normal mode
+./ultra_gui -sim         # Simulator mode (no radio needed)
 ```
 
-1. Open **Settings** and enter your callsign
-2. Select audio devices (input from radio, output to radio)
-3. Use **Test Mode** to verify operation without transmitting
-4. Switch to **Operate Mode** to go on-air
+**CLI Tools:**
+```bash
+# Transmit
+./ultra -s MYCALL -d THEIRCALL ptx "Hello World" | aplay -f FLOAT_LE -r 48000
 
-### Test Mode
+# Receive
+arecord -f FLOAT_LE -r 48000 | ./ultra prx
 
-Two virtual stations (TEST1, TEST2) with cross-wired audio for development:
-
-- **Loopback:** Single modem, TX audio loops to RX
-- **Protocol Test:** Full two-modem simulation with channel model
+# Loopback test
+./ultra ptx "Test message" | ./ultra prx
+```
 
 ---
 
-## Use Cases
+## How It Works
 
-- **General HF Data:** Day-to-day messaging between amateur stations
-- **File Exchange:** Documents, images, small files over HF
-- **Portable/Field Ops:** Lightweight software for field deployments
-- **NVIS Networks:** Regional coverage via 40m/80m near-vertical skywave
-- **Emergency Comms:** Reliable messaging when infrastructure is down
-- **Challenging Paths:** Polar, auroral, or mobile HF with OTFS mode
+### Protocol
+
+1. **CONNECT** - Initiates link with full callsign exchange
+2. **MODE_CHANGE** - Negotiates optimal modulation/coding based on measured SNR
+3. **DATA** - Transfers payload with per-frame acknowledgment
+4. **DISCONNECT** - Graceful termination with callsign ID (regulatory compliance)
+
+### Signal Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Sample Rate | 48 kHz |
+| Bandwidth | ~2.8 kHz |
+| Center Frequency | 1500 Hz (audio) |
+| OFDM Carriers | 30 |
+| LDPC Codeword | 648 bits |
+
+### LDPC Codes
+
+| Rate | Info Bytes | Use Case |
+|------|------------|----------|
+| R1/4 | 20 | Low SNR, maximum reliability |
+| R1/2 | 40 | Moderate SNR, good balance |
+| R2/3 | 54 | Good SNR, higher throughput |
+| R3/4 | 60 | Very good SNR |
+| R5/6 | 67 | Excellent SNR, maximum throughput |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    GUI Application (ImGui)                       │
-├─────────────────────────────────────────────────────────────────┤
-│         Protocol Engine (ARQ, Connection, File Transfer)         │
-├─────────────────────────────────────────────────────────────────┤
-│         Modem Engine (TX/RX coordination, carrier sense)         │
-├─────────────────────────────────────────────────────────────────┤
-│   LDPC Encoder/Decoder  │  Interleaver  │  OFDM/OTFS Mod/Demod  │
-├─────────────────────────────────────────────────────────────────┤
-│                      Audio I/O (SDL2)                            │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│              GUI Application (ImGui + SDL2)             │
+├─────────────────────────────────────────────────────────┤
+│     Protocol Engine (Connection, ARQ, File Transfer)    │
+├─────────────────────────────────────────────────────────┤
+│        Modem Engine (TX/RX coordination, SNR est)       │
+├──────────────┬──────────────┬───────────────────────────┤
+│ OFDM Mod/Dem │ DPSK Mod/Dem │ MFSK Mod/Dem             │
+├──────────────┴──────────────┴───────────────────────────┤
+│  LDPC Encoder/Decoder  │  Interleaver  │  Sync/CFO     │
+├─────────────────────────────────────────────────────────┤
+│                    Audio I/O (SDL2)                     │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Technical Details
+## Testing
 
-<details>
-<summary>Click to expand</summary>
+```bash
+cd build
 
-### OFDM Parameters
+# Run unit tests
+ctest
 
-| Parameter | Value |
-|-----------|-------|
-| Sample Rate | 48 kHz |
-| FFT Size | 512 |
-| Subcarrier Spacing | 93.75 Hz |
-| Total Subcarriers | 30 |
-| Data Subcarriers | 15 |
-| Pilot Subcarriers | 15 (every 2nd) |
-| **Signal Bandwidth** | **~2.8 kHz** |
-| Center Frequency | 1500 Hz |
-| Symbol Duration | ~11 ms |
-| Cyclic Prefix | Adaptive (SHORT/MEDIUM/LONG) |
+# Comprehensive modem test
+./tests/test_comprehensive_modem
 
-> **Note:** Requires SSB filter set to 2.8 kHz or wider. Standard 2.4 kHz filters will attenuate upper subcarriers.
+# CLI protocol simulator
+./cli_simulator --snr 20 --test
 
-### OTFS Parameters
+# OFDM + LDPC integration test
+./test_ofdm_ldpc_r23
+```
 
-| Parameter | Value |
-|-----------|-------|
-| Delay Bins (M) | 32 |
-| Doppler Bins (N) | 16 (QPSK) / 32 (BPSK) |
-| Grid Size | 512-1024 symbols |
-| Transform | ISFFT/SFFT (radix-2) |
+---
 
-### LDPC Codes
+## Radio Setup
 
-| Rate | Info Bits (k) | Codeword (n) | Overhead |
-|------|---------------|--------------|----------|
-| R1/4 | 162 | 648 | 4x |
-| R1/2 | 324 | 648 | 2x |
-| R2/3 | 432 | 648 | 1.5x |
-| R3/4 | 486 | 648 | 1.33x |
-| R5/6 | 540 | 648 | 1.2x |
+### Requirements
+- SSB transceiver with 2.8+ kHz filter bandwidth
+- Audio interface (SignaLink, RigBlaster, or direct soundcard connection)
+- PTT control (VOX, CAT, or hardware)
 
-Decoder: Min-sum belief propagation with early termination (max 50 iterations).
+### Audio Levels
+- TX: Adjust for clean signal without ALC compression
+- RX: Set for comfortable listening level (avoid clipping)
 
-### Modulation Schemes
+### Recommended Operating Frequencies
 
-- **BPSK:** 1 bit/symbol, most robust
-- **QPSK:** 2 bits/symbol, good balance
-- **16-QAM:** 4 bits/symbol, requires good SNR
-- **64-QAM:** 6 bits/symbol, excellent conditions only
-- **256-QAM:** 8 bits/symbol, exceptional conditions
+ProjectUltra uses **~2.8 kHz bandwidth**. Operate in wideband digital segments,
+not narrow-band FT8/PSK31 areas.
 
-### Synchronization
+| Band | Frequency (USB) | Notes |
+|------|-----------------|-------|
+| 80m | 3.590 MHz | Above narrow digital, below voice |
+| 40m | 7.102 MHz | Common for VARA/Winlink |
+| 30m | 10.145 MHz | Check for WSPR at 10.140 |
+| 20m | 14.108 MHz | Above FT8 crowd, wideband digital |
+| 15m | 21.110 MHz | Above narrow digital segment |
+| 10m | 28.120 MHz | Plenty of room |
 
-Schmidl-Cox preamble correlation with:
-- Coarse CFO estimation (±20 Hz tolerance)
-- Fine timing recovery
-- Adaptive threshold (0.75 default)
+**Avoid:**
+- 14.070-14.095 MHz (FT8/PSK31)
+- Any .074 MHz frequencies (FT8)
+- 14.100 MHz (NCDXF beacons)
 
-### Protocol Frames
-
-| Field | Size | Description |
-|-------|------|-------------|
-| Magic | 1 byte | Frame identifier (0x55) |
-| Type | 1 byte | CONNECT, DATA, ACK, etc. |
-| Flags | 1 byte | MORE_DATA, COMPRESSED, etc. |
-| Sequence | 1 byte | ARQ sequence number |
-| Src Call | 8 bytes | Source callsign |
-| Dst Call | 8 bytes | Destination callsign |
-| Length | 1 byte | Payload length |
-| Payload | 0-255 bytes | Frame data |
-| CRC | 2 bytes | CRC-16 checksum |
-
-### Channel Model
-
-Testing uses ITU-R F.1487 Watterson model:
-
-| Condition | Delay Spread | Doppler Spread | Description |
-|-----------|--------------|----------------|-------------|
-| AWGN | 0 | 0 | Ideal channel |
-| Good | 0.5 ms | 0.1 Hz | Quiet band |
-| Moderate | 1.0 ms | 0.5 Hz | Typical daytime |
-| Poor | 2.0 ms | 1.0 Hz | Disturbed path |
-| Flutter | 0.5 ms | 10 Hz | Auroral/polar |
-
-### References
-
-- ITU-R F.1487: Testing of HF modems with bandwidths up to about 12 kHz
-- Hadani et al. (2017): "Orthogonal Time Frequency Space Modulation"
-- IEEE 802.11n/ac: LDPC code structure
-- Schmidl & Cox: Robust frequency and timing synchronization for OFDM
-
-</details>
+**Best practice:** Listen for 10-15 seconds before transmitting. Use minimum
+power necessary. Be ready to QSY if causing interference.
 
 ---
 
 ## Current Status
 
-**What Works:**
-- OFDM modulation/demodulation with robust frame detection
-- LDPC encoding/decoding (all rates R1/4 to R5/6)
-- Stop-and-Wait ARQ protocol with retransmission
-- File transfer with compression
-- GUI with waterfall and constellation displays
-- Channel simulation (ITU-R F.1487 Watterson model)
-- Two-modem test mode (cross-wired virtual stations)
-- Loopback testing with channel noise simulation
+> **Note**: All features below have been tested in simulation only (ITU-R F.1487 Watterson
+> channel model). On-air testing with real HF equipment is in progress. Real-world
+> performance may differ significantly from simulation results.
+
+**Working (in simulation):**
+- All LDPC code rates (R1/4 through R5/6)
+- OFDM with DQPSK/D8PSK modulation
+- Single-carrier DPSK (DBPSK/DQPSK/D8PSK)
+- MFSK (2/4/8/16/32 tones)
+- ARQ protocol with retransmission
+- GUI with waterfall and constellation
+- CLI transmit/receive tools
+- HF channel simulator (ITU-R F.1487)
 
 **In Progress:**
-- On-air testing with real HF equipment
-- OTFS mode optimization for poor/flutter channels
-- Adaptive mode selection (auto modulation/coding)
-- Selective Repeat ARQ (currently using Stop-and-Wait)
-
-**Planned:**
-- Multi-carrier bonding
-- Extended AFC beyond ±20 Hz
-- Mobile/portable optimizations
+- On-air testing
+- Automatic waveform switching
+- File transfer optimization
 
 ---
 
 ## Contributing
 
-Contributions welcome! Priority areas:
+Contributions welcome! Areas of interest:
 
-- On-air testing across different paths and conditions
-- OTFS optimization for specific channel types
-- User interface improvements
+- On-air testing and performance reports
 - Documentation and tutorials
+- Bug fixes and optimizations
 
-Please open an issue to discuss before submitting PRs.
+Please open an issue before submitting large PRs.
+
+### Help Wanted: Real HF Recordings
+
+**We need real-world HF recordings to validate the modem beyond simulation.**
+
+If you're a licensed amateur radio operator, you can help by recording your own
+transmissions via WebSDR. This is legitimate amateur experimentation under
+FCC Part 97 (advancement of the radio art).
+
+**How to record your own signal:**
+
+1. Pick a frequency from the recommended list above (e.g., 14.108 MHz USB)
+2. Open a WebSDR receiver (websdr.org or kiwisdr.com) and tune to that frequency
+3. Start recording on the WebSDR (or use Audacity to capture system audio)
+4. Transmit a CONNECT frame using ProjectUltra
+5. Stop recording and save the file
+
+**What to submit:**
+- Recording file (48kHz mono WAV or F32 preferred)
+- Your callsign and transmit location
+- Band/frequency and time (UTC)
+- WebSDR location used (e.g., "Twente WebSDR, Netherlands")
+- Approximate path distance
+- Band conditions if known (S-meter readings)
+
+**Why this helps:**
+Real ionospheric propagation has characteristics that simulation can't capture.
+Even "failed" recordings where the signal didn't decode are valuable - they
+help us improve sync detection and weak-signal performance.
+
+**How to submit:** Open a GitHub issue with the "Recording" label.
 
 ---
 
 ## License
 
-Released under the MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) for details.
 
 ---
 
 ## Acknowledgments
 
-Built with [Dear ImGui](https://github.com/ocornut/imgui), [SDL2](https://libsdl.org/), and [miniz](https://github.com/richgel999/miniz).
+- [Dear ImGui](https://github.com/ocornut/imgui) - GUI framework
+- [SDL2](https://libsdl.org/) - Audio and windowing
+- [miniz](https://github.com/richgel999/miniz) - Compression
