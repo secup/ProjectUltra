@@ -345,6 +345,18 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
     size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
     size_t bytes_per_symbol = (bits_per_symbol + 7) / 8;
 
+    // DEBUG: Check DBPSK reference state at start of modulate
+    if (mod == Modulation::DQPSK || mod == Modulation::D8PSK || mod == Modulation::DBPSK) {
+        LOG_DEBUG("MOD", "modulate() entry: dbpsk_prev_symbols.size()=%zu, first 3: (%.2f,%.2f) (%.2f,%.2f) (%.2f,%.2f)",
+                 impl_->dbpsk_prev_symbols.size(),
+                 impl_->dbpsk_prev_symbols.size() > 0 ? impl_->dbpsk_prev_symbols[0].real() : 0,
+                 impl_->dbpsk_prev_symbols.size() > 0 ? impl_->dbpsk_prev_symbols[0].imag() : 0,
+                 impl_->dbpsk_prev_symbols.size() > 1 ? impl_->dbpsk_prev_symbols[1].real() : 0,
+                 impl_->dbpsk_prev_symbols.size() > 1 ? impl_->dbpsk_prev_symbols[1].imag() : 0,
+                 impl_->dbpsk_prev_symbols.size() > 2 ? impl_->dbpsk_prev_symbols[2].real() : 0,
+                 impl_->dbpsk_prev_symbols.size() > 2 ? impl_->dbpsk_prev_symbols[2].imag() : 0);
+    }
+
     Samples output;
 
     // Process data in symbol-sized chunks
@@ -394,10 +406,11 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
                 impl_->dbpsk_prev_symbols[c] = new_symbol;
                 symbol_data.push_back(new_symbol);
             } else if (mod == Modulation::D8PSK) {
-                // 3 bits: phase changes in 45° increments
-                // 000→0°, 001→45°, 010→90°, 011→135°, 100→180°, 101→225°, 110→270°, 111→315°
+                // 3 bits: phase changes in 45° increments with 22.5° offset
+                // Offset ensures sin()-based LLR formulas work (sin(0°)=0 is bad)
+                // 000→22.5°, 001→67.5°, 010→112.5°, 011→157.5°, etc.
                 static const float pi = 3.14159265358979f;
-                float angle = (bits & 7) * (pi / 4.0f);  // 45° per step
+                float angle = (bits & 7) * (pi / 4.0f) + pi / 8.0f;  // 45° steps + 22.5° offset
                 Complex phase_change(std::cos(angle), std::sin(angle));
                 Complex new_symbol = impl_->dbpsk_prev_symbols[c] * phase_change;
                 impl_->dbpsk_prev_symbols[c] = new_symbol;

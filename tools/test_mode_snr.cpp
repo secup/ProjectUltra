@@ -15,7 +15,7 @@ struct TestResult {
     bool synced;
 };
 
-TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int trials) {
+TestResult test_ofdm(float snr_db, Modulation mod, CodeRate rate, size_t data_bytes, int trials) {
     std::mt19937 rng(12345);
 
     ModemConfig config;
@@ -24,10 +24,12 @@ TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int t
     config.fft_size = 512;
     config.num_carriers = 30;
     config.pilot_spacing = 2;
-    config.modulation = Modulation::DQPSK;
+    config.modulation = mod;
     config.code_rate = rate;
+    // Differential modulation doesn't need pilots
+    config.use_pilots = (mod != Modulation::DQPSK && mod != Modulation::D8PSK && mod != Modulation::DBPSK);
 
-    OFDMModulator mod(config);
+    OFDMModulator modulator(config);
     LDPCEncoder encoder(rate);
     LDPCDecoder decoder(rate);
 
@@ -42,8 +44,8 @@ TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int t
         for (auto& b : data) b = rng() & 0xFF;
 
         Bytes encoded = encoder.encode(data);
-        auto preamble = mod.generatePreamble();
-        auto modulated = mod.modulate(encoded, config.modulation);
+        auto preamble = modulator.generatePreamble();
+        auto modulated = modulator.modulate(encoded, mod);
 
         Samples signal;
         signal.insert(signal.end(), preamble.begin(), preamble.end());
@@ -68,6 +70,10 @@ TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int t
 
         float measured_snr = demod.getEstimatedSNR();
         auto soft = demod.getSoftBits();
+        // Debug: print soft bits count for first trial
+        if (t == 0 && trials == 1) {
+            printf("  [soft=%zu, synced=%d] ", soft.size(), demod.isSynced() ? 1 : 0);
+        }
         if (soft.size() >= 648) {
             result.synced = true;
             snr_sum += measured_snr;
@@ -75,6 +81,19 @@ TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int t
 
             std::span<const float> llrs(soft.data(), 648);
             Bytes decoded = decoder.decodeSoft(llrs);
+            // Debug
+            if (t == 0 && trials == 1) {
+                printf("decode_ok=%d iters=%d dec_sz=%zu\n",
+                       decoder.lastDecodeSuccess() ? 1 : 0, decoder.lastIterations(), decoded.size());
+                // Show first mismatch
+                for (size_t i = 0; i < std::min(data.size(), decoded.size()); i++) {
+                    if (data[i] != decoded[i]) {
+                        printf("  mismatch at byte %zu: expected 0x%02X got 0x%02X\n",
+                               i, data[i], decoded[i]);
+                        break;
+                    }
+                }
+            }
             // Compare only the original data bytes (decoded may have extra padding bytes)
             bool match = decoder.lastDecodeSuccess() && decoded.size() >= data.size();
             if (match) {
@@ -89,55 +108,60 @@ TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int t
     return result;
 }
 
+// Wrapper for backward compatibility
+TestResult test_exact_size(float snr_db, CodeRate rate, size_t data_bytes, int trials) {
+    return test_ofdm(snr_db, Modulation::DQPSK, rate, data_bytes, trials);
+}
+
 int main() {
     setLogLevel(LogLevel::WARN);
-    int trials = 10;  // Reduced for faster testing
+    int trials = 20;
 
-    // Use max bytes that fit in one codeword for each rate
-    // Fine sweep to find threshold
-    std::cout << "=== OFDM DQPSK Code Rate Performance vs SNR (AWGN) ===\n\n";
-    std::cout << "           ";
-    for (float snr : {14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 20.0f}) {
-        printf("%4.0f dB  ", snr);
+    std::cout << "=== OFDM D8PSK vs DQPSK - Full SNR Range (AWGN) ===\n\n";
+
+    // Test D8PSK across wide SNR range
+    std::cout << "--- D8PSK R1/2 (~3.4 kbps) ---\n";
+    std::cout << "SNR:   15 dB  17 dB  20 dB  23 dB  25 dB  28 dB  30 dB\n";
+    printf("Result:");
+    for (float snr : {15.0f, 17.0f, 20.0f, 23.0f, 25.0f, 28.0f, 30.0f}) {
+        auto res = test_ofdm(snr, Modulation::D8PSK, CodeRate::R1_2, 40, trials);
+        printf("%4d%%  ", res.success * 100 / trials);
     }
     std::cout << "\n";
 
-    struct RateInfo {
-        CodeRate rate;
-        const char* name;
-        size_t bytes;
-    };
-
-    std::vector<RateInfo> rates = {
-        {CodeRate::R1_4, "R1/4 (20B)", 20},
-        {CodeRate::R1_2, "R1/2 (40B)", 40},
-        {CodeRate::R2_3, "R2/3 (54B)", 54},
-    };
-
-    for (const auto& r : rates) {
-        printf("%-11s", r.name);
-        for (float snr : {14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 20.0f}) {
-            auto res = test_exact_size(snr, r.rate, r.bytes, trials);
-            printf("%4d%%    ", res.success * 100 / trials);
-        }
-        std::cout << "\n";
-    }
-
-    // Show what the demodulator actually measures
-    std::cout << "\nMeasured (per-carrier) SNR at each AWGN level:\n";
-    std::cout << "AWGN: ";
-    for (float snr : {14.0f, 15.0f, 16.0f, 17.0f, 18.0f, 20.0f}) {
-        auto res = test_exact_size(snr, CodeRate::R1_4, 20, 5);
-        if (res.synced) {
-            printf("%.0f→%.0f  ", snr, res.measured_snr);
-        } else {
-            printf("%.0f→N/S  ", snr);  // No sync
-        }
+    std::cout << "\n--- D8PSK R2/3 (~4.8 kbps) ---\n";
+    std::cout << "SNR:   20 dB  23 dB  25 dB  28 dB  30 dB  33 dB  35 dB\n";
+    printf("Result:");
+    for (float snr : {20.0f, 23.0f, 25.0f, 28.0f, 30.0f, 33.0f, 35.0f}) {
+        auto res = test_ofdm(snr, Modulation::D8PSK, CodeRate::R2_3, 54, trials);
+        printf("%4d%%  ", res.success * 100 / trials);
     }
     std::cout << "\n";
 
-    std::cout << "\n=== Throughput Reference ===\n";
-    std::cout << "R1/4: ~1.1 kbps   R1/2: ~2.3 kbps   R2/3: ~3.2 kbps   R3/4: ~3.6 kbps\n";
+    std::cout << "\n--- DQPSK R1/2 (~2.3 kbps) for comparison ---\n";
+    std::cout << "SNR:   15 dB  17 dB  20 dB  23 dB  25 dB  28 dB  30 dB\n";
+    printf("Result:");
+    for (float snr : {15.0f, 17.0f, 20.0f, 23.0f, 25.0f, 28.0f, 30.0f}) {
+        auto res = test_ofdm(snr, Modulation::DQPSK, CodeRate::R1_2, 40, trials);
+        printf("%4d%%  ", res.success * 100 / trials);
+    }
+    std::cout << "\n";
+
+    std::cout << "\n--- DQPSK R2/3 (~3.2 kbps) for comparison ---\n";
+    std::cout << "SNR:   20 dB  23 dB  25 dB  28 dB  30 dB  33 dB  35 dB\n";
+    printf("Result:");
+    for (float snr : {20.0f, 23.0f, 25.0f, 28.0f, 30.0f, 33.0f, 35.0f}) {
+        auto res = test_ofdm(snr, Modulation::DQPSK, CodeRate::R2_3, 54, trials);
+        printf("%4d%%  ", res.success * 100 / trials);
+    }
+    std::cout << "\n";
+
+    std::cout << "\n=== Summary ===\n";
+    std::cout << "Mode          Rate   Throughput   Min SNR for 90%+\n";
+    std::cout << "DQPSK         R1/2   ~2.3 kbps    17 dB\n";
+    std::cout << "D8PSK         R1/2   ~3.4 kbps    ?? dB (check above)\n";
+    std::cout << "DQPSK         R2/3   ~3.2 kbps    ?? dB\n";
+    std::cout << "D8PSK         R2/3   ~4.8 kbps    ?? dB\n";
 
     return 0;
 }

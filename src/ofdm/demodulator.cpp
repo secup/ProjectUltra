@@ -290,6 +290,7 @@ std::array<float, 2> softDemapDQPSK(Complex sym, Complex prev_sym, float noise_v
 
 // D8PSK soft demapping - compares current symbol to previous symbol
 // Returns 3 LLRs based on phase difference (8 phases at 45° increments)
+// Uses same formula as working single-carrier DPSK (sin-based)
 std::array<float, 3> softDemapD8PSK(Complex sym, Complex prev_sym, float noise_var) {
     std::array<float, 3> llrs = {0.0f, 0.0f, 0.0f};
 
@@ -303,33 +304,17 @@ std::array<float, 3> softDemapD8PSK(Complex sym, Complex prev_sym, float noise_v
 
     // D8PSK: 8 phases at 45° increments
     // 000→0°, 001→45°, 010→90°, 011→135°, 100→180°, 101→225°, 110→270°, 111→315°
-    //
-    // Gray coding would be better but we use natural binary for simplicity
-    // bit 2 (MSB): 0 for phases 0-135°, 1 for phases 180-315°
-    // bit 1: 0 for 0°,45°,180°,225°, 1 for 90°,135°,270°,315°
-    // bit 0 (LSB): alternates every 45°
+    // Natural binary mapping (no Gray code)
 
-    float scale = signal_power / noise_var;
-    static const float pi = 3.14159265358979f;
+    float confidence = signal_power / noise_var;
 
-    // Normalize phase to [0, 2π)
-    float phase = phase_diff;
-    if (phase < 0) phase += 2 * pi;
-
-    // For natural binary encoding:
-    // bit 2: 1 when phase >= π (180°)
-    // bit 1: 1 when phase in [π/2, π) or [3π/2, 2π)
-    // bit 0: 1 when phase in [π/4, π/2) or [3π/4, π) or [5π/4, 3π/2) or [7π/4, 2π)
-
-    // Soft decision based on distance to decision boundaries
-    // bit 2: boundary at π
-    llrs[0] = clipLLR(scale * std::cos(phase));  // + when phase near 0, - when near π
-
-    // bit 1: boundaries at π/2 and 3π/2
-    llrs[1] = clipLLR(scale * std::cos(2 * phase - pi/2));
-
-    // bit 0: boundaries at π/4, 3π/4, 5π/4, 7π/4
-    llrs[2] = clipLLR(scale * std::cos(4 * phase - pi/4));
+    // Use sin-based formulas (matches working single-carrier DPSK implementation)
+    // bit 2 (MSB): sin(phase) - positive for 0-180°, negative for 180-360°
+    // bit 1: sin(2*phase) - period of 180°
+    // bit 0 (LSB): sin(4*phase) - period of 90°
+    llrs[0] = clipLLR(confidence * std::sin(phase_diff));
+    llrs[1] = clipLLR(confidence * std::sin(2.0f * phase_diff));
+    llrs[2] = clipLLR(confidence * std::sin(4.0f * phase_diff));
 
     return llrs;
 }
@@ -2032,8 +2017,114 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
             impl_->last_sync_offset = sync_offset;
 
-            // Consume samples: everything up to end of preamble
-            size_t consume = sync_offset + preamble_total_len + impl_->manual_timing_offset;
+            // Find where STS actually starts by detecting the guard-to-STS transition.
+            // The guard is silence (or noise-only), STS has signal energy.
+            //
+            // Strategy: Scan forward looking for a sharp energy transition.
+            // This works for both clean signals (0→signal) and noisy signals (noise→signal+noise).
+            constexpr size_t ENERGY_WINDOW = 64;  // Window for energy measurement
+            constexpr size_t SEARCH_STEP = 8;  // Step size for scanning
+            constexpr float TRANSITION_RATIO = 3.0f;  // Signal should be 3x higher than guard/noise
+
+            // Measure signal energy at sync_offset (we know signal is there)
+            float signal_energy = 0;
+            for (size_t j = 0; j < ENERGY_WINDOW && sync_offset + j < impl_->rx_buffer.size(); j++) {
+                float s = impl_->rx_buffer[sync_offset + j];
+                signal_energy += s * s;
+            }
+            signal_energy /= ENERGY_WINDOW;
+
+            // The guard is BEFORE sync_offset. Search backward to find the guard-to-STS transition.
+            // We expect: [noise/silence] [guard=560] [STS=2240] <- sync_offset is somewhere here
+            // The guard should be approximately 560-2800 samples before sync_offset.
+
+            // Start search from well before sync_offset (account for STS length + margin)
+            size_t search_start = (sync_offset > preamble_symbol_len * 6) ?
+                                  sync_offset - preamble_symbol_len * 6 : 0;
+
+            // Measure baseline energy from the start of search region (likely in guard or pre-signal noise)
+            float baseline_energy = 0;
+            size_t baseline_samples = std::min((size_t)256, sync_offset - search_start);
+            for (size_t j = 0; j < baseline_samples && search_start + j < impl_->rx_buffer.size(); j++) {
+                float s = impl_->rx_buffer[search_start + j];
+                baseline_energy += s * s;
+            }
+            if (baseline_samples > 0) baseline_energy /= baseline_samples;
+
+            LOG_SYNC(DEBUG, "Guard search: sync_offset=%zu, search_start=%zu, signal_energy=%.6f, baseline_energy=%.6f, ratio=%.1f",
+                    sync_offset, search_start, signal_energy, baseline_energy,
+                    baseline_energy > 1e-12f ? signal_energy / baseline_energy : 999.0f);
+
+            size_t guard_end = 0;
+            bool found_guard = false;
+
+            // If baseline is much lower than signal, there's likely a guard region - find the transition
+            // The guard (silence) + noise should be significantly lower than STS (signal) + noise
+            if (baseline_energy < signal_energy * 0.3f) {
+                // Search for energy transition from baseline level to signal level
+                float threshold = std::max(baseline_energy * TRANSITION_RATIO, signal_energy * 0.1f);
+
+                // Search limit: normally up to sync_offset, but if sync_offset is suspiciously small
+                // (could be a false sync in guard region), extend the search
+                // Minimum expected sync_offset = guard(560) + some STS samples = ~800
+                size_t expected_min_sync = preamble_symbol_len * 2;  // ~1120 samples
+                size_t search_limit;
+                if (sync_offset < expected_min_sync) {
+                    // sync_offset might be in guard - search further
+                    search_limit = std::min(sync_offset + preamble_symbol_len * 2,
+                                            impl_->rx_buffer.size() - ENERGY_WINDOW);
+                } else {
+                    // Normal case - sync_offset is in STS, search up to it
+                    search_limit = sync_offset;
+                }
+
+                if (search_limit <= search_start + ENERGY_WINDOW) {
+                    LOG_SYNC(DEBUG, "search_limit too small, using fallback");
+                } else {
+                    for (size_t i = search_start; i + ENERGY_WINDOW < search_limit; i += SEARCH_STEP) {
+                        float energy = 0;
+                        for (size_t j = 0; j < ENERGY_WINDOW; j++) {
+                            float s = impl_->rx_buffer[i + j];
+                            energy += s * s;
+                        }
+                        energy /= ENERGY_WINDOW;
+
+                        if (energy > threshold) {
+                            // Found transition - use this position as STS start
+                            // Round UP to nearest symbol boundary to avoid partial overlaps
+                            size_t symbol_size = preamble_symbol_len;
+                            guard_end = ((i + symbol_size - 1) / symbol_size) * symbol_size;
+                            if (guard_end > i + symbol_size) guard_end = i;  // Safety: don't overshoot too much
+                            found_guard = true;
+                            LOG_SYNC(DEBUG, "Found guard→STS transition at %zu (rounded to %zu), energy=%.6f, threshold=%.6f",
+                                    i, guard_end, energy, threshold);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (!found_guard) {
+                // No clear guard region found - estimate STS start from sync_offset
+                // sync_offset points somewhere in the middle of the STS plateau (M metric window)
+                // The Schmidl-Cox M metric peaks at approximately STS_start + 2*symbol_len
+                // So: STS_start ≈ sync_offset - 2*symbol_len
+                // Round UP to be conservative - better to consume slightly more than leave preamble bits
+                size_t estimated_sts_start = (sync_offset > preamble_symbol_len * 2) ?
+                                             sync_offset - preamble_symbol_len * 2 : 0;
+                // Round UP to nearest symbol boundary to ensure we don't leave any preamble
+                guard_end = ((estimated_sts_start + preamble_symbol_len - 1) / preamble_symbol_len) * preamble_symbol_len;
+                LOG_SYNC(DEBUG, "No guard detected, estimating STS start at %zu (from sync_offset=%zu)",
+                        guard_end, sync_offset);
+            }
+
+            size_t sts_start = guard_end;
+
+            // Consume samples: from STS start + full preamble length (4 STS + 2 LTS)
+            // Note: preamble_total_len = 6 * symbol_samples covers STS + LTS but NOT guard
+            size_t consume = sts_start + preamble_total_len + impl_->manual_timing_offset;
+            LOG_SYNC(DEBUG, "Consume calc: sts_start=%zu + preamble=%zu + offset=%d = %zu (buffer was %zu)",
+                    sts_start, preamble_total_len, impl_->manual_timing_offset, consume, impl_->rx_buffer.size());
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + consume);
 

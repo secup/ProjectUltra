@@ -153,6 +153,21 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_mode_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_mode_snr PRIVATE ultra_core)
 
+    # DPSK SNR test (single-carrier: DBPSK, DQPSK, D8PSK)
+    add_executable(test_dpsk_snr tools/test_dpsk_snr.cpp)
+    target_include_directories(test_dpsk_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_dpsk_snr PRIVATE ultra_core)
+
+    # DQPSK pattern debug
+    add_executable(test_dqpsk_pattern_debug tools/test_dqpsk_pattern_debug.cpp)
+    target_include_directories(test_dqpsk_pattern_debug PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_dqpsk_pattern_debug PRIVATE ultra_core)
+
+    # DQPSK detailed trace
+    add_executable(test_dqpsk_trace tools/test_dqpsk_trace.cpp)
+    target_include_directories(test_dqpsk_trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_dqpsk_trace PRIVATE ultra_core)
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
