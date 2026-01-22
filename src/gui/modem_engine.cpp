@@ -1959,22 +1959,17 @@ void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rat
 }
 
 protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
-    // MFSK vs OFDM switching based on actual SNR (in signal bandwidth)
-    // Convert from reported SNR (2500 Hz ref) to actual: actual = reported + 17 dB for 50 Hz MFSK
-    //
-    // Thresholds (actual SNR in signal bandwidth):
-    // - Below 5 dB:  Use MFSK (works at 0 dB actual = -17 dB reported)
-    // - 5 dB and up: Use OFDM (works reliably at 10+ dB actual)
-    //
-    // Note: There's a ~5 dB hysteresis zone (5-10 dB) where both work,
-    // so switching won't oscillate rapidly.
+    // Waveform selection based on measured SNR
+    // Thresholds based on testing (test_mode_snr tool):
+    //   < 0 dB:  MFSK (works at -17 dB reported / 0 dB actual)
+    //   0-17 dB: DPSK (single-carrier, OFDM sync fails below ~17 dB)
+    //   > 17 dB: OFDM (highest throughput, needs reliable sync)
 
-    if (snr_db < 5.0f) {
-        // Very low SNR - MFSK required
-        // MFSK 8-tone works at 0 dB actual (-17 dB reported)
+    if (snr_db < 0.0f) {
         return protocol::WaveformMode::MFSK;
+    } else if (snr_db < 17.0f) {
+        return protocol::WaveformMode::DPSK;
     } else {
-        // Adequate SNR - OFDM provides higher throughput
         return protocol::WaveformMode::OFDM;
     }
 }

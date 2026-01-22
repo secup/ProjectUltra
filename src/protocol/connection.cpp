@@ -945,8 +945,8 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     // AUTO mode: Select based on measured SNR
     // Thresholds based on testing (see CLAUDE.md):
     //   < 0 dB:  MFSK (works at -17 dB reported)
-    //   0-10 dB: DPSK (single-carrier, robust on flutter)
-    //   > 10 dB: OFDM (highest throughput)
+    //   0-17 dB: DPSK (single-carrier, robust - OFDM sync fails below ~17 dB)
+    //   > 17 dB: OFDM (highest throughput)
     float snr = measured_snr_db_;
     LOG_MODEM(INFO, "Connection: AUTO mode selection, SNR=%.1f dB", snr);
 
@@ -955,8 +955,8 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         return WaveformMode::MFSK;
     }
 
-    if (snr < 10.0f && (common & ModeCapabilities::DPSK)) {
-        LOG_MODEM(INFO, "Connection: Selected DPSK for low SNR (%.1f dB)", snr);
+    if (snr < 17.0f && (common & ModeCapabilities::DPSK)) {
+        LOG_MODEM(INFO, "Connection: Selected DPSK for low/mid SNR (%.1f dB)", snr);
         return WaveformMode::DPSK;
     }
 
