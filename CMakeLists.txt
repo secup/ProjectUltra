@@ -148,6 +148,11 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(test_lowsnr_sync PRIVATE ultra_core)
 
+    # Mode/SNR quick test
+    add_executable(test_mode_snr tools/test_mode_snr.cpp)
+    target_include_directories(test_mode_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_mode_snr PRIVATE ultra_core)
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
