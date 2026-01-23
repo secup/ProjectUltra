@@ -39,7 +39,7 @@ void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog << " [options] <command>\n\n";
     std::cerr << "Commands:\n";
     std::cerr << "  ptx [msg]       Protocol TX - send v2 frame:\n";
-    std::cerr << "                    ptx              -> PROBE (no message)\n";
+    std::cerr << "                    ptx ping         -> PING probe (~1 sec, DPSK)\n";
     std::cerr << "                    ptx connect      -> CONNECT (with callsigns)\n";
     std::cerr << "                    ptx disconnect   -> DISCONNECT (end connection)\n";
     std::cerr << "                    ptx \"Hello\"      -> DATA (with message)\n";
@@ -302,12 +302,14 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
     // Create the frame
     ultra::Bytes frame_data;
     std::string frame_type_str;
+    bool is_ping = false;  // PING is special - no LDPC encoding
 
-    if (!message || strlen(message) == 0) {
-        // No message = send PROBE
-        auto probe = v2::ControlFrame::makeProbe(src_call, dst_call);
-        frame_data = probe.serialize();
-        frame_type_str = "PROBE";
+    if (!message || strlen(message) == 0 || strcmp(message, "ping") == 0) {
+        // No message or "ping" keyword = send PING probe (raw DPSK, no LDPC)
+        frame_data = v2::PingFrame::serialize();  // 4-byte "ULTR" magic
+        frame_type_str = "PING";
+        is_ping = true;
+        waveform = WaveformType::DPSK;  // Force DPSK for PING
     } else if (strcmp(message, "connect") == 0) {
         // "connect" keyword = send CONNECT frame with full callsigns
         // Mode caps: support all modes (0xFF), preferred: DQPSK R1/4 (0x00)
@@ -329,70 +331,95 @@ int runProtocolTx(ultra::ModemConfig& config, const char* message, const char* o
     std::cerr << "  Frame type: " << frame_type_str << "\n";
     std::cerr << "  Frame size: " << frame_data.size() << " bytes\n";
 
-    // LDPC encode with v2 function (splits into codewords)
-    auto encoded_cws = v2::encodeFrameWithLDPC(frame_data);
-    std::cerr << "  LDPC codewords: " << encoded_cws.size() << "\n";
-
-    // Interleave each codeword for HF channel diversity
-    ultra::Interleaver interleaver(6, 108);  // Match GUI settings
-    ultra::Bytes all_encoded;
-    for (const auto& cw : encoded_cws) {
-        auto interleaved = interleaver.interleave(cw);
-        all_encoded.insert(all_encoded.end(), interleaved.begin(), interleaved.end());
-    }
-    std::cerr << "  Total encoded: " << all_encoded.size() << " bytes\n";
-
     std::vector<float> output;
 
-    if (waveform == WaveformType::DPSK) {
-        // DPSK modulation (medium preset: DQPSK 62.5 baud)
+    if (is_ping) {
+        // PING is special - raw 4 bytes via DPSK, NO LDPC encoding
         auto dpsk_config = ultra::dpsk_presets::medium();
         ultra::DPSKModulator dpsk_mod(dpsk_config);
 
         auto preamble = dpsk_mod.generatePreamble();
-        auto modulated = dpsk_mod.modulate(all_encoded);
+        auto modulated = dpsk_mod.modulate(frame_data);  // Raw bytes, no LDPC
 
-        const size_t TAIL_SAMPLES = dpsk_config.samples_per_symbol * 4;
-        output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
+        // Match modem_engine format: lead-in silence + preamble + data + tail
+        const size_t LEAD_IN_SAMPLES = 48000 * 100 / 1000;  // 100ms lead-in
+        const size_t TAIL_SAMPLES = 576;  // Short tail
+
+        output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+        output.resize(LEAD_IN_SAMPLES, 0.0f);  // Lead-in silence
         output.insert(output.end(), preamble.begin(), preamble.end());
         output.insert(output.end(), modulated.begin(), modulated.end());
         output.resize(output.size() + TAIL_SAMPLES, 0.0f);
 
-        std::cerr << "  DPSK: " << dpsk_config.symbol_rate() << " baud, "
-                  << (dpsk_config.modulation == ultra::DPSKModulation::DQPSK ? "DQPSK" : "DBPSK") << "\n";
-    } else if (waveform == WaveformType::MFSK) {
-        // MFSK modulation (8-tone for robustness)
-        ultra::MFSKConfig mfsk_config;
-        mfsk_config.num_tones = 8;
-        mfsk_config.repetition = 2;
-        ultra::MFSKModulator mfsk_mod(mfsk_config);
-
-        auto preamble = mfsk_mod.generatePreamble();
-        auto modulated = mfsk_mod.modulate(all_encoded);
-
-        const size_t TAIL_SAMPLES = mfsk_config.samples_per_symbol * 4;
-        output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
-        output.insert(output.end(), preamble.begin(), preamble.end());
-        output.insert(output.end(), modulated.begin(), modulated.end());
-        output.resize(output.size() + TAIL_SAMPLES, 0.0f);
-
-        std::cerr << "  MFSK: " << mfsk_config.num_tones << " tones, "
-                  << mfsk_config.effective_bps() << " bps effective\n";
+        std::cerr << "  PING: raw DPSK (no LDPC), " << dpsk_config.symbol_rate() << " baud\n";
     } else {
-        // OFDM modulation (default)
-        config.modulation = ultra::Modulation::DQPSK;
-        config.code_rate = ultra::CodeRate::R1_4;
-        ultra::OFDMModulator mod(config);
+        // Normal frames - LDPC encode with v2 function (splits into codewords)
+        auto encoded_cws = v2::encodeFrameWithLDPC(frame_data);
+        std::cerr << "  LDPC codewords: " << encoded_cws.size() << "\n";
 
-        auto preamble = mod.generatePreamble();
-        auto modulated = mod.modulate(all_encoded, config.modulation);
+        // Interleave each codeword for HF channel diversity
+        ultra::Interleaver interleaver(6, 108);  // Match GUI settings
+        ultra::Bytes all_encoded;
+        for (const auto& cw : encoded_cws) {
+            auto interleaved = interleaver.interleave(cw);
+            all_encoded.insert(all_encoded.end(), interleaved.begin(), interleaved.end());
+        }
+        std::cerr << "  Total encoded: " << all_encoded.size() << " bytes\n";
 
-        const size_t TAIL_SAMPLES = 576 * 2;  // 2 OFDM symbols
-        output.reserve(preamble.size() + modulated.size() + TAIL_SAMPLES);
-        output.insert(output.end(), preamble.begin(), preamble.end());
-        output.insert(output.end(), modulated.begin(), modulated.end());
-        output.resize(output.size() + TAIL_SAMPLES, 0.0f);
-    }
+        // Match GUI format: lead-in silence + preamble + data + tail
+        const size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 150ms lead-in
+        const size_t TAIL_SAMPLES = 576 * 2;  // 1152 samples tail
+
+        if (waveform == WaveformType::DPSK) {
+            // DPSK modulation (medium preset: DQPSK 62.5 baud)
+            auto dpsk_config = ultra::dpsk_presets::medium();
+            ultra::DPSKModulator dpsk_mod(dpsk_config);
+
+            auto preamble = dpsk_mod.generatePreamble();
+            auto modulated = dpsk_mod.modulate(all_encoded);
+
+            output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+            output.resize(LEAD_IN_SAMPLES, 0.0f);  // Lead-in silence
+            output.insert(output.end(), preamble.begin(), preamble.end());
+            output.insert(output.end(), modulated.begin(), modulated.end());
+            output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+
+            std::cerr << "  DPSK: " << dpsk_config.symbol_rate() << " baud, "
+                      << (dpsk_config.modulation == ultra::DPSKModulation::DQPSK ? "DQPSK" : "DBPSK") << "\n";
+        } else if (waveform == WaveformType::MFSK) {
+            // MFSK modulation (8-tone for robustness)
+            ultra::MFSKConfig mfsk_config;
+            mfsk_config.num_tones = 8;
+            mfsk_config.repetition = 2;
+            ultra::MFSKModulator mfsk_mod(mfsk_config);
+
+            auto preamble = mfsk_mod.generatePreamble();
+            auto modulated = mfsk_mod.modulate(all_encoded);
+
+            output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+            output.resize(LEAD_IN_SAMPLES, 0.0f);  // Lead-in silence
+            output.insert(output.end(), preamble.begin(), preamble.end());
+            output.insert(output.end(), modulated.begin(), modulated.end());
+            output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+
+            std::cerr << "  MFSK: " << mfsk_config.num_tones << " tones, "
+                      << mfsk_config.effective_bps() << " bps effective\n";
+        } else {
+            // OFDM modulation (default)
+            config.modulation = ultra::Modulation::DQPSK;
+            config.code_rate = ultra::CodeRate::R1_4;
+            ultra::OFDMModulator mod(config);
+
+            auto preamble = mod.generatePreamble();
+            auto modulated = mod.modulate(all_encoded, config.modulation);
+
+            output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+            output.resize(LEAD_IN_SAMPLES, 0.0f);  // Lead-in silence
+            output.insert(output.end(), preamble.begin(), preamble.end());
+            output.insert(output.end(), modulated.begin(), modulated.end());
+            output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+        }
+    }  // end of else (normal frames)
 
     // Normalize
     float max_val = 0;
@@ -544,6 +571,36 @@ int runProtocolRx(ultra::ModemConfig& config, const char* input_file, const std:
                                              all_samples.size() - data_start);
                 accumulated_soft_bits = dpsk_demod->demodulateSoft(data_span);
                 std::cerr << "  [DEMOD] " << accumulated_soft_bits.size() << " soft bits\n";
+
+                // Check for PING frame (raw 4 bytes "ULTR", no LDPC)
+                // PING is only 32 bits - if we have ~32 bits, check for magic
+                if (accumulated_soft_bits.size() >= 32 && accumulated_soft_bits.size() < LDPC_BLOCK_SIZE) {
+                    // Convert first 32 soft bits to 4 bytes
+                    ultra::Bytes ping_bytes(4, 0);
+                    for (int i = 0; i < 32; i++) {
+                        uint8_t bit = (accumulated_soft_bits[i] < 0) ? 1 : 0;
+                        ping_bytes[i / 8] = (ping_bytes[i / 8] << 1) | bit;
+                    }
+
+                    // Check for PING magic (normal or inverted due to 180° phase ambiguity)
+                    bool is_ping_normal = v2::PingFrame::isPing(ping_bytes);
+                    bool is_ping_inverted = (ping_bytes[0] == 0xAA && ping_bytes[1] == 0xB3 &&
+                                             ping_bytes[2] == 0xAB && ping_bytes[3] == 0xAD);
+
+                    if (is_ping_normal || is_ping_inverted) {
+                        frames_received++;
+                        control_frames++;
+                        std::cerr << "  [PING] Detected! Magic: "
+                                  << (is_ping_normal ? "ULTR (normal)" : "inverted (0xAA 0xB3 0xAB 0xAD)")
+                                  << "\n";
+
+                        std::cerr << "\n=== Protocol RX v2 Statistics ===\n";
+                        std::cerr << "  Frames received: " << frames_received << "\n";
+                        std::cerr << "  Control frames:  " << control_frames << " (PING)\n";
+                        std::cerr << "  Data frames:     " << data_frames << "\n";
+                        return 0;
+                    }
+                }
             } else if (waveform == WaveformType::DPSK) {
                 std::cerr << "  [ERROR] DPSK preamble not found\n";
                 return 1;
