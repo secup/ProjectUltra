@@ -32,14 +32,27 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 
 ## Performance
 
-| Channel Condition | Waveform | Throughput | Min SNR |
-|-------------------|----------|------------|---------|
-| Very low SNR | MFSK | 47 bps | -17 dB* |
-| Poor/Flutter HF | Single-carrier DPSK | 300-1100 bps | 0-15 dB |
-| Good HF | OFDM DQPSK | 1.1-2.3 kbps | 17-25 dB |
-| Excellent | OFDM D8PSK | 3.4 kbps | 25+ dB |
+**General HF (multipath, fading):**
+| SNR | Mode | Throughput | Notes |
+|-----|------|------------|-------|
+| -17 dB* | MFSK 8-tone | 47 bps | Extreme weak signal |
+| 0-15 dB | Single-carrier DPSK | 125-300 bps | Flutter/polar paths |
+| 17+ dB | OFDM DQPSK R1/4 | 1.3 kbps | Reliable on most HF |
+| 25+ dB | OFDM DQPSK R1/2 | 2.5 kbps | Good conditions |
+| 30+ dB | OFDM DQPSK R2/3 | 3.4 kbps | Excellent conditions |
+
+**NVIS / Local / Cable (stable phase):**
+| SNR | Mode | Throughput | Notes |
+|-----|------|------------|-------|
+| 20+ dB | OFDM 16QAM R2/3 | 3.4 kbps | Coherent with pilots |
+| 25+ dB | OFDM 16QAM R3/4 | 3.8 kbps | Good NVIS conditions |
+| 28+ dB | OFDM 16QAM R5/6 | 4.3 kbps | Excellent NVIS/local |
 
 *Reported SNR in 2500 Hz bandwidth; actual SNR in signal bandwidth is higher.
+
+**When to use 16QAM:** NVIS propagation (300-500 km), ground wave, or direct cable
+connection. These paths have stable phase, allowing coherent demodulation with
+pilot-assisted channel estimation. Use the GUI Expert settings to force 16QAM mode.
 
 ### Waveform Strategy
 
@@ -50,10 +63,13 @@ SNR Range           Waveform              Why
 ─────────────────────────────────────────────────────────────
 < 0 dB              MFSK 8-tone           Narrow bandwidth, long integration
 0-17 dB             Single-carrier DPSK   Full power concentration, no ICI
-17+ dB              OFDM                  High throughput, parallel carriers
+17+ dB              OFDM DQPSK            High throughput, differential encoding
+25+ dB (NVIS)       OFDM 16QAM            Maximum throughput, pilot-assisted
 ```
 
 **Key insight**: On challenging HF channels (multipath, flutter), single-carrier DPSK achieves 100% success where multi-carrier schemes fail. This is because DPSK concentrates all power in one carrier and differential encoding cancels phase distortion.
+
+**NVIS/Local optimization**: For stable paths like NVIS (Near Vertical Incidence Skywave), 16QAM with pilots provides better performance than differential modes. The pilots track slow phase drift and frequency-selective fading that would corrupt D8PSK's tight 45° phase spacing.
 
 ---
 
@@ -221,11 +237,13 @@ power necessary. Be ready to QSY if causing interference.
 
 **Working (in simulation):**
 - All LDPC code rates (R1/4 through R5/6)
-- OFDM with DQPSK/D8PSK modulation
+- OFDM with DQPSK/D8PSK modulation (differential)
+- OFDM with QPSK/16QAM modulation (coherent, for NVIS/local)
 - Single-carrier DPSK (DBPSK/DQPSK/D8PSK)
 - MFSK (2/4/8/16/32 tones)
 - ARQ protocol with retransmission
 - GUI with waterfall and constellation
+- Expert mode for forcing waveform/modulation settings
 - CLI transmit/receive tools
 - HF channel simulator (ITU-R F.1487)
 

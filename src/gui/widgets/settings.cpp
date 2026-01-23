@@ -630,28 +630,30 @@ void SettingsWindow::renderExpertTab(AppSettings& settings) {
     ImGui::Text("Forced Code Rate");
     ImGui::SetNextItemWidth(200);
 
-    const char* rate_items[] = { "AUTO", "R1/4", "R1/2", "R2/3", "R3/4" };
+    const char* rate_items[] = { "AUTO", "R1/4", "R1/2", "R2/3", "R3/4", "R5/6" };
     int rate_idx = 0;  // AUTO
     switch (settings.forced_code_rate) {
         case 0:    rate_idx = 1; break;  // R1/4
         case 2:    rate_idx = 2; break;  // R1/2
         case 3:    rate_idx = 3; break;  // R2/3
         case 4:    rate_idx = 4; break;  // R3/4
+        case 5:    rate_idx = 5; break;  // R5/6
         default:   rate_idx = 0; break;  // AUTO
     }
 
-    if (ImGui::Combo("##coderate", &rate_idx, rate_items, 5)) {
+    if (ImGui::Combo("##coderate", &rate_idx, rate_items, 6)) {
         switch (rate_idx) {
             case 0: settings.forced_code_rate = 0xFF; break;  // AUTO
             case 1: settings.forced_code_rate = 0; break;     // R1/4
             case 2: settings.forced_code_rate = 2; break;     // R1/2
             case 3: settings.forced_code_rate = 3; break;     // R2/3
             case 4: settings.forced_code_rate = 4; break;     // R3/4
+            case 5: settings.forced_code_rate = 5; break;     // R5/6
         }
         changed = true;
     }
     ImGui::SameLine();
-    ImGui::TextDisabled("R1/4=robust, R3/4=fast");
+    ImGui::TextDisabled("R1/4=robust, R5/6=fast");
 
     ImGui::Spacing();
     ImGui::Spacing();
@@ -689,6 +691,7 @@ void SettingsWindow::renderExpertTab(AppSettings& settings) {
             case 2: return "R1/2";
             case 3: return "R2/3";
             case 4: return "R3/4";
+            case 5: return "R5/6";
             case 0xFF: return "AUTO";
             default: return "Unknown";
         }
