@@ -136,22 +136,25 @@ struct OFDMModulator::Impl {
     }
 
     void setupCarriers() {
-        // Place carriers symmetrically around DC
-        // Leave DC null, use center_freq for baseband
+        // Place carriers symmetrically around DC (excluding DC itself)
+        //
+        // For N carriers total:
+        //   Negative bins: -floor(N/2) to -1  → floor(N/2) carriers
+        //   Positive bins: +1 to +ceil(N/2)   → ceil(N/2) carriers
+        //   Total: floor(N/2) + ceil(N/2) = N carriers
+        //
+        // Examples:
+        //   N=30: -15..-1 (15) + 1..15 (15) = 30 carriers ✓
+        //   N=59: -29..-1 (29) + 1..30 (30) = 59 carriers ✓
 
-        int half_carriers = config.num_carriers / 2;
-        int fft_half = config.fft_size / 2;
-
-        // Calculate carrier spacing to fit in ~2.4 kHz
-        // With 48 carriers in ~2400 Hz, spacing is 50 Hz
-        // At 48000 sample rate and 512 FFT, bin spacing is 93.75 Hz
-        // We'll use every carrier but limit the bandwidth
+        int neg_limit = config.num_carriers / 2;         // Floor
+        int pos_limit = (config.num_carriers + 1) / 2;   // Ceiling
 
         data_carrier_indices.clear();
         pilot_carrier_indices.clear();
 
         int pilot_count = 0;
-        for (int i = -half_carriers; i <= half_carriers; ++i) {
+        for (int i = -neg_limit; i <= pos_limit; ++i) {
             if (i == 0) continue;  // Skip DC
 
             int fft_idx = (i + config.fft_size) % config.fft_size;
@@ -493,8 +496,9 @@ Samples OFDMModulator::generatePreamble() {
     // This ensures sync detector always has "before" samples to correlate against
     // In real HF, radio PTT delay provides this naturally (50-300ms)
     // We add minimal guard so TX works even in direct loopback tests
-    constexpr size_t GUARD_SAMPLES = 560;  // CP + FFT = one symbol period
-    preamble.resize(GUARD_SAMPLES, 0.0f);
+    // Guard scales with FFT size: 512 FFT → 560 samples, 1024 FFT → 1120 samples
+    size_t guard_samples = impl_->config.fft_size + impl_->config.getCyclicPrefix();
+    preamble.resize(guard_samples, 0.0f);
 
     // Generate Schmidl-Cox STS: only even subcarriers
     // Time-domain: x[n] = x[n + N/2], enabling half-symbol correlation

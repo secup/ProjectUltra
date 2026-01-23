@@ -195,6 +195,41 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_hf_reality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_hf_reality PRIVATE ultra_core)
 
+    # NVIS Mode Test - 1024 FFT, 59 carriers, 42 baud high-speed mode
+    add_executable(test_nvis_mode tools/test_nvis_mode.cpp)
+    target_include_directories(test_nvis_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_nvis_mode PRIVATE ultra_core)
+
+    # Minimal 1024 FFT Test - Debug NVIS mode issues
+    add_executable(test_1024fft_minimal tools/test_1024fft_minimal.cpp)
+    target_include_directories(test_1024fft_minimal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_1024fft_minimal PRIVATE ultra_core)
+
+    # NVIS Debug Test - Compare fresh vs warmed RNG
+    add_executable(test_nvis_debug tools/test_nvis_debug.cpp)
+    target_include_directories(test_nvis_debug PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_nvis_debug PRIVATE ultra_core)
+
+    # NVIS Data Test - Test different data patterns
+    add_executable(test_nvis_data tools/test_nvis_data.cpp)
+    target_include_directories(test_nvis_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_nvis_data PRIVATE ultra_core)
+
+    # NVIS Bits Test - Bit-level debugging
+    add_executable(test_nvis_bits tools/test_nvis_bits.cpp)
+    target_include_directories(test_nvis_bits PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_nvis_bits PRIVATE ultra_core)
+
+    # NVIS Carrier Test - Carrier-level debugging
+    add_executable(test_nvis_carrier tools/test_nvis_carrier.cpp)
+    target_include_directories(test_nvis_carrier PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_nvis_carrier PRIVATE ultra_core)
+
+    # NVIS Compare Test - Compare config styles
+    add_executable(test_nvis_compare tools/test_nvis_compare.cpp)
+    target_include_directories(test_nvis_compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_nvis_compare PRIVATE ultra_core)
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp

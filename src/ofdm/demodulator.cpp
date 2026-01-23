@@ -463,10 +463,14 @@ struct OFDMDemodulator::Impl {
 
     void setupCarriers() {
         // Must match modulator exactly
-        int half_carriers = config.num_carriers / 2;
+        // N carriers: -floor(N/2)..-1 (negative) + 1..ceil(N/2) (positive)
+        //   N=30: -15..-1 (15) + 1..15 (15) = 30 carriers ✓
+        //   N=59: -29..-1 (29) + 1..30 (30) = 59 carriers ✓
+        int neg_limit = config.num_carriers / 2;
+        int pos_limit = (config.num_carriers + 1) / 2;
 
         int pilot_count = 0;
-        for (int i = -half_carriers; i <= half_carriers; ++i) {
+        for (int i = -neg_limit; i <= pos_limit; ++i) {
             if (i == 0) continue;
 
             int fft_idx = (i + config.fft_size) % config.fft_size;
@@ -571,15 +575,17 @@ struct OFDMDemodulator::Impl {
         // This replaces the O(n²) computation that was done every symbol
 
         // Build ordered carrier list: -half to -1, then +1 to +half (skipping DC)
+        // Must match setupCarriers exactly
         struct CarrierInfo {
             int fft_idx;
             bool is_pilot;
         };
         std::vector<CarrierInfo> carriers;
-        int half = config.num_carriers / 2;
+        int neg_limit = config.num_carriers / 2;
+        int pos_limit = (config.num_carriers + 1) / 2;
         int pilot_count = 0;
 
-        for (int i = -half; i <= half; ++i) {
+        for (int i = -neg_limit; i <= pos_limit; ++i) {
             if (i == 0) continue;
             int fft_idx = (i + config.fft_size) % config.fft_size;
             bool is_pilot = (pilot_count % config.pilot_spacing == 0);
@@ -972,12 +978,25 @@ struct OFDMDemodulator::Impl {
         size_t preamble_sym_len = config.fft_size + config.getCyclicPrefix();
         size_t coarse_lts_start = coarse_sts_start + 4 * preamble_sym_len;
 
-        // Search window: ±64 samples around expected position
-        constexpr int SEARCH_HALF = 64;
+        // Search window: cover Schmidl-Cox plateau uncertainty WITHOUT extending into data
+        //
+        // Schmidl-Cox can peak anywhere within the STS due to its correlation plateau.
+        // With 4 repeated STS symbols, the plateau can span ~3 symbol lengths.
+        // But searching too far forward will find spurious peaks in the data region!
+        //
+        // The LTS starts immediately after STS (no gap). If Schmidl-Cox peaks at
+        // the earliest valid position (start of STS), coarse_lts_start is correct.
+        // If it peaks at the latest position (end of STS plateau), we need to
+        // search backward by up to ~3 symbol lengths.
+        //
+        // Solution: Search -3 to +0.5 symbol lengths from coarse position
+        // This finds the LTS without extending into data
+        int SEARCH_BACK = 3 * preamble_sym_len;   // Search backward for late Schmidl-Cox
+        int SEARCH_FWD = preamble_sym_len / 2;     // Small forward margin
 
         // Ensure we have enough data
-        if (coarse_lts_start < SEARCH_HALF ||
-            coarse_lts_start + SEARCH_HALF + lts_passband_I.size() > rx_buffer.size()) {
+        if (coarse_lts_start < (size_t)SEARCH_BACK ||
+            coarse_lts_start + SEARCH_FWD + lts_passband_I.size() > rx_buffer.size()) {
             LOG_SYNC(DEBUG, "LTS refinement: not enough data, using coarse timing");
             return coarse_lts_start;
         }
@@ -1002,7 +1021,12 @@ struct OFDMDemodulator::Impl {
         }
         energy_ref *= 0.5f;  // Average of I² + Q² = energy of complex signal
 
-        for (int delta = -SEARCH_HALF; delta <= SEARCH_HALF; ++delta) {
+        // Also track where we expect the true LTS to be (4 symbols after buffer start)
+        // This helps debug if we're finding the wrong peak
+        size_t expected_lts = 4 * preamble_sym_len;  // From start of preamble
+        float corr_at_expected = 0.0f;
+
+        for (int delta = -SEARCH_BACK; delta <= SEARCH_FWD; ++delta) {
             size_t offset = coarse_lts_start + delta;
 
             float corr_I = 0.0f;
@@ -1026,7 +1050,16 @@ struct OFDMDemodulator::Impl {
                 best_corr = corr;
                 best_offset = offset;
             }
+
+            // Track correlation at expected position
+            if (offset == expected_lts) {
+                corr_at_expected = corr;
+            }
         }
+
+        LOG_SYNC(DEBUG, "LTS search: expected=%zu (corr=%.3f), found=%zu (corr=%.3f), diff=%d",
+                 expected_lts, corr_at_expected, best_offset, best_corr,
+                 (int)best_offset - (int)expected_lts);
 
         int timing_correction = (int)best_offset - (int)coarse_lts_start;
         LOG_SYNC(DEBUG, "LTS fine timing: coarse=%zu, refined=%zu, correction=%+d samples, corr=%.3f",
@@ -1034,9 +1067,11 @@ struct OFDMDemodulator::Impl {
 
         // LTS correlation threshold: require strong match to confirm real preamble
         // This prevents false sync on noise (Schmidl-Cox can false trigger)
-        // Note: 0.35 threshold accommodates TX ramp and HF channel effects
-        // Real LTS should correlate at 0.5+ at 20+ dB SNR
-        constexpr float LTS_CORRELATION_THRESHOLD = 0.35f;
+        // Threshold scales with FFT size: longer templates have lower correlation
+        // due to noise averaging differently over more samples.
+        // - 512 FFT: use 0.35 (560 sample template, correlation ~0.5+ at 20 dB)
+        // - 1024 FFT: use 0.05 (1120 sample template, correlation ~0.12-0.25)
+        float LTS_CORRELATION_THRESHOLD = (config.fft_size >= 1024) ? 0.05f : 0.35f;
         if (best_corr < LTS_CORRELATION_THRESHOLD) {
             LOG_SYNC(WARN, "LTS correlation too low (%.3f < %.1f) - likely false sync, aborting",
                      best_corr, LTS_CORRELATION_THRESHOLD);
@@ -1507,7 +1542,11 @@ struct OFDMDemodulator::Impl {
         // === Symbol timing recovery from pilot phase slope ===
         // Timing offset τ causes linear phase slope: phase(k) = 2π × k × τ / N
         // Use linear regression on pilot phases to estimate τ
-        {
+        //
+        // IMPORTANT: Skip first few symbols! For large timing offsets, phases wrap around
+        // ±π which corrupts the linear regression. The LTS-derived timing is accurate and
+        // should be trusted initially. Pilot-based tracking can refine it later.
+        if (snr_symbol_count >= 3) {
             // Collect (fft_index, phase) pairs for linear regression
             float sum_k = 0, sum_k2 = 0, sum_phase = 0, sum_k_phase = 0;
             int timing_valid_count = 0;
@@ -1542,8 +1581,10 @@ struct OFDMDemodulator::Impl {
                     timing_offset_samples = TIMING_ALPHA * instantaneous_timing +
                                            (1.0f - TIMING_ALPHA) * timing_offset_samples;
 
-                    // Clamp to reasonable range (±half symbol shouldn't happen)
-                    timing_offset_samples = std::max(-50.0f, std::min(50.0f, timing_offset_samples));
+                    // Clamp to reasonable range (±~10% of FFT size)
+                    // 512 FFT: ±50 samples, 1024 FFT: ±100 samples, etc.
+                    float max_timing = 50.0f * (config.fft_size / 512.0f);
+                    timing_offset_samples = std::max(-max_timing, std::min(max_timing, timing_offset_samples));
 
                     LOG_DEMOD(DEBUG, "Timing recovery: instant=%.2f samp, filtered=%.2f samp (slope=%.4f rad/bin)",
                              instantaneous_timing, timing_offset_samples, slope);
@@ -1578,6 +1619,20 @@ struct OFDMDemodulator::Impl {
                 if (k > (int)config.fft_size / 2) k -= config.fft_size;
                 float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
                 Complex timing_removal = std::exp(Complex(0, -timing_phase));
+
+                // Debug: show before/after for pilots near DC on first symbol
+                if (snr_symbol_count == 0 && k >= -2 && k <= 3) {
+                    Complex before = channel_estimate[idx];
+                    Complex after = before * timing_removal;
+                    LOG_DEMOD(DEBUG, "TimingFix k=%d: before=(%.2f,%.2f) phase=%.1f° "
+                              "remove=%.1f° after=(%.2f,%.2f) phase=%.1f°",
+                              k, before.real(), before.imag(),
+                              std::arg(before) * 180.0f / M_PI,
+                              -timing_phase * 180.0f / M_PI,
+                              after.real(), after.imag(),
+                              std::arg(after) * 180.0f / M_PI);
+                }
+
                 channel_estimate[idx] *= timing_removal;
             }
         }
@@ -2428,18 +2483,19 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             }
             impl_->dqpsk_skip_first_symbol = false;
 
-            // Initialize timing_offset_samples for coherent mode phase correction
-            // The LTS timing refinement indicates residual timing error that causes
-            // phase slope across carriers. Use this to seed the timing estimator.
-            // For coherent modes (QPSK, 16QAM), this enables the DC boundary fix
-            // to work on the first symbol.
-            if (!is_differential && impl_->config.use_pilots) {
-                impl_->timing_offset_samples = static_cast<float>(timing_refinement);
-                LOG_SYNC(INFO, "Coherent mode: initialized timing_offset=%.1f samples from LTS delta",
-                         impl_->timing_offset_samples);
-            } else {
-                impl_->timing_offset_samples = 0.0f;
-            }
+            // Initialize timing_offset_samples for coherent mode
+            // IMPORTANT: After LTS refinement and correct consume calculation,
+            // the FFT timing is EXACT. The timing_refinement value represents
+            // Schmidl-Cox inaccuracy, NOT actual FFT timing error!
+            //
+            // Setting timing_offset to the refinement delta was WRONG because:
+            // - consume = refined_lts + 2*preamble_sym gives exact data start
+            // - FFT windows start at exactly the right positions
+            // - There's no actual phase slope from timing error
+            //
+            // The pilot-based timing recovery (later) can track any residual drift.
+            impl_->timing_offset_samples = 0.0f;
+            LOG_SYNC(INFO, "Coherent mode: timing_offset=0 (LTS gives exact timing)");
             }  // end of LTS success else block
         } else {
             // No preamble found - if buffer is large, trim old data but keep overlap

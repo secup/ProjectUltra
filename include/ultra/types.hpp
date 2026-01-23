@@ -314,6 +314,35 @@ inline ModemConfig high_throughput() {
     return cfg;
 }
 
+// NVIS High-Speed Mode: Maximum throughput for stable channels (NVIS, local, cable)
+// Matches industry-leader performance: ~42 baud, 59 carriers
+//
+// Target throughput (matching industry leader):
+//   DQPSK R3/4: 3,900 bps (all 59 carriers as data, no pilots)
+//   D8PSK R3/4: 5,800 bps (all 59 carriers as data, no pilots)
+//   16QAM R3/4: 7,000 bps (uses preamble-only channel estimation)
+//   32QAM R3/4: 8,500 bps (uses preamble-only channel estimation)
+//
+// Key insight: Differential modes (DQPSK/D8PSK) don't need pilots, so all
+// 59 carriers carry data. For coherent modes (16QAM/32QAM), we use preamble-
+// based channel estimation which works well on stable NVIS paths.
+//
+// Use default balanced() for challenging HF (flutter, polar, multipath).
+inline ModemConfig nvis_mode() {
+    ModemConfig cfg;
+    cfg.fft_size = 1024;                       // 46.875 Hz bin spacing
+    cfg.num_carriers = 59;                     // 59 carriers for ~2.8 kHz bandwidth
+    cfg.cp_mode = CyclicPrefixMode::MEDIUM;    // 96 samples (2ms) at 1024 FFT
+    cfg.symbol_guard = 0;                      // No extra guard needed for stable paths
+    cfg.use_pilots = false;                    // All carriers as data (for DQPSK/D8PSK)
+    cfg.pilot_spacing = 2;                     // Only used if use_pilots=true
+    cfg.modulation = Modulation::DQPSK;        // Default to DQPSK
+    cfg.code_rate = CodeRate::R3_4;            // R3/4 for good NVIS conditions
+    cfg.speed_profile = SpeedProfile::TURBO;
+    cfg.adaptive_eq_enabled = false;
+    return cfg;
+}
+
 // Get config for given speed profile
 inline ModemConfig forProfile(SpeedProfile profile) {
     switch (profile) {
