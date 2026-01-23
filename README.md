@@ -22,7 +22,7 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 ## Features
 
 - **Adaptive Waveforms**: Automatically selects optimal waveform based on channel conditions
-- **Wide SNR Range**: Operates from -17 dB (reported) to 30+ dB
+- **Wide SNR Range**: Operates from -11 dB to 30+ dB (DPSK tested at -11 dB)
 - **Strong FEC**: LDPC codes with rates from R1/4 to R5/6
 - **ARQ Protocol**: Reliable delivery with automatic retransmission
 - **GUI Application**: Real-time waterfall, constellation display, and message log
@@ -35,8 +35,8 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 **General HF (multipath, fading):**
 | SNR | Mode | Throughput | Notes |
 |-----|------|------------|-------|
-| -17 dB* | MFSK 8-tone | 47 bps | Extreme weak signal |
-| 0-15 dB | Single-carrier DPSK | 125-300 bps | Flutter/polar paths |
+| -11 to 0 dB | Single-carrier DPSK | 125 bps | Noise stronger than signal! |
+| 0-17 dB | Single-carrier DPSK | 125-300 bps | Flutter/polar paths |
 | 17+ dB | OFDM DQPSK R1/4 | 1.3 kbps | Reliable on most HF |
 | 25+ dB | OFDM DQPSK R1/2 | 2.5 kbps | Good conditions |
 | 30+ dB | OFDM DQPSK R2/3 | 3.4 kbps | Excellent conditions |
@@ -56,24 +56,23 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 | 30+ dB | OFDM 16QAM R3/4 | 5.8 kbps | 45 data + 14 pilot carriers |
 | 30+ dB | OFDM 32QAM R3/4 | **7.2 kbps** | Maximum throughput |
 
-*Reported SNR in 2500 Hz bandwidth; actual SNR in signal bandwidth is higher.
-
 **When to use 16QAM:** NVIS propagation (300-500 km), ground wave, or direct cable
 connection. These paths have stable phase, allowing coherent demodulation with
 pilot-assisted channel estimation. Use the GUI Expert settings to force 16QAM mode.
 
 ### Waveform Strategy
 
-ProjectUltra uses multiple waveform types, each optimized for different conditions:
+ProjectUltra uses two waveform families optimized for different SNR ranges:
 
 ```
 SNR Range           Waveform              Why
 ─────────────────────────────────────────────────────────────
-< 0 dB              MFSK 8-tone           Narrow bandwidth, long integration
-0-17 dB             Single-carrier DPSK   Full power concentration, no ICI
+-11 to 17 dB        Single-carrier DPSK   Full power in one carrier, no ICI
 17+ dB              OFDM 512-FFT          High throughput, fast symbols (85 baud)
 25+ dB (NVIS)       OFDM 1024-FFT         Max throughput, slow symbols (42 baud)
 ```
+
+**Key insight**: Single-carrier DPSK works down to **-11 dB SNR** (noise 12× stronger than signal). This eliminates the need for MFSK, which would only provide ~6 dB additional sensitivity at 1/3 the speed.
 
 **Two OFDM modes** for different channel conditions:
 - **512 FFT (85 baud)**: Fast symbols tolerate Doppler/flutter, 30 carriers
@@ -177,9 +176,9 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 │     Protocol Engine (Connection, ARQ, File Transfer)    │
 ├─────────────────────────────────────────────────────────┤
 │        Modem Engine (TX/RX coordination, SNR est)       │
-├──────────────┬──────────────┬───────────────────────────┤
-│ OFDM Mod/Dem │ DPSK Mod/Dem │ MFSK Mod/Dem             │
-├──────────────┴──────────────┴───────────────────────────┤
+├──────────────────────────┬────────────────────────────┤
+│       OFDM Mod/Dem       │       DPSK Mod/Dem        │
+├──────────────────────────┴────────────────────────────┤
 │  LDPC Encoder/Decoder  │  Interleaver  │  Sync/CFO     │
 ├─────────────────────────────────────────────────────────┤
 │                    Audio I/O (SDL2)                     │
@@ -254,8 +253,7 @@ power necessary. Be ready to QSY if causing interference.
 - OFDM with DQPSK/D8PSK modulation (differential)
 - OFDM with QPSK/16QAM/32QAM modulation (coherent, for NVIS/local)
 - **NVIS high-speed mode**: 1024 FFT, 59 carriers, up to 7.2 kbps
-- Single-carrier DPSK (DBPSK/DQPSK/D8PSK)
-- MFSK (2/4/8/16/32 tones)
+- Single-carrier DPSK (works to -11 dB SNR!)
 - ARQ protocol with retransmission
 - GUI with waterfall and constellation
 - Expert mode for forcing waveform/modulation settings
