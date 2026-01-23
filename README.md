@@ -107,10 +107,14 @@ arecord -f FLOAT_LE -r 48000 | ./ultra prx
 
 ### Protocol
 
-1. **CONNECT** - Initiates link with full callsign exchange
-2. **MODE_CHANGE** - Negotiates optimal modulation/coding based on measured SNR
-3. **DATA** - Transfers payload with per-frame acknowledgment
-4. **DISCONNECT** - Graceful termination with callsign ID (regulatory compliance)
+1. **PING/PONG** - Fast presence probe (~1 sec each) to check if remote station is listening
+2. **CONNECT** - Full callsign exchange after successful probe (FCC Part 97.119 compliance)
+3. **MODE_CHANGE** - Negotiates optimal modulation/coding based on measured SNR
+4. **DATA** - Transfers payload with per-frame acknowledgment
+5. **DISCONNECT** - Graceful termination with callsign ID (regulatory compliance)
+
+The PING/PONG probe allows quick "anyone home?" detection before committing to the
+full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fails fast.
 
 ### Signal Parameters
 
@@ -255,8 +259,22 @@ FCC Part 97 (advancement of the radio art).
 1. Pick a frequency from the recommended list above (e.g., 14.108 MHz USB)
 2. Open a WebSDR receiver (websdr.org or kiwisdr.com) and tune to that frequency
 3. Start recording on the WebSDR (or use Audacity to capture system audio)
-4. Transmit a CONNECT frame using ProjectUltra
+4. Transmit using ProjectUltra (see options below)
 5. Stop recording and save the file
+
+**What to transmit:**
+
+| Frame Type | Duration | Best For |
+|------------|----------|----------|
+| **PING probe** | ~1 second | Quick propagation test |
+| **Full CONNECT** | ~8 seconds | Complete handshake test |
+
+- **PING probe**: Short DPSK burst with "ULTR" marker. Fast way to check if your
+  signal is reaching the WebSDR. In GUI: click Connect, recording starts immediately
+  with the PING. Cancel after 2-3 seconds if you just want the probe.
+
+- **Full CONNECT**: Complete connection attempt with callsign exchange (3 codewords).
+  More comprehensive test of sync, LDPC decode, and protocol parsing.
 
 **What to submit:**
 - Recording file (48kHz mono WAV or F32 preferred)
@@ -265,6 +283,7 @@ FCC Part 97 (advancement of the radio art).
 - WebSDR location used (e.g., "Twente WebSDR, Netherlands")
 - Approximate path distance
 - Band conditions if known (S-meter readings)
+- Frame type transmitted (PING or CONNECT)
 
 **Why this helps:**
 Real ionospheric propagation has characteristics that simulation can't capture.
