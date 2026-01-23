@@ -1566,8 +1566,44 @@ struct OFDMDemodulator::Impl {
                            config.modulation != Modulation::DQPSK &&
                            config.modulation != Modulation::D8PSK);
 
+        // Step 1: For coherent modes, remove timing phase from pilots before interpolation
+        // This makes the interpolation work across DC boundary (pilots will have similar phases)
+        if (is_coherent && snr_symbol_count < 3) {
+            LOG_DEMOD(INFO, "Coherent timing fix: is_coherent=%d, timing_offset=%.2f, sym=%d",
+                      is_coherent ? 1 : 0, timing_offset_samples, snr_symbol_count);
+        }
+        if (is_coherent && std::abs(timing_offset_samples) > 0.1f) {
+            for (int idx : pilot_carrier_indices) {
+                int k = idx;
+                if (k > (int)config.fft_size / 2) k -= config.fft_size;
+                float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
+                Complex timing_removal = std::exp(Complex(0, -timing_phase));
+                channel_estimate[idx] *= timing_removal;
+            }
+        }
+
         // Interpolate between pilots for data carriers
         interpolateChannel();
+
+        // Step 2: For coherent modes, add back the correct timing phase for each carrier
+        // Each carrier needs its own timing phase based on its FFT bin index
+        if (is_coherent && std::abs(timing_offset_samples) > 0.1f) {
+            // Apply to all carriers (both pilot and data)
+            for (int idx : pilot_carrier_indices) {
+                int k = idx;
+                if (k > (int)config.fft_size / 2) k -= config.fft_size;
+                float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
+                Complex timing_correction = std::exp(Complex(0, timing_phase));
+                channel_estimate[idx] *= timing_correction;
+            }
+            for (int idx : data_carrier_indices) {
+                int k = idx;
+                if (k > (int)config.fft_size / 2) k -= config.fft_size;
+                float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
+                Complex timing_correction = std::exp(Complex(0, timing_phase));
+                channel_estimate[idx] *= timing_correction;
+            }
+        }
 
         // Initialize adaptive equalizer weights from pilot-based channel estimate
         // This gives the adaptive filter a good starting point for fading channels
@@ -2391,6 +2427,19 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->carrier_phase_correction = Complex(1, 0);
             }
             impl_->dqpsk_skip_first_symbol = false;
+
+            // Initialize timing_offset_samples for coherent mode phase correction
+            // The LTS timing refinement indicates residual timing error that causes
+            // phase slope across carriers. Use this to seed the timing estimator.
+            // For coherent modes (QPSK, 16QAM), this enables the DC boundary fix
+            // to work on the first symbol.
+            if (!is_differential && impl_->config.use_pilots) {
+                impl_->timing_offset_samples = static_cast<float>(timing_refinement);
+                LOG_SYNC(INFO, "Coherent mode: initialized timing_offset=%.1f samples from LTS delta",
+                         impl_->timing_offset_samples);
+            } else {
+                impl_->timing_offset_samples = 0.0f;
+            }
             }  // end of LTS success else block
         } else {
             // No preamble found - if buffer is large, trim old data but keep overlap

@@ -295,10 +295,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     // Modulation selection
+    // When connected, ALL frames (including control) use negotiated modulation
+    // so RX demodulator (also configured to negotiated mode) can decode them.
+    // Robustness is handled by code rate: CW0 header always uses R1/4.
     Modulation tx_modulation = Modulation::DQPSK;
-    if ((is_v2_frame && is_data_frame && connected_) || (!is_v2_frame && connected_)) {
+    if (connected_) {
         tx_modulation = data_modulation_;
-        LOG_MODEM(INFO, "[%s] TX: Using negotiated modulation %s for data",
+        LOG_MODEM(INFO, "[%s] TX: Using negotiated modulation %s",
                   log_prefix_.c_str(), modulationToString(tx_modulation));
     }
 

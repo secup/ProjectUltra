@@ -128,14 +128,23 @@ void ModemEngine::setConnected(bool connected) {
             std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
             rx_sample_buffer_.clear();
         }
-        ofdm_demodulator_->reset();
 
-        // NOTE: Don't overwrite waveform_mode_ here - it was already set to the negotiated
-        // mode (e.g., OFDM) by the on_mode_negotiated_ callback before setConnected() is called.
-        // During handshake, TX uses last_rx_waveform_ (set by RX path when we received CONNECT/CONNECT_ACK)
+        // Configure OFDM modulator/demodulator to match data_modulation_
+        // This ensures TX and RX use the same constellation when connected
+        bool is_differential = (data_modulation_ == Modulation::DBPSK ||
+                               data_modulation_ == Modulation::DQPSK ||
+                               data_modulation_ == Modulation::D8PSK);
+        config_.modulation = data_modulation_;
+        config_.code_rate = data_code_rate_;
+        config_.use_pilots = !is_differential;
 
-        LOG_MODEM(INFO, "Entered connected state, RX buffer cleared (negotiated=%d, TX uses last_rx=%d)",
-                  static_cast<int>(waveform_mode_), static_cast<int>(last_rx_waveform_));
+        ofdm_modulator_ = std::make_unique<OFDMModulator>(config_);
+        decoder_->setRate(data_code_rate_);
+        ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
+
+        LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d)",
+                  modulationToString(data_modulation_), codeRateToString(data_code_rate_),
+                  config_.use_pilots ? 1 : 0);
     } else {
         // Switching to disconnected state - use robust mode for RX
         ModemConfig rx_config = config_;
