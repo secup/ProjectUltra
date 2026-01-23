@@ -96,8 +96,6 @@ int main(int argc, char* argv[]) {
                 waveform_mode = WaveformMode::OFDM;
             } else if (mode == "dpsk") {
                 waveform_mode = WaveformMode::DPSK;
-            } else if (mode == "mfsk") {
-                waveform_mode = WaveformMode::MFSK;
             } else {
                 fprintf(stderr, "Unknown waveform mode: %s\n", mode.c_str());
                 return 1;
@@ -109,7 +107,7 @@ int main(int argc, char* argv[]) {
             printf("  --snr <dB>       SNR level (default: 25)\n");
             printf("  --frames <n>     Number of frames (default: 10)\n");
             printf("  --duration <s>   Audio duration in seconds (default: 30)\n");
-            printf("  -w, --waveform   Waveform mode: ofdm, dpsk, mfsk (default: ofdm)\n");
+            printf("  -w, --waveform   Waveform mode: ofdm, dpsk (default: ofdm)\n");
             printf("  -p, --play       Play audio through speakers\n");
             printf("  --save           Save audio file for playback\n");
             printf("  -o <file>        Output audio file (implies --save)\n");
@@ -128,7 +126,6 @@ int main(int argc, char* argv[]) {
     const char* waveform_name = "?";
     if (waveform_mode == WaveformMode::OFDM) waveform_name = "OFDM";
     else if (waveform_mode == WaveformMode::DPSK) waveform_name = "DPSK";
-    else if (waveform_mode == WaveformMode::MFSK) waveform_name = "MFSK";
 
     printf("Configuration:\n");
     printf("  SNR:        %.1f dB\n", snr_db);

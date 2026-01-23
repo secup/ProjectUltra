@@ -345,8 +345,6 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod) {
     // (enum values don't correspond to bit counts)
     size_t bits_per_carrier = getBitsPerSymbol(mod);
     size_t carriers_per_symbol = impl_->data_carrier_indices.size();
-    size_t bits_per_symbol = carriers_per_symbol * bits_per_carrier;
-    size_t bytes_per_symbol = (bits_per_symbol + 7) / 8;
 
     // DEBUG: Check DBPSK reference state at start of modulate
     if (mod == Modulation::DQPSK || mod == Modulation::D8PSK || mod == Modulation::DBPSK) {

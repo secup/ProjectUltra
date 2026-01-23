@@ -63,13 +63,6 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                       dpsk_config_.raw_bps());
             break;
 
-        case protocol::WaveformMode::MFSK:
-            mfsk_demodulator_->reset();
-            LOG_MODEM(INFO, "MFSK mode active: %d tones, %.1f effective bps",
-                      mfsk_config_.num_tones,
-                      mfsk_config_.effective_bps());
-            break;
-
         case protocol::WaveformMode::OTFS_EQ:
         case protocol::WaveformMode::OTFS_RAW:
             otfs_demodulator_->reset();
@@ -121,7 +114,7 @@ void ModemEngine::setConnected(bool connected) {
         use_connected_waveform_once_ = false;  // Clear any leftover flag
 
         // CRITICAL: Clear RX buffer and state when entering connected state
-        // Old samples from DPSK/MFSK handshake would corrupt OFDM preamble detection
+        // Old samples from DPSK handshake would corrupt OFDM preamble detection
         rx_frame_state_.clear();
         detected_frame_queue_.clear();
         {
@@ -249,50 +242,13 @@ void ModemEngine::recommendDataMode(float snr_db, Modulation& mod, CodeRate& rat
 
 protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     // Waveform selection based on measured SNR
-    // Thresholds based on testing (test_mode_snr tool):
-    //   < 0 dB:  MFSK (works at -17 dB reported / 0 dB actual)
-    //   0-17 dB: DPSK (single-carrier, OFDM sync fails below ~17 dB)
-    //   > 17 dB: OFDM (highest throughput, needs reliable sync)
-
-    if (snr_db < 0.0f) {
-        return protocol::WaveformMode::MFSK;
-    } else if (snr_db < 17.0f) {
+    // DPSK works down to -11 dB SNR (tested), so we use it for low SNR
+    // OFDM requires ~17 dB for reliable sync detection
+    if (snr_db < 17.0f) {
         return protocol::WaveformMode::DPSK;
     } else {
         return protocol::WaveformMode::OFDM;
     }
-}
-
-void ModemEngine::setMFSKMode(int num_tones) {
-    // Select appropriate MFSK preset based on number of tones
-    switch (num_tones) {
-        case 2:
-            mfsk_config_ = mfsk_presets::robust();  // ~8 bps, most robust
-            break;
-        case 4:
-            mfsk_config_ = mfsk_presets::low_snr();  // ~21 bps
-            break;
-        case 8:
-            mfsk_config_ = mfsk_presets::medium();  // ~47 bps, default
-            break;
-        case 16:
-            mfsk_config_ = mfsk_presets::fast();  // ~62 bps
-            break;
-        case 32:
-            mfsk_config_ = mfsk_presets::turbo();  // ~156 bps, fastest MFSK
-            break;
-        default:
-            LOG_MODEM(WARN, "Invalid MFSK tones %d, using 8", num_tones);
-            mfsk_config_ = mfsk_presets::medium();
-            break;
-    }
-
-    // Recreate modulator/demodulator with new config
-    mfsk_modulator_ = std::make_unique<MFSKModulator>(mfsk_config_);
-    mfsk_demodulator_ = std::make_unique<MFSKDemodulator>(mfsk_config_);
-
-    LOG_MODEM(INFO, "MFSK mode set: %d tones, %.1f bps",
-              mfsk_config_.num_tones, mfsk_config_.effective_bps());
 }
 
 void ModemEngine::setDPSKMode(DPSKModulation mod, int samples_per_symbol) {

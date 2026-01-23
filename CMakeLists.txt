@@ -156,15 +156,6 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(test_sync_robustness PRIVATE ultra_core)
 
-    # Low SNR sync test (DPSK/MFSK)
-    add_executable(test_lowsnr_sync
-        tools/test_lowsnr_sync.cpp
-    )
-    target_include_directories(test_lowsnr_sync PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(test_lowsnr_sync PRIVATE ultra_core)
-
     # Mode/SNR quick test
     add_executable(test_mode_snr tools/test_mode_snr.cpp)
     target_include_directories(test_mode_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -180,16 +171,6 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_dpsk_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_dpsk_snr PRIVATE ultra_core)
 
-    # DQPSK pattern debug
-    add_executable(test_dqpsk_pattern_debug tools/test_dqpsk_pattern_debug.cpp)
-    target_include_directories(test_dqpsk_pattern_debug PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_dqpsk_pattern_debug PRIVATE ultra_core)
-
-    # DQPSK detailed trace
-    add_executable(test_dqpsk_trace tools/test_dqpsk_trace.cpp)
-    target_include_directories(test_dqpsk_trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_dqpsk_trace PRIVATE ultra_core)
-
     # HF Reality Test - Ultimate validation with realistic conditions
     add_executable(test_hf_reality tools/test_hf_reality.cpp)
     target_include_directories(test_hf_reality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -200,35 +181,10 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_nvis_mode PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_nvis_mode PRIVATE ultra_core)
 
-    # Minimal 1024 FFT Test - Debug NVIS mode issues
-    add_executable(test_1024fft_minimal tools/test_1024fft_minimal.cpp)
-    target_include_directories(test_1024fft_minimal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_1024fft_minimal PRIVATE ultra_core)
-
-    # NVIS Debug Test - Compare fresh vs warmed RNG
-    add_executable(test_nvis_debug tools/test_nvis_debug.cpp)
-    target_include_directories(test_nvis_debug PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_nvis_debug PRIVATE ultra_core)
-
     # NVIS Data Test - Test different data patterns
     add_executable(test_nvis_data tools/test_nvis_data.cpp)
     target_include_directories(test_nvis_data PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_nvis_data PRIVATE ultra_core)
-
-    # NVIS Bits Test - Bit-level debugging
-    add_executable(test_nvis_bits tools/test_nvis_bits.cpp)
-    target_include_directories(test_nvis_bits PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_nvis_bits PRIVATE ultra_core)
-
-    # NVIS Carrier Test - Carrier-level debugging
-    add_executable(test_nvis_carrier tools/test_nvis_carrier.cpp)
-    target_include_directories(test_nvis_carrier PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_nvis_carrier PRIVATE ultra_core)
-
-    # NVIS Compare Test - Compare config styles
-    add_executable(test_nvis_compare tools/test_nvis_compare.cpp)
-    target_include_directories(test_nvis_compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_nvis_compare PRIVATE ultra_core)
 
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
@@ -267,20 +223,6 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(test_hf_modem PRIVATE ultra_core)
-
-    # HF Modem Debug - ModemEngine TX vs direct demod RX
-    add_executable(test_hf_modem_debug
-        tools/test_hf_modem_debug.cpp
-        src/gui/modem/modem_engine.cpp
-        src/gui/modem/modem_rx.cpp
-        src/gui/modem/modem_mode.cpp
-        src/gui/modem/modem_carrier_sense.cpp
-        src/gui/adaptive_mode.cpp
-    )
-    target_include_directories(test_hf_modem_debug PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(test_hf_modem_debug PRIVATE ultra_core)
 endif()
 
 # GUI Application

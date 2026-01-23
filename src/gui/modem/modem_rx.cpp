@@ -78,22 +78,6 @@ void ModemEngine::acquisitionLoop() {
             continue;
         }
 
-        // Try MFSK preamble detection (only if enabled)
-        if constexpr (MFSK_ENABLED) {
-            int mfsk_start = mfsk_demodulator_->findPreamble(span);
-            if (mfsk_start >= 0) {
-                DetectedFrame frame;
-                frame.data_start = mfsk_start;
-                frame.waveform = protocol::WaveformMode::MFSK;
-                frame.timestamp = std::chrono::steady_clock::now();
-
-                detected_frame_queue_.push(frame);
-                last_rx_waveform_ = protocol::WaveformMode::MFSK;
-
-                LOG_MODEM(INFO, "[%s] Acquisition: MFSK preamble at %d (buffer=%zu)",
-                          log_prefix_.c_str(), mfsk_start, samples_snapshot.size());
-            }
-        }
     }
 
     LOG_MODEM(INFO, "[%s] Acquisition loop exiting", log_prefix_.c_str());
@@ -149,13 +133,6 @@ void ModemEngine::rxDecodeLoop() {
                 if (buf_size > 4000) {
                     processRxBuffer_DPSK();
                 }
-            } else if constexpr (MFSK_ENABLED) {
-                if (waveform_mode_ == protocol::WaveformMode::MFSK) {
-                    // Process MFSK in connected mode
-                    if (buf_size > 4000) {
-                        processRxBuffer_MFSK();
-                    }
-                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -175,18 +152,13 @@ void ModemEngine::rxDecodeLoop() {
 
         LOG_MODEM(INFO, "[%s] RX decode: Processing %s frame at %d",
                   log_prefix_.c_str(),
-                  frame.waveform == protocol::WaveformMode::DPSK ? "DPSK" :
-                  frame.waveform == protocol::WaveformMode::MFSK ? "MFSK" : "OFDM",
+                  frame.waveform == protocol::WaveformMode::DPSK ? "DPSK" : "OFDM",
                   frame.data_start);
 
         // Decode based on waveform type
         bool success = false;
         if (frame.waveform == protocol::WaveformMode::DPSK) {
             success = rxDecodeDPSK(frame);
-        } else if constexpr (MFSK_ENABLED) {
-            if (frame.waveform == protocol::WaveformMode::MFSK) {
-                success = rxDecodeMFSK(frame);
-            }
         }
 
         if (!success) {
@@ -563,135 +535,6 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
         if (!frame_data.empty()) {
             LOG_MODEM(INFO, "[%s] RX DPSK: Frame reassembled, %zu bytes",
-                      log_prefix_.c_str(), frame_data.size());
-
-            {
-                std::lock_guard<std::mutex> lock(stats_mutex_);
-                stats_.frames_received++;
-                stats_.synced = true;
-                rx_data_queue_.push(frame_data);
-            }
-
-            if (raw_data_callback_) {
-                raw_data_callback_(frame_data);
-            }
-
-            last_rx_complete_time_ = std::chrono::steady_clock::now();
-            return true;
-        }
-    }
-
-    return false;
-}
-
-// ============================================================================
-// MFSK DECODE
-// ============================================================================
-
-bool ModemEngine::rxDecodeMFSK(const DetectedFrame& frame) {
-    namespace v2 = protocol::v2;
-
-    int symbol_samples = mfsk_config_.samples_per_symbol;
-    int bits_per_sym = mfsk_config_.bits_per_symbol();
-    int samples_per_codeword = (v2::LDPC_CODEWORD_BITS / bits_per_sym) * symbol_samples;
-
-    // Step 1: Wait for CW0 samples
-    while (rx_decode_running_) {
-        size_t buffer_size = getBufferSize();
-        int available = buffer_size - frame.data_start;
-        if (available >= samples_per_codeword) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    if (!rx_decode_running_) return false;
-
-    // Step 2: Decode CW0
-    std::vector<float> buffer = getBufferSnapshot();
-    SampleSpan cw0_span(buffer.data() + frame.data_start, samples_per_codeword);
-    auto cw0_soft = mfsk_demodulator_->demodulateSoft(cw0_span);
-
-    if (cw0_soft.size() < v2::LDPC_CODEWORD_BITS) {
-        LOG_MODEM(WARN, "RX MFSK: CW0 demod failed, got %zu bits", cw0_soft.size());
-        consumeSamples(frame.data_start + samples_per_codeword);
-        return false;
-    }
-
-    std::vector<float> cw0_bits(cw0_soft.begin(), cw0_soft.begin() + v2::LDPC_CODEWORD_BITS);
-    LDPCDecoder cw0_decoder(CodeRate::R1_4);
-    Bytes cw0_decoded = cw0_decoder.decodeSoft(cw0_bits);
-
-    if (!cw0_decoder.lastDecodeSuccess() || cw0_decoded.size() < v2::BYTES_PER_CODEWORD) {
-        LOG_MODEM(INFO, "RX MFSK: CW0 LDPC decode FAILED");
-        consumeSamples(frame.data_start + samples_per_codeword);
-        return false;
-    }
-
-    LOG_MODEM(INFO, "RX MFSK: CW0 decode SUCCESS");
-
-    // Parse header
-    Bytes cw0_data(cw0_decoded.begin(), cw0_decoded.begin() + v2::BYTES_PER_CODEWORD);
-    auto cw0_info = v2::identifyCodeword(cw0_data);
-
-    int expected_codewords = 1;
-    if (cw0_info.type == v2::CodewordType::HEADER) {
-        auto header = v2::parseHeader(cw0_data);
-        if (header.valid) {
-            expected_codewords = header.total_cw;
-            LOG_MODEM(INFO, "RX MFSK: Header valid, expecting %d codewords", expected_codewords);
-        }
-    }
-
-    // Step 3: Wait for ALL codewords
-    int total_samples_needed = expected_codewords * samples_per_codeword;
-
-    while (rx_decode_running_) {
-        size_t buffer_size = getBufferSize();
-        int available = buffer_size - frame.data_start;
-        if (available >= total_samples_needed) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    if (!rx_decode_running_) return false;
-
-    // Step 4: Decode ALL codewords
-    buffer = getBufferSnapshot();
-    SampleSpan full_data_span(buffer.data() + frame.data_start, total_samples_needed);
-    auto soft_bits = mfsk_demodulator_->demodulateSoft(full_data_span);
-
-    LOG_MODEM(INFO, "RX MFSK: Got %zu soft bits for %d codewords",
-              soft_bits.size(), expected_codewords);
-
-    const size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
-    size_t num_codewords = std::min((size_t)expected_codewords, soft_bits.size() / LDPC_BLOCK);
-
-    v2::CodewordStatus cw_status;
-    cw_status.decoded.resize(expected_codewords, false);
-    cw_status.data.resize(expected_codewords);
-
-    for (size_t i = 0; i < num_codewords; i++) {
-        std::vector<float> cw_bits(soft_bits.begin() + i * LDPC_BLOCK,
-                                   soft_bits.begin() + (i + 1) * LDPC_BLOCK);
-
-        LDPCDecoder cw_decoder(CodeRate::R1_4);
-        Bytes decoded = cw_decoder.decodeSoft(cw_bits);
-
-        if (cw_decoder.lastDecodeSuccess() && decoded.size() >= v2::BYTES_PER_CODEWORD) {
-            Bytes cw_data(decoded.begin(), decoded.begin() + v2::BYTES_PER_CODEWORD);
-            cw_status.decoded[i] = true;
-            cw_status.data[i] = cw_data;
-            LOG_MODEM(INFO, "RX MFSK: CW%zu decode SUCCESS", i);
-        } else {
-            LOG_MODEM(INFO, "RX MFSK: CW%zu decode FAILED", i);
-        }
-    }
-
-    consumeSamples(frame.data_start + total_samples_needed);
-
-    if (cw_status.allSuccess()) {
-        Bytes frame_data = cw_status.reassemble();
-
-        if (!frame_data.empty()) {
-            LOG_MODEM(INFO, "[%s] RX MFSK: Frame reassembled, %zu bytes",
                       log_prefix_.c_str(), frame_data.size());
 
             {
@@ -1127,54 +970,6 @@ void ModemEngine::processRxBuffer_DPSK() {
 
     if (!success) {
         LOG_MODEM(INFO, "[%s] processRxBuffer_DPSK: Frame decode failed",
-                  log_prefix_.c_str());
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.frames_failed++;
-    }
-
-    rx_frame_state_.clear();
-}
-
-// ============================================================================
-// MFSK BUFFER PROCESSING (Connected Mode)
-// ============================================================================
-
-void ModemEngine::processRxBuffer_MFSK() {
-    // Get buffer snapshot for preamble detection
-    std::vector<float> samples = getBufferSnapshot();
-    if (samples.size() < 4000) return;
-
-    SampleSpan span(samples.data(), samples.size());
-
-    // Look for MFSK preamble
-    int preamble_start = mfsk_demodulator_->findPreamble(span);
-    if (preamble_start < 0) {
-        // No preamble found - trim old samples if buffer is getting large
-        if (samples.size() > 48000) {
-            consumeSamples(samples.size() - 24000);
-        }
-        return;
-    }
-
-    LOG_MODEM(INFO, "[%s] processRxBuffer_MFSK: Found preamble at %d",
-              log_prefix_.c_str(), preamble_start);
-
-    // Create a DetectedFrame and delegate to rxDecodeMFSK
-    DetectedFrame frame;
-    frame.data_start = preamble_start;
-    frame.waveform = protocol::WaveformMode::MFSK;
-    frame.timestamp = std::chrono::steady_clock::now();
-
-    // Mark state as active
-    rx_frame_state_.active = true;
-    rx_frame_state_.frame = frame;
-    rx_frame_state_.expected_codewords = 0;
-    rx_frame_state_.frame_type = protocol::v2::FrameType::PROBE;
-
-    bool success = rxDecodeMFSK(frame);
-
-    if (!success) {
-        LOG_MODEM(INFO, "[%s] processRxBuffer_MFSK: Frame decode failed",
                   log_prefix_.c_str());
         std::lock_guard<std::mutex> lock(stats_mutex_);
         stats_.frames_failed++;

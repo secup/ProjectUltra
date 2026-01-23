@@ -231,9 +231,8 @@ private:
 
         pulse_shape_.resize(config_.samples_per_symbol);
         int N = config_.samples_per_symbol;
-        float beta = config_.rolloff;
 
-        // Raised cosine window
+        // Raised cosine window (rolloff parameter not used for simple window)
         for (int i = 0; i < N; i++) {
             float t = (float)i / N;
             // Smooth raised cosine envelope
@@ -622,18 +621,7 @@ private:
     // differential scoring inherently removes CFO
     int refineTimingWithMatchedFilter(SampleSpan samples, int coarse_offset, int symbol_len, float cfo_hz) {
         static const int BARKER13[] = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
-        static const int BARKER_LEN = 13;
         static const int REFINE_SYMBOLS = 6;  // Use first 6 symbols for refinement
-
-        // Build expected differential pattern for first REFINE_SYMBOLS
-        std::vector<int> expected_pattern;
-        for (int s = 1; s < REFINE_SYMBOLS; s++) {
-            expected_pattern.push_back(BARKER13[s]);
-        }
-        constexpr float MIN_SYMBOL_ENERGY = 0.001f;
-
-        (void)expected_pattern;
-        (void)MIN_SYMBOL_ENERGY;
 
         // Use matched filter with CFO-adjusted carrier
         // Generate template for first few symbols

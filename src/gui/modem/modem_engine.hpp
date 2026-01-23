@@ -1,7 +1,7 @@
 #pragma once
 
 // ModemEngine - Main modem interface class
-// Handles TX/RX audio processing with OFDM, DPSK, MFSK modulation
+// Handles TX/RX audio processing with OFDM and DPSK modulation
 
 #include "modem_types.hpp"
 #include "ultra/types.hpp"
@@ -9,7 +9,6 @@
 #include "ultra/otfs.hpp"
 #include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
 #include "ultra/dsp.hpp"  // FIRFilter
-#include "fsk/mfsk.hpp"   // MFSKModulator, MFSKDemodulator
 #include "psk/dpsk.hpp"   // DPSKModulator, DPSKDemodulator
 #include "../adaptive_mode.hpp"
 #include <memory>
@@ -146,9 +145,6 @@ public:
     static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate);
     static protocol::WaveformMode recommendWaveformMode(float snr_db);
 
-    void setMFSKMode(int num_tones);
-    int getMFSKTones() const { return mfsk_config_.num_tones; }
-
     void setDPSKMode(DPSKModulation mod, int samples_per_symbol = 384);
     DPSKModulation getDPSKModulation() const { return dpsk_config_.modulation; }
     const DPSKConfig& getDPSKConfig() const { return dpsk_config_; }
@@ -183,11 +179,6 @@ private:
 
     // RX chain - OTFS
     std::unique_ptr<OTFSDemodulator> otfs_demodulator_;
-
-    // TX/RX chain - MFSK
-    std::unique_ptr<MFSKModulator> mfsk_modulator_;
-    std::unique_ptr<MFSKDemodulator> mfsk_demodulator_;
-    MFSKConfig mfsk_config_;
 
     // TX/RX chain - DPSK
     std::unique_ptr<DPSKModulator> dpsk_modulator_;
@@ -230,7 +221,6 @@ private:
 
     // RX decode helpers
     bool rxDecodeDPSK(const DetectedFrame& frame);
-    bool rxDecodeMFSK(const DetectedFrame& frame);
     bool rxDecodeOFDM();
 
     // OFDM multi-codeword accumulation
@@ -285,7 +275,6 @@ private:
     void consumeSamples(size_t count);
     void processRxBuffer_OFDM();
     void processRxBuffer_DPSK();
-    void processRxBuffer_MFSK();
 };
 
 } // namespace gui

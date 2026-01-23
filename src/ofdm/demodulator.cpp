@@ -1772,7 +1772,6 @@ struct OFDMDemodulator::Impl {
             case Modulation::QAM32: {
                 // 32-QAM rectangular 8×4 constellation
                 // I: 4 levels {-3,-1,+1,+3}, Q: 8 levels {-7,-5,-3,-1,+1,+3,+5,+7}
-                constexpr float d = 0.1961161351381840f;  // 1/sqrt(26)
                 auto slice_i = [](float x) -> float {
                     // 4 levels: -3,-1,+1,+3
                     constexpr float d = 0.1961161351381840f;
@@ -2277,17 +2276,10 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 //   - Empirically verified: offset = 4.5 × CP = 216 samples (for CP=48)
                 //
                 // To distinguish real recordings (with ramp-up) from synthetic signals (no ramp-up):
-                // - Check if correlation increases significantly from coarse to coarse+offset
-                // - If increase > 0.05: real signal with ramp-up, use offset
-                // - If increase <= 0.05: already at plateau, use offset=0
+                // Search for correlation plateau to confirm real preamble
                 constexpr float PLATEAU_THRESHOLD = 0.90f;
-                constexpr float RAMP_UP_THRESHOLD = 0.01f;  // Min increase to indicate ramp-up
                 constexpr size_t SEARCH_WINDOW = 300;
                 constexpr size_t MIN_PLATEAU_SAMPLES = 15;
-
-                // CP-based timing offset: 4.5 × CP = (9 × CP) / 2
-                const size_t cp_len = impl_->config.getCyclicPrefix();
-                const size_t CP_TIMING_OFFSET = (9 * cp_len) / 2;  // 216 for CP=48
 
                 size_t plateau_count = 0;
                 float peak_corr = corr;

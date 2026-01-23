@@ -495,7 +495,6 @@ static CodeRate parseCodeRate(const std::string& s) {
 static WaveformMode parseWaveform(const std::string& s) {
     if (s == "OFDM" || s == "ofdm") return WaveformMode::OFDM;
     if (s == "DPSK" || s == "dpsk") return WaveformMode::DPSK;
-    if (s == "MFSK" || s == "mfsk") return WaveformMode::MFSK;
     return WaveformMode::AUTO;
 }
 
@@ -520,7 +519,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Options:\n";
             std::cout << "  --snr <dB>          Set channel SNR (default: 20)\n";
             std::cout << "  --verbose           Enable verbose logging\n";
-            std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK, MFSK\n";
+            std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK\n";
             std::cout << "  --force-mod <mod>   Force modulation: DQPSK, QPSK, QAM16, D8PSK, etc.\n";
             std::cout << "  --force-rate <rate> Force code rate: R1/4, R1/2, R2/3, R3/4, R5/6\n";
             std::cout << "\nExamples:\n";

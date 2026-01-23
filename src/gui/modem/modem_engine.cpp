@@ -44,13 +44,7 @@ ModemEngine::ModemEngine() {
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
-    // MFSK modulator/demodulator (used for very low SNR: -17 to +5 dB reported)
-    // Default to 8FSK medium mode (47 bps, works at 0 dB actual = -17 dB reported)
-    mfsk_config_ = mfsk_presets::medium();
-    mfsk_modulator_ = std::make_unique<MFSKModulator>(mfsk_config_);
-    mfsk_demodulator_ = std::make_unique<MFSKDemodulator>(mfsk_config_);
-
-    // DPSK modulator/demodulator (used for low-mid SNR: 0-15 dB)
+    // DPSK modulator/demodulator (used for low SNR: -11 to 17 dB)
     // Default to medium preset for connection attempts (DQPSK 62.5 baud)
     // This matches the setConnectWaveform(DPSK) configuration
     dpsk_config_ = dpsk_presets::medium();
@@ -338,7 +332,6 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     bool use_dpsk = (active_waveform == protocol::WaveformMode::DPSK);
-    bool use_mfsk = (active_waveform == protocol::WaveformMode::MFSK);
 
     Samples preamble, modulated;
 
@@ -347,11 +340,6 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   log_prefix_.c_str(), dpsk_config_.num_phases(), dpsk_config_.samples_per_symbol);
         preamble = dpsk_modulator_->generatePreamble();
         modulated = dpsk_modulator_->modulate(to_modulate);
-    } else if (use_mfsk) {
-        LOG_MODEM(INFO, "[%s] TX: Using MFSK modulation (%d tones)",
-                  log_prefix_.c_str(), mfsk_config_.num_tones);
-        preamble = mfsk_modulator_->generatePreamble();
-        modulated = mfsk_modulator_->modulate(to_modulate);
     } else {
         LOG_MODEM(INFO, "[%s] TX: Using OFDM modulation (%s)",
                   log_prefix_.c_str(), is_v2_frame ? "control frame" : "data frame");

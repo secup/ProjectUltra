@@ -45,7 +45,7 @@ void printUsage(const char* prog) {
     std::cerr << "  -s <call>       Source callsign (default: N0CALL)\n";
     std::cerr << "  -d <call>       Destination callsign (default: CQ)\n";
     std::cerr << "  -o <file>       Output to file instead of stdout\n";
-    std::cerr << "  -w <waveform>   Waveform: ofdm, dpsk, mfsk (default: ofdm)\n";
+    std::cerr << "  -w <waveform>   Waveform: ofdm, dpsk (default: ofdm)\n";
     std::cerr << "\nExamples:\n";
     std::cerr << "  # Send PING probe and play audio\n";
     std::cerr << "  " << prog << " ptx ping -s MYCALL | aplay -f FLOAT_LE -r 48000\n\n";
@@ -70,9 +70,8 @@ void printInfo() {
     std::cout << "  LDPC codeword:  648 bits\n\n";
 
     std::cout << "Waveforms:\n";
-    std::cout << "  OFDM    High throughput, good SNR (>15 dB)\n";
-    std::cout << "  DPSK    Single-carrier, mid SNR (0-15 dB)\n";
-    std::cout << "  MFSK    Most robust, low SNR (<0 dB)\n\n";
+    std::cout << "  OFDM    High throughput, good SNR (>17 dB)\n";
+    std::cout << "  DPSK    Single-carrier, low SNR (-11 to 17 dB)\n\n";
 
     std::cout << "Code Rates:\n";
     std::cout << "  R1/4    20 info bytes, most robust\n";
@@ -83,18 +82,16 @@ void printInfo() {
 }
 
 // Waveform type
-enum class WaveformType { OFDM, DPSK, MFSK };
+enum class WaveformType { OFDM, DPSK };
 
 WaveformType parseWaveform(const char* s) {
     if (strcmp(s, "dpsk") == 0) return WaveformType::DPSK;
-    if (strcmp(s, "mfsk") == 0) return WaveformType::MFSK;
     return WaveformType::OFDM;
 }
 
 protocol::WaveformMode toWaveformMode(WaveformType w) {
     switch (w) {
         case WaveformType::DPSK: return protocol::WaveformMode::DPSK;
-        case WaveformType::MFSK: return protocol::WaveformMode::MFSK;
         default: return protocol::WaveformMode::OFDM;
     }
 }
