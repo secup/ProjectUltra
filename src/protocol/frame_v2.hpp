@@ -159,6 +159,11 @@ constexpr size_t MAX_PAYLOAD_V2 = 4096;
 
 // Frame types
 enum class FrameType : uint8_t {
+    // Minimal probe frames (no LDPC, just raw bytes via DPSK)
+    // Used for fast "anyone home?" check before full CONNECT
+    PING        = 0x01,  // Quick presence check (preamble + "ULTR")
+    PONG        = 0x02,  // Response to PING (preamble + "ULTR")
+
     // Control frames (1 codeword)
     PROBE       = 0x10,  // Channel probe request
     PROBE_ACK   = 0x11,  // Channel probe response
@@ -242,6 +247,43 @@ inline bool isDataFrame(FrameType type) {
 
 // Frame type to string
 const char* frameTypeToString(FrameType type);
+
+// ============================================================================
+// Ping Frame (4 bytes - NO LDPC, raw DPSK modulation)
+// ============================================================================
+// Used for fast "anyone home?" presence check before full CONNECT.
+// Just preamble + "ULTR" magic bytes (~1 sec total vs ~16 sec for CONNECT).
+//
+// Format: [0x55][0x4C][0x54][0x52] = "ULTR" (same as v1 magic)
+// The frame type (PING vs PONG) is determined by context:
+//   - Disconnected station sends PING when initiating
+//   - Station receiving PING responds with PONG
+//
+// This frame is NOT LDPC-encoded - it's raw bytes modulated via DPSK.
+// Detection: After DPSK preamble, look for "ULTR" magic in demodulated bits.
+struct PingFrame {
+    static constexpr size_t SIZE = 4;
+    static constexpr uint8_t MAGIC[4] = {0x55, 0x4C, 0x54, 0x52};  // "ULTR"
+
+    // Create ping/pong bytes (always returns the 4-byte magic)
+    static Bytes serialize() {
+        return Bytes(MAGIC, MAGIC + SIZE);
+    }
+
+    // Check if data starts with ping magic
+    static bool isPing(const Bytes& data) {
+        if (data.size() < SIZE) return false;
+        return data[0] == MAGIC[0] && data[1] == MAGIC[1] &&
+               data[2] == MAGIC[2] && data[3] == MAGIC[3];
+    }
+
+    // Check if data starts with ping magic (from raw bytes)
+    static bool isPing(const uint8_t* data, size_t len) {
+        if (len < SIZE) return false;
+        return data[0] == MAGIC[0] && data[1] == MAGIC[1] &&
+               data[2] == MAGIC[2] && data[3] == MAGIC[3];
+    }
+};
 
 // ============================================================================
 // Control Frame (20 bytes - fits in 1 codeword)

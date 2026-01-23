@@ -153,6 +153,9 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
 
         std::string msg;
         switch (state) {
+            case protocol::ConnectionState::PROBING:
+                msg = "[SYS] Probing " + info + "...";
+                break;
             case protocol::ConnectionState::CONNECTING:
                 msg = "[SYS] Connecting to " + info + "...";
                 break;
@@ -187,6 +190,56 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         if (rx_log_.size() > MAX_RX_LOG) {
             rx_log_.pop_front();
         }
+    });
+
+    // PING TX callback - protocol wants to send a fast presence probe
+    protocol_.setPingTxCallback([this]() {
+        guiLog("TX PING: Probing for remote station...");
+        auto samples = modem_.transmitPing();
+        if (!samples.empty()) {
+            if (simulation_enabled_) {
+                // Queue for sim
+                std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+                our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
+                guiLog("SIM: Queued %zu PING samples", samples.size());
+            } else {
+                // Send to real audio
+                audio_.queueTxSamples(samples);
+            }
+        }
+    });
+
+    // PING received callback - someone is probing us
+    protocol_.setPingReceivedCallback([this]() {
+        guiLog("RX PING: Incoming probe, sending PONG...");
+        auto samples = modem_.transmitPong();
+        if (!samples.empty()) {
+            if (simulation_enabled_) {
+                // Queue for sim
+                std::lock_guard<std::mutex> lock(our_tx_pending_mutex_);
+                our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
+                guiLog("SIM: Queued %zu PONG samples", samples.size());
+            } else {
+                // Send to real audio
+                audio_.queueTxSamples(samples);
+            }
+        }
+    });
+
+    // Wire up modem ping detection to protocol
+    modem_.setPingReceivedCallback([this](float snr) {
+        // Check state to show appropriate message
+        if (protocol_.getState() == protocol::ConnectionState::PROBING) {
+            guiLog("RX PONG: Remote station responded! (SNR=%.1f dB)", snr);
+            // Add to message log so user sees it in the app
+            char buf[64];
+            snprintf(buf, sizeof(buf), "[PONG] Station responded (SNR=%.0f dB)", snr);
+            rx_log_.push_back(buf);
+            if (rx_log_.size() > MAX_RX_LOG) rx_log_.pop_front();
+        } else {
+            guiLog("MODEM: Detected PING/PONG (SNR=%.1f dB)", snr);
+        }
+        protocol_.onPingReceived();
     });
 
     protocol_.setDataModeChangedCallback([this](Modulation mod, CodeRate rate, float snr_db) {
@@ -502,6 +555,32 @@ void App::initVirtualStation() {
         // Virtual station received our message - it could auto-reply here
         // For now, just log that it received the message
         guiLog("SIM: Virtual station received msg from %s: %s", from.c_str(), text.c_str());
+    });
+
+    // Virtual station PING TX callback
+    virtual_protocol_.setPingTxCallback([this]() {
+        guiLog("SIM: Virtual station TX PING");
+        auto samples = virtual_modem_->transmitPing();
+        if (!samples.empty()) {
+            std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
+            virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
+        }
+    });
+
+    // Virtual station PING received callback - respond with PONG
+    virtual_protocol_.setPingReceivedCallback([this]() {
+        guiLog("SIM: Virtual station received PING, sending PONG");
+        auto samples = virtual_modem_->transmitPong();
+        if (!samples.empty()) {
+            std::lock_guard<std::mutex> lock(virtual_tx_pending_mutex_);
+            virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
+        }
+    });
+
+    // Wire up virtual modem ping detection to virtual protocol
+    virtual_modem_->setPingReceivedCallback([this](float snr) {
+        guiLog("SIM: Virtual modem detected PING/PONG (SNR=%.1f dB)", snr);
+        virtual_protocol_.onPingReceived();
     });
 
     guiLog("Virtual station initialized: callsign=%s", virtual_callsign_.c_str());

@@ -36,6 +36,13 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
             on_incoming_call_(from);
         }
     });
+
+    // Forward internal state changes (like PROBING → CONNECTING)
+    connection_.setStateChangedCallback([this](ConnectionState state, const std::string& info) {
+        if (on_connection_changed_) {
+            on_connection_changed_(state, info);
+        }
+    });
 }
 
 void ProtocolEngine::setLocalCallsign(const std::string& call) {
@@ -82,7 +89,8 @@ bool ProtocolEngine::connect(const std::string& remote_call) {
     std::lock_guard<std::mutex> lock(mutex_);
     bool result = connection_.connect(remote_call);
     if (result && on_connection_changed_) {
-        on_connection_changed_(ConnectionState::CONNECTING, remote_call);
+        // Connection now starts with PROBING state (fast presence check)
+        on_connection_changed_(ConnectionState::PROBING, remote_call);
     }
     return result;
 }
@@ -387,6 +395,21 @@ CodeRate ProtocolEngine::getDataCodeRate() const {
 void ProtocolEngine::setDataModeChangedCallback(DataModeChangedCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.setDataModeChangedCallback(std::move(cb));
+}
+
+void ProtocolEngine::setPingTxCallback(PingTxCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setPingTxCallback(std::move(cb));
+}
+
+void ProtocolEngine::setPingReceivedCallback(PingReceivedCallback cb) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setPingReceivedCallback(std::move(cb));
+}
+
+void ProtocolEngine::onPingReceived() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.onPongReceived();
 }
 
 } // namespace protocol

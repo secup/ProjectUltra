@@ -13,7 +13,8 @@ namespace protocol {
 // Connection states
 enum class ConnectionState {
     DISCONNECTED,
-    CONNECTING,
+    PROBING,       // Sending PING, waiting for PONG (fast presence check)
+    CONNECTING,    // Received PONG, sending full CONNECT
     CONNECTED,
     DISCONNECTING
 };
@@ -59,6 +60,13 @@ public:
     using MessageSentCallback = std::function<void(bool success)>;
     using IncomingCallCallback = std::function<void(const std::string& remote_call)>;
     using DataReceivedCallback = std::function<void(const Bytes& data, bool more_data)>;
+
+    // Ping/Pong callbacks (for fast presence check before full CONNECT)
+    using PingTxCallback = std::function<void()>;  // Request modem to transmit ping
+    using PingReceivedCallback = std::function<void()>;  // Called when receiver detects our ping (incoming call)
+
+    // State change callback (for internal state transitions like PROBING → CONNECTING)
+    using StateChangedCallback = std::function<void(ConnectionState state, const std::string& info)>;
 
     // File transfer callbacks
     using FileProgressCallback = FileTransferController::ProgressCallback;
@@ -111,6 +119,12 @@ public:
     void setMessageSentCallback(MessageSentCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
     void setDataReceivedCallback(DataReceivedCallback cb);
+
+    // Ping/Pong (fast presence check)
+    void setPingTxCallback(PingTxCallback cb) { on_ping_tx_ = cb; }
+    void setPingReceivedCallback(PingReceivedCallback cb) { on_ping_received_ = cb; }
+    void setStateChangedCallback(StateChangedCallback cb) { on_state_changed_ = cb; }
+    void onPongReceived();  // Call when modem detects response to our PING
 
     void setFileProgressCallback(FileProgressCallback cb);
     void setFileReceivedCallback(FileReceivedCallback cb);
@@ -234,6 +248,14 @@ private:
     DataModeChangedCallback on_data_mode_changed_;
     ConnectWaveformChangedCallback on_connect_waveform_changed_;
     HandshakeConfirmedCallback on_handshake_confirmed_;
+    PingTxCallback on_ping_tx_;
+    PingReceivedCallback on_ping_received_;
+    StateChangedCallback on_state_changed_;
+
+    // Probing state (PING/PONG fast presence check)
+    int ping_retry_count_ = 0;
+    static constexpr int MAX_PING_RETRIES = 5;  // Try 5 pings before giving up
+    static constexpr uint32_t PING_TIMEOUT_MS = 3000;  // 3 seconds per ping attempt
 
     // Handshake state - responder waits for first frame before confirming
     bool is_initiator_ = false;           // True if we initiated the connection
@@ -251,6 +273,7 @@ private:
     void transmitFrame(const Bytes& frame_data);
     void enterConnected();
     void enterDisconnected(const std::string& reason);
+    void sendFullConnect();  // Send full CONNECT frame after successful PING/PONG
 
     WaveformMode negotiateMode(uint8_t remote_caps, WaveformMode remote_pref);
     void sendNextFileChunk();

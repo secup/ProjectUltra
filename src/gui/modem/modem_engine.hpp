@@ -51,6 +51,11 @@ public:
     std::vector<float> transmit(const std::string& text);
     std::vector<float> transmit(const Bytes& data);
 
+    // Minimal ping/pong probe (fast presence check, ~1 sec vs ~16 sec CONNECT)
+    // Returns: preamble + raw DPSK "ULTR" bytes (no LDPC encoding)
+    std::vector<float> transmitPing();
+    std::vector<float> transmitPong();  // Same as ping, context determines meaning
+
     // Test signal generation
     std::vector<float> generateTestTone(float duration_sec = 1.0f);
     std::vector<float> transmitTestPattern(int pattern = 0);
@@ -92,6 +97,11 @@ public:
 
     using StatusCallback = std::function<void(const std::string&)>;
     void setStatusCallback(StatusCallback callback) { status_callback_ = callback; }
+
+    // Ping received callback - called when "ULTR" magic detected via DPSK
+    // The measured_snr is estimated from preamble energy
+    using PingReceivedCallback = std::function<void(float measured_snr)>;
+    void setPingReceivedCallback(PingReceivedCallback callback) { ping_received_callback_ = callback; }
 
     void reset();
 
@@ -244,6 +254,7 @@ private:
     DataCallback data_callback_;
     RawDataCallback raw_data_callback_;
     StatusCallback status_callback_;
+    PingReceivedCallback ping_received_callback_;
 
     // Adaptive modulation controller
     AdaptiveModeController adaptive_;

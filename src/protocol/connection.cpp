@@ -45,6 +45,7 @@ static void recommendDataMode(float snr_db, Modulation& mod, CodeRate& rate) {
 const char* connectionStateToString(ConnectionState state) {
     switch (state) {
         case ConnectionState::DISCONNECTED:  return "DISCONNECTED";
+        case ConnectionState::PROBING:       return "PROBING";
         case ConnectionState::CONNECTING:    return "CONNECTING";
         case ConnectionState::CONNECTED:     return "CONNECTED";
         case ConnectionState::DISCONNECTING: return "DISCONNECTING";
@@ -104,7 +105,7 @@ bool Connection::connect(const std::string& remote_call) {
         return false;
     }
 
-    LOG_MODEM(INFO, "Connection: Connecting to %s", remote_call_.c_str());
+    LOG_MODEM(INFO, "Connection: Connecting to %s (starting with PING probe)", remote_call_.c_str());
 
     // Use current connect_waveform_ (can be pre-set via setInitialConnectWaveform)
     // Notify the modem of the waveform to use
@@ -112,7 +113,53 @@ bool Connection::connect(const std::string& remote_call) {
         on_connect_waveform_changed_(connect_waveform_);
     }
 
-    // Send CONNECT directly (no PROBE phase)
+    // Start with PROBING state - send PING for fast presence check
+    state_ = ConnectionState::PROBING;
+    ping_retry_count_ = 0;
+    timeout_remaining_ms_ = PING_TIMEOUT_MS;
+    stats_.connects_initiated++;
+
+    // Send PING (modem will generate preamble + "ULTR")
+    if (on_ping_tx_) {
+        LOG_MODEM(INFO, "Connection: Sending PING via %s",
+                  waveformModeToString(connect_waveform_));
+        on_ping_tx_();
+    } else {
+        // Fallback: no ping callback, send CONNECT directly
+        LOG_MODEM(WARN, "Connection: No ping callback, sending CONNECT directly");
+        sendFullConnect();
+    }
+
+    return true;
+}
+
+void Connection::onPongReceived() {
+    if (state_ != ConnectionState::PROBING) {
+        // Not in probing state - this might be an incoming ping from someone else
+        // Notify via ping_received callback (they're calling us)
+        if (state_ == ConnectionState::DISCONNECTED && on_ping_received_) {
+            LOG_MODEM(INFO, "Connection: Received incoming PING while disconnected");
+            on_ping_received_();
+        }
+        return;
+    }
+
+    // We were probing and got a PONG - remote station exists!
+    LOG_MODEM(INFO, "Connection: PONG received, sending full CONNECT");
+    sendFullConnect();
+}
+
+void Connection::sendFullConnect() {
+    // Transition to CONNECTING and send full CONNECT frame
+    state_ = ConnectionState::CONNECTING;
+    connect_retry_count_ = 0;
+    timeout_remaining_ms_ = config_.connect_timeout_ms;
+
+    // Notify about state change (PROBING → CONNECTING)
+    if (on_state_changed_) {
+        on_state_changed_(ConnectionState::CONNECTING, remote_call_);
+    }
+
     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                         config_.mode_capabilities,
                                                         static_cast<uint8_t>(config_.preferred_mode));
@@ -121,13 +168,6 @@ bool Connection::connect(const std::string& remote_call) {
     LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes)",
               waveformModeToString(connect_waveform_), connect_data.size());
     transmitFrame(connect_data);
-
-    state_ = ConnectionState::CONNECTING;
-    connect_retry_count_ = 0;
-    timeout_remaining_ms_ = config_.connect_timeout_ms;
-    stats_.connects_initiated++;
-
-    return true;
 }
 
 void Connection::acceptCall() {
@@ -702,6 +742,29 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
 
 void Connection::tick(uint32_t elapsed_ms) {
     switch (state_) {
+        case ConnectionState::PROBING:
+            // Fast presence check via PING/PONG
+            if (elapsed_ms >= timeout_remaining_ms_) {
+                ping_retry_count_++;
+                if (ping_retry_count_ >= MAX_PING_RETRIES) {
+                    // No response after all PINGs - give up
+                    LOG_MODEM(INFO, "Connection: No response after %d PINGs, giving up",
+                              MAX_PING_RETRIES);
+                    stats_.connects_failed++;
+                    enterDisconnected("No response");
+                } else {
+                    LOG_MODEM(INFO, "Connection: PING timeout, retrying (%d/%d)",
+                              ping_retry_count_, MAX_PING_RETRIES);
+                    if (on_ping_tx_) {
+                        on_ping_tx_();
+                    }
+                    timeout_remaining_ms_ = PING_TIMEOUT_MS;
+                }
+            } else {
+                timeout_remaining_ms_ -= elapsed_ms;
+            }
+            break;
+
         case ConnectionState::CONNECTING:
             if (elapsed_ms >= timeout_remaining_ms_) {
                 connect_retry_count_++;

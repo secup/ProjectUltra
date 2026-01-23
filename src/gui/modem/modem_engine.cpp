@@ -397,6 +397,65 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 }
 
 // ============================================================================
+// PING/PONG PROBE (minimal presence check)
+// ============================================================================
+
+std::vector<float> ModemEngine::transmitPing() {
+    namespace v2 = protocol::v2;
+
+    // Get the "ULTR" magic bytes (4 bytes, no LDPC encoding)
+    Bytes ping_data = v2::PingFrame::serialize();
+
+    LOG_MODEM(INFO, "[%s] TX PING: %zu bytes raw DPSK (no LDPC)",
+              log_prefix_.c_str(), ping_data.size());
+
+    // Generate DPSK preamble and modulate raw bytes
+    Samples preamble = dpsk_modulator_->generatePreamble();
+    Samples modulated = dpsk_modulator_->modulate(ping_data);
+
+    // Combine: lead-in silence + preamble + data + tail guard
+    const size_t LEAD_IN_SAMPLES = 48000 * 100 / 1000;  // 100ms (shorter for ping)
+    const size_t TAIL_SAMPLES = 576;  // Short tail
+    std::vector<float> output;
+    output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+
+    output.resize(LEAD_IN_SAMPLES, 0.0f);
+    output.insert(output.end(), preamble.begin(), preamble.end());
+    output.insert(output.end(), modulated.begin(), modulated.end());
+    output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+
+    // Apply TX bandpass filter
+    if (filter_config_.enabled && tx_filter_) {
+        SampleSpan span(output.data(), output.size());
+        output = tx_filter_->process(span);
+    }
+
+    // Scale for audio output
+    float max_val = 0.0f;
+    for (float s : output) {
+        max_val = std::max(max_val, std::abs(s));
+    }
+    if (max_val > 0.0f) {
+        float scale = 0.8f / max_val;
+        for (float& s : output) {
+            s *= scale;
+        }
+    }
+
+    LOG_MODEM(INFO, "[%s] TX PING: Generated %zu samples (%.2f sec)",
+              log_prefix_.c_str(), output.size(), output.size() / 48000.0f);
+
+    return output;
+}
+
+std::vector<float> ModemEngine::transmitPong() {
+    // Pong is identical to ping - context determines meaning
+    // (Ping = initiator probe, Pong = responder reply)
+    LOG_MODEM(INFO, "[%s] TX PONG (same as PING)", log_prefix_.c_str());
+    return transmitPing();
+}
+
+// ============================================================================
 // TEST SIGNAL GENERATION
 // ============================================================================
 

@@ -83,6 +83,8 @@ uint32_t hashCallsign(const std::string& callsign) {
 // ============================================================================
 const char* frameTypeToString(FrameType type) {
     switch (type) {
+        case FrameType::PING:        return "PING";
+        case FrameType::PONG:        return "PONG";
         case FrameType::PROBE:       return "PROBE";
         case FrameType::PROBE_ACK:   return "PROBE_ACK";
         case FrameType::CONNECT:     return "CONNECT";

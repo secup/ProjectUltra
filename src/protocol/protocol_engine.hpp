@@ -116,6 +116,19 @@ public:
     using DataModeChangedCallback = Connection::DataModeChangedCallback;
     void setDataModeChangedCallback(DataModeChangedCallback cb);
 
+    // --- Ping/Pong (fast presence check) ---
+
+    // Callback when protocol wants to send a ping (modem transmits raw "ULTR")
+    using PingTxCallback = Connection::PingTxCallback;
+    void setPingTxCallback(PingTxCallback cb);
+
+    // Callback when we receive an incoming ping while disconnected (someone's calling)
+    using PingReceivedCallback = Connection::PingReceivedCallback;
+    void setPingReceivedCallback(PingReceivedCallback cb);
+
+    // Call when modem detects "ULTR" magic (either PONG to our PING, or incoming PING)
+    void onPingReceived();
+
 private:
     Connection connection_;
 

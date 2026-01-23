@@ -291,7 +291,101 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     int bits_per_sym = dpsk_config_.bits_per_symbol();
     int samples_per_codeword = (v2::LDPC_CODEWORD_BITS / bits_per_sym) * symbol_samples;
 
-    // Step 1: Wait for CW0 samples
+    // Ping detection: "ULTR" = 4 bytes = 32 bits = 16 DQPSK symbols
+    int ping_bits = v2::PingFrame::SIZE * 8;  // 32 bits
+    int ping_symbols = (ping_bits + bits_per_sym - 1) / bits_per_sym;  // 16 for DQPSK
+    int samples_for_ping = ping_symbols * symbol_samples;
+
+    // Step 0: Check for PING (raw "ULTR" bytes, no LDPC)
+    // Wait for just enough samples to detect ping
+    while (rx_decode_running_) {
+        size_t buffer_size = getBufferSize();
+        int available = buffer_size - frame.data_start;
+        if (available >= samples_for_ping) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    if (!rx_decode_running_) return false;
+
+    {
+        std::vector<float> buffer = getBufferSnapshot();
+        SampleSpan span(buffer.data(), buffer.size());
+
+        dpsk_demodulator_->reset();
+        dpsk_demodulator_->findPreamble(span);
+
+        // Demodulate just enough for ping check
+        SampleSpan ping_span(buffer.data() + frame.data_start, samples_for_ping);
+        auto ping_soft = dpsk_demodulator_->demodulateSoft(ping_span);
+
+        // Convert soft bits to hard bits
+        Bytes ping_bytes;
+        for (size_t i = 0; i + 8 <= ping_soft.size(); i += 8) {
+            uint8_t byte = 0;
+            for (int b = 0; b < 8; b++) {
+                if (ping_soft[i + b] > 0) {
+                    byte |= (1 << (7 - b));
+                }
+            }
+            ping_bytes.push_back(byte);
+        }
+
+        // Check for "ULTR" magic (also check bit-inverted version due to DPSK phase ambiguity)
+        // DPSK can have 180° phase ambiguity that inverts all bits
+        bool is_ping_normal = v2::PingFrame::isPing(ping_bytes);
+        bool is_ping_inverted = false;
+        if (!is_ping_normal && ping_bytes.size() >= 4) {
+            // Check inverted: 0x55 ^ 0xFF = 0xAA, 0x4C ^ 0xFF = 0xB3, etc.
+            is_ping_inverted = (ping_bytes[0] == 0xAA && ping_bytes[1] == 0xB3 &&
+                               ping_bytes[2] == 0xAB && ping_bytes[3] == 0xAD);
+        }
+
+        if (is_ping_normal || is_ping_inverted) {
+            LOG_MODEM(INFO, "[%s] RX DPSK: PING detected%s! (%02X %02X %02X %02X)",
+                      log_prefix_.c_str(),
+                      is_ping_inverted ? " (inverted)" : "",
+                      ping_bytes.size() > 0 ? ping_bytes[0] : 0,
+                      ping_bytes.size() > 1 ? ping_bytes[1] : 0,
+                      ping_bytes.size() > 2 ? ping_bytes[2] : 0,
+                      ping_bytes.size() > 3 ? ping_bytes[3] : 0);
+
+            // Consume ping samples
+            consumeSamples(frame.data_start + samples_for_ping);
+            dpsk_demodulator_->reset();
+
+            // Notify via callback (with rough SNR estimate from stats)
+            if (ping_received_callback_) {
+                float snr = getCurrentSNR();
+                ping_received_callback_(snr);
+            }
+
+            // Update stats
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.frames_received++;
+            }
+
+            last_rx_complete_time_ = std::chrono::steady_clock::now();
+            return true;
+        }
+
+        // Not a ping - check if first 2 bytes are v2 magic (0x55 0x4C) or inverted (0xAA 0xB3)
+        // If so, this is likely a normal frame; if not, it's garbage
+        bool looks_like_v2_frame = (ping_bytes.size() >= 2 &&
+                                    ((ping_bytes[0] == 0x55 && ping_bytes[1] == 0x4C) ||
+                                     (ping_bytes[0] == 0xAA && ping_bytes[1] == 0xB3)));
+        if (!looks_like_v2_frame) {
+            LOG_MODEM(INFO, "[%s] RX DPSK: Not a PING or v2 frame (%02X %02X), discarding",
+                      log_prefix_.c_str(),
+                      ping_bytes.size() > 0 ? ping_bytes[0] : 0,
+                      ping_bytes.size() > 1 ? ping_bytes[1] : 0);
+            consumeSamples(frame.data_start + samples_for_ping);
+            dpsk_demodulator_->reset();
+            return false;
+        }
+    }
+
+    // Step 1: Wait for CW0 samples (this is a normal v2 frame, needs LDPC decode)
     while (rx_decode_running_) {
         size_t buffer_size = getBufferSize();
         int available = buffer_size - frame.data_start;

@@ -38,6 +38,7 @@ public:
 
     void setSNR(float snr) { snr_db_ = snr; }
     void setVerbose(bool v) { verbose_ = v; }
+    void setNoReply(bool v) { no_reply_ = v; }
 
     bool runTest() {
         printHeader();
@@ -177,7 +178,13 @@ private:
     bool verbose_ = false;
     std::mt19937 rng_{42};
 
+    // Timing
+    std::chrono::steady_clock::time_point last_tick_time_ = std::chrono::steady_clock::now();
+
     void initStations() {
+        // Reset timing baseline
+        last_tick_time_ = std::chrono::steady_clock::now();
+
         // === Our station (ALPHA) ===
         modem_.setLogPrefix("ALPHA");
         protocol_.setLocalCallsign("ALPHA");
@@ -225,6 +232,25 @@ private:
         protocol_.setHandshakeConfirmedCallback([this]() {
             modem_.setHandshakeComplete(true);
             handshake_complete_alpha_ = true;
+        });
+
+        // PING TX callback - ALPHA wants to probe
+        protocol_.setPingTxCallback([this]() {
+            if (verbose_) std::cout << "  [ALPHA] TX PING\n";
+            auto samples = modem_.transmitPing();
+            our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
+        });
+
+        // PING received callback - someone is probing ALPHA
+        protocol_.setPingReceivedCallback([this]() {
+            if (verbose_) std::cout << "  [ALPHA] RX PING, sending PONG\n";
+            auto samples = modem_.transmitPong();
+            our_tx_pending_.insert(our_tx_pending_.end(), samples.begin(), samples.end());
+        });
+
+        // Wire up modem ping detection to protocol
+        modem_.setPingReceivedCallback([this](float) {
+            protocol_.onPingReceived();
         });
 
         // === Virtual station (BRAVO) ===
@@ -275,6 +301,25 @@ private:
             handshake_complete_bravo_ = true;
         });
 
+        // PING TX callback - BRAVO wants to probe
+        virtual_protocol_.setPingTxCallback([this]() {
+            if (verbose_) std::cout << "  [BRAVO] TX PING\n";
+            auto samples = virtual_modem_->transmitPing();
+            virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
+        });
+
+        // PING received callback - someone is probing BRAVO
+        virtual_protocol_.setPingReceivedCallback([this]() {
+            if (verbose_) std::cout << "  [BRAVO] RX PING, sending PONG\n";
+            auto samples = virtual_modem_->transmitPong();
+            virtual_tx_pending_.insert(virtual_tx_pending_.end(), samples.begin(), samples.end());
+        });
+
+        // Wire up modem ping detection to protocol
+        virtual_modem_->setPingReceivedCallback([this](float) {
+            virtual_protocol_.onPingReceived();
+        });
+
         virtual_protocol_.setMessageReceivedCallback([this](const std::string& from, const std::string& text) {
             message_received_ = true;
             received_message_ = text;
@@ -287,6 +332,13 @@ private:
     // Process one simulation tick - move audio and tick protocols
     void processOneTick() {
         constexpr size_t CHUNK_SIZE = 480;  // 10ms at 48kHz
+
+        // Track actual elapsed time for protocol ticks
+        auto now = std::chrono::steady_clock::now();
+        uint32_t elapsed_ms = static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_tick_time_).count());
+        if (elapsed_ms < 1) elapsed_ms = 1;  // Minimum 1ms per tick
+        last_tick_time_ = now;
 
         // Move ALPHA TX -> channel -> BRAVO RX
         size_t alpha_tx_moved = 0;
@@ -338,12 +390,12 @@ private:
                       << ", total_rx=" << total_bravo_rx << std::endl;
         }
 
-        // Tick protocols
-        protocol_.tick(16);
-        virtual_protocol_.tick(16);
+        // Tick protocols with actual elapsed time
+        protocol_.tick(elapsed_ms);
+        virtual_protocol_.tick(elapsed_ms);
 
         // Give acquisition threads time to run (they need CPU time for preamble detection)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     void applyChannel(std::vector<float>& samples) {

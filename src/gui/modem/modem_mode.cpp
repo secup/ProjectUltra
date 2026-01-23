@@ -88,13 +88,14 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
 }
 
 void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
-    if (connect_waveform_ == mode) return;
-
     LOG_MODEM(INFO, "Switching connect waveform: %s -> %s",
               protocol::waveformModeToString(connect_waveform_),
               protocol::waveformModeToString(mode));
 
     connect_waveform_ = mode;
+
+    // Clear any leftover flag from previous disconnect - we're starting fresh
+    use_connected_waveform_once_ = false;
 
     // Configure DPSK for medium preset (DQPSK 62b R1/4) for connection attempts
     if (mode == protocol::WaveformMode::DPSK) {
@@ -143,6 +144,15 @@ void ModemEngine::setConnected(bool connected) {
 
         decoder_->setRate(CodeRate::R1_4);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
+
+        // CRITICAL: Clear RX state so acquisition thread can detect new PINGs
+        rx_frame_state_.clear();
+        detected_frame_queue_.clear();
+        {
+            std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+            rx_sample_buffer_.clear();
+        }
+        dpsk_demodulator_->reset();
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)
         // This handles the case where the ACK is queued before setConnected(false) is called

@@ -1,5 +1,6 @@
 #include "constellation.hpp"
 #include "imgui.h"
+#include <cmath>
 
 namespace ultra {
 namespace gui {
@@ -40,8 +41,11 @@ void ConstellationWidget::render(const std::vector<std::complex<float>>& symbols
     // Show modulation type
     const char* mod_name = "Unknown";
     switch (mod) {
+        case Modulation::DBPSK:  mod_name = "DBPSK"; break;
         case Modulation::BPSK:   mod_name = "BPSK"; break;
+        case Modulation::DQPSK:  mod_name = "DQPSK"; break;
         case Modulation::QPSK:   mod_name = "QPSK"; break;
+        case Modulation::D8PSK:  mod_name = "D8PSK"; break;
         case Modulation::QAM16:  mod_name = "16-QAM"; break;
         case Modulation::QAM64:  mod_name = "64-QAM"; break;
         case Modulation::QAM256: mod_name = "256-QAM"; break;
@@ -69,41 +73,47 @@ void ConstellationWidget::drawGrid(ImDrawList* draw_list, ImVec2 center, float s
 
     // Draw ideal constellation points
     ImU32 ideal_color = IM_COL32(80, 80, 100, 255);
-
-    int bits = static_cast<int>(mod);
-    int points_per_axis = 1;
-
-    switch (mod) {
-        case Modulation::BPSK:   points_per_axis = 2; break;  // 2 points on I axis only
-        case Modulation::QPSK:   points_per_axis = 2; break;
-        case Modulation::QAM16:  points_per_axis = 4; break;
-        case Modulation::QAM64:  points_per_axis = 8; break;
-        case Modulation::QAM256: points_per_axis = 16; break;
-        default: points_per_axis = 2;
-    }
-
     float point_radius = 3.0f;
-    if (points_per_axis > 8) point_radius = 2.0f;
+    float radius = half * 0.7f;
 
-    if (mod == Modulation::BPSK) {
-        // BPSK: just 2 points on I axis
-        draw_list->AddCircleFilled(
-            ImVec2(center.x - half * 0.7f, center.y),
-            point_radius, ideal_color
-        );
-        draw_list->AddCircleFilled(
-            ImVec2(center.x + half * 0.7f, center.y),
-            point_radius, ideal_color
-        );
+    // PSK modulations: points on a circle
+    if (mod == Modulation::DBPSK || mod == Modulation::BPSK) {
+        // BPSK: 2 points on I axis
+        draw_list->AddCircleFilled(ImVec2(center.x - radius, center.y), point_radius, ideal_color);
+        draw_list->AddCircleFilled(ImVec2(center.x + radius, center.y), point_radius, ideal_color);
+    } else if (mod == Modulation::DQPSK || mod == Modulation::QPSK) {
+        // QPSK/DQPSK: 4 points at 45°, 135°, 225°, 315°
+        for (int i = 0; i < 4; i++) {
+            float angle = M_PI / 4 + i * M_PI / 2;  // 45° + i*90°
+            float px = center.x + radius * std::cos(angle);
+            float py = center.y - radius * std::sin(angle);  // Flip Y
+            draw_list->AddCircleFilled(ImVec2(px, py), point_radius, ideal_color);
+        }
+    } else if (mod == Modulation::D8PSK || mod == Modulation::QAM8) {
+        // 8PSK: 8 points evenly spaced
+        for (int i = 0; i < 8; i++) {
+            float angle = i * M_PI / 4;  // 0°, 45°, 90°, ...
+            float px = center.x + radius * std::cos(angle);
+            float py = center.y - radius * std::sin(angle);
+            draw_list->AddCircleFilled(ImVec2(px, py), point_radius, ideal_color);
+        }
     } else {
         // QAM: grid of points
+        int points_per_axis = 2;
+        switch (mod) {
+            case Modulation::QAM16:  points_per_axis = 4; break;
+            case Modulation::QAM64:  points_per_axis = 8; break;
+            case Modulation::QAM256: points_per_axis = 16; point_radius = 2.0f; break;
+            default: points_per_axis = 4;
+        }
+
         for (int yi = 0; yi < points_per_axis; ++yi) {
             for (int xi = 0; xi < points_per_axis; ++xi) {
                 float x = (2.0f * xi - points_per_axis + 1) / (points_per_axis - 1);
                 float y = (2.0f * yi - points_per_axis + 1) / (points_per_axis - 1);
 
                 float px = center.x + x * half * 0.8f;
-                float py = center.y - y * half * 0.8f;  // Flip Y for screen coords
+                float py = center.y - y * half * 0.8f;
 
                 draw_list->AddCircleFilled(ImVec2(px, py), point_radius, ideal_color);
             }
