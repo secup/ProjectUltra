@@ -170,6 +170,11 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_mode_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_mode_snr PRIVATE ultra_core)
 
+    # Quick coherent mode test
+    add_executable(test_coherent_quick tools/test_coherent_quick.cpp)
+    target_include_directories(test_coherent_quick PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_coherent_quick PRIVATE ultra_core)
+
     # DPSK SNR test (single-carrier: DBPSK, DQPSK, D8PSK)
     add_executable(test_dpsk_snr tools/test_dpsk_snr.cpp)
     target_include_directories(test_dpsk_snr PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -185,6 +190,11 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_dqpsk_trace PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_dqpsk_trace PRIVATE ultra_core)
 
+    # HF Reality Test - Ultimate validation with realistic conditions
+    add_executable(test_hf_reality tools/test_hf_reality.cpp)
+    target_include_directories(test_hf_reality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_hf_reality PRIVATE ultra_core)
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
@@ -198,6 +208,44 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(threaded_simulator PRIVATE ultra_core)
+
+    # Simple noise test (amplitude independence verification)
+    add_executable(test_simple_noise tools/test_simple_noise.cpp)
+    target_include_directories(test_simple_noise PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_simple_noise PRIVATE ultra_core)
+
+    # Single frame test
+    add_executable(test_single_frame tools/test_single_frame.cpp)
+    target_include_directories(test_single_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_single_frame PRIVATE ultra_core)
+
+    # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
+    add_executable(test_hf_modem
+        tools/test_hf_modem.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(test_hf_modem PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_hf_modem PRIVATE ultra_core)
+
+    # HF Modem Debug - ModemEngine TX vs direct demod RX
+    add_executable(test_hf_modem_debug
+        tools/test_hf_modem_debug.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(test_hf_modem_debug PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(test_hf_modem_debug PRIVATE ultra_core)
 endif()
 
 # GUI Application

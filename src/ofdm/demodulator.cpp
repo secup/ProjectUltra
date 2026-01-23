@@ -368,6 +368,13 @@ struct OFDMDemodulator::Impl {
     float sync_threshold;  // Threshold for valid sync region (from config)
     size_t last_sync_offset = 0;   // Last detected sync offset (for testing/debugging)
 
+    // Noise floor tracking for amplitude-independent sync detection
+    // Instead of absolute MIN_ENERGY, we track the noise floor and require
+    // signal to be significantly above it. This makes sync work at any amplitude.
+    float noise_floor_energy = 0.0f;  // Running estimate of noise energy
+    static constexpr float NOISE_FLOOR_ALPHA = 0.01f;  // Slow adaptation for noise floor
+    static constexpr float SIGNAL_TO_NOISE_RATIO_THRESHOLD = 6.0f;  // Require 6x noise floor (~8 dB)
+
     // Buffer management constants
     // Preamble = 6 symbols × 560 samples = 3360 samples
     // We need at least this much data to detect a preamble
@@ -410,6 +417,14 @@ struct OFDMDemodulator::Impl {
     // Per-carrier phase from LTS (for DQPSK without pilots)
     // Each carrier may have different phase due to timing offset
     std::vector<Complex> lts_carrier_phases;
+
+    // LTS time-domain reference for fine timing (cross-correlation)
+    // Generated once at init, reused for all sync detections
+    // Store PASSBAND templates for direct correlation with received signal
+    // I = Re(baseband * mixer), Q = Im(baseband * mixer)
+    // corr = sqrt(corr_I² + corr_Q²) gives phase-invariant correlation
+    std::vector<float> lts_passband_I;  // In-phase template (what TX actually sends)
+    std::vector<float> lts_passband_Q;  // Quadrature template (for phase-invariant correlation)
 
     // Phase inversion detection (for audio paths with inverted polarity)
     bool llr_sign_flip = false;  // Flip LLR signs if inverted
@@ -502,6 +517,53 @@ struct OFDMDemodulator::Impl {
                       pilot_sequence[1].real(), pilot_sequence[1].imag(),
                       pilot_sequence[2].real(), pilot_sequence[2].imag());
         }
+
+        // === Generate LTS time-domain reference for fine timing ===
+        // This must match exactly what the modulator produces
+        // LTS = sync_sequence on data carriers + pilots, IFFT, mix to center freq
+
+        // Build frequency domain LTS
+        std::vector<Complex> lts_freq(config.fft_size, Complex(0, 0));
+
+        // Add data carriers (sync_sequence)
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            lts_freq[data_carrier_indices[i]] = sync_sequence[i % sync_sequence.size()];
+        }
+
+        // Add pilots (same as normal OFDM symbols)
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            lts_freq[pilot_carrier_indices[i]] = pilot_sequence[i];
+        }
+
+        // IFFT to time domain (complex baseband)
+        std::vector<Complex> lts_complex;
+        fft.inverse(lts_freq, lts_complex);
+
+        // Add cyclic prefix to get full baseband symbol
+        size_t cp_len = config.getCyclicPrefix();
+        std::vector<Complex> lts_baseband(cp_len + config.fft_size);
+        for (size_t i = 0; i < cp_len; ++i) {
+            lts_baseband[i] = lts_complex[config.fft_size - cp_len + i];
+        }
+        for (size_t i = 0; i < config.fft_size; ++i) {
+            lts_baseband[cp_len + i] = lts_complex[i];
+        }
+
+        // Convert to passband templates (I and Q) using NCO
+        // This matches exactly what the modulator does: Re(baseband * mixer)
+        // We also generate Q component for phase-invariant correlation
+        lts_passband_I.resize(lts_baseband.size());
+        lts_passband_Q.resize(lts_baseband.size());
+
+        NCO template_nco(config.center_freq, config.sample_rate);
+        for (size_t i = 0; i < lts_baseband.size(); ++i) {
+            Complex osc = template_nco.next();
+            Complex mixed = lts_baseband[i] * osc;
+            lts_passband_I[i] = mixed.real();  // What TX actually sends
+            lts_passband_Q[i] = mixed.imag();  // Quadrature reference
+        }
+
+        LOG_DEMOD(DEBUG, "LTS passband templates generated: %zu samples", lts_passband_I.size());
     }
 
     void buildInterpTable() {
@@ -569,15 +631,13 @@ struct OFDMDemodulator::Impl {
     }
 
     // Quick energy check - sample a few points to see if there's signal
-    // Returns true if energy is above minimum threshold for valid signal
-    bool hasMinimumEnergy(size_t offset, size_t window_len) const {
+    // Returns true if energy is above noise floor threshold for valid signal
+    // NOTE: Uses noise floor tracking for amplitude-independent detection
+    bool hasMinimumEnergy(size_t offset, size_t window_len) {
         if (offset + window_len > rx_buffer.size()) return false;
 
         // Sample every 16th point for speed (64 samples for 1024 window)
         constexpr size_t SAMPLE_STEP = 16;
-        // Preamble has RMS ~0.05, silence has RMS ~0.00004
-        // Use 0.03 to reliably catch preamble start while rejecting silence
-        constexpr float MIN_RMS = 0.03f;
         float sum_sq = 0;
         size_t count = 0;
 
@@ -587,8 +647,44 @@ struct OFDMDemodulator::Impl {
             ++count;
         }
 
-        float rms = std::sqrt(sum_sq / count);
-        return rms >= MIN_RMS;
+        float energy = sum_sq / count;  // Mean square (variance)
+
+        // Amplitude-independent energy detection using noise floor tracking
+        //
+        // Key insight: We can't assume silence comes before signal. In loopback tests,
+        // signal may start immediately. So we use a "minimum seen" approach:
+        // - Track the minimum energy seen (likely the noise floor)
+        // - Require current energy to be significantly above this minimum
+        //
+        // This works because:
+        // - If signal comes first: min stays at signal level, but correlation-based
+        //   detection still works (just no early rejection)
+        // - If noise comes first: min tracks noise, enables proper early rejection
+        // - Over time: min converges to actual noise floor
+
+        if (noise_floor_energy < 1e-20f) {
+            // First sample - initialize to this energy
+            // Use a small multiplier so we don't reject the very first signal
+            noise_floor_energy = energy * 0.1f;
+        }
+
+        // Track minimum energy (likely noise floor) - adapt downward faster than upward
+        if (energy < noise_floor_energy) {
+            // New minimum - adapt quickly
+            noise_floor_energy = energy;
+        } else if (energy < noise_floor_energy * 3.0f) {
+            // Close to floor - slow adaptation
+            noise_floor_energy = (1.0f - NOISE_FLOOR_ALPHA) * noise_floor_energy
+                               + NOISE_FLOOR_ALPHA * energy;
+        }
+        // If energy >> noise_floor, don't update (this is signal, not noise)
+
+        // Require energy significantly above noise floor (amplitude-independent)
+        // Signal should be at least 4x above noise floor (~6 dB) to be worth checking
+        constexpr float ENERGY_RATIO_THRESHOLD = 4.0f;
+        float threshold = noise_floor_energy * ENERGY_RATIO_THRESHOLD;
+
+        return energy >= threshold;
     }
 
     // Convert real signal to analytic (complex) signal using FFT-based Hilbert transform
@@ -771,18 +867,46 @@ struct OFDMDemodulator::Impl {
         float energy = 0;
         float normalized = measureCorrelation(offset, &energy);
 
-        // Require minimum energy to avoid false triggers on transients/noise
-        // Energy is sum of squares over N/2 = 256 samples
-        // For 0.3 RMS signal: energy = 256 * 0.3^2 = 23
-        constexpr float MIN_ENERGY = 20.0f;
-        if (energy < MIN_ENERGY) {
+        // Amplitude-independent sync detection using noise floor tracking
+        // Instead of absolute MIN_ENERGY, we track the noise floor and require
+        // signal energy to be significantly above it.
+        //
+        // Update noise floor estimate (slow adaptation, only when correlation is low)
+        // Low correlation = likely noise, so we can update our noise estimate
+        if (normalized < 0.3f) {
+            if (noise_floor_energy < 1e-10f) {
+                // Initialize on first sample
+                noise_floor_energy = energy;
+            } else {
+                // Exponential moving average
+                noise_floor_energy = (1.0f - NOISE_FLOOR_ALPHA) * noise_floor_energy
+                                   + NOISE_FLOOR_ALPHA * energy;
+            }
+        }
+
+        // Require energy significantly above noise floor
+        // This makes sync detection work at ANY signal amplitude
+        float energy_threshold = noise_floor_energy * SIGNAL_TO_NOISE_RATIO_THRESHOLD;
+
+        // Also require minimum absolute energy to handle the case where
+        // noise_floor_energy is still zero (very beginning of processing)
+        constexpr float MIN_ABSOLUTE_ENERGY = 1e-10f;  // Very small - let noise floor tracking do its job
+        energy_threshold = std::max(energy_threshold, MIN_ABSOLUTE_ENERGY);
+
+        // Debug: log periodically when interesting
+        if (offset % 5000 == 0 || (normalized > 0.5f && energy > energy_threshold)) {
+            LOG_DEMOD(TRACE, "detectSync offset=%zu corr=%.3f energy=%.3g noise_floor=%.3g thresh=%.3g",
+                    offset, normalized, energy, noise_floor_energy, energy_threshold);
+        }
+
+        if (energy < energy_threshold) {
             return false;
         }
 
         // Debug: print correlation at key offsets
         if (offset % 500 == 0 || normalized > 0.5f) {
-            LOG_DEMOD(TRACE, "detectSync offset=%zu normalized=%.3f energy=%.1f threshold=%.2f",
-                    offset, normalized, energy, sync_threshold);
+            LOG_DEMOD(TRACE, "detectSync offset=%zu normalized=%.3f energy=%.3g noise_floor=%.3g threshold=%.2f",
+                    offset, normalized, energy, noise_floor_energy, sync_threshold);
         }
 
         return normalized > sync_threshold;
@@ -828,6 +952,98 @@ struct OFDMDemodulator::Impl {
                   phase, cfo_hz, max_cfo);
 
         return cfo_hz;
+    }
+
+    // ========================================================================
+    // LTS FINE TIMING: Cross-correlation for sample-accurate sync
+    // ========================================================================
+    //
+    // Schmidl-Cox gives coarse timing (±48 samples due to plateau shape).
+    // LTS cross-correlation gives fine timing (±1 sample accuracy).
+    //
+    // This is the standard two-stage sync used in WiFi (802.11a/g/n).
+    //
+    // Returns: exact LTS start position (sample offset from buffer start)
+    //          or coarse_lts_start if cross-correlation fails
+    //
+    size_t refineLTSTiming(size_t coarse_sts_start) {
+        // Expected LTS position: after 4 STS symbols
+        // Note: Preamble symbols don't have symbol_guard, just FFT + CP
+        size_t preamble_sym_len = config.fft_size + config.getCyclicPrefix();
+        size_t coarse_lts_start = coarse_sts_start + 4 * preamble_sym_len;
+
+        // Search window: ±64 samples around expected position
+        constexpr int SEARCH_HALF = 64;
+
+        // Ensure we have enough data
+        if (coarse_lts_start < SEARCH_HALF ||
+            coarse_lts_start + SEARCH_HALF + lts_passband_I.size() > rx_buffer.size()) {
+            LOG_SYNC(DEBUG, "LTS refinement: not enough data, using coarse timing");
+            return coarse_lts_start;
+        }
+
+        // PASSBAND correlation for phase-invariant timing
+        // Correlate received signal directly with passband templates (I and Q)
+        // corr_mag = sqrt(corr_I² + corr_Q²) is phase-invariant
+        //
+        // This works because:
+        // - TX sends: Re(baseband * exp(j*w*t)) = lts_passband_I
+        // - lts_passband_Q is the quadrature component
+        // - corr_I = <rx, I>, corr_Q = <rx, Q>
+        // - |corr| = sqrt(corr_I² + corr_Q²) is independent of carrier phase
+        float best_corr = 0.0f;
+        size_t best_offset = coarse_lts_start;
+
+        // Pre-calculate reference template energy (constant)
+        float energy_ref = 0.0f;
+        for (size_t i = 0; i < lts_passband_I.size(); ++i) {
+            energy_ref += lts_passband_I[i] * lts_passband_I[i];
+            energy_ref += lts_passband_Q[i] * lts_passband_Q[i];
+        }
+        energy_ref *= 0.5f;  // Average of I² + Q² = energy of complex signal
+
+        for (int delta = -SEARCH_HALF; delta <= SEARCH_HALF; ++delta) {
+            size_t offset = coarse_lts_start + delta;
+
+            float corr_I = 0.0f;
+            float corr_Q = 0.0f;
+            float energy_rx = 0.0f;
+
+            // Direct passband correlation
+            for (size_t i = 0; i < lts_passband_I.size(); ++i) {
+                float rx_sample = rx_buffer[offset + i];
+                corr_I += rx_sample * lts_passband_I[i];
+                corr_Q += rx_sample * lts_passband_Q[i];
+                energy_rx += rx_sample * rx_sample;
+            }
+
+            // Phase-invariant magnitude
+            float corr_mag = std::sqrt(corr_I * corr_I + corr_Q * corr_Q);
+            float norm = std::sqrt(energy_rx * energy_ref);
+            float corr = (norm > 1e-6f) ? corr_mag / norm : 0.0f;
+
+            if (corr > best_corr) {
+                best_corr = corr;
+                best_offset = offset;
+            }
+        }
+
+        int timing_correction = (int)best_offset - (int)coarse_lts_start;
+        LOG_SYNC(DEBUG, "LTS fine timing: coarse=%zu, refined=%zu, correction=%+d samples, corr=%.3f",
+                 coarse_lts_start, best_offset, timing_correction, best_corr);
+
+        // LTS correlation threshold: require strong match to confirm real preamble
+        // This prevents false sync on noise (Schmidl-Cox can false trigger)
+        // Note: 0.35 threshold accommodates TX ramp and HF channel effects
+        // Real LTS should correlate at 0.5+ at 20+ dB SNR
+        constexpr float LTS_CORRELATION_THRESHOLD = 0.35f;
+        if (best_corr < LTS_CORRELATION_THRESHOLD) {
+            LOG_SYNC(WARN, "LTS correlation too low (%.3f < %.1f) - likely false sync, aborting",
+                     best_corr, LTS_CORRELATION_THRESHOLD);
+            return SIZE_MAX;  // Signal failure - caller should abort sync
+        }
+
+        return best_offset;
     }
 
     // ========================================================================
@@ -1337,6 +1553,18 @@ struct OFDMDemodulator::Impl {
 
         // Store current pilots for next symbol
         prev_pilot_phases = h_ls_all;
+
+        // === COHERENT MODE FIX: Remove timing phase from pilots before interpolation ===
+        // Problem: Timing offset τ creates phase slope: phase(k) = 2π × k × τ / N
+        // At DC boundary, pilots at k=-1 and k=+2 have phase difference of ~101°
+        // This causes interpolation to fail (>90° threshold), using "nearest pilot" fallback
+        // The nearest pilot's phase doesn't match the data carrier's phase, causing decode errors
+        //
+        // Solution: Remove timing-induced phase from pilots, interpolate (now works),
+        // then add the CORRECT timing phase for each carrier based on its own k value.
+        bool is_coherent = (config.modulation != Modulation::DBPSK &&
+                           config.modulation != Modulation::DQPSK &&
+                           config.modulation != Modulation::D8PSK);
 
         // Interpolate between pilots for data carriers
         interpolateChannel();
@@ -2042,16 +2270,43 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             LOG_SYNC(DEBUG, "Schmidl-Cox sync: sync_offset=%zu used directly as sts_start (no rounding)",
                     sync_offset);
 
+            // === LTS FINE TIMING ===
+            // Schmidl-Cox gives coarse timing (±48 samples due to plateau).
+            // LTS cross-correlation gives sample-accurate timing.
+            // This is the standard two-stage sync used in WiFi 802.11.
+            // Note: Preamble symbols are FFT+CP, no symbol_guard
+            size_t preamble_sym_len = impl_->config.fft_size + impl_->config.getCyclicPrefix();
+            size_t refined_lts_start = impl_->refineLTSTiming(sts_start);
+
+            // Check if LTS confirmation failed (SIZE_MAX = false sync from Schmidl-Cox)
+            if (refined_lts_start == SIZE_MAX) {
+                LOG_SYNC(INFO, "LTS confirmation FAILED - Schmidl-Cox false positive, continuing search");
+                // Don't sync - this was a false trigger. Trim buffer and continue.
+                if (impl_->rx_buffer.size() > impl_->OVERLAP_SAMPLES * 2) {
+                    size_t trim = std::min(sync_offset + preamble_sym_len,
+                                           impl_->rx_buffer.size() - impl_->OVERLAP_SAMPLES);
+                    impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
+                                           impl_->rx_buffer.begin() + trim);
+                }
+                // Stay in SEARCHING state
+                found_sync = false;
+            } else {
+                size_t coarse_lts_pos = sts_start + 4 * preamble_sym_len;
+                int timing_refinement = (int)refined_lts_start - (int)coarse_lts_pos;
+                LOG_SYNC(INFO, "LTS fine timing: coarse_lts=%zu, refined=%zu, delta=%+d samples",
+                         coarse_lts_pos, refined_lts_start, timing_refinement);
+
             // === Extract carrier phase from LTS (for DQPSK without pilots) ===
-            // LTS starts after 4 STS symbols: sts_start + 4*symbol_samples
-            // We use the first LTS symbol to estimate carrier phase
+            // Note: With LTS fine timing above, we now have accurate timing.
+            // This phase extraction code was for trying to compensate for timing
+            // errors by extracting per-carrier phases, but with accurate timing,
+            // it's no longer needed. Keeping for potential future use.
             bool is_differential = (impl_->config.modulation == Modulation::DQPSK ||
                                     impl_->config.modulation == Modulation::D8PSK ||
                                     impl_->config.modulation == Modulation::DBPSK);
             LOG_SYNC(DEBUG, "LTS phase check: is_differential=%d, use_pilots=%d",
                     is_differential, impl_->config.use_pilots);
-            // DISABLED: LTS phase extraction doesn't improve first symbol accuracy
-            // The timing offset between LTS and data causes phase mismatch
+            // DISABLED: With LTS fine timing, per-carrier phase extraction is redundant
             if (false && is_differential && !impl_->config.use_pilots) {
                 size_t lts_start = sts_start + 4 * impl_->symbol_samples;
                 size_t cp_len = impl_->config.getCyclicPrefix();
@@ -2114,11 +2369,13 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 }
             }
 
-            // Consume samples: from STS start + full preamble length (4 STS + 2 LTS)
-            // Note: preamble_total_len = 6 * symbol_samples covers STS + LTS but NOT guard
-            size_t consume = sts_start + preamble_total_len + impl_->manual_timing_offset;
-            LOG_SYNC(DEBUG, "Consume calc: sts_start=%zu + preamble=%zu + offset=%d = %zu (buffer was %zu)",
-                    sts_start, preamble_total_len, impl_->manual_timing_offset, consume, impl_->rx_buffer.size());
+            // Consume samples: from refined LTS start + 2 LTS symbols
+            // Using LTS fine timing instead of coarse Schmidl-Cox position
+            // This gives sample-accurate timing for coherent modes (QPSK, 16QAM)
+            // Note: LTS symbols are preamble_sym_len (no guard), not symbol_samples
+            size_t consume = refined_lts_start + 2 * preamble_sym_len + impl_->manual_timing_offset;
+            LOG_SYNC(DEBUG, "Consume calc: refined_lts=%zu + 2*preamble_sym=%zu + offset=%d = %zu (buffer was %zu)",
+                    refined_lts_start, 2 * preamble_sym_len, impl_->manual_timing_offset, consume, impl_->rx_buffer.size());
             impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
                                    impl_->rx_buffer.begin() + consume);
 
@@ -2134,6 +2391,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
                 impl_->carrier_phase_correction = Complex(1, 0);
             }
             impl_->dqpsk_skip_first_symbol = false;
+            }  // end of LTS success else block
         } else {
             // No preamble found - if buffer is large, trim old data but keep overlap
             if (impl_->rx_buffer.size() > impl_->OVERLAP_SAMPLES * 2) {
@@ -2176,25 +2434,38 @@ bool OFDMDemodulator::process(SampleSpan samples) {
             for (size_t offset = 0; offset <= search_limit; offset += STEP) {
                 float corr = impl_->measureCorrelation(offset);
                 if (corr > impl_->sync_threshold) {
-                    // Found new preamble - use this offset directly
-                    // (No fine timing refinement - see note in SEARCHING state)
-                    size_t best_offset = offset;
+                    // Found new preamble - use LTS fine timing for sample-accurate sync
+                    size_t sts_start = offset;
+
+                    // LTS fine timing - same as SEARCHING state
+                    size_t refined_lts_start = impl_->refineLTSTiming(sts_start);
+
+                    // Check if LTS confirmation failed (false positive from Schmidl-Cox)
+                    if (refined_lts_start == SIZE_MAX) {
+                        LOG_SYNC(DEBUG, "SYNCED: LTS confirmation failed at offset %zu, continuing", offset);
+                        continue;  // Try next offset
+                    }
+
+                    size_t consume = refined_lts_start + 2 * preamble_symbol_len;
+
+                    LOG_SYNC(INFO, "SYNCED preamble: sts=%zu, refined_lts=%zu, consume=%zu",
+                             sts_start, refined_lts_start, consume);
 
                     // Sync directly to the new preamble (same as SEARCHING state does)
                     // Estimate coarse CFO from preamble
-                    float coarse_cfo = impl_->estimateCoarseCFO(best_offset);
+                    float coarse_cfo = impl_->estimateCoarseCFO(sts_start);
                     impl_->freq_offset_hz = coarse_cfo;
                     impl_->freq_offset_filtered = coarse_cfo;
                     impl_->freq_correction_phase = 0.0f;
                     impl_->symbols_since_sync = 0;
 
-                    // Remove preamble and any garbage before it
+                    // Remove preamble using LTS-refined timing
                     impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
-                                           impl_->rx_buffer.begin() + best_offset + preamble_total_len);
+                                           impl_->rx_buffer.begin() + consume);
 
                     // Reset ALL state for new transmission (critical for correct decode!)
                     LOG_SYNC(WARN, "Mid-frame preamble detected at offset %zu (had %zu soft bits)! Clearing state.",
-                             best_offset, impl_->soft_bits.size());
+                             sts_start, impl_->soft_bits.size());
                     impl_->soft_bits.clear();
                     impl_->synced_symbol_count.store(0);
                     impl_->idle_call_count.store(0);

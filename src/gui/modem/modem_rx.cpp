@@ -127,18 +127,31 @@ void ModemEngine::rxDecodeLoop() {
     LOG_MODEM(INFO, "[%s] RX decode loop starting", log_prefix_.c_str());
 
     while (rx_decode_running_) {
-        // If connected, handle OFDM (has its own sync mechanism)
+        // If connected, dispatch based on waveform mode
         if (connected_) {
-            // Process OFDM if:
-            // 1. Buffer has enough for initial sync (8000 samples), OR
-            // 2. We're already synced or have pending codewords (demod has internal state)
-            bool has_pending_ofdm = ofdm_demodulator_->isSynced() ||
-                                    ofdm_demodulator_->hasPendingData() ||
-                                    ofdm_expected_codewords_ > 0;
             size_t buf_size = getBufferSize();
 
-            if (buf_size > 8000 || has_pending_ofdm) {
-                processRxBuffer_OFDM();
+            if (waveform_mode_ == protocol::WaveformMode::OFDM) {
+                // Process OFDM if:
+                // 1. Buffer has enough for initial sync (8000 samples), OR
+                // 2. We're already synced or have pending codewords (demod has internal state)
+                bool has_pending_ofdm = ofdm_demodulator_->isSynced() ||
+                                        ofdm_demodulator_->hasPendingData() ||
+                                        ofdm_expected_codewords_ > 0;
+
+                if (buf_size > 8000 || has_pending_ofdm) {
+                    processRxBuffer_OFDM();
+                }
+            } else if (waveform_mode_ == protocol::WaveformMode::DPSK) {
+                // Process DPSK in connected mode
+                if (buf_size > 4000) {
+                    processRxBuffer_DPSK();
+                }
+            } else if (waveform_mode_ == protocol::WaveformMode::MFSK) {
+                // Process MFSK in connected mode
+                if (buf_size > 4000) {
+                    processRxBuffer_MFSK();
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -1065,6 +1078,102 @@ void ModemEngine::processRxBuffer_OFDM() {
     LOG_MODEM(INFO, "[%s] RX OFDM: Frame processing complete, calling demod reset()",
               log_prefix_.c_str());
     ofdm_demodulator_->reset();
+}
+
+// ============================================================================
+// DPSK BUFFER PROCESSING (Connected Mode)
+// ============================================================================
+
+void ModemEngine::processRxBuffer_DPSK() {
+    // Get buffer snapshot for preamble detection
+    std::vector<float> samples = getBufferSnapshot();
+    if (samples.size() < 4000) return;
+
+    SampleSpan span(samples.data(), samples.size());
+
+    // Look for DPSK preamble
+    int preamble_start = dpsk_demodulator_->findPreamble(span);
+    if (preamble_start < 0) {
+        // No preamble found - trim old samples if buffer is getting large
+        if (samples.size() > 48000) {
+            consumeSamples(samples.size() - 24000);
+        }
+        return;
+    }
+
+    LOG_MODEM(INFO, "[%s] processRxBuffer_DPSK: Found preamble at %d",
+              log_prefix_.c_str(), preamble_start);
+
+    // Create a DetectedFrame and delegate to rxDecodeDPSK
+    DetectedFrame frame;
+    frame.data_start = preamble_start;
+    frame.waveform = protocol::WaveformMode::DPSK;
+    frame.timestamp = std::chrono::steady_clock::now();
+
+    // Mark state as active
+    rx_frame_state_.active = true;
+    rx_frame_state_.frame = frame;
+    rx_frame_state_.expected_codewords = 0;
+    rx_frame_state_.frame_type = protocol::v2::FrameType::PROBE;
+
+    bool success = rxDecodeDPSK(frame);
+
+    if (!success) {
+        LOG_MODEM(INFO, "[%s] processRxBuffer_DPSK: Frame decode failed",
+                  log_prefix_.c_str());
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.frames_failed++;
+    }
+
+    rx_frame_state_.clear();
+}
+
+// ============================================================================
+// MFSK BUFFER PROCESSING (Connected Mode)
+// ============================================================================
+
+void ModemEngine::processRxBuffer_MFSK() {
+    // Get buffer snapshot for preamble detection
+    std::vector<float> samples = getBufferSnapshot();
+    if (samples.size() < 4000) return;
+
+    SampleSpan span(samples.data(), samples.size());
+
+    // Look for MFSK preamble
+    int preamble_start = mfsk_demodulator_->findPreamble(span);
+    if (preamble_start < 0) {
+        // No preamble found - trim old samples if buffer is getting large
+        if (samples.size() > 48000) {
+            consumeSamples(samples.size() - 24000);
+        }
+        return;
+    }
+
+    LOG_MODEM(INFO, "[%s] processRxBuffer_MFSK: Found preamble at %d",
+              log_prefix_.c_str(), preamble_start);
+
+    // Create a DetectedFrame and delegate to rxDecodeMFSK
+    DetectedFrame frame;
+    frame.data_start = preamble_start;
+    frame.waveform = protocol::WaveformMode::MFSK;
+    frame.timestamp = std::chrono::steady_clock::now();
+
+    // Mark state as active
+    rx_frame_state_.active = true;
+    rx_frame_state_.frame = frame;
+    rx_frame_state_.expected_codewords = 0;
+    rx_frame_state_.frame_type = protocol::v2::FrameType::PROBE;
+
+    bool success = rxDecodeMFSK(frame);
+
+    if (!success) {
+        LOG_MODEM(INFO, "[%s] processRxBuffer_MFSK: Frame decode failed",
+                  log_prefix_.c_str());
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.frames_failed++;
+    }
+
+    rx_frame_state_.clear();
 }
 
 } // namespace gui

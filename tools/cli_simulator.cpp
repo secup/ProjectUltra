@@ -176,6 +176,7 @@ private:
     // Config
     float snr_db_ = 20.0f;
     bool verbose_ = false;
+    bool no_reply_ = false;
     std::mt19937 rng_{42};
 
     // Timing

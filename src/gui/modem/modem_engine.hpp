@@ -284,6 +284,8 @@ private:
     size_t getBufferSize() const;
     void consumeSamples(size_t count);
     void processRxBuffer_OFDM();
+    void processRxBuffer_DPSK();
+    void processRxBuffer_MFSK();
 };
 
 } // namespace gui
