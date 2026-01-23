@@ -283,7 +283,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes", to_modulate.size());
     } else {
         // === Raw Data Path (non-v2 frame) ===
-        CodeRate tx_code_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+        // Use connected code rate if still connected OR for disconnect ACK
+        CodeRate tx_code_rate = (connected_ || use_connected_waveform_once_) ? data_code_rate_ : CodeRate::R1_4;
 
         encoder_->setRate(tx_code_rate);
         Bytes encoded = encoder_->encode(data);
@@ -298,11 +299,15 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     // When connected, ALL frames (including control) use negotiated modulation
     // so RX demodulator (also configured to negotiated mode) can decode them.
     // Robustness is handled by code rate: CW0 header always uses R1/4.
+    // IMPORTANT: When use_connected_waveform_once_ is set (for DISCONNECT ACK),
+    // we must also use the connected modulation since the remote is still expecting it.
     Modulation tx_modulation = Modulation::DQPSK;
-    if (connected_) {
+    if (connected_ || use_connected_waveform_once_) {
         tx_modulation = data_modulation_;
-        LOG_MODEM(INFO, "[%s] TX: Using negotiated modulation %s",
-                  log_prefix_.c_str(), modulationToString(tx_modulation));
+        LOG_MODEM(INFO, "[%s] TX: Using %s modulation %s",
+                  log_prefix_.c_str(),
+                  connected_ ? "negotiated" : "preserved (disconnect ACK)",
+                  modulationToString(tx_modulation));
     }
 
     // Determine which waveform to use
