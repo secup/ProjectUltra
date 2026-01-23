@@ -396,6 +396,19 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
         settings_.save();
     });
 
+    settings_window_.setExpertSettingsChangedCallback([this](uint8_t waveform, uint8_t modulation, uint8_t code_rate) {
+        // Apply forced settings to protocol (used on next connect)
+        protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(waveform));
+        protocol_.setForcedModulation(static_cast<Modulation>(modulation));
+        protocol_.setForcedCodeRate(static_cast<CodeRate>(code_rate));
+        settings_.save();
+    });
+
+    // Apply initial expert settings from loaded config
+    protocol_.setPreferredMode(static_cast<protocol::WaveformMode>(settings_.forced_waveform));
+    protocol_.setForcedModulation(static_cast<Modulation>(settings_.forced_modulation));
+    protocol_.setForcedCodeRate(static_cast<CodeRate>(settings_.forced_code_rate));
+
     // Apply initial filter settings from loaded config
     FilterConfig initial_filter;
     initial_filter.enabled = settings_.filter_enabled;

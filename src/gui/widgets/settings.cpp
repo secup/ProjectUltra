@@ -112,6 +112,11 @@ bool AppSettings::save(const std::string& path) const {
     file << "\n[FileTransfer]\n";
     file << "receive_directory=" << receive_directory << "\n";
 
+    file << "\n[Expert]\n";
+    file << "forced_waveform=" << static_cast<int>(forced_waveform) << "\n";
+    file << "forced_modulation=" << static_cast<int>(forced_modulation) << "\n";
+    file << "forced_code_rate=" << static_cast<int>(forced_code_rate) << "\n";
+
     return true;
 }
 
@@ -182,6 +187,14 @@ bool AppSettings::load(const std::string& path) {
             strncpy(receive_directory, value.c_str(), sizeof(receive_directory) - 1);
             receive_directory[sizeof(receive_directory) - 1] = '\0';
         }
+        // Expert settings
+        else if (key == "forced_waveform") {
+            forced_waveform = static_cast<uint8_t>(std::atoi(value.c_str()));
+        } else if (key == "forced_modulation") {
+            forced_modulation = static_cast<uint8_t>(std::atoi(value.c_str()));
+        } else if (key == "forced_code_rate") {
+            forced_code_rate = static_cast<uint8_t>(std::atoi(value.c_str()));
+        }
     }
 
     return true;
@@ -223,6 +236,11 @@ bool SettingsWindow::render(AppSettings& settings) {
 
             if (ImGui::BeginTabItem("Audio")) {
                 renderAudioTab(settings);
+                ImGui::EndTabItem();
+            }
+
+            if (ImGui::BeginTabItem("Expert")) {
+                renderExpertTab(settings);
                 ImGui::EndTabItem();
             }
 
@@ -535,6 +553,156 @@ void SettingsWindow::renderAudioTab(AppSettings& settings) {
     if (filter_changed && on_filter_changed_) {
         on_filter_changed_(settings.filter_enabled, settings.filter_center,
                           settings.filter_bandwidth, settings.filter_taps);
+    }
+}
+
+void SettingsWindow::renderExpertTab(AppSettings& settings) {
+    ImGui::Spacing();
+    ImGui::Text("Expert Mode Settings");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Warning message
+    ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f),
+        "* Leave as AUTO if you are unsure.");
+    ImGui::TextDisabled("These settings force specific waveform and modulation modes.");
+    ImGui::TextDisabled("AUTO lets the protocol negotiate optimal settings based on SNR.");
+    ImGui::Spacing();
+    ImGui::Spacing();
+
+    bool changed = false;
+
+    // --- Forced Waveform ---
+    ImGui::Text("Forced Waveform");
+    ImGui::SetNextItemWidth(200);
+
+    // Current waveform display string
+    const char* waveform_items[] = { "AUTO", "OFDM", "DPSK" };
+    int waveform_idx = 0;  // AUTO
+    if (settings.forced_waveform == 0x00) waveform_idx = 1;       // OFDM
+    else if (settings.forced_waveform == 0x04) waveform_idx = 2;  // DPSK
+
+    if (ImGui::Combo("##waveform", &waveform_idx, waveform_items, 3)) {
+        switch (waveform_idx) {
+            case 0: settings.forced_waveform = 0xFF; break;  // AUTO
+            case 1: settings.forced_waveform = 0x00; break;  // OFDM
+            case 2: settings.forced_waveform = 0x04; break;  // DPSK
+        }
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("OFDM=fast, DPSK=robust");
+
+    ImGui::Spacing();
+
+    // --- Forced Modulation ---
+    ImGui::Text("Forced Modulation");
+    ImGui::SetNextItemWidth(200);
+
+    const char* modulation_items[] = { "AUTO", "DBPSK", "DQPSK", "D8PSK", "QPSK", "16QAM" };
+    int mod_idx = 0;  // AUTO
+    switch (settings.forced_modulation) {
+        case 0:    mod_idx = 1; break;  // DBPSK
+        case 2:    mod_idx = 2; break;  // DQPSK
+        case 4:    mod_idx = 3; break;  // D8PSK
+        case 3:    mod_idx = 4; break;  // QPSK
+        case 6:    mod_idx = 5; break;  // QAM16
+        default:   mod_idx = 0; break;  // AUTO
+    }
+
+    if (ImGui::Combo("##modulation", &mod_idx, modulation_items, 6)) {
+        switch (mod_idx) {
+            case 0: settings.forced_modulation = 0xFF; break;  // AUTO
+            case 1: settings.forced_modulation = 0; break;     // DBPSK
+            case 2: settings.forced_modulation = 2; break;     // DQPSK
+            case 3: settings.forced_modulation = 4; break;     // D8PSK
+            case 4: settings.forced_modulation = 3; break;     // QPSK
+            case 5: settings.forced_modulation = 6; break;     // QAM16
+        }
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("D*=differential, Q*/16QAM=coherent");
+
+    ImGui::Spacing();
+
+    // --- Forced Code Rate ---
+    ImGui::Text("Forced Code Rate");
+    ImGui::SetNextItemWidth(200);
+
+    const char* rate_items[] = { "AUTO", "R1/4", "R1/2", "R2/3", "R3/4" };
+    int rate_idx = 0;  // AUTO
+    switch (settings.forced_code_rate) {
+        case 0:    rate_idx = 1; break;  // R1/4
+        case 2:    rate_idx = 2; break;  // R1/2
+        case 3:    rate_idx = 3; break;  // R2/3
+        case 4:    rate_idx = 4; break;  // R3/4
+        default:   rate_idx = 0; break;  // AUTO
+    }
+
+    if (ImGui::Combo("##coderate", &rate_idx, rate_items, 5)) {
+        switch (rate_idx) {
+            case 0: settings.forced_code_rate = 0xFF; break;  // AUTO
+            case 1: settings.forced_code_rate = 0; break;     // R1/4
+            case 2: settings.forced_code_rate = 2; break;     // R1/2
+            case 3: settings.forced_code_rate = 3; break;     // R2/3
+            case 4: settings.forced_code_rate = 4; break;     // R3/4
+        }
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("R1/4=robust, R3/4=fast");
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Summary of current settings
+    ImGui::Text("Current Settings:");
+    ImGui::Spacing();
+
+    auto getWaveformStr = [](uint8_t w) -> const char* {
+        switch (w) {
+            case 0x00: return "OFDM";
+            case 0x04: return "DPSK";
+            case 0xFF: return "AUTO";
+            default: return "Unknown";
+        }
+    };
+
+    auto getModulationStr = [](uint8_t m) -> const char* {
+        switch (m) {
+            case 0: return "DBPSK";
+            case 2: return "DQPSK";
+            case 4: return "D8PSK";
+            case 3: return "QPSK";
+            case 6: return "16QAM";
+            case 0xFF: return "AUTO";
+            default: return "Unknown";
+        }
+    };
+
+    auto getCodeRateStr = [](uint8_t r) -> const char* {
+        switch (r) {
+            case 0: return "R1/4";
+            case 2: return "R1/2";
+            case 3: return "R2/3";
+            case 4: return "R3/4";
+            case 0xFF: return "AUTO";
+            default: return "Unknown";
+        }
+    };
+
+    ImGui::BulletText("Waveform: %s", getWaveformStr(settings.forced_waveform));
+    ImGui::BulletText("Modulation: %s", getModulationStr(settings.forced_modulation));
+    ImGui::BulletText("Code Rate: %s", getCodeRateStr(settings.forced_code_rate));
+
+    // Call callback if settings changed
+    if (changed && on_expert_settings_changed_) {
+        on_expert_settings_changed_(settings.forced_waveform,
+                                     settings.forced_modulation,
+                                     settings.forced_code_rate);
     }
 }
 

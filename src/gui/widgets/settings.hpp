@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <functional>
@@ -46,6 +47,12 @@ struct AppSettings {
     // Get the effective receive directory (uses default if empty)
     std::string getReceiveDirectory() const;
 
+    // Expert Settings (forced modes for advanced operators)
+    // 0xFF = AUTO (let protocol decide), any other value = forced
+    uint8_t forced_waveform = 0xFF;     // WaveformMode enum
+    uint8_t forced_modulation = 0xFF;   // Modulation enum
+    uint8_t forced_code_rate = 0xFF;    // CodeRate enum
+
     // Get platform-specific Downloads folder
     static std::string getDefaultDownloadsPath();
 };
@@ -88,6 +95,10 @@ public:
     using ReceiveDirChangedCallback = std::function<void(const std::string&)>;
     void setReceiveDirChangedCallback(ReceiveDirChangedCallback cb) { on_receive_dir_changed_ = cb; }
 
+    // Callback when expert settings change (forced waveform/modulation/code rate)
+    using ExpertSettingsChangedCallback = std::function<void(uint8_t waveform, uint8_t modulation, uint8_t code_rate)>;
+    void setExpertSettingsChangedCallback(ExpertSettingsChangedCallback cb) { on_expert_settings_changed_ = cb; }
+
 private:
     bool visible_ = false;
     bool was_visible_ = false;  // Track previous frame visibility
@@ -99,10 +110,12 @@ private:
     ClosedCallback on_closed_;
     FilterChangedCallback on_filter_changed_;
     ReceiveDirChangedCallback on_receive_dir_changed_;
+    ExpertSettingsChangedCallback on_expert_settings_changed_;
 
     void renderStationTab(AppSettings& settings);
     void renderRadioTab(AppSettings& settings);
     void renderAudioTab(AppSettings& settings);
+    void renderExpertTab(AppSettings& settings);
 };
 
 } // namespace gui
