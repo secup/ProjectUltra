@@ -345,6 +345,26 @@ void ProtocolEngine::setModeCapabilities(uint8_t caps) {
     connection_.setModeCapabilities(caps);
 }
 
+void ProtocolEngine::setForcedModulation(Modulation mod) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setForcedModulation(mod);
+}
+
+void ProtocolEngine::setForcedCodeRate(CodeRate rate) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    connection_.setForcedCodeRate(rate);
+}
+
+Modulation ProtocolEngine::getForcedModulation() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getForcedModulation();
+}
+
+CodeRate ProtocolEngine::getForcedCodeRate() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return connection_.getForcedCodeRate();
+}
+
 void ProtocolEngine::setModeNegotiatedCallback(ModeNegotiatedCallback cb) {
     std::lock_guard<std::mutex> lock(mutex_);
     connection_.setModeNegotiatedCallback(std::move(cb));

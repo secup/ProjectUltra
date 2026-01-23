@@ -162,11 +162,14 @@ void Connection::sendFullConnect() {
 
     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                         config_.mode_capabilities,
-                                                        static_cast<uint8_t>(config_.preferred_mode));
+                                                        static_cast<uint8_t>(config_.preferred_mode),
+                                                        static_cast<uint8_t>(config_.forced_modulation),
+                                                        static_cast<uint8_t>(config_.forced_code_rate));
     Bytes connect_data = connect_frame.serialize();
 
-    LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes)",
-              waveformModeToString(connect_waveform_), connect_data.size());
+    LOG_MODEM(INFO, "Connection: Sending CONNECT via %s (%zu bytes, forced_mod=%d, forced_rate=%d)",
+              waveformModeToString(connect_waveform_), connect_data.size(),
+              static_cast<int>(config_.forced_modulation), static_cast<int>(config_.forced_code_rate));
     transmitFrame(connect_data);
 }
 
@@ -181,10 +184,35 @@ void Connection::acceptCall() {
 
     negotiated_mode_ = negotiateMode(remote_capabilities_, remote_preferred_);
 
-    // Recommend data mode based on measured SNR
+    // Check if initiator forced specific modes (0xFF = AUTO, else forced)
     Modulation rec_mod;
     CodeRate rec_rate;
-    recommendDataMode(measured_snr_db_, rec_mod, rec_rate);
+
+    if (pending_forced_modulation_ != Modulation::AUTO) {
+        // Initiator forced a specific modulation - honor it
+        rec_mod = pending_forced_modulation_;
+        LOG_MODEM(INFO, "Connection: Using FORCED modulation %s from initiator",
+                  modulationToString(rec_mod));
+    } else {
+        // AUTO - recommend based on measured SNR
+        CodeRate dummy_rate;
+        recommendDataMode(measured_snr_db_, rec_mod, dummy_rate);
+    }
+
+    if (pending_forced_code_rate_ != CodeRate::AUTO) {
+        // Initiator forced a specific code rate - honor it
+        rec_rate = pending_forced_code_rate_;
+        LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
+                  codeRateToString(rec_rate));
+    } else {
+        // AUTO - recommend based on measured SNR
+        Modulation dummy_mod;
+        recommendDataMode(measured_snr_db_, dummy_mod, rec_rate);
+    }
+
+    // Clear pending forced modes
+    pending_forced_modulation_ = Modulation::AUTO;
+    pending_forced_code_rate_ = CodeRate::AUTO;
 
     // Set our local data mode immediately
     data_modulation_ = rec_mod;
@@ -548,13 +576,38 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         is_initiator_ = false;
         handshake_confirmed_ = false;  // Responder waits for first frame to confirm
 
-        // Recommend data mode based on measured SNR
+        // Check if initiator forced specific modes (0xFF = AUTO, else forced)
+        Modulation forced_mod = static_cast<Modulation>(frame.initial_modulation);
+        CodeRate forced_rate = static_cast<CodeRate>(frame.initial_code_rate);
+
         Modulation rec_mod;
         CodeRate rec_rate;
-        recommendDataMode(snr_db, rec_mod, rec_rate);
 
-        LOG_MODEM(INFO, "Connection: Initial data mode %s %s based on SNR=%.1f dB",
-                  modulationToString(rec_mod), codeRateToString(rec_rate), snr_db);
+        if (forced_mod != Modulation::AUTO) {
+            // Initiator forced a specific modulation - honor it
+            rec_mod = forced_mod;
+            LOG_MODEM(INFO, "Connection: Using FORCED modulation %s from initiator",
+                      modulationToString(rec_mod));
+        } else {
+            // AUTO - recommend based on measured SNR
+            CodeRate dummy_rate;
+            recommendDataMode(snr_db, rec_mod, dummy_rate);
+        }
+
+        if (forced_rate != CodeRate::AUTO) {
+            // Initiator forced a specific code rate - honor it
+            rec_rate = forced_rate;
+            LOG_MODEM(INFO, "Connection: Using FORCED code rate %s from initiator",
+                      codeRateToString(rec_rate));
+        } else {
+            // AUTO - recommend based on measured SNR
+            Modulation dummy_mod;
+            recommendDataMode(snr_db, dummy_mod, rec_rate);
+        }
+
+        LOG_MODEM(INFO, "Connection: Initial data mode %s %s (SNR=%.1f dB, forced_mod=%d, forced_rate=%d)",
+                  modulationToString(rec_mod), codeRateToString(rec_rate), snr_db,
+                  static_cast<int>(forced_mod), static_cast<int>(forced_rate));
 
         // Set our local data mode immediately
         data_modulation_ = rec_mod;
@@ -576,6 +629,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
     } else {
         pending_remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         pending_remote_hash_ = frame.src_hash;  // Store hash for later
+        // Store forced modes from initiator for later use in acceptCall()
+        pending_forced_modulation_ = static_cast<Modulation>(frame.initial_modulation);
+        pending_forced_code_rate_ = static_cast<CodeRate>(frame.initial_code_rate);
         if (on_incoming_call_) {
             on_incoming_call_(pending_remote_call_);
         }
@@ -792,7 +848,9 @@ void Connection::tick(uint32_t elapsed_ms) {
                               connect_retry_count_ + 1, config_.connect_retries);
                     auto connect_frame = v2::ConnectFrame::makeConnect(local_call_, remote_call_,
                                                                         config_.mode_capabilities,
-                                                                        static_cast<uint8_t>(config_.preferred_mode));
+                                                                        static_cast<uint8_t>(config_.preferred_mode),
+                                                                        static_cast<uint8_t>(config_.forced_modulation),
+                                                                        static_cast<uint8_t>(config_.forced_code_rate));
                     transmitFrame(connect_frame.serialize());
                     timeout_remaining_ms_ = config_.connect_timeout_ms;
                 }

@@ -413,9 +413,19 @@ struct DataFrame {
 // │ 10B (null) │ 10B (null) │  1B  │  1B  │ 1B  │  1B  │ 1B  │  = 25 bytes payload
 // └────────────┴────────────┴──────┴──────┴─────┴──────┴─────┘
 //
-// CONNECT uses: CAPS (our capabilities), WFMOD (preferred waveform), MOD/RATE/SNR=0
-// CONNECT_ACK uses: WFMOD (negotiated waveform), MOD (initial modulation),
-//                   RATE (initial code rate), SNR (measured SNR)
+// CONNECT frame fields (dual meaning based on frame type):
+//   - mode_capabilities: our supported waveform modes (bitmap)
+//   - negotiated_mode:   CONNECT = forced waveform (0xFF=AUTO)
+//                        CONNECT_ACK = agreed waveform
+//   - initial_modulation: CONNECT = forced modulation (0xFF=AUTO)
+//                         CONNECT_ACK = agreed modulation
+//   - initial_code_rate:  CONNECT = forced code rate (0xFF=AUTO)
+//                         CONNECT_ACK = agreed code rate
+//   - measured_snr:       CONNECT = unused (0)
+//                         CONNECT_ACK = responder's measured SNR
+//
+// When forced values are set (not 0xFF), responder MUST use them.
+// When AUTO (0xFF), responder chooses based on measured SNR.
 //
 // Total frame: 17B header + 25B payload + 2B CRC = 44 bytes (3 codewords)
 struct ConnectFrame {
@@ -431,16 +441,18 @@ struct ConnectFrame {
     char src_callsign[MAX_CALLSIGN_LEN] = {0};  // Full source callsign
     char dst_callsign[MAX_CALLSIGN_LEN] = {0};  // Full destination callsign
     uint8_t mode_capabilities = 0;               // Supported waveform modes (CONNECT)
-    uint8_t negotiated_mode = 0;                 // Preferred (CONNECT) / negotiated (CONNECT_ACK) waveform
+    uint8_t negotiated_mode = 0;                 // Forced/negotiated waveform (0xFF=AUTO)
 
-    // Initial data mode (CONNECT_ACK only) - eliminates separate MODE_CHANGE after connect
-    uint8_t initial_modulation = 0;              // Initial Modulation for DATA frames
-    uint8_t initial_code_rate = 0;               // Initial CodeRate for DATA frames
-    uint8_t measured_snr = 0;                    // Measured SNR (encoded: 0-255 = -10 to +53.75 dB)
+    // Data mode fields - dual meaning based on frame type
+    uint8_t initial_modulation = 0;              // Forced/agreed Modulation (0xFF=AUTO)
+    uint8_t initial_code_rate = 0;               // Forced/agreed CodeRate (0xFF=AUTO)
+    uint8_t measured_snr = 0;                    // CONNECT_ACK: measured SNR
 
     // Factory methods
     static ConnectFrame makeConnect(const std::string& src, const std::string& dst,
-                                     uint8_t mode_caps, uint8_t pref_mode);
+                                     uint8_t mode_caps, uint8_t forced_waveform,
+                                     uint8_t forced_modulation = 0xFF,
+                                     uint8_t forced_code_rate = 0xFF);
     static ConnectFrame makeConnectAck(const std::string& src, const std::string& dst,
                                         uint8_t neg_mode, Modulation init_mod, CodeRate init_rate,
                                         float snr_db);

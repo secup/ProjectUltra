@@ -40,6 +40,11 @@ public:
     void setVerbose(bool v) { verbose_ = v; }
     void setNoReply(bool v) { no_reply_ = v; }
 
+    // Forced mode settings (operator override)
+    void setForcedWaveform(WaveformMode mode) { forced_waveform_ = mode; }
+    void setForcedModulation(Modulation mod) { forced_modulation_ = mod; }
+    void setForcedCodeRate(CodeRate rate) { forced_code_rate_ = rate; }
+
     bool runTest() {
         printHeader();
         initStations();
@@ -179,6 +184,11 @@ private:
     bool no_reply_ = false;
     std::mt19937 rng_{42};
 
+    // Forced mode settings (operator override, default AUTO)
+    WaveformMode forced_waveform_ = WaveformMode::AUTO;
+    Modulation forced_modulation_ = Modulation::AUTO;
+    CodeRate forced_code_rate_ = CodeRate::AUTO;
+
     // Timing
     std::chrono::steady_clock::time_point last_tick_time_ = std::chrono::steady_clock::now();
 
@@ -190,6 +200,20 @@ private:
         modem_.setLogPrefix("ALPHA");
         protocol_.setLocalCallsign("ALPHA");
         protocol_.setAutoAccept(true);
+
+        // Apply forced mode settings if specified
+        if (forced_waveform_ != WaveformMode::AUTO) {
+            protocol_.setPreferredMode(forced_waveform_);
+            std::cout << "  [ALPHA] Forcing waveform: " << waveformModeToString(forced_waveform_) << "\n";
+        }
+        if (forced_modulation_ != Modulation::AUTO) {
+            protocol_.setForcedModulation(forced_modulation_);
+            std::cout << "  [ALPHA] Forcing modulation: " << modulationToString(forced_modulation_) << "\n";
+        }
+        if (forced_code_rate_ != CodeRate::AUTO) {
+            protocol_.setForcedCodeRate(forced_code_rate_);
+            std::cout << "  [ALPHA] Forcing code rate: " << codeRateToString(forced_code_rate_) << "\n";
+        }
 
         protocol_.setTxDataCallback([this](const Bytes& data) {
             auto samples = modem_.transmit(data);
@@ -446,6 +470,35 @@ private:
     }
 };
 
+// Helper to parse modulation string
+static Modulation parseModulation(const std::string& s) {
+    if (s == "DQPSK" || s == "dqpsk") return Modulation::DQPSK;
+    if (s == "QPSK" || s == "qpsk") return Modulation::QPSK;
+    if (s == "QAM16" || s == "qam16" || s == "16qam" || s == "16QAM") return Modulation::QAM16;
+    if (s == "D8PSK" || s == "d8psk") return Modulation::D8PSK;
+    if (s == "DBPSK" || s == "dbpsk") return Modulation::DBPSK;
+    if (s == "BPSK" || s == "bpsk") return Modulation::BPSK;
+    return Modulation::AUTO;
+}
+
+// Helper to parse code rate string
+static CodeRate parseCodeRate(const std::string& s) {
+    if (s == "R1/4" || s == "r1/4" || s == "1/4") return CodeRate::R1_4;
+    if (s == "R1/2" || s == "r1/2" || s == "1/2") return CodeRate::R1_2;
+    if (s == "R2/3" || s == "r2/3" || s == "2/3") return CodeRate::R2_3;
+    if (s == "R3/4" || s == "r3/4" || s == "3/4") return CodeRate::R3_4;
+    if (s == "R5/6" || s == "r5/6" || s == "5/6") return CodeRate::R5_6;
+    return CodeRate::AUTO;
+}
+
+// Helper to parse waveform string
+static WaveformMode parseWaveform(const std::string& s) {
+    if (s == "OFDM" || s == "ofdm") return WaveformMode::OFDM;
+    if (s == "DPSK" || s == "dpsk") return WaveformMode::DPSK;
+    if (s == "MFSK" || s == "mfsk") return WaveformMode::MFSK;
+    return WaveformMode::AUTO;
+}
+
 int main(int argc, char* argv[]) {
     CLISimulator sim;
 
@@ -455,12 +508,24 @@ int main(int argc, char* argv[]) {
             sim.setSNR(std::stof(argv[++i]));
         } else if (arg == "--verbose" || arg == "-v") {
             sim.setVerbose(true);
+        } else if ((arg == "--force-waveform" || arg == "-fw") && i + 1 < argc) {
+            sim.setForcedWaveform(parseWaveform(argv[++i]));
+        } else if ((arg == "--force-mod" || arg == "-fm") && i + 1 < argc) {
+            sim.setForcedModulation(parseModulation(argv[++i]));
+        } else if ((arg == "--force-rate" || arg == "-fr") && i + 1 < argc) {
+            sim.setForcedCodeRate(parseCodeRate(argv[++i]));
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - Fast batch processing\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
             std::cout << "Options:\n";
-            std::cout << "  --snr <dB>   Set channel SNR (default: 20)\n";
-            std::cout << "  --verbose    Enable verbose logging\n";
+            std::cout << "  --snr <dB>          Set channel SNR (default: 20)\n";
+            std::cout << "  --verbose           Enable verbose logging\n";
+            std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK, MFSK\n";
+            std::cout << "  --force-mod <mod>   Force modulation: DQPSK, QPSK, QAM16, D8PSK, etc.\n";
+            std::cout << "  --force-rate <rate> Force code rate: R1/4, R1/2, R2/3, R3/4, R5/6\n";
+            std::cout << "\nExamples:\n";
+            std::cout << "  " << argv[0] << " --snr 25 --force-mod QAM16 --force-rate R1/2\n";
+            std::cout << "  " << argv[0] << " --snr 15 --force-waveform DPSK\n";
             return 0;
         }
     }

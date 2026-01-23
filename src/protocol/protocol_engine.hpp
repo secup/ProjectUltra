@@ -93,6 +93,15 @@ public:
     WaveformMode getNegotiatedMode() const;
     void setPreferredMode(WaveformMode mode);
     void setModeCapabilities(uint8_t caps);
+
+    // Forced data mode - operator can override SNR-based selection
+    // Set before calling connect(). Values are sent in CONNECT frame.
+    // 0xFF (AUTO) = let responder decide based on SNR
+    void setForcedModulation(Modulation mod);
+    void setForcedCodeRate(CodeRate rate);
+    Modulation getForcedModulation() const;
+    CodeRate getForcedCodeRate() const;
+
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb);
     void setConnectWaveformChangedCallback(ConnectWaveformChangedCallback cb);
     WaveformMode getConnectWaveform() const;

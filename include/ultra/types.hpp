@@ -35,6 +35,7 @@ enum class Modulation : uint8_t {
     QAM32 = 7,   // 5 bits/symbol - coherent
     QAM64 = 8,   // 6 bits/symbol - coherent
     QAM256 = 10, // 8 bits/symbol - highest throughput, needs 30+ dB SNR
+    AUTO = 0xFF, // Let responder decide based on SNR (for CONNECT frame)
 };
 
 // Get bits per symbol for a modulation scheme
@@ -95,6 +96,7 @@ enum class CodeRate : uint8_t {
     R3_4,   // 3/4
     R5_6,   // 5/6
     R7_8,   // 7/8 - least redundancy
+    AUTO = 0xFF, // Let responder decide based on SNR (for CONNECT frame)
 };
 
 // Convert CodeRate enum to float value

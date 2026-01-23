@@ -614,7 +614,8 @@ std::string DataFrame::payloadAsText() const {
 // ============================================================================
 
 ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string& dst,
-                                        uint8_t mode_caps, uint8_t pref_mode) {
+                                        uint8_t mode_caps, uint8_t forced_waveform,
+                                        uint8_t forced_modulation, uint8_t forced_code_rate) {
     ConnectFrame f;
     f.type = FrameType::CONNECT;
     f.flags = Flags::VERSION_V2;
@@ -629,7 +630,10 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
     f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
     f.mode_capabilities = mode_caps;
-    f.negotiated_mode = pref_mode;
+    f.negotiated_mode = forced_waveform;        // 0xFF = AUTO, else forced
+    f.initial_modulation = forced_modulation;   // 0xFF = AUTO, else forced
+    f.initial_code_rate = forced_code_rate;     // 0xFF = AUTO, else forced
+    f.measured_snr = 0;                         // Not used in CONNECT
     return f;
 }
 

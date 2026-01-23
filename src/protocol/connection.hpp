@@ -30,7 +30,13 @@ struct ConnectionConfig {
     bool auto_accept = true;
 
     uint8_t mode_capabilities = ModeCapabilities::ALL;
-    WaveformMode preferred_mode = WaveformMode::AUTO;
+    WaveformMode preferred_mode = WaveformMode::AUTO;  // Forced waveform (0xFF=AUTO)
+
+    // Forced data mode - operator can override SNR-based selection
+    // 0xFF (AUTO) = let responder decide based on SNR
+    // Any other value = force that specific mode
+    Modulation forced_modulation = Modulation::AUTO;
+    CodeRate forced_code_rate = CodeRate::AUTO;
 };
 
 // Connection statistics
@@ -144,6 +150,12 @@ public:
     void setPreferredMode(WaveformMode mode) { config_.preferred_mode = mode; }
     void setModeCapabilities(uint8_t caps) { config_.mode_capabilities = caps; }
 
+    // Forced data mode - operator can override SNR-based selection
+    void setForcedModulation(Modulation mod) { config_.forced_modulation = mod; }
+    void setForcedCodeRate(CodeRate rate) { config_.forced_code_rate = rate; }
+    Modulation getForcedModulation() const { return config_.forced_modulation; }
+    CodeRate getForcedCodeRate() const { return config_.forced_code_rate; }
+
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }
 
@@ -193,6 +205,10 @@ private:
     // Remote station hashes (for routing when callsign unknown)
     uint32_t remote_hash_ = 0;
     uint32_t pending_remote_hash_ = 0;
+
+    // Pending forced modes from incoming CONNECT (for manual accept flow)
+    Modulation pending_forced_modulation_ = Modulation::AUTO;
+    CodeRate pending_forced_code_rate_ = CodeRate::AUTO;
 
     // Waveform mode
     WaveformMode negotiated_mode_ = WaveformMode::OFDM;
