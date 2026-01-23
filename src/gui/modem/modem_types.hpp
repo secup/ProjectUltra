@@ -13,6 +13,14 @@
 namespace ultra {
 namespace gui {
 
+// ============================================================================
+// WAVEFORM ENABLE FLAGS
+// ============================================================================
+// MFSK is disabled: DPSK works to -11 dB SNR which is sufficient for most cases.
+// MFSK would only provide ~6 dB additional sensitivity at 1/3 the speed.
+// Disabling MFSK speeds up acquisition by skipping Goertzel tone sweeps.
+constexpr bool MFSK_ENABLED = false;
+
 // Statistics for display (local to modem engine)
 struct LoopbackStats {
     float snr_db = 0.0f;

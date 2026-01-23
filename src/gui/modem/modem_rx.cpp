@@ -78,19 +78,21 @@ void ModemEngine::acquisitionLoop() {
             continue;
         }
 
-        // Try MFSK preamble detection
-        int mfsk_start = mfsk_demodulator_->findPreamble(span);
-        if (mfsk_start >= 0) {
-            DetectedFrame frame;
-            frame.data_start = mfsk_start;
-            frame.waveform = protocol::WaveformMode::MFSK;
-            frame.timestamp = std::chrono::steady_clock::now();
+        // Try MFSK preamble detection (only if enabled)
+        if constexpr (MFSK_ENABLED) {
+            int mfsk_start = mfsk_demodulator_->findPreamble(span);
+            if (mfsk_start >= 0) {
+                DetectedFrame frame;
+                frame.data_start = mfsk_start;
+                frame.waveform = protocol::WaveformMode::MFSK;
+                frame.timestamp = std::chrono::steady_clock::now();
 
-            detected_frame_queue_.push(frame);
-            last_rx_waveform_ = protocol::WaveformMode::MFSK;
+                detected_frame_queue_.push(frame);
+                last_rx_waveform_ = protocol::WaveformMode::MFSK;
 
-            LOG_MODEM(INFO, "[%s] Acquisition: MFSK preamble at %d (buffer=%zu)",
-                      log_prefix_.c_str(), mfsk_start, samples_snapshot.size());
+                LOG_MODEM(INFO, "[%s] Acquisition: MFSK preamble at %d (buffer=%zu)",
+                          log_prefix_.c_str(), mfsk_start, samples_snapshot.size());
+            }
         }
     }
 
@@ -147,10 +149,12 @@ void ModemEngine::rxDecodeLoop() {
                 if (buf_size > 4000) {
                     processRxBuffer_DPSK();
                 }
-            } else if (waveform_mode_ == protocol::WaveformMode::MFSK) {
-                // Process MFSK in connected mode
-                if (buf_size > 4000) {
-                    processRxBuffer_MFSK();
+            } else if constexpr (MFSK_ENABLED) {
+                if (waveform_mode_ == protocol::WaveformMode::MFSK) {
+                    // Process MFSK in connected mode
+                    if (buf_size > 4000) {
+                        processRxBuffer_MFSK();
+                    }
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -171,15 +175,18 @@ void ModemEngine::rxDecodeLoop() {
 
         LOG_MODEM(INFO, "[%s] RX decode: Processing %s frame at %d",
                   log_prefix_.c_str(),
-                  frame.waveform == protocol::WaveformMode::DPSK ? "DPSK" : "MFSK",
+                  frame.waveform == protocol::WaveformMode::DPSK ? "DPSK" :
+                  frame.waveform == protocol::WaveformMode::MFSK ? "MFSK" : "OFDM",
                   frame.data_start);
 
         // Decode based on waveform type
         bool success = false;
         if (frame.waveform == protocol::WaveformMode::DPSK) {
             success = rxDecodeDPSK(frame);
-        } else if (frame.waveform == protocol::WaveformMode::MFSK) {
-            success = rxDecodeMFSK(frame);
+        } else if constexpr (MFSK_ENABLED) {
+            if (frame.waveform == protocol::WaveformMode::MFSK) {
+                success = rxDecodeMFSK(frame);
+            }
         }
 
         if (!success) {
