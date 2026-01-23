@@ -47,14 +47,11 @@ add_library(ultra_core STATIC
     src/ofdm/demodulator.cpp
     src/ofdm/ofdm_sync.cpp
     src/ofdm/channel_equalizer.cpp
-    src/ofdm/channel_estimator.cpp
     src/ofdm/adaptive_modem.cpp
     src/otfs/otfs.cpp
     src/fec/ldpc_encoder.cpp
     src/fec/ldpc_decoder.cpp
     src/framing/frame_builder.cpp
-    src/framing/frame_parser.cpp
-    src/sync/synchronizer.cpp
     src/arq/arq_controller.cpp
     src/dsp/fft.cpp
     src/dsp/filters.cpp
