@@ -94,6 +94,7 @@ if(ULTRA_BUILD_TOOLS)
         src/main.cpp
         src/gui/modem/modem_engine.cpp
         src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
@@ -103,22 +104,12 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(ultra PRIVATE ultra_core)
 
-    # HF Channel Simulator / Loopback Test
-    add_executable(ultra_sim
-        src/sim/loopback_test.cpp
-        src/gui/adaptive_mode.cpp
-    )
-    target_include_directories(ultra_sim PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/sim
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/gui
-    )
-    target_link_libraries(ultra_sim PRIVATE ultra_core)
-
     # CLI Simulator - Command-line version of GUI test mode
     add_executable(cli_simulator
         tools/cli_simulator.cpp
         src/gui/modem/modem_engine.cpp
         src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
@@ -133,6 +124,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/test_modem_engine_loopback.cpp
         src/gui/modem/modem_engine.cpp
         src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
@@ -147,6 +139,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/test_sync_robustness.cpp
         src/gui/modem/modem_engine.cpp
         src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
@@ -191,6 +184,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/threaded_simulator.cpp
         src/gui/modem/modem_engine.cpp
         src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
@@ -215,6 +209,7 @@ if(ULTRA_BUILD_TOOLS)
         tools/test_hf_modem.cpp
         src/gui/modem/modem_engine.cpp
         src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
         src/gui/modem/modem_mode.cpp
         src/gui/modem/modem_carrier_sense.cpp
         src/gui/adaptive_mode.cpp
@@ -249,6 +244,7 @@ if(ULTRA_BUILD_GUI)
             src/gui/audio_engine.cpp
             src/gui/modem/modem_engine.cpp
             src/gui/modem/modem_rx.cpp
+            src/gui/modem/modem_rx_decode.cpp
             src/gui/modem/modem_mode.cpp
             src/gui/modem/modem_carrier_sense.cpp
             src/gui/adaptive_mode.cpp

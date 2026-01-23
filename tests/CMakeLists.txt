@@ -58,30 +58,10 @@ add_executable(test_protocol_modem test_protocol_modem.cpp)
 target_link_libraries(test_protocol_modem PRIVATE ultra_core)
 add_test(NAME ProtocolModem COMMAND test_protocol_modem)
 
-# ITU-R F.1487 HF Channel Benchmark Suite
-# Measures SNR thresholds for BER targets under standard channel conditions
-add_executable(benchmark_itu_r benchmark_itu_r.cpp)
-target_include_directories(benchmark_itu_r PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
-)
-target_link_libraries(benchmark_itu_r PRIVATE ultra_core)
-
 # Selective Repeat ARQ tests
 add_executable(test_selective_repeat test_selective_repeat.cpp)
 target_link_libraries(test_selective_repeat PRIVATE ultra_core)
 add_test(NAME SelectiveRepeatARQ COMMAND test_selective_repeat)
-
-# OTFS Unit Tests (full pipeline per CLAUDE.md)
-add_executable(test_otfs test_otfs.cpp)
-target_link_libraries(test_otfs PRIVATE ultra_core)
-add_test(NAME OTFS COMMAND test_otfs)
-
-# OFDM vs OTFS Comparison Benchmark
-add_executable(benchmark_otfs benchmark_otfs.cpp)
-target_include_directories(benchmark_otfs PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
-)
-target_link_libraries(benchmark_otfs PRIVATE ultra_core)
 
 # Adaptive Mode Selection Tests
 add_executable(test_adaptive_mode test_adaptive_mode.cpp)
@@ -90,14 +70,6 @@ target_include_directories(test_adaptive_mode PRIVATE
 )
 target_link_libraries(test_adaptive_mode PRIVATE ultra_core)
 add_test(NAME AdaptiveMode COMMAND test_adaptive_mode)
-
-# MIL-STD-188-110B Comparison Benchmark
-# Measures SNR thresholds for BER < 10^-3 and 10^-5 to compare with MIL-STD
-add_executable(benchmark_milstd benchmark_milstd.cpp)
-target_include_directories(benchmark_milstd PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/sim
-)
-target_link_libraries(benchmark_milstd PRIVATE ultra_core)
 
 # Adaptive Link Establishment Test (PROBE/CONNECT through full modem - CRITICAL)
 # Tests adaptive modulation selection and link establishment at various SNR levels

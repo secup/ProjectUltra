@@ -11,6 +11,7 @@
 #include "ultra/dsp.hpp"  // FIRFilter
 #include "psk/dpsk.hpp"   // DPSKModulator, DPSKDemodulator
 #include "../adaptive_mode.hpp"
+#include "protocol/frame_v2.hpp"  // v2::FrameType
 #include <memory>
 #include <vector>
 #include <queue>
@@ -219,9 +220,15 @@ private:
     void startRxDecodeThread();
     void stopRxDecodeThread();
 
-    // RX decode helpers
+    // RX decode helpers (implemented in modem_rx_decode.cpp)
     bool rxDecodeDPSK(const DetectedFrame& frame);
     bool rxDecodeOFDM();
+    bool detectPing(const std::vector<float>& soft_bits);
+    bool waitForSamples(size_t required);
+    std::vector<float> deinterleaveCodewords(const std::vector<float>& soft_bits);
+    void deliverFrame(const Bytes& frame_data);
+    void notifyFrameParsed(const Bytes& frame_data, protocol::v2::FrameType frame_type);
+    void updateStats(std::function<void(LoopbackStats&)> updater);
 
     // OFDM multi-codeword accumulation
     std::vector<float> ofdm_accumulated_soft_bits_;
