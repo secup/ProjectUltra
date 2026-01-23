@@ -63,6 +63,7 @@ add_library(ultra_core STATIC
     src/protocol/arq.cpp
     src/protocol/selective_repeat_arq.cpp
     src/protocol/connection.cpp
+    src/protocol/connection_handlers.cpp
     src/protocol/protocol_engine.cpp
     src/protocol/file_transfer.cpp
     src/protocol/compression.cpp
