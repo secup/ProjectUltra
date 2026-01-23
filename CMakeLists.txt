@@ -45,6 +45,8 @@ endif()
 add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
     src/ofdm/demodulator.cpp
+    src/ofdm/ofdm_sync.cpp
+    src/ofdm/channel_equalizer.cpp
     src/ofdm/channel_estimator.cpp
     src/ofdm/adaptive_modem.cpp
     src/otfs/otfs.cpp
