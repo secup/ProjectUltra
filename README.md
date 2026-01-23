@@ -2,7 +2,7 @@
 
 **High-performance HF modem for amateur radio**
 
-*Last updated: 2026-01-22*
+*Last updated: 2026-01-23*
 
 > **EXPERIMENTAL SOFTWARE - WORK IN PROGRESS**
 >
@@ -41,12 +41,20 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 | 25+ dB | OFDM DQPSK R1/2 | 2.5 kbps | Good conditions |
 | 30+ dB | OFDM DQPSK R2/3 | 3.4 kbps | Excellent conditions |
 
-**NVIS / Local / Cable (stable phase):**
+**NVIS / Local / Cable (stable phase) - Standard 512 FFT:**
 | SNR | Mode | Throughput | Notes |
 |-----|------|------------|-------|
 | 20+ dB | OFDM 16QAM R2/3 | 3.4 kbps | Coherent with pilots |
 | 25+ dB | OFDM 16QAM R3/4 | 3.8 kbps | Good NVIS conditions |
 | 28+ dB | OFDM 16QAM R5/6 | 4.3 kbps | Excellent NVIS/local |
+
+**NVIS High-Speed Mode (1024 FFT, 59 carriers, ~42 baud):**
+| SNR | Mode | Throughput | Notes |
+|-----|------|------------|-------|
+| 25+ dB | OFDM DQPSK R3/4 | 3.8 kbps | All 59 carriers as data |
+| 25+ dB | OFDM D8PSK R3/4 | 5.7 kbps | All 59 carriers as data |
+| 30+ dB | OFDM 16QAM R3/4 | 5.8 kbps | 45 data + 14 pilot carriers |
+| 30+ dB | OFDM 32QAM R3/4 | **7.2 kbps** | Maximum throughput |
 
 *Reported SNR in 2500 Hz bandwidth; actual SNR in signal bandwidth is higher.
 
@@ -56,16 +64,20 @@ pilot-assisted channel estimation. Use the GUI Expert settings to force 16QAM mo
 
 ### Waveform Strategy
 
-ProjectUltra uses three waveform types, each optimized for different conditions:
+ProjectUltra uses multiple waveform types, each optimized for different conditions:
 
 ```
 SNR Range           Waveform              Why
 ─────────────────────────────────────────────────────────────
 < 0 dB              MFSK 8-tone           Narrow bandwidth, long integration
 0-17 dB             Single-carrier DPSK   Full power concentration, no ICI
-17+ dB              OFDM DQPSK            High throughput, differential encoding
-25+ dB (NVIS)       OFDM 16QAM            Maximum throughput, pilot-assisted
+17+ dB              OFDM 512-FFT          High throughput, fast symbols (85 baud)
+25+ dB (NVIS)       OFDM 1024-FFT         Max throughput, slow symbols (42 baud)
 ```
+
+**Two OFDM modes** for different channel conditions:
+- **512 FFT (85 baud)**: Fast symbols tolerate Doppler/flutter, 30 carriers
+- **1024 FFT (42 baud)**: Slow symbols maximize throughput on stable paths, 59 carriers
 
 **Key insight**: On challenging HF channels (multipath, flutter), single-carrier DPSK achieves 100% success where multi-carrier schemes fail. This is because DPSK concentrates all power in one carrier and differential encoding cancels phase distortion.
 
@@ -134,13 +146,15 @@ full CONNECT sequence. If no response after 5 PINGs (15 seconds), connection fai
 
 ### Signal Parameters
 
-| Parameter | Value |
-|-----------|-------|
-| Sample Rate | 48 kHz |
-| Bandwidth | ~2.8 kHz |
-| Center Frequency | 1500 Hz (audio) |
-| OFDM Carriers | 30 |
-| LDPC Codeword | 648 bits |
+| Parameter | Standard Mode | NVIS Mode |
+|-----------|---------------|-----------|
+| Sample Rate | 48 kHz | 48 kHz |
+| Bandwidth | ~2.8 kHz | ~2.8 kHz |
+| Center Frequency | 1500 Hz | 1500 Hz |
+| FFT Size | 512 | 1024 |
+| OFDM Carriers | 30 | 59 |
+| Symbol Rate | ~85 baud | ~42 baud |
+| LDPC Codeword | 648 bits | 648 bits |
 
 ### LDPC Codes
 
@@ -238,7 +252,8 @@ power necessary. Be ready to QSY if causing interference.
 **Working (in simulation):**
 - All LDPC code rates (R1/4 through R5/6)
 - OFDM with DQPSK/D8PSK modulation (differential)
-- OFDM with QPSK/16QAM modulation (coherent, for NVIS/local)
+- OFDM with QPSK/16QAM/32QAM modulation (coherent, for NVIS/local)
+- **NVIS high-speed mode**: 1024 FFT, 59 carriers, up to 7.2 kbps
 - Single-carrier DPSK (DBPSK/DQPSK/D8PSK)
 - MFSK (2/4/8/16/32 tones)
 - ARQ protocol with retransmission
