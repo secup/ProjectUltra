@@ -92,6 +92,14 @@ endif()
 if(ULTRA_BUILD_TOOLS)
     add_executable(ultra
         src/main.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(ultra PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(ultra PRIVATE ultra_core)
 
