@@ -115,6 +115,12 @@ void ModemEngine::rxDecodeLoop() {
                 if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC || has_pending) {
                     processRxBuffer_OFDM();
                 }
+            } else if (waveform_mode_ == protocol::WaveformMode::OTFS_EQ ||
+                       waveform_mode_ == protocol::WaveformMode::OTFS_RAW) {
+                // OTFS processing - similar to OFDM but with OTFS demodulator
+                if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC) {
+                    processRxBuffer_OTFS();
+                }
             } else if (waveform_mode_ == protocol::WaveformMode::DPSK) {
                 if (buf_size > MIN_SAMPLES_FOR_DPSK) {
                     processRxBuffer_DPSK();

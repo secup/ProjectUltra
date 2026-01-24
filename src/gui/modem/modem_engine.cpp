@@ -35,12 +35,16 @@ ModemEngine::ModemEngine() {
     ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(rx_config);
 
     // OTFS modulator/demodulator (used for data frames when negotiated)
-    otfs_config_.M = config_.num_carriers;
-    otfs_config_.N = 16;  // 16 OFDM symbols per OTFS frame
+    // OTFS uses delay-Doppler grid: M delay bins × N Doppler bins
+    // 1 OTFS frame = 1 LDPC codeword (648 bits = 324 QPSK symbols)
+    // M=32, N=16 = 512 symbols capacity (enough for 1 codeword + pilots)
+    otfs_config_.M = 32;   // Delay bins
+    otfs_config_.N = 16;   // Doppler bins = OFDM symbols per frame
     otfs_config_.fft_size = config_.fft_size;
-    otfs_config_.cp_length = config_.getCyclicPrefix();
+    otfs_config_.cp_length = 64;  // Fixed CP for OTFS (different from OFDM)
     otfs_config_.sample_rate = config_.sample_rate;
     otfs_config_.center_freq = config_.center_freq;
+    otfs_config_.modulation = Modulation::QPSK;  // Default for OTFS
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
@@ -96,11 +100,14 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     }
 
     // Recreate OTFS modulator/demodulator with new config
-    otfs_config_.M = config_.num_carriers;
+    // Keep M=32 fixed (1 codeword per OTFS frame)
+    // OTFS uses fixed CP=64 (different from OFDM)
+    otfs_config_.M = 32;
     otfs_config_.fft_size = config_.fft_size;
-    otfs_config_.cp_length = config_.getCyclicPrefix();
+    otfs_config_.cp_length = 64;  // Fixed for OTFS
     otfs_config_.sample_rate = config_.sample_rate;
     otfs_config_.center_freq = config_.center_freq;
+    otfs_config_.modulation = Modulation::QPSK;
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
@@ -332,6 +339,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     }
 
     bool use_dpsk = (active_waveform == protocol::WaveformMode::DPSK);
+    bool use_otfs = (active_waveform == protocol::WaveformMode::OTFS_EQ ||
+                     active_waveform == protocol::WaveformMode::OTFS_RAW);
 
     Samples preamble, modulated;
 
@@ -340,6 +349,52 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   log_prefix_.c_str(), dpsk_config_.num_phases(), dpsk_config_.samples_per_symbol);
         preamble = dpsk_modulator_->generatePreamble();
         modulated = dpsk_modulator_->modulate(to_modulate);
+    } else if (use_otfs) {
+        // OTFS: 1 codeword per frame, multiple frames for multi-codeword messages
+        // Each encoded codeword is 81 bytes (648 bits)
+        constexpr size_t BYTES_PER_CODEWORD = 81;
+        size_t num_codewords = (to_modulate.size() + BYTES_PER_CODEWORD - 1) / BYTES_PER_CODEWORD;
+
+        LOG_MODEM(INFO, "[%s] TX: Using OTFS modulation (%s, M=%d, N=%d, %zu codewords = %zu frames)",
+                  log_prefix_.c_str(),
+                  active_waveform == protocol::WaveformMode::OTFS_EQ ? "TF-EQ" : "RAW",
+                  otfs_config_.M, otfs_config_.N, num_codewords, num_codewords);
+
+        // Configure OTFS equalization mode
+        otfs_config_.tf_equalization = (active_waveform == protocol::WaveformMode::OTFS_EQ);
+        otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
+
+        // Generate one OTFS frame per codeword
+        const size_t INTER_FRAME_GAP = 480;  // 10ms gap between frames
+
+        for (size_t cw = 0; cw < num_codewords; cw++) {
+            // Extract this codeword's bytes
+            size_t start = cw * BYTES_PER_CODEWORD;
+            size_t end = std::min(start + BYTES_PER_CODEWORD, to_modulate.size());
+            Bytes cw_data(to_modulate.begin() + start, to_modulate.begin() + end);
+
+            // Pad if last codeword is partial
+            while (cw_data.size() < BYTES_PER_CODEWORD) {
+                cw_data.push_back(0);
+            }
+
+            // Map to DD grid and modulate
+            auto dd_symbols = otfs_modulator_->mapToDD(cw_data, tx_modulation);
+            auto frame_preamble = otfs_modulator_->generatePreamble();
+            auto frame_data = otfs_modulator_->modulate(dd_symbols, tx_modulation);
+
+            // Append preamble + data
+            modulated.insert(modulated.end(), frame_preamble.begin(), frame_preamble.end());
+            modulated.insert(modulated.end(), frame_data.begin(), frame_data.end());
+
+            // Add gap between frames (except after last)
+            if (cw + 1 < num_codewords) {
+                modulated.resize(modulated.size() + INTER_FRAME_GAP, 0.0f);
+            }
+        }
+
+        // preamble is empty for OTFS (already included in modulated)
+        preamble.clear();
     } else {
         LOG_MODEM(INFO, "[%s] TX: Using OFDM modulation (%s)",
                   log_prefix_.c_str(), is_v2_frame ? "control frame" : "data frame");

@@ -234,6 +234,10 @@ private:
     std::vector<float> ofdm_accumulated_soft_bits_;
     int ofdm_expected_codewords_ = 0;
 
+    // OTFS multi-codeword accumulation (1 OTFS frame = 1 codeword)
+    std::vector<float> otfs_accumulated_soft_bits_;
+    int otfs_expected_codewords_ = 0;
+
     // Multi-detect rate limiting
     size_t last_multidetect_buffer_size_ = 0;
     static constexpr size_t MULTIDETECT_MIN_NEW_SAMPLES = 4800;
@@ -281,6 +285,7 @@ private:
     size_t getBufferSize() const;
     void consumeSamples(size_t count);
     void processRxBuffer_OFDM();
+    void processRxBuffer_OTFS();
     void processRxBuffer_DPSK();
 };
 

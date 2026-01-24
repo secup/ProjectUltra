@@ -231,6 +231,11 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(test_hf_modem PRIVATE ultra_core)
+
+    # OTFS vs OFDM comparison test
+    add_executable(test_otfs_vs_ofdm tools/test_otfs_vs_ofdm.cpp)
+    target_include_directories(test_otfs_vs_ofdm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_otfs_vs_ofdm PRIVATE ultra_core)
 endif()
 
 # GUI Application

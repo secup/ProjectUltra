@@ -84,6 +84,8 @@ static FrameDecodeResult decodeCodewords(
             cw_status.decoded[i] = true;
             cw_status.data[i] = cw_data;
             result.codewords_ok++;
+            LOG_MODEM(DEBUG, "[%s] CW%zu: LDPC OK (rate=%d, got %zu bytes)",
+                      log_prefix, i, static_cast<int>(rate), cw_data.size());
 
             // Extract frame type from CW0 header
             if (i == 0) {
@@ -97,6 +99,7 @@ static FrameDecodeResult decodeCodewords(
             }
         } else {
             result.codewords_failed++;
+            LOG_MODEM(DEBUG, "[%s] CW%zu: LDPC FAIL (rate=%d)", log_prefix, i, static_cast<int>(rate));
         }
     }
 
@@ -448,6 +451,207 @@ void ModemEngine::processRxBuffer_OFDM() {
     }
 
     ofdm_demodulator_->reset();
+}
+
+// ============================================================================
+// OTFS FRAME DECODE
+// ============================================================================
+// OTFS architecture: 1 OTFS frame = 1 LDPC codeword
+// Multi-codeword messages = multiple OTFS frames in sequence
+// RX accumulates codewords until complete message received
+
+void ModemEngine::processRxBuffer_OTFS() {
+    using namespace rx_constants;
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+
+    // Get samples from buffer (keep demodulator persistent!)
+    std::vector<float> samples;
+    {
+        std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+        if (rx_sample_buffer_.size() < MIN_SAMPLES_FOR_OFDM_SYNC &&
+            otfs_accumulated_soft_bits_.empty()) {
+            return;
+        }
+        samples = std::move(rx_sample_buffer_);
+        rx_sample_buffer_.clear();
+    }
+
+    // Ensure demodulator exists with correct config (only create once)
+    bool need_tf_eq = (waveform_mode_ == protocol::WaveformMode::OTFS_EQ);
+    if (!otfs_demodulator_ || otfs_config_.tf_equalization != need_tf_eq) {
+        otfs_config_.tf_equalization = need_tf_eq;
+        otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
+        LOG_MODEM(INFO, "[%s] OTFS: Created demodulator (TF-EQ=%s)",
+                  log_prefix_.c_str(), need_tf_eq ? "true" : "false");
+    }
+
+    // Feed samples and process all available frames
+    bool frame_ready = false;
+    if (!samples.empty()) {
+        LOG_MODEM(DEBUG, "[%s] OTFS: Feeding %zu samples to demodulator",
+                  log_prefix_.c_str(), samples.size());
+        SampleSpan span(samples.data(), samples.size());
+        frame_ready = otfs_demodulator_->process(span);
+    }
+
+    // Loop to extract all ready frames from the demodulator
+    while (true) {
+        // If no frame ready from previous call, try processing more
+        if (!frame_ready) {
+            SampleSpan empty_span{};  // Empty span
+            frame_ready = otfs_demodulator_->process(empty_span);
+        }
+
+        if (!frame_ready) {
+            break;  // No more frames ready
+        }
+
+        // Get soft bits from this OTFS frame (should be ~1 codeword worth)
+        auto soft_bits = otfs_demodulator_->getSoftBits();
+        if (soft_bits.size() < LDPC_BLOCK) {
+            LOG_MODEM(WARN, "[%s] OTFS: Insufficient bits (%zu < %zu)",
+                      log_prefix_.c_str(), soft_bits.size(), LDPC_BLOCK);
+            // Demodulator already back in SEARCHING state, just continue
+            frame_ready = false;
+            continue;
+        }
+
+        // Deinterleave if enabled
+        if (interleaving_enabled_) {
+            soft_bits = deinterleaveCodewords(soft_bits);
+        }
+
+        // Take exactly 1 codeword worth of bits
+        std::vector<float> cw_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+
+        // Accumulate this codeword's soft bits
+        otfs_accumulated_soft_bits_.insert(otfs_accumulated_soft_bits_.end(),
+                                            cw_bits.begin(), cw_bits.end());
+
+        size_t accumulated_cw = otfs_accumulated_soft_bits_.size() / LDPC_BLOCK;
+        // Log soft bit statistics for debugging
+        float sum = 0, min_val = cw_bits[0], max_val = cw_bits[0];
+        for (float v : cw_bits) {
+            sum += v;
+            if (v < min_val) min_val = v;
+            if (v > max_val) max_val = v;
+        }
+        float mean = sum / cw_bits.size();
+        LOG_MODEM(INFO, "[%s] OTFS: Frame decoded, accumulated %zu codewords (soft bits: mean=%.2f, min=%.2f, max=%.2f)",
+                  log_prefix_.c_str(), accumulated_cw, mean, min_val, max_val);
+
+        // After first frame, probe CW0 to learn expected count
+        if (otfs_expected_codewords_ == 0 && accumulated_cw == 1) {
+            std::vector<float> cw0_bits(otfs_accumulated_soft_bits_.begin(),
+                                         otfs_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+            Bytes cw0_data;
+            if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+                auto cw_info = v2::identifyCodeword(cw0_data);
+                if (cw_info.type == v2::CodewordType::HEADER) {
+                    auto header = v2::parseHeader(cw0_data);
+                    if (header.valid) {
+                        otfs_expected_codewords_ = header.total_cw;
+                        LOG_MODEM(INFO, "[%s] OTFS: CW0 decoded early, expecting %d codewords",
+                                  log_prefix_.c_str(), otfs_expected_codewords_);
+                    }
+                }
+            }
+        }
+
+        // Stop accumulating if we have enough
+        if (otfs_expected_codewords_ > 0 && accumulated_cw >= (size_t)otfs_expected_codewords_) {
+            LOG_MODEM(INFO, "[%s] OTFS: Got all %d expected codewords, stopping",
+                      log_prefix_.c_str(), otfs_expected_codewords_);
+            break;  // Don't process more frames
+        }
+
+        // Demodulator already transitions to SEARCHING state after returning soft bits
+        // Do NOT call reset() as that would clear the sample buffer with remaining frames
+        frame_ready = false;
+    }
+
+    size_t num_codewords = otfs_accumulated_soft_bits_.size() / LDPC_BLOCK;
+    if (num_codewords == 0) {
+        return;
+    }
+
+    // Probe CW0 to get expected codeword count (if not already known)
+    if (otfs_expected_codewords_ == 0 && num_codewords >= 1) {
+        std::vector<float> cw0_bits(otfs_accumulated_soft_bits_.begin(),
+                                     otfs_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+
+        Bytes cw0_data;
+        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+            auto cw_info = v2::identifyCodeword(cw0_data);
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw0_data);
+                if (header.valid) {
+                    otfs_expected_codewords_ = header.total_cw;
+                    LOG_MODEM(INFO, "[%s] OTFS: CW0 decoded, expecting %d total codewords",
+                              log_prefix_.c_str(), otfs_expected_codewords_);
+                }
+            }
+        } else {
+            LOG_MODEM(INFO, "[%s] OTFS: CW0 LDPC decode failed", log_prefix_.c_str());
+        }
+    }
+
+    // Wait for all codewords if we know how many to expect
+    if (otfs_expected_codewords_ > 0 && num_codewords < (size_t)otfs_expected_codewords_) {
+        // Don't reset - let demodulator keep searching for next frame
+        return;
+    }
+
+    // If CW0 failed and we only have 1 codeword, discard and try again
+    if (otfs_expected_codewords_ == 0 && num_codewords == 1) {
+        LOG_MODEM(INFO, "[%s] OTFS: CW0 failed, discarding", log_prefix_.c_str());
+        otfs_accumulated_soft_bits_.clear();
+        return;
+    }
+
+    // --- All codewords received, decode complete message ---
+    auto accumulated = std::move(otfs_accumulated_soft_bits_);
+    otfs_accumulated_soft_bits_.clear();
+    int expected = otfs_expected_codewords_;
+    otfs_expected_codewords_ = 0;
+
+    num_codewords = accumulated.size() / LDPC_BLOCK;
+    if (expected > 0 && (size_t)expected < num_codewords) {
+        num_codewords = expected;
+    }
+
+    // Determine frame type from CW0 for rate selection
+    v2::FrameType frame_type = v2::FrameType::PROBE;
+    {
+        std::vector<float> cw0_bits(accumulated.begin(), accumulated.begin() + LDPC_BLOCK);
+        Bytes cw0_data;
+        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+            auto cw_info = v2::identifyCodeword(cw0_data);
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw0_data);
+                if (header.valid) frame_type = header.type;
+            }
+        }
+    }
+
+    bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
+    auto result = decodeCodewords(accumulated, num_codewords, data_code_rate_,
+                                   use_adaptive, log_prefix_.c_str());
+
+    LOG_MODEM(INFO, "[%s] OTFS: Decoded %d/%d codewords",
+              log_prefix_.c_str(), result.codewords_ok,
+              result.codewords_ok + result.codewords_failed);
+
+    if (result.success && !result.frame_data.empty()) {
+        deliverFrame(result.frame_data);
+        notifyFrameParsed(result.frame_data, result.frame_type);
+    } else {
+        updateStats([&](LoopbackStats& s) {
+            if (result.codewords_failed > 0) s.frames_failed++;
+        });
+    }
+
+    otfs_demodulator_->reset();
 }
 
 // ============================================================================
