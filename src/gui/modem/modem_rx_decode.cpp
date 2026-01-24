@@ -516,10 +516,7 @@ void ModemEngine::processRxBuffer_OTFS() {
             continue;
         }
 
-        // Deinterleave if enabled
-        if (interleaving_enabled_) {
-            soft_bits = deinterleaveCodewords(soft_bits);
-        }
+        // OTFS has built-in time-frequency diversity, no interleaving needed
 
         // Take exactly 1 codeword worth of bits
         std::vector<float> cw_bits(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);

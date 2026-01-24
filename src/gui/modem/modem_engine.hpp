@@ -150,6 +150,10 @@ public:
     DPSKModulation getDPSKModulation() const { return dpsk_config_.modulation; }
     const DPSKConfig& getDPSKConfig() const { return dpsk_config_; }
 
+    // Interleaving control
+    void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
+    bool isInterleavingEnabled() const { return interleaving_enabled_; }
+
 private:
     ModemConfig config_;
     std::string log_prefix_ = "MODEM";
@@ -260,9 +264,9 @@ private:
     // Adaptive modulation controller
     AdaptiveModeController adaptive_;
 
-    // Interleaver
+    // Interleaver (enabled by default for OFDM)
     Interleaver interleaver_{6, 108};
-    bool interleaving_enabled_ = false;
+    bool interleaving_enabled_ = true;
 
     // Audio filters
     FilterConfig filter_config_;
