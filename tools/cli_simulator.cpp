@@ -27,10 +27,14 @@
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
 #include "ultra/logging.hpp"
+#include "sim/hf_channel.hpp"
 
 using namespace ultra;
 using namespace ultra::gui;
 using namespace ultra::protocol;
+
+// HF channel condition
+enum class ChannelCondition { AWGN, Good, Moderate, Poor, Flutter };
 
 class CLISimulator {
 public:
@@ -39,6 +43,7 @@ public:
     void setSNR(float snr) { snr_db_ = snr; }
     void setVerbose(bool v) { verbose_ = v; }
     void setNoReply(bool v) { no_reply_ = v; }
+    void setChannelCondition(ChannelCondition cond) { channel_condition_ = cond; }
 
     // Forced mode settings (operator override)
     void setForcedWaveform(WaveformMode mode) { forced_waveform_ = mode; }
@@ -182,7 +187,9 @@ private:
     float snr_db_ = 20.0f;
     bool verbose_ = false;
     bool no_reply_ = false;
+    ChannelCondition channel_condition_ = ChannelCondition::AWGN;
     std::mt19937 rng_{42};
+    std::unique_ptr<sim::WattersonChannel> hf_channel_;
 
     // Forced mode settings (operator override, default AUTO)
     WaveformMode forced_waveform_ = WaveformMode::AUTO;
@@ -195,6 +202,19 @@ private:
     void initStations() {
         // Reset timing baseline
         last_tick_time_ = std::chrono::steady_clock::now();
+
+        // Initialize HF channel if not AWGN
+        if (channel_condition_ != ChannelCondition::AWGN) {
+            sim::WattersonChannel::Config cfg;
+            switch (channel_condition_) {
+                case ChannelCondition::Good:     cfg = sim::itu_r_f1487::good(snr_db_); break;
+                case ChannelCondition::Moderate: cfg = sim::itu_r_f1487::moderate(snr_db_); break;
+                case ChannelCondition::Poor:     cfg = sim::itu_r_f1487::poor(snr_db_); break;
+                case ChannelCondition::Flutter:  cfg = sim::itu_r_f1487::flutter(snr_db_); break;
+                default: cfg = sim::itu_r_f1487::awgn(snr_db_); break;
+            }
+            hf_channel_ = std::make_unique<sim::WattersonChannel>(cfg, 42);
+        }
 
         // === Our station (ALPHA) ===
         modem_.setLogPrefix("ALPHA");
@@ -426,20 +446,36 @@ private:
     void applyChannel(std::vector<float>& samples) {
         if (samples.empty()) return;
 
-        // Calculate signal power (per-frame, no silence in buffer)
-        float sum_sq = 0.0f;
-        for (float s : samples) sum_sq += s * s;
-        float signal_rms = std::sqrt(sum_sq / samples.size());
-        if (signal_rms < 1e-6f) return;
+        if (hf_channel_) {
+            // Use Watterson fading channel (includes noise)
+            SampleSpan span(samples.data(), samples.size());
+            samples = hf_channel_->process(span);
+        } else {
+            // AWGN only
+            float sum_sq = 0.0f;
+            for (float s : samples) sum_sq += s * s;
+            float signal_rms = std::sqrt(sum_sq / samples.size());
+            if (signal_rms < 1e-6f) return;
 
-        // Add AWGN
-        float snr_linear = std::pow(10.0f, snr_db_ / 10.0f);
-        float noise_power = (signal_rms * signal_rms) / snr_linear;
-        float noise_stddev = std::sqrt(noise_power);
+            float snr_linear = std::pow(10.0f, snr_db_ / 10.0f);
+            float noise_power = (signal_rms * signal_rms) / snr_linear;
+            float noise_stddev = std::sqrt(noise_power);
 
-        std::normal_distribution<float> noise(0.0f, noise_stddev);
-        for (float& s : samples) {
-            s += noise(rng_);
+            std::normal_distribution<float> noise(0.0f, noise_stddev);
+            for (float& s : samples) {
+                s += noise(rng_);
+            }
+        }
+    }
+
+    const char* channelConditionName() const {
+        switch (channel_condition_) {
+            case ChannelCondition::AWGN: return "AWGN";
+            case ChannelCondition::Good: return "Good (0.5ms/0.1Hz)";
+            case ChannelCondition::Moderate: return "Moderate (1.0ms/0.5Hz)";
+            case ChannelCondition::Poor: return "Poor (2.0ms/1.0Hz)";
+            case ChannelCondition::Flutter: return "Flutter (0.5ms/10Hz)";
+            default: return "Unknown";
         }
     }
 
@@ -451,6 +487,7 @@ private:
         std::cout << "\n";
         std::cout << "Configuration:\n";
         std::cout << "  SNR:       " << snr_db_ << " dB\n";
+        std::cout << "  Channel:   " << channelConditionName() << "\n";
         std::cout << "  Stations:  ALPHA <-> BRAVO\n";
         std::cout << "\n";
     }
@@ -489,6 +526,8 @@ static CodeRate parseCodeRate(const std::string& s) {
 static WaveformMode parseWaveform(const std::string& s) {
     if (s == "OFDM" || s == "ofdm") return WaveformMode::OFDM;
     if (s == "DPSK" || s == "dpsk") return WaveformMode::DPSK;
+    if (s == "OTFS" || s == "otfs" || s == "otfs_eq") return WaveformMode::OTFS_EQ;
+    if (s == "otfs_raw" || s == "OTFS_RAW") return WaveformMode::OTFS_RAW;
     return WaveformMode::AUTO;
 }
 
@@ -507,18 +546,41 @@ int main(int argc, char* argv[]) {
             sim.setForcedModulation(parseModulation(argv[++i]));
         } else if ((arg == "--force-rate" || arg == "-fr") && i + 1 < argc) {
             sim.setForcedCodeRate(parseCodeRate(argv[++i]));
+        } else if ((arg == "--channel" || arg == "-c") && i + 1 < argc) {
+            std::string ch = argv[++i];
+            if (ch == "awgn" || ch == "AWGN") {
+                sim.setChannelCondition(ChannelCondition::AWGN);
+            } else if (ch == "good" || ch == "Good") {
+                sim.setChannelCondition(ChannelCondition::Good);
+            } else if (ch == "moderate" || ch == "Moderate") {
+                sim.setChannelCondition(ChannelCondition::Moderate);
+            } else if (ch == "poor" || ch == "Poor") {
+                sim.setChannelCondition(ChannelCondition::Poor);
+            } else if (ch == "flutter" || ch == "Flutter") {
+                sim.setChannelCondition(ChannelCondition::Flutter);
+            } else {
+                std::cerr << "Unknown channel: " << ch << " (use: awgn, good, moderate, poor, flutter)\n";
+                return 1;
+            }
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - Fast batch processing\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
             std::cout << "Options:\n";
             std::cout << "  --snr <dB>          Set channel SNR (default: 20)\n";
+            std::cout << "  --channel <type>    HF channel: awgn, good, moderate, poor, flutter\n";
             std::cout << "  --verbose           Enable verbose logging\n";
-            std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK\n";
+            std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK, OTFS\n";
             std::cout << "  --force-mod <mod>   Force modulation: DQPSK, QPSK, QAM16, D8PSK, etc.\n";
             std::cout << "  --force-rate <rate> Force code rate: R1/4, R1/2, R2/3, R3/4, R5/6\n";
+            std::cout << "\nHF Channel Conditions (ITU-R F.1487):\n";
+            std::cout << "  awgn      No fading, no multipath (baseline)\n";
+            std::cout << "  good      0.5ms delay, 0.1 Hz Doppler (quiet mid-latitude)\n";
+            std::cout << "  moderate  1.0ms delay, 0.5 Hz Doppler (typical)\n";
+            std::cout << "  poor      2.0ms delay, 1.0 Hz Doppler (disturbed)\n";
+            std::cout << "  flutter   0.5ms delay, 10 Hz Doppler (auroral/polar)\n";
             std::cout << "\nExamples:\n";
-            std::cout << "  " << argv[0] << " --snr 25 --force-mod QAM16 --force-rate R1/2\n";
-            std::cout << "  " << argv[0] << " --snr 15 --force-waveform DPSK\n";
+            std::cout << "  " << argv[0] << " --snr 25 --channel good --force-waveform OTFS\n";
+            std::cout << "  " << argv[0] << " --snr 20 --channel moderate\n";
             return 0;
         }
     }

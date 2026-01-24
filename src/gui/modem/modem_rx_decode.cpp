@@ -202,22 +202,9 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
             return true;
         }
 
-        // Convert soft to bytes for v2 magic check
-        Bytes header_bytes;
-        for (size_t i = 0; i + 8 <= ping_soft.size(); i += 8) {
-            uint8_t byte = 0;
-            for (int b = 0; b < 8; b++) {
-                if (ping_soft[i + b] > 0) byte |= (1 << (7 - b));
-            }
-            header_bytes.push_back(byte);
-        }
-
-        if (!looksLikeV2Frame(header_bytes)) {
-            LOG_MODEM(INFO, "[%s] DPSK: Not PING or v2 frame, discarding", log_prefix_.c_str());
-            consumeSamples(frame.data_start + samples_for_ping);
-            dpsk_demodulator_->reset();
-            return false;
-        }
+        // Not a PING - assume it's an LDPC-encoded v2 frame
+        // The magic bytes will be visible after LDPC decoding, not in raw soft bits
+        LOG_MODEM(DEBUG, "[%s] DPSK: Not PING, trying v2 LDPC decode", log_prefix_.c_str());
     }
 
     // --- Step 2: Decode CW0 to get codeword count ---
