@@ -426,13 +426,7 @@ private:
     void applyChannel(std::vector<float>& samples) {
         if (samples.empty()) return;
 
-        // DEBUG: Skip AWGN to test if preamble is detected without noise
-        // TODO: Re-enable once basic detection works
-        (void)snr_db_;  // Suppress unused warning
-        (void)rng_;
-        return;  // No channel effects for now
-
-        // Calculate signal power
+        // Calculate signal power (per-frame, no silence in buffer)
         float sum_sq = 0.0f;
         for (float s : samples) sum_sq += s * s;
         float signal_rms = std::sqrt(sum_sq / samples.size());
