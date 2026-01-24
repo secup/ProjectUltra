@@ -26,22 +26,24 @@ namespace FrameFlags {
 
 // Modulation modes for adaptive selection (negotiated in CONNECT)
 enum class WaveformMode : uint8_t {
-    OFDM     = 0x00,  // Standard OFDM (best for high SNR, +15 dB and up)
-    OTFS_EQ  = 0x01,  // OTFS with TF equalization (best for Good channels)
-    OTFS_RAW = 0x02,  // OTFS without TF eq (best for Poor channels)
-    MFSK     = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
-    DPSK     = 0x04,  // Single-carrier DPSK for mid SNR (0 dB to +15 dB)
-    AUTO     = 0xFF,  // Automatic selection (let receiver decide)
+    OFDM       = 0x00,  // Standard OFDM with Schmidl-Cox sync (17+ dB)
+    OTFS_EQ    = 0x01,  // OTFS with TF equalization (best for Good channels)
+    OTFS_RAW   = 0x02,  // OTFS without TF eq (best for Poor channels)
+    MFSK       = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
+    DPSK       = 0x04,  // Single-carrier DPSK for extreme low SNR (-8 to 0 dB)
+    OFDM_CHIRP = 0x05,  // OFDM with chirp sync + DQPSK (0 to 17 dB) - high throughput at low SNR
+    AUTO       = 0xFF,  // Automatic selection (let receiver decide)
 };
 
 // Mode capabilities bitmap (for CONNECT payload)
 namespace ModeCapabilities {
-    constexpr uint8_t OFDM     = 0x01;
-    constexpr uint8_t OTFS_EQ  = 0x02;
-    constexpr uint8_t OTFS_RAW = 0x04;
-    constexpr uint8_t MFSK     = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
-    constexpr uint8_t DPSK     = 0x10;  // Single-carrier DPSK for mid SNR (0 to +15 dB)
-    constexpr uint8_t ALL      = OFDM | OTFS_EQ | OTFS_RAW | MFSK | DPSK;
+    constexpr uint8_t OFDM       = 0x01;
+    constexpr uint8_t OTFS_EQ    = 0x02;
+    constexpr uint8_t OTFS_RAW   = 0x04;
+    constexpr uint8_t MFSK       = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
+    constexpr uint8_t DPSK       = 0x10;  // Single-carrier DPSK for extreme low SNR (-8 to 0 dB)
+    constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync (0 to 17 dB)
+    constexpr uint8_t ALL        = OFDM | OTFS_EQ | OTFS_RAW | MFSK | DPSK | OFDM_CHIRP;
 }
 
 const char* waveformModeToString(WaveformMode mode);

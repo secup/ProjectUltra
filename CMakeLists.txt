@@ -217,6 +217,41 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(profile_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(profile_acquisition PRIVATE ultra_core)
 
+    # Chirp acquisition test - isolated test for new preamble
+    add_executable(test_chirp_acquisition tools/test_chirp_acquisition.cpp)
+    target_include_directories(test_chirp_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_chirp_acquisition PRIVATE ultra_core)
+
+    # Basic chirp test - minimal debugging
+    add_executable(test_chirp_basic tools/test_chirp_basic.cpp)
+    target_include_directories(test_chirp_basic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_chirp_basic PRIVATE ultra_core)
+
+    # CFO debug test - isolated CFO estimation debugging
+    add_executable(test_cfo_debug tools/test_cfo_debug.cpp)
+    target_include_directories(test_cfo_debug PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_cfo_debug PRIVATE ultra_core)
+
+    # DPSK channel isolation test - debug fading vs multipath
+    add_executable(test_dpsk_channel tools/test_dpsk_channel.cpp)
+    target_include_directories(test_dpsk_channel PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_dpsk_channel PRIVATE ultra_core)
+
+    # Multi-Carrier DPSK test - fills gap between single-carrier and OFDM
+    add_executable(test_mc_dpsk tools/test_mc_dpsk.cpp)
+    target_include_directories(test_mc_dpsk PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_mc_dpsk PRIVATE ultra_core)
+
+    # MC-DPSK full frame test (fast, no threading)
+    add_executable(test_mc_dpsk_frame tools/test_mc_dpsk_frame.cpp)
+    target_include_directories(test_mc_dpsk_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_mc_dpsk_frame PRIVATE ultra_core)
+
+    # OFDM with chirp sync test
+    add_executable(test_ofdm_chirp tools/test_ofdm_chirp.cpp)
+    target_include_directories(test_ofdm_chirp PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_ofdm_chirp PRIVATE ultra_core)
+
     # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
     add_executable(test_hf_modem
         tools/test_hf_modem.cpp

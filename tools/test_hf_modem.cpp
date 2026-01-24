@@ -14,6 +14,7 @@
 
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
+#include "sim/hf_channel.hpp"
 #include "ultra/logging.hpp"
 #include <iostream>
 #include <fstream>
@@ -28,6 +29,7 @@
 
 using namespace ultra;
 using namespace ultra::gui;
+using namespace ultra::sim;
 namespace v2 = ultra::protocol::v2;
 using ultra::protocol::WaveformMode;
 
@@ -71,6 +73,7 @@ int main(int argc, char* argv[]) {
     bool play_audio = false;
     std::string output_file = "hf_modem_test.f32";
     WaveformMode waveform_mode = WaveformMode::OFDM;
+    std::string channel_type = "awgn";  // awgn, good, moderate, poor
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -94,6 +97,8 @@ int main(int argc, char* argv[]) {
             std::string mode = argv[++i];
             if (mode == "ofdm") {
                 waveform_mode = WaveformMode::OFDM;
+            } else if (mode == "chirp" || mode == "ofdm_chirp") {
+                waveform_mode = WaveformMode::OFDM_CHIRP;
             } else if (mode == "dpsk") {
                 waveform_mode = WaveformMode::DPSK;
             } else if (mode == "otfs" || mode == "otfs_eq") {
@@ -101,7 +106,14 @@ int main(int argc, char* argv[]) {
             } else if (mode == "otfs_raw") {
                 waveform_mode = WaveformMode::OTFS_RAW;
             } else {
-                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, dpsk, otfs, otfs_raw)\n", mode.c_str());
+                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp, dpsk, otfs, otfs_raw)\n", mode.c_str());
+                return 1;
+            }
+        } else if ((arg == "-c" || arg == "--channel") && i + 1 < argc) {
+            channel_type = argv[++i];
+            if (channel_type != "awgn" && channel_type != "good" &&
+                channel_type != "moderate" && channel_type != "poor") {
+                fprintf(stderr, "Unknown channel type: %s (use: awgn, good, moderate, poor)\n", channel_type.c_str());
                 return 1;
             }
         } else if (arg == "-h" || arg == "--help") {
@@ -111,7 +123,8 @@ int main(int argc, char* argv[]) {
             printf("  --snr <dB>       SNR level (default: 25)\n");
             printf("  --frames <n>     Number of frames (default: 10)\n");
             printf("  --duration <s>   Audio duration in seconds (default: 30)\n");
-            printf("  -w, --waveform   Waveform mode: ofdm, dpsk, otfs, otfs_raw (default: ofdm)\n");
+            printf("  -w, --waveform   Waveform mode: ofdm, chirp, dpsk, otfs, otfs_raw (default: ofdm)\n");
+            printf("  -c, --channel    Channel type: awgn, good, moderate, poor (default: awgn)\n");
             printf("  -p, --play       Play audio through speakers\n");
             printf("  --save           Save audio file for playback\n");
             printf("  -o <file>        Output audio file (implies --save)\n");
@@ -129,12 +142,14 @@ int main(int argc, char* argv[]) {
 
     const char* waveform_name = "?";
     if (waveform_mode == WaveformMode::OFDM) waveform_name = "OFDM";
+    else if (waveform_mode == WaveformMode::OFDM_CHIRP) waveform_name = "OFDM-CHIRP";
     else if (waveform_mode == WaveformMode::DPSK) waveform_name = "DPSK";
     else if (waveform_mode == WaveformMode::OTFS_EQ) waveform_name = "OTFS-EQ";
     else if (waveform_mode == WaveformMode::OTFS_RAW) waveform_name = "OTFS-RAW";
 
     printf("Configuration:\n");
     printf("  SNR:        %.1f dB\n", snr_db);
+    printf("  Channel:    %s\n", channel_type.c_str());
     printf("  Frames:     %d\n", num_frames);
     printf("  Duration:   %.0f seconds\n", duration_sec);
     printf("  Waveform:   %s\n\n", waveform_name);
@@ -225,10 +240,47 @@ int main(int argc, char* argv[]) {
     }
 
     // ========================================
-    // Add HF channel noise
+    // Apply HF channel simulation
     // ========================================
-    printf("Adding channel noise (SNR=%.1f dB)...\n", snr_db);
-    addNoise(full_audio, snr_db, rng);
+    printf("Applying %s channel (SNR=%.1f dB)...\n", channel_type.c_str(), snr_db);
+
+    if (channel_type == "awgn") {
+        // Simple AWGN - good for baseline testing
+        addNoise(full_audio, snr_db, rng);
+    } else {
+        // HF fading channel (Watterson model)
+        WattersonChannel::Config ch_cfg;
+        ch_cfg.sample_rate = 48000.0f;
+        ch_cfg.snr_db = snr_db;
+        ch_cfg.noise_enabled = true;
+
+        if (channel_type == "good") {
+            ch_cfg.fading_enabled = true;
+            ch_cfg.multipath_enabled = true;
+            ch_cfg.delay_spread_ms = 0.5f;
+            ch_cfg.doppler_spread_hz = 0.2f;
+            ch_cfg.path1_gain = 0.9f;
+            ch_cfg.path2_gain = 0.4f;
+        } else if (channel_type == "moderate") {
+            ch_cfg.fading_enabled = true;
+            ch_cfg.multipath_enabled = true;
+            ch_cfg.delay_spread_ms = 1.0f;
+            ch_cfg.doppler_spread_hz = 0.5f;
+            ch_cfg.path1_gain = 0.707f;
+            ch_cfg.path2_gain = 0.707f;
+        } else if (channel_type == "poor") {
+            ch_cfg.fading_enabled = true;
+            ch_cfg.multipath_enabled = true;
+            ch_cfg.delay_spread_ms = 2.0f;
+            ch_cfg.doppler_spread_hz = 1.0f;
+            ch_cfg.path1_gain = 0.6f;
+            ch_cfg.path2_gain = 0.8f;
+        }
+
+        WattersonChannel channel(ch_cfg, 42);
+        SampleSpan input_span(full_audio.data(), full_audio.size());
+        full_audio = channel.process(input_span);
+    }
 
     // Save audio if requested
     if (save_audio) {
@@ -238,23 +290,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Play audio through speakers if requested
-    if (play_audio) {
-        printf("\n🔊 Playing audio through speakers (%.1f seconds)...\n", full_audio.size() / 48000.0f);
-        FILE* aplay = popen("aplay -f FLOAT_LE -r 48000 -c 1 -q 2>/dev/null", "w");
-        if (aplay) {
-            fwrite(full_audio.data(), sizeof(float), full_audio.size(), aplay);
-            pclose(aplay);
-            printf("🔊 Playback complete.\n");
-        } else {
-            fprintf(stderr, "Warning: Could not open aplay for playback\n");
-        }
-    }
-
     // ========================================
     // RX - Decode each frame region separately
     // ========================================
-    printf("\nDecoding via ModemEngine.feedAudio()...\n\n");
+    printf("\nDecoding via ModemEngine.feedAudio()...\n");
+    if (play_audio) {
+        printf("🔊 Real-time audio playback enabled\n");
+    }
+    printf("\n");
 
     // Process each frame region separately (like real HF - fresh sync per burst)
     for (int i = 0; i < num_frames; i++) {
@@ -291,15 +334,33 @@ int main(int argc, char* argv[]) {
         size_t window_end = std::min(frames[i].audio_start + frames[i].audio_len + margin_after,
                                      full_audio.size());
 
-        // Feed audio in chunks
-        size_t chunk_size = 960;
+        // Feed audio in chunks (with optional real-time playback)
+        size_t chunk_size = 960;  // 20ms @ 48kHz
+        FILE* aplay_pipe = nullptr;
+        if (play_audio) {
+            aplay_pipe = popen("aplay -f FLOAT_LE -r 48000 -c 1 -q 2>/dev/null", "w");
+        }
+
         for (size_t j = window_start; j < window_end; j += chunk_size) {
             size_t len = std::min(chunk_size, window_end - j);
             rx_modem.feedAudio(full_audio.data() + j, len);
+
+            // Real-time playback: write to speaker and pace at sample rate
+            if (aplay_pipe) {
+                fwrite(full_audio.data() + j, sizeof(float), len, aplay_pipe);
+                std::this_thread::sleep_for(std::chrono::microseconds(len * 1000000 / 48000));
+            }
+        }
+
+        if (aplay_pipe) {
+            pclose(aplay_pipe);
         }
 
         // Wait for RX threads to process
-        for (int wait = 0; wait < 100 && !got_frame; wait++) {
+        // With real-time playback, RX processes during feed, but still need time to finish decode
+        // DPSK needs longer wait because chirp detection scans large buffer (takes ~6s)
+        int max_wait_iters = (waveform_mode == WaveformMode::DPSK) ? 1000 : 100;
+        for (int wait = 0; wait < max_wait_iters && !got_frame; wait++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 

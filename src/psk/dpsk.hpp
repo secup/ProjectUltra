@@ -34,6 +34,11 @@ enum class DPSKModulation {
     D8PSK    // 3 bits/symbol - differential 8PSK
 };
 
+// Training sequence length for CFO estimation after chirp sync
+// 8 symbols of alternating DBPSK (+1, -1, +1, -1, ...) provides
+// robust CFO estimation with up to ~±15 Hz tolerance at 62.5 baud
+constexpr int DPSK_TRAINING_SYMBOLS = 8;
+
 struct DPSKConfig {
     float sample_rate = 48000.0f;
     float carrier_freq = 1500.0f;         // Single carrier frequency
@@ -142,6 +147,60 @@ public:
         symbol_phase_ = symbol_phase;
 
         return out;
+    }
+
+    // Generate a single reference symbol for differential demodulation
+    // Used when chirp sync replaces Barker-13 preamble
+    // This provides the phase reference for subsequent DPSK symbols
+    Samples generateReferenceSymbol() {
+        Samples out(config_.samples_per_symbol);
+        float carrier_inc = 2.0f * M_PI * config_.carrier_freq / config_.sample_rate;
+        float phase = 0.0f;
+
+        for (int i = 0; i < config_.samples_per_symbol; i++) {
+            out[i] = std::cos(phase);
+            phase += carrier_inc;
+        }
+
+        // Set modulator state for subsequent data
+        carrier_phase_ = phase;
+        symbol_phase_ = 0.0f;
+
+        return out;
+    }
+
+    // Generate training sequence for CFO estimation after chirp sync
+    // Uses alternating DBPSK pattern: 0°, 180°, 0°, 180°, ...
+    // This creates a known differential pattern (+π, +π, +π, ...) that
+    // allows robust CFO estimation even with data modulation modes
+    Samples generateTrainingSequence() {
+        Samples out;
+        out.reserve(DPSK_TRAINING_SYMBOLS * config_.samples_per_symbol);
+
+        float carrier_inc = 2.0f * M_PI * config_.carrier_freq / config_.sample_rate;
+        float phase = 0.0f;
+
+        for (int sym = 0; sym < DPSK_TRAINING_SYMBOLS; sym++) {
+            // Alternating phase: 0° for even symbols, 180° for odd symbols
+            float symbol_phase = (sym % 2 == 0) ? 0.0f : M_PI;
+
+            for (int i = 0; i < config_.samples_per_symbol; i++) {
+                out.push_back(std::cos(phase + symbol_phase));
+                phase += carrier_inc;
+            }
+        }
+
+        // Set modulator state for subsequent symbols
+        carrier_phase_ = phase;
+        // After 8 alternating symbols, we end on phase 180° (odd symbol)
+        symbol_phase_ = M_PI;
+
+        return out;
+    }
+
+    // Get training sequence length in samples
+    int getTrainingSamples() const {
+        return DPSK_TRAINING_SYMBOLS * config_.samples_per_symbol;
     }
 
     // Get expected preamble length in samples
@@ -831,6 +890,108 @@ public:
     void setReferenceSymbol(SampleSpan ref_samples) {
         prev_symbol_ = correlateSymbol(ref_samples);
         demod_carrier_phase_ = 0.0f;
+    }
+
+    // Estimate CFO from training sequence (alternating DBPSK pattern)
+    // Training pattern: symbols alternate 0°, 180°, 0°, 180°, ...
+    // Expected differential phase: +π (180°) between each pair
+    // With CFO: measured differential = +π + CFO_phase_per_symbol
+    // Returns estimated CFO in Hz
+    float estimateCFOFromTraining(SampleSpan training_samples) {
+        int symbol_len = config_.samples_per_symbol;
+        int num_symbols = training_samples.size() / symbol_len;
+
+        if (num_symbols < 2) return 0.0f;
+
+        // Extract I/Q for each symbol
+        std::vector<Complex> symbols;
+        symbols.reserve(num_symbols);
+
+        for (int s = 0; s < num_symbols; s++) {
+            SampleSpan sym(training_samples.data() + s * symbol_len, symbol_len);
+            symbols.push_back(correlateSymbol(sym));
+        }
+
+        // Compute differential phases and compare to expected (+π)
+        float phase_error_sum = 0.0f;
+        int count = 0;
+
+        for (int i = 0; i < num_symbols - 1; i++) {
+            if (std::abs(symbols[i]) < 0.01f || std::abs(symbols[i + 1]) < 0.01f)
+                continue;
+
+            // Measured differential
+            Complex diff = symbols[i + 1] * std::conj(symbols[i]);
+            float measured = std::atan2(diff.imag(), diff.real());
+
+            // Expected differential is +π (alternating pattern)
+            float expected = M_PI;
+
+            // Phase error = measured - expected
+            float error = measured - expected;
+
+            // Wrap to [-π, π]
+            while (error > M_PI) error -= 2.0f * M_PI;
+            while (error < -M_PI) error += 2.0f * M_PI;
+
+            phase_error_sum += error;
+            count++;
+        }
+
+        if (count == 0) return 0.0f;
+
+        float avg_phase_error = phase_error_sum / count;
+
+        // Convert phase error per symbol to Hz
+        float symbol_duration = symbol_len / config_.sample_rate;
+        float cfo_hz = avg_phase_error / (2.0f * M_PI * symbol_duration);
+
+        return cfo_hz;
+    }
+
+    // Combined: estimate CFO from training and set reference symbol
+    // Call this after chirp detection with:
+    //   training_samples: DPSK_TRAINING_SYMBOLS worth of samples
+    //   ref_samples: 1 symbol worth of samples (immediately after training)
+    void setReferenceWithTraining(SampleSpan training_samples, SampleSpan ref_samples) {
+        // Estimate CFO from training sequence
+        estimated_cfo_ = estimateCFOFromTraining(training_samples);
+
+        // Estimate initial phase offset from the last training symbol
+        // The last training symbol (index 7) should be at 180° phase
+        int symbol_len = config_.samples_per_symbol;
+        int num_training = training_samples.size() / symbol_len;
+        if (num_training >= 2) {
+            // Use last two training symbols to get initial phase offset
+            SampleSpan last_sym(training_samples.data() + (num_training - 1) * symbol_len, symbol_len);
+            SampleSpan prev_sym(training_samples.data() + (num_training - 2) * symbol_len, symbol_len);
+
+            Complex last = correlateSymbol(last_sym);
+            Complex prev = correlateSymbol(prev_sym);
+
+            if (std::abs(prev) > 0.01f && std::abs(last) > 0.01f) {
+                Complex diff = last * std::conj(prev);
+                float measured = std::atan2(diff.imag(), diff.real());
+
+                // CFO compensation
+                float cfo_phase = 2.0f * M_PI * estimated_cfo_ * symbol_len / config_.sample_rate;
+                measured -= cfo_phase;
+
+                // Expected is +π, so offset = measured - π
+                initial_phase_offset_ = measured - M_PI;
+
+                // Wrap to [-π, π]
+                while (initial_phase_offset_ > M_PI) initial_phase_offset_ -= 2.0f * M_PI;
+                while (initial_phase_offset_ < -M_PI) initial_phase_offset_ += 2.0f * M_PI;
+            }
+        }
+
+        // Set reference symbol
+        prev_symbol_ = correlateSymbol(ref_samples);
+        demod_carrier_phase_ = 0.0f;
+
+        LOG_DEMOD(DEBUG, "DPSK Training: CFO=%.2f Hz, phase_offset=%.1f deg",
+                  estimated_cfo_, initial_phase_offset_ * 180.0f / M_PI);
     }
 
     const DPSKConfig& config() const { return config_; }

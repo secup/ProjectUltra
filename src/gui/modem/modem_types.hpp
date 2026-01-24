@@ -39,6 +39,7 @@ struct DetectedFrame {
     int data_start = -1;                    // Sample position where data starts
     protocol::WaveformMode waveform = protocol::WaveformMode::OFDM;
     std::chrono::steady_clock::time_point timestamp;  // When detected
+    bool has_chirp_preamble = false;        // True if chirp-based (has training sequence)
 
     bool valid() const { return data_start >= 0; }
 };

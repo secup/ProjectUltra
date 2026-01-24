@@ -27,8 +27,13 @@ public:
     // Modulate data bytes into audio samples
     Samples modulate(ByteSpan data, Modulation mod);
 
-    // Generate a sync/preamble sequence
+    // Generate a sync/preamble sequence (Schmidl-Cox: STS + LTS)
     Samples generatePreamble();
+
+    // Generate training symbols for chirp-based acquisition
+    // Call AFTER generating chirp, BEFORE modulate()
+    // Resets mixer so training + data are phase-coherent
+    Samples generateTrainingSymbols(int count = 2);
 
     // Generate channel probe signal
     Samples generateProbe();
@@ -90,6 +95,18 @@ public:
     // Set timing offset adjustment (samples to skip after preamble)
     // Positive = start symbols later, Negative = start symbols earlier
     void setTimingOffset(int offset);
+
+    // Process pre-synced samples (bypass Schmidl-Cox preamble detection)
+    // Use when external timing sync is provided (e.g., chirp preamble)
+    //
+    // ROBUST ACQUISITION:
+    // - samples should start at the first OFDM symbol after chirp
+    // - training_symbols: number of LTS training symbols at start (default: 2)
+    //   These are used for channel estimation (not decoded as data)
+    // - Remaining symbols are demodulated as data
+    //
+    // Returns true when enough soft bits accumulated for LDPC decode
+    bool processPresynced(SampleSpan samples, int training_symbols = 2);
 
     // Reset state (e.g., after sync loss)
     void reset();

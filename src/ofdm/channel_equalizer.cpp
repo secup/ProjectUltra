@@ -66,7 +66,8 @@ std::vector<Complex> OFDMDemodulator::Impl::extractSymbol(const std::vector<Comp
 
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
     // For FIRST symbol after sync, use pilot estimate directly (no smoothing)
-    float alpha = soft_bits.empty() ? 1.0f : 0.9f;
+    // If snr_symbol_count > 0, we have a pre-existing estimate (from training or previous symbols)
+    float alpha = (snr_symbol_count == 0) ? 1.0f : 0.9f;
 
     // First pass: compute all LS estimates and their average
     std::vector<Complex> h_ls_all(pilot_carrier_indices.size());

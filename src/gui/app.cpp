@@ -1077,6 +1077,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         auto waveform = modem_.getWaveformMode();
         const char* wf_str = protocol::waveformModeToString(waveform);
         ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+                          (waveform == protocol::WaveformMode::OFDM_CHIRP) ? ImVec4(0.2f, 1.0f, 0.6f, 1.0f) :
                           (waveform == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                        ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
@@ -1127,6 +1128,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         auto connect_wf = protocol_.getConnectWaveform();
         const char* wf_str = protocol::waveformModeToString(connect_wf);
         ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+                          (connect_wf == protocol::WaveformMode::OFDM_CHIRP) ? ImVec4(0.2f, 1.0f, 0.6f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                          ImVec4(0.6f, 0.6f, 0.6f, 1.0f);

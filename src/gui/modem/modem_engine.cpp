@@ -48,12 +48,28 @@ ModemEngine::ModemEngine() {
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
 
-    // DPSK modulator/demodulator (used for low SNR: -11 to 17 dB)
+    // DPSK modulator/demodulator (single-carrier, for very low SNR AWGN)
     // Default to medium preset for connection attempts (DQPSK 62.5 baud)
-    // This matches the setConnectWaveform(DPSK) configuration
     dpsk_config_ = dpsk_presets::medium();
     dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
     dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
+
+    // Multi-Carrier DPSK (for fading channels - frequency diversity)
+    // Default to 8 carriers, 93.75 baud, DQPSK
+    mc_dpsk_config_ = mc_dpsk_presets::level8();
+    mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
+    mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
+
+    // Chirp sync for robust presence detection on fading channels
+    // Single chirp works better on fading - 2 reps can confuse detection
+    sync::ChirpConfig chirp_cfg;
+    chirp_cfg.sample_rate = config_.sample_rate;
+    chirp_cfg.f_start = 300.0f;     // Start frequency (Hz)
+    chirp_cfg.f_end = 2700.0f;      // End frequency (Hz)
+    chirp_cfg.duration_ms = 500.0f; // 500ms chirp
+    chirp_cfg.repetitions = 1;      // Single chirp for fading channels
+    chirp_cfg.gap_ms = 0.0f;
+    chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
 
     // Initialize audio filters
     rebuildFilters();
@@ -347,14 +363,32 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     bool use_dpsk = (active_waveform == protocol::WaveformMode::DPSK);
     bool use_otfs = (active_waveform == protocol::WaveformMode::OTFS_EQ ||
                      active_waveform == protocol::WaveformMode::OTFS_RAW);
+    bool use_ofdm_chirp = (active_waveform == protocol::WaveformMode::OFDM_CHIRP);
 
     Samples preamble, modulated;
 
     if (use_dpsk) {
-        LOG_MODEM(INFO, "[%s] TX: Using DPSK modulation (%d-PSK, %d samples/sym)",
-                  log_prefix_.c_str(), dpsk_config_.num_phases(), dpsk_config_.samples_per_symbol);
-        preamble = dpsk_modulator_->generatePreamble();
-        modulated = dpsk_modulator_->modulate(to_modulate);
+        // Use Multi-Carrier DPSK for frequency diversity against fading
+        LOG_MODEM(INFO, "[%s] TX: Using MC-DPSK modulation (%d carriers, %d samples/sym)",
+                  log_prefix_.c_str(), mc_dpsk_config_.num_carriers, mc_dpsk_config_.samples_per_symbol);
+
+        // Reset modulator state
+        mc_dpsk_modulator_->reset();
+
+        // Use chirp preamble for robust fading channel sync
+        // Then add training sequence for CFO estimation
+        // Then add one reference symbol for differential demodulation
+        Samples chirp = chirp_sync_->generate();
+        Samples training = mc_dpsk_modulator_->generateTrainingSequence();
+        Samples ref_symbol = mc_dpsk_modulator_->generateReferenceSymbol();
+
+        // Combine: chirp + training + reference symbol as preamble
+        preamble.reserve(chirp.size() + training.size() + ref_symbol.size());
+        preamble.insert(preamble.end(), chirp.begin(), chirp.end());
+        preamble.insert(preamble.end(), training.begin(), training.end());
+        preamble.insert(preamble.end(), ref_symbol.begin(), ref_symbol.end());
+
+        modulated = mc_dpsk_modulator_->modulate(to_modulate);
     } else if (use_otfs) {
         // OTFS: 1 codeword per frame, multiple frames for multi-codeword messages
         // Each encoded codeword is 81 bytes (648 bits)
@@ -401,10 +435,34 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         // preamble is empty for OTFS (already included in modulated)
         preamble.clear();
+    } else if (use_ofdm_chirp) {
+        // OFDM_CHIRP: Low-SNR mode with chirp sync + DQPSK (no pilots)
+        // Chirp provides robust timing sync at 0-17 dB SNR
+        // DQPSK is differential so no channel estimation needed
+        LOG_MODEM(INFO, "[%s] TX: Using OFDM_CHIRP (chirp sync + DQPSK, no pilots)",
+                  log_prefix_.c_str());
+
+        // Generate chirp preamble for robust timing sync
+        Samples chirp = chirp_sync_->generate();
+
+        // Force DQPSK for chirp mode (differential = no pilots needed)
+        Modulation chirp_modulation = Modulation::DQPSK;
+
+        // Generate OFDM data with DQPSK
+        modulated = ofdm_modulator_->modulate(to_modulate, chirp_modulation);
+
+        // Preamble is chirp only
+        preamble = std::move(chirp);
     } else {
-        LOG_MODEM(INFO, "[%s] TX: Using OFDM modulation (%s)",
-                  log_prefix_.c_str(), is_v2_frame ? "control frame" : "data frame");
+        // Standard OFDM: High-SNR mode with Schmidl-Cox sync
+        // Supports higher-order modulations (16QAM, 32QAM) with pilot-based equalization
+        LOG_MODEM(INFO, "[%s] TX: Using OFDM (Schmidl-Cox sync, %s)",
+                  log_prefix_.c_str(), modulationToString(tx_modulation));
+
+        // Generate Schmidl-Cox preamble (STS + LTS) for timing and channel estimation
         preamble = ofdm_modulator_->generatePreamble();
+
+        // Generate OFDM data with selected modulation
         modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
     }
 
@@ -458,35 +516,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 // ============================================================================
 
 std::vector<float> ModemEngine::transmitPing() {
-    namespace v2 = protocol::v2;
-
-    // Get the "ULTR" magic bytes (4 bytes, no LDPC encoding)
-    Bytes ping_data = v2::PingFrame::serialize();
-
-    // Generate DPSK preamble and modulate raw bytes
-    Samples preamble = dpsk_modulator_->generatePreamble();
-    Samples modulated = dpsk_modulator_->modulate(ping_data);
-
-    // Build single ping unit: preamble + data + gap for time diversity
-    // Gap must be significant fraction of fading coherence time (~2s for 0.5Hz Doppler)
-    const size_t GAP_SAMPLES = 48000 * 500 / 1000;  // 500ms gap for fading diversity
-    std::vector<float> single_ping;
-    single_ping.reserve(preamble.size() + modulated.size() + GAP_SAMPLES);
-    single_ping.insert(single_ping.end(), preamble.begin(), preamble.end());
-    single_ping.insert(single_ping.end(), modulated.begin(), modulated.end());
-    single_ping.resize(single_ping.size() + GAP_SAMPLES, 0.0f);
-
-    // Combine: lead-in + (ping * repetitions) + tail
-    const size_t LEAD_IN_SAMPLES = 48000 * 100 / 1000;  // 100ms lead-in
-    const size_t TAIL_SAMPLES = 576;  // Short tail
-    std::vector<float> output;
-    output.reserve(LEAD_IN_SAMPLES + single_ping.size() * ping_repetitions_ + TAIL_SAMPLES);
-
-    output.resize(LEAD_IN_SAMPLES, 0.0f);
-    for (int i = 0; i < ping_repetitions_; i++) {
-        output.insert(output.end(), single_ping.begin(), single_ping.end());
-    }
-    output.resize(output.size() + TAIL_SAMPLES, 0.0f);
+    // Generate chirp sync signal for robust presence detection
+    // Chirp spreads energy across 400-2600 Hz, robust to frequency-selective fading
+    auto output = chirp_sync_->generate();
 
     // Apply TX bandpass filter
     if (filter_config_.enabled && tx_filter_) {
@@ -506,9 +538,8 @@ std::vector<float> ModemEngine::transmitPing() {
         }
     }
 
-    LOG_MODEM(INFO, "[%s] TX PING: %zu bytes x%d reps, %zu samples (%.2f sec)",
-              log_prefix_.c_str(), ping_data.size(), ping_repetitions_,
-              output.size(), output.size() / 48000.0f);
+    LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples (%.2f sec)",
+              log_prefix_.c_str(), output.size(), output.size() / 48000.0f);
 
     return output;
 }

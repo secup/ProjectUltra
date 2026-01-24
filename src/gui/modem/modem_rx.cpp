@@ -38,6 +38,8 @@ void ModemEngine::stopAcquisitionThread() {
 void ModemEngine::acquisitionLoop() {
     LOG_MODEM(INFO, "[%s] Acquisition loop starting", log_prefix_.c_str());
 
+    static int acq_iter = 0;  // Debug iteration counter
+
     while (acquisition_running_) {
         {
             std::unique_lock<std::mutex> lock(acquisition_mutex_);
@@ -50,23 +52,82 @@ void ModemEngine::acquisitionLoop() {
         if (detected_frame_queue_.size() > 0) continue;
 
         auto samples = getBufferSnapshot();
+
+        // Debug: log buffer state periodically
+        if (++acq_iter % 20 == 0 || samples.size() >= MIN_SAMPLES_FOR_ACQUISITION) {
+            LOG_MODEM(DEBUG, "[%s] Acq iter %d: buf=%zu, min=%zu",
+                      log_prefix_.c_str(), acq_iter, samples.size(), MIN_SAMPLES_FOR_ACQUISITION);
+        }
+
         if (samples.size() < MIN_SAMPLES_FOR_ACQUISITION) continue;
 
-        SampleSpan span(samples.data(), samples.size());
+        const size_t chirp_total = chirp_sync_->getTotalSamples();
 
-        // Try DPSK preamble detection (used for connection)
-        int dpsk_start = dpsk_demodulator_->findPreamble(span);
-        if (dpsk_start >= 0) {
-            DetectedFrame frame;
-            frame.data_start = dpsk_start;
-            frame.waveform = protocol::WaveformMode::DPSK;
-            frame.timestamp = std::chrono::steady_clock::now();
+        // Search for chirp in buffer - limit to reasonable window to avoid slow search
+        // Max search: chirp length + 2 seconds of lead-in
+        size_t max_search = chirp_total + 96000;  // chirp + 2s
+        size_t search_len = std::min(max_search, samples.size());
 
-            detected_frame_queue_.push(frame);
-            last_rx_waveform_ = protocol::WaveformMode::DPSK;
+        SampleSpan search_span(samples.data(), search_len);
 
-            LOG_MODEM(INFO, "[%s] Acquisition: DPSK preamble at %d",
-                      log_prefix_.c_str(), dpsk_start);
+        float chirp_corr = 0.0f;
+        int chirp_start = chirp_sync_->detect(search_span, chirp_corr, 0.35f);
+
+        // Debug: log chirp detection result
+        LOG_MODEM(DEBUG, "[%s] Acq: chirp_start=%d, corr=%.3f, search_len=%zu",
+                  log_prefix_.c_str(), chirp_start, chirp_corr, search_len);
+
+        if (chirp_start >= 0) {
+            size_t chirp_end = chirp_start + chirp_sync_->getTotalSamples();
+
+            // Check if there's signal energy after chirp (= DPSK frame)
+            // PING is chirp-only, DPSK frames have chirp + training + ref symbol + data
+            bool has_data_after = false;
+            size_t training_len = mc_dpsk_config_.training_symbols * mc_dpsk_config_.samples_per_symbol;
+            size_t ref_symbol_len = mc_dpsk_config_.samples_per_symbol;
+
+            if (chirp_end + training_len + ref_symbol_len + 1000 < samples.size()) {
+                // Check energy in the samples after chirp (training sequence)
+                float energy = 0.0f;
+                for (size_t i = chirp_end; i < chirp_end + training_len; i++) {
+                    energy += samples[i] * samples[i];
+                }
+                float rms = std::sqrt(energy / training_len);
+                has_data_after = (rms > 0.05f);  // Threshold for signal presence
+            }
+
+            if (has_data_after) {
+                // DPSK frame with chirp preamble
+                // Layout: [CHIRP][TRAINING][REF][DATA...]
+                // rxDecodeDPSK expects data_start to point to DATA,
+                // with reference symbol at data_start - symbol_samples
+                size_t data_start = chirp_end + training_len + ref_symbol_len;
+
+                DetectedFrame frame;
+                frame.data_start = static_cast<int>(data_start);
+                frame.waveform = protocol::WaveformMode::DPSK;
+                frame.timestamp = std::chrono::steady_clock::now();
+                frame.has_chirp_preamble = true;  // Use training + ref for CFO estimation
+
+                detected_frame_queue_.push(frame);
+                last_rx_waveform_ = protocol::WaveformMode::DPSK;
+
+                LOG_MODEM(INFO, "[%s] Acquisition: Chirp+DPSK frame, data at %zu (corr=%.3f)",
+                          log_prefix_.c_str(), data_start, chirp_corr);
+            } else {
+                // PING (chirp only, no data)
+                LOG_MODEM(INFO, "[%s] Acquisition: Chirp PING at %d (corr=%.3f)",
+                          log_prefix_.c_str(), chirp_start, chirp_corr);
+
+                if (chirp_end > samples.size()) chirp_end = samples.size();
+                consumeSamples(chirp_end);
+
+                if (ping_received_callback_) {
+                    ping_received_callback_(getCurrentSNR());
+                }
+                updateStats([](LoopbackStats& s) { s.frames_received++; });
+                last_rx_complete_time_ = std::chrono::steady_clock::now();
+            }
         }
     }
 

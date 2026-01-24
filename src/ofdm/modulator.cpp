@@ -524,6 +524,40 @@ Samples OFDMModulator::generatePreamble() {
     return preamble;
 }
 
+Samples OFDMModulator::generateTrainingSymbols(int count) {
+    // Generate LTS training symbols for chirp-based acquisition
+    //
+    // IMPORTANT: This resets the mixer so training symbols start at phase 0.
+    // Call this AFTER generating chirp, BEFORE modulate().
+    // The modulate() call will continue from the mixer phase after training.
+    //
+    // This ensures TX sequence: chirp + training + data are all phase-coherent.
+
+    impl_->mixer.reset();
+
+    // Initialize DBPSK state for differential modes
+    impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
+
+    Samples training;
+
+    // Generate LTS: known sequence on all carriers
+    std::vector<Complex> lts_data(impl_->data_carrier_indices.size());
+    for (size_t i = 0; i < lts_data.size(); ++i) {
+        lts_data[i] = impl_->sync_sequence[i % impl_->sync_sequence.size()];
+    }
+
+    // Generate each symbol separately to maintain mixer phase coherence
+    // (complexToReal advances the mixer, so we can't reuse the same samples)
+    // Note: createOFDMSymbol already adds the cyclic prefix
+    for (int i = 0; i < count; ++i) {
+        auto long_sym = impl_->createOFDMSymbol(lts_data, true);  // Returns CP + FFT samples
+        auto lts_real = impl_->complexToReal(long_sym);
+        training.insert(training.end(), lts_real.begin(), lts_real.end());
+    }
+
+    return training;
+}
+
 Samples OFDMModulator::generateProbe() {
     // Channel probe: known sequence across all carriers
     // Used for channel quality measurement

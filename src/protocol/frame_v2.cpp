@@ -14,13 +14,14 @@ namespace protocol {
 
 const char* waveformModeToString(WaveformMode mode) {
     switch (mode) {
-        case WaveformMode::OFDM:     return "OFDM";
-        case WaveformMode::OTFS_EQ:  return "OTFS-EQ";
-        case WaveformMode::OTFS_RAW: return "OTFS-RAW";
-        case WaveformMode::MFSK:     return "MFSK";
-        case WaveformMode::DPSK:     return "DPSK";
-        case WaveformMode::AUTO:     return "AUTO";
-        default:                     return "UNKNOWN";
+        case WaveformMode::OFDM:       return "OFDM";
+        case WaveformMode::OTFS_EQ:    return "OTFS-EQ";
+        case WaveformMode::OTFS_RAW:   return "OTFS-RAW";
+        case WaveformMode::MFSK:       return "MFSK";
+        case WaveformMode::DPSK:       return "DPSK";
+        case WaveformMode::OFDM_CHIRP: return "OFDM-CHIRP";
+        case WaveformMode::AUTO:       return "AUTO";
+        default:                       return "UNKNOWN";
     }
 }
 

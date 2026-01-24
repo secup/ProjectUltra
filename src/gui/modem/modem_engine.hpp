@@ -10,6 +10,8 @@
 #include "ultra/fec.hpp"  // LDPCEncoder, LDPCDecoder, Interleaver
 #include "ultra/dsp.hpp"  // FIRFilter
 #include "psk/dpsk.hpp"   // DPSKModulator, DPSKDemodulator
+#include "psk/multi_carrier_dpsk.hpp"  // MultiCarrierDPSK for fading channels
+#include "sync/chirp_sync.hpp"  // ChirpSync for robust fading channel detection
 #include "../adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
 #include <memory>
@@ -154,10 +156,6 @@ public:
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
     bool isInterleavingEnabled() const { return interleaving_enabled_; }
 
-    // PING repetition for fading robustness (default 1, use 2-3 for HF)
-    void setPingRepetitions(int reps) { ping_repetitions_ = std::max(1, std::min(5, reps)); }
-    int getPingRepetitions() const { return ping_repetitions_; }
-
 private:
     ModemConfig config_;
     std::string log_prefix_ = "MODEM";
@@ -174,9 +172,6 @@ private:
     Modulation data_modulation_ = Modulation::QPSK;
     CodeRate data_code_rate_ = CodeRate::R1_2;
 
-    // PING diversity (1 = normal, 2-3 = robust for fading channels)
-    int ping_repetitions_ = 1;
-
     // TX chain - OFDM
     std::unique_ptr<LDPCEncoder> encoder_;
     std::unique_ptr<OFDMModulator> ofdm_modulator_;
@@ -192,10 +187,18 @@ private:
     // RX chain - OTFS
     std::unique_ptr<OTFSDemodulator> otfs_demodulator_;
 
-    // TX/RX chain - DPSK
+    // TX/RX chain - DPSK (single carrier, for very low SNR)
     std::unique_ptr<DPSKModulator> dpsk_modulator_;
     std::unique_ptr<DPSKDemodulator> dpsk_demodulator_;
     DPSKConfig dpsk_config_;
+
+    // TX/RX chain - Multi-Carrier DPSK (for fading channels)
+    std::unique_ptr<MultiCarrierDPSKModulator> mc_dpsk_modulator_;
+    std::unique_ptr<MultiCarrierDPSKDemodulator> mc_dpsk_demodulator_;
+    MultiCarrierDPSKConfig mc_dpsk_config_;
+
+    // Chirp sync for robust presence detection on fading channels
+    std::unique_ptr<sync::ChirpSync> chirp_sync_;
 
     // ========================================================================
     // RX ARCHITECTURE

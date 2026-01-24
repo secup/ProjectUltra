@@ -160,38 +160,83 @@ static bool looksLikeV2Frame(const Bytes& bytes) {
 bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     using namespace rx_constants;
 
-    const int symbol_samples = dpsk_config_.samples_per_symbol;
-    const int bits_per_sym = dpsk_config_.bits_per_symbol();
-    const int samples_per_codeword = (v2::LDPC_CODEWORD_BITS / bits_per_sym) * symbol_samples;
+    // Use Multi-Carrier DPSK for frequency diversity
+    const int symbol_samples = mc_dpsk_config_.samples_per_symbol;
+    const int bits_per_sym = mc_dpsk_config_.num_carriers * mc_dpsk_config_.bits_per_symbol;
+    const int samples_per_codeword = (v2::LDPC_CODEWORD_BITS + bits_per_sym - 1) / bits_per_sym * symbol_samples;
 
     // PING: 4 bytes = 32 bits
     const int ping_bits = v2::PingFrame::SIZE * 8;
     const int ping_symbols = (ping_bits + bits_per_sym - 1) / bits_per_sym;
     const int samples_for_ping = ping_symbols * symbol_samples;
 
+    // Calculate training sequence length for chirp frames (MC-DPSK training)
+    const int training_samples = mc_dpsk_config_.training_symbols * symbol_samples;
+
     // --- Step 1: Wait for ping samples and check for PING ---
-    if (!waitForSamples(frame.data_start + samples_for_ping)) return false;
+    LOG_MODEM(DEBUG, "[%s] DPSK decode: waiting for %d + %d = %d samples (buf=%zu)",
+              log_prefix_.c_str(), frame.data_start, samples_for_ping,
+              frame.data_start + samples_for_ping, getBufferSize());
+    if (!waitForSamples(frame.data_start + samples_for_ping)) {
+        LOG_MODEM(WARN, "[%s] DPSK decode: waitForSamples failed (buf=%zu, needed=%d)",
+                  log_prefix_.c_str(), getBufferSize(), frame.data_start + samples_for_ping);
+        return false;
+    }
 
     {
         auto buffer = getBufferSnapshot();
+        LOG_MODEM(DEBUG, "[%s] DPSK decode: got buffer snapshot, size=%zu", log_prefix_.c_str(), buffer.size());
 
-        // Set up demodulator reference from last preamble symbol
-        // frame.data_start points to where DATA begins (after preamble)
+        // Set up demodulator reference
+        // frame.data_start points to where DATA begins (after ref symbol)
         // Reference symbol is one symbol before data start
         int ref_offset = frame.data_start - symbol_samples;
         if (ref_offset < 0 || ref_offset + symbol_samples > (int)buffer.size()) {
-            LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d", log_prefix_.c_str(), ref_offset);
+            LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d (buf=%zu)", log_prefix_.c_str(), ref_offset, buffer.size());
             return false;
         }
-        SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
-        dpsk_demodulator_->setReferenceSymbol(ref_sym);
 
+        if (frame.has_chirp_preamble) {
+            // Chirp frame: Layout is [CHIRP][TRAINING][REF][DATA...]
+            // Use training sequence for CFO estimation
+            int training_offset = ref_offset - training_samples;
+            if (training_offset < 0) {
+                LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d", log_prefix_.c_str(), training_offset);
+                return false;
+            }
+            LOG_MODEM(DEBUG, "[%s] DPSK decode: chirp frame, training_offset=%d, ref_offset=%d",
+                      log_prefix_.c_str(), training_offset, ref_offset);
+            SampleSpan training_span(buffer.data() + training_offset, training_samples);
+            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->processTraining(training_span);
+
+            // CFO sanity check: real signals have low CFO
+            // High CFO indicates false positive chirp detection on noise
+            // Relaxed to 5 Hz for fading channels (phase distortion increases apparent CFO)
+            float cfo = mc_dpsk_demodulator_->getEstimatedCFO();
+            if (std::abs(cfo) > 5.0f) {
+                LOG_MODEM(INFO, "[%s] DPSK: Rejecting frame - CFO %.1f Hz too high (false positive)",
+                          log_prefix_.c_str(), cfo);
+                mc_dpsk_demodulator_->reset();
+                return false;
+            }
+
+            mc_dpsk_demodulator_->setReference(ref_span);
+        } else {
+            // Legacy Barker-13 frame: just use reference symbol
+            LOG_MODEM(DEBUG, "[%s] DPSK decode: barker frame, ref_offset=%d", log_prefix_.c_str(), ref_offset);
+            SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->setReference(ref_sym);
+        }
+
+        LOG_MODEM(DEBUG, "[%s] MC-DPSK decode: demodulating ping span at %d, CFO=%.1f Hz",
+                  log_prefix_.c_str(), frame.data_start, mc_dpsk_demodulator_->getEstimatedCFO());
         SampleSpan ping_span(buffer.data() + frame.data_start, samples_for_ping);
-        auto ping_soft = dpsk_demodulator_->demodulateSoft(ping_span);
+        auto ping_soft = mc_dpsk_demodulator_->demodulateSoft(ping_span);
 
         if (detectPing(ping_soft)) {
             consumeSamples(frame.data_start + samples_for_ping);
-            dpsk_demodulator_->reset();
+            mc_dpsk_demodulator_->reset();
 
             if (ping_received_callback_) {
                 ping_received_callback_(getCurrentSNR());
@@ -216,36 +261,50 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     {
         auto buffer = getBufferSnapshot();
 
-        // Set up demodulator reference from last preamble symbol
+        // Set up demodulator reference
         int ref_offset = frame.data_start - symbol_samples;
         if (ref_offset < 0 || ref_offset + symbol_samples > (int)buffer.size()) {
             LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d for CW0", log_prefix_.c_str(), ref_offset);
             return false;
         }
-        SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
-        dpsk_demodulator_->setReferenceSymbol(ref_sym);
+
+        if (frame.has_chirp_preamble) {
+            // Chirp frame: use training + ref for CFO estimation
+            int training_offset = ref_offset - training_samples;
+            if (training_offset < 0) {
+                LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d for CW0", log_prefix_.c_str(), training_offset);
+                return false;
+            }
+            SampleSpan training_span(buffer.data() + training_offset, training_samples);
+            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->processTraining(training_span);
+            mc_dpsk_demodulator_->setReference(ref_span);
+        } else {
+            // Legacy Barker-13 frame
+            SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->setReference(ref_sym);
+        }
 
         SampleSpan cw0_span(buffer.data() + frame.data_start, samples_per_codeword);
-        auto cw0_soft = dpsk_demodulator_->demodulateSoft(cw0_span);
+        auto cw0_soft = mc_dpsk_demodulator_->demodulateSoft(cw0_span);
 
         if (cw0_soft.size() < v2::LDPC_CODEWORD_BITS) {
             LOG_MODEM(WARN, "[%s] DPSK: CW0 demod failed", log_prefix_.c_str());
             consumeSamples(frame.data_start + samples_per_codeword);
-            dpsk_demodulator_->reset();
+            mc_dpsk_demodulator_->reset();
             return false;
         }
 
         // Deinterleave and decode CW0
+        // Note: DPSK mode does NOT use interleaving (TX only interleaves for OFDM)
         std::vector<float> cw0_bits(cw0_soft.begin(), cw0_soft.begin() + v2::LDPC_CODEWORD_BITS);
-        if (interleaving_enabled_) {
-            cw0_bits = interleaver_.deinterleave(cw0_bits);
-        }
+        // No interleaving for DPSK
 
         Bytes cw0_data;
         if (!decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
             LOG_MODEM(INFO, "[%s] DPSK: CW0 LDPC failed", log_prefix_.c_str());
             consumeSamples(frame.data_start + samples_per_codeword);
-            dpsk_demodulator_->reset();
+            mc_dpsk_demodulator_->reset();
             return false;
         }
 
@@ -268,22 +327,34 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
     auto buffer = getBufferSnapshot();
 
-    // Set up demodulator reference from last preamble symbol
+    // Set up demodulator with training sequence for CFO correction (critical for fading!)
     int ref_offset = frame.data_start - symbol_samples;
     if (ref_offset < 0 || ref_offset + symbol_samples > (int)buffer.size()) {
         LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d for full frame", log_prefix_.c_str(), ref_offset);
         return false;
     }
-    SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
-    dpsk_demodulator_->setReferenceSymbol(ref_sym);
+
+    if (frame.has_chirp_preamble) {
+        // Use training sequence for CFO estimation (essential for fading channels)
+        int training_offset = ref_offset - training_samples;
+        if (training_offset >= 0) {
+            SampleSpan training_span(buffer.data() + training_offset, training_samples);
+            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->processTraining(training_span);
+            mc_dpsk_demodulator_->setReference(ref_span);
+        } else {
+            SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->setReference(ref_sym);
+        }
+    } else {
+        SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+        mc_dpsk_demodulator_->setReference(ref_sym);
+    }
 
     SampleSpan data_span(buffer.data() + frame.data_start, total_samples);
-    auto soft_bits = dpsk_demodulator_->demodulateSoft(data_span);
+    auto soft_bits = mc_dpsk_demodulator_->demodulateSoft(data_span);
 
-    // Deinterleave per-codeword
-    if (interleaving_enabled_) {
-        soft_bits = deinterleaveCodewords(soft_bits);
-    }
+    // Note: DPSK mode does NOT use interleaving (TX only interleaves for OFDM)
 
     // Decode all codewords
     bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
@@ -291,7 +362,7 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                                    use_adaptive, log_prefix_.c_str());
 
     consumeSamples(frame.data_start + total_samples);
-    dpsk_demodulator_->reset();
+    mc_dpsk_demodulator_->reset();
 
     if (result.success) {
         deliverFrame(result.frame_data);
@@ -648,34 +719,65 @@ void ModemEngine::processRxBuffer_DPSK() {
     auto samples = getBufferSnapshot();
     if (samples.size() < MIN_SAMPLES_FOR_DPSK) return;
 
-    SampleSpan span(samples.data(), samples.size());
-    int preamble_start = dpsk_demodulator_->findPreamble(span);
+    const int symbol_samples = mc_dpsk_config_.samples_per_symbol;
+    const size_t training_len = mc_dpsk_config_.training_symbols * symbol_samples;
+    const size_t ref_symbol_len = symbol_samples;
+    const size_t chirp_total = chirp_sync_->getTotalSamples();
 
-    if (preamble_start < 0) {
-        // Trim old samples if buffer too large
-        if (samples.size() > MAX_BUFFER_BEFORE_TRIM) {
-            consumeSamples(samples.size() - BUFFER_TRIM_TARGET);
-        }
-        return;
-    }
+    // Search for chirp in buffer - limit to reasonable window
+    size_t max_search = chirp_total + 96000;  // chirp + 2s lead-in
+    size_t search_len = std::min(max_search, samples.size());
 
-    LOG_MODEM(INFO, "[%s] DPSK: Found preamble at %d", log_prefix_.c_str(), preamble_start);
+    SampleSpan search_span(samples.data(), search_len);
 
     DetectedFrame frame;
-    frame.data_start = preamble_start;
     frame.waveform = protocol::WaveformMode::DPSK;
     frame.timestamp = std::chrono::steady_clock::now();
 
-    rx_frame_state_.active = true;
-    rx_frame_state_.frame = frame;
+    float chirp_corr = 0.0f;
+    int chirp_start = chirp_sync_->detect(search_span, chirp_corr, 0.35f);
 
-    bool success = rxDecodeDPSK(frame);
+    if (chirp_start >= 0) {
+        size_t chirp_end = chirp_start + chirp_sync_->getTotalSamples();
 
-    if (!success) {
-        updateStats([](LoopbackStats& s) { s.frames_failed++; });
+        // Check if we have enough data after chirp for training + ref + data
+        if (chirp_end + training_len + ref_symbol_len + 1000 < samples.size()) {
+            // Check energy in training sequence
+            float energy = 0.0f;
+            for (size_t i = chirp_end; i < chirp_end + training_len; i++) {
+                energy += samples[i] * samples[i];
+            }
+            float rms = std::sqrt(energy / training_len);
+
+            if (rms > 0.05f) {
+                // DPSK frame with chirp preamble
+                // Layout: [CHIRP][TRAINING][REF][DATA...]
+                size_t data_start = chirp_end + training_len + ref_symbol_len;
+
+                frame.data_start = static_cast<int>(data_start);
+                frame.has_chirp_preamble = true;
+
+                LOG_MODEM(INFO, "[%s] DPSK: Chirp preamble at %d, data at %zu (corr=%.3f)",
+                          log_prefix_.c_str(), chirp_start, data_start, chirp_corr);
+
+                rx_frame_state_.active = true;
+                rx_frame_state_.frame = frame;
+
+                bool success = rxDecodeDPSK(frame);
+                if (!success) {
+                    updateStats([](LoopbackStats& s) { s.frames_failed++; });
+                }
+
+                rx_frame_state_.clear();
+                return;
+            }
+        }
     }
 
-    rx_frame_state_.clear();
+    // No chirp found - trim old samples if buffer too large
+    if (samples.size() > MAX_BUFFER_BEFORE_TRIM) {
+        consumeSamples(samples.size() - BUFFER_TRIM_TARGET);
+    }
 }
 
 // ============================================================================

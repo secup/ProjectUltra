@@ -713,6 +713,98 @@ void OFDMDemodulator::setTimingOffset(int offset) {
     impl_->manual_timing_offset = offset;
 }
 
+bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols) {
+    // Process samples after external sync (chirp preamble)
+    //
+    // ROBUST ACQUISITION SEQUENCE:
+    // 1. First 'training_symbols' are known LTS sequence - use for channel estimation
+    // 2. Remaining symbols are data - demodulate them
+    //
+    // This mirrors the Schmidl-Cox approach: LTS for channel est, then data.
+    // The chirp replaces STS for more robust timing sync at low SNR.
+
+    if (samples.size() < impl_->symbol_samples) {
+        return false;
+    }
+
+    // Reset state but preserve config
+    impl_->soft_bits.clear();
+    impl_->demod_data.clear();
+    impl_->rx_buffer.clear();
+    impl_->synced_symbol_count.store(0);
+    impl_->idle_call_count.store(0);
+    impl_->mixer.reset();
+
+    // Reset channel estimate to unity
+    std::fill(impl_->channel_estimate.begin(), impl_->channel_estimate.end(), Complex(1, 0));
+    impl_->snr_symbol_count = 0;
+    impl_->estimated_snr_linear = 1.0f;
+    impl_->noise_variance = 0.1f;
+
+    // Reset CFO tracking
+    impl_->freq_offset_hz = 0.0f;
+    impl_->freq_offset_filtered = 0.0f;
+    impl_->freq_correction_phase = 0.0f;
+    impl_->symbols_since_sync = 0;
+    impl_->prev_pilot_phases.clear();
+    impl_->pilot_phase_correction = Complex(1, 0);
+
+    // Reset adaptive equalizer state
+    std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
+    std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));
+    std::fill(impl_->rls_P.begin(), impl_->rls_P.end(), 1.0f);
+
+    impl_->dbpsk_prev_equalized.clear();
+    impl_->carrier_phase_initialized = false;
+    impl_->carrier_phase_correction = Complex(1, 0);
+
+    // Set state to SYNCED
+    impl_->state.store(Impl::State::SYNCED);
+
+    const float* ptr = samples.data();
+    size_t remaining = samples.size();
+
+    // === Skip training symbols - they're for channel est which pilots handle ===
+    // For differential modulation, we just need consistent phase reference
+    // The data symbols will self-correct via differential detection
+    if (training_symbols > 0) {
+        ptr += training_symbols * impl_->symbol_samples;
+        remaining -= training_symbols * impl_->symbol_samples;
+        impl_->synced_symbol_count = training_symbols;
+        impl_->snr_symbol_count = training_symbols;
+    }
+
+    // Initialize reference for differential demodulation to (1,0)
+    // Same as Schmidl-Cox path does
+    impl_->dbpsk_prev_equalized.clear();  // Will be initialized in demodulateSymbol
+
+    LOG_SYNC(INFO, "processPresynced: skipped %d training symbols, %zu samples remaining",
+             training_symbols, remaining);
+
+    // === PHASE 2: Process data symbols ===
+    impl_->rx_buffer.insert(impl_->rx_buffer.end(), ptr, ptr + remaining);
+
+    while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
+        SampleSpan sym_samples(impl_->rx_buffer.data(), impl_->symbol_samples);
+        auto bb = impl_->toBaseband(sym_samples);
+        auto fd = impl_->extractSymbol(bb, 0);
+
+        impl_->updateChannelEstimate(fd);
+        auto eq = impl_->equalize(fd);
+        impl_->demodulateSymbol(eq, impl_->config.modulation);
+
+        impl_->rx_buffer.erase(impl_->rx_buffer.begin(),
+                               impl_->rx_buffer.begin() + impl_->symbol_samples);
+        ++impl_->synced_symbol_count;
+        impl_->updateQuality();
+    }
+
+    LOG_SYNC(INFO, "processPresynced: total %d symbols, got %zu soft bits",
+             impl_->synced_symbol_count.load(), impl_->soft_bits.size());
+
+    return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
+}
+
 void OFDMDemodulator::reset() {
     impl_->state.store(Impl::State::SEARCHING);
     impl_->synced_symbol_count.store(0);
