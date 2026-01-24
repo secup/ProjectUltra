@@ -463,22 +463,29 @@ std::vector<float> ModemEngine::transmitPing() {
     // Get the "ULTR" magic bytes (4 bytes, no LDPC encoding)
     Bytes ping_data = v2::PingFrame::serialize();
 
-    LOG_MODEM(INFO, "[%s] TX PING: %zu bytes raw DPSK (no LDPC)",
-              log_prefix_.c_str(), ping_data.size());
-
     // Generate DPSK preamble and modulate raw bytes
     Samples preamble = dpsk_modulator_->generatePreamble();
     Samples modulated = dpsk_modulator_->modulate(ping_data);
 
-    // Combine: lead-in silence + preamble + data + tail guard
-    const size_t LEAD_IN_SAMPLES = 48000 * 100 / 1000;  // 100ms (shorter for ping)
+    // Build single ping unit: preamble + data + gap for time diversity
+    // Gap must be significant fraction of fading coherence time (~2s for 0.5Hz Doppler)
+    const size_t GAP_SAMPLES = 48000 * 500 / 1000;  // 500ms gap for fading diversity
+    std::vector<float> single_ping;
+    single_ping.reserve(preamble.size() + modulated.size() + GAP_SAMPLES);
+    single_ping.insert(single_ping.end(), preamble.begin(), preamble.end());
+    single_ping.insert(single_ping.end(), modulated.begin(), modulated.end());
+    single_ping.resize(single_ping.size() + GAP_SAMPLES, 0.0f);
+
+    // Combine: lead-in + (ping * repetitions) + tail
+    const size_t LEAD_IN_SAMPLES = 48000 * 100 / 1000;  // 100ms lead-in
     const size_t TAIL_SAMPLES = 576;  // Short tail
     std::vector<float> output;
-    output.reserve(LEAD_IN_SAMPLES + preamble.size() + modulated.size() + TAIL_SAMPLES);
+    output.reserve(LEAD_IN_SAMPLES + single_ping.size() * ping_repetitions_ + TAIL_SAMPLES);
 
     output.resize(LEAD_IN_SAMPLES, 0.0f);
-    output.insert(output.end(), preamble.begin(), preamble.end());
-    output.insert(output.end(), modulated.begin(), modulated.end());
+    for (int i = 0; i < ping_repetitions_; i++) {
+        output.insert(output.end(), single_ping.begin(), single_ping.end());
+    }
     output.resize(output.size() + TAIL_SAMPLES, 0.0f);
 
     // Apply TX bandpass filter
@@ -499,8 +506,9 @@ std::vector<float> ModemEngine::transmitPing() {
         }
     }
 
-    LOG_MODEM(INFO, "[%s] TX PING: Generated %zu samples (%.2f sec)",
-              log_prefix_.c_str(), output.size(), output.size() / 48000.0f);
+    LOG_MODEM(INFO, "[%s] TX PING: %zu bytes x%d reps, %zu samples (%.2f sec)",
+              log_prefix_.c_str(), ping_data.size(), ping_repetitions_,
+              output.size(), output.size() / 48000.0f);
 
     return output;
 }

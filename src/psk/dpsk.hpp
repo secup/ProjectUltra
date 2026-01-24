@@ -324,9 +324,9 @@ public:
             expected_pattern.push_back(BARKER13[s % BARKER_LEN]);
         }
 
-        // Detection threshold - raised to 0.92 to reduce false positives in noise
-        // Real preamble achieves 0.98+ correlation in tests, noise rarely exceeds 0.90
-        constexpr float DETECTION_THRESHOLD = 0.92f;
+        // Detection threshold - lowered to 0.80 for multipath tolerance
+        // Real preamble achieves 0.98+ in AWGN, ~0.85 in multipath channels
+        constexpr float DETECTION_THRESHOLD = 0.80f;
         constexpr float MIN_SYMBOL_ENERGY = 0.001f;
 
         // Limit search range for performance (use optimization 2)
@@ -382,7 +382,7 @@ public:
         // A real preamble should be a clear outlier compared to the global average.
         // In pure noise, all correlation scores are similar. With a real preamble,
         // best_score >> global_avg.
-        constexpr float GLOBAL_OUTLIER_RATIO = 1.6f;  // Best must be 1.6x global average
+        constexpr float GLOBAL_OUTLIER_RATIO = 1.3f;  // Best must be 1.3x global average (relaxed for multipath)
         if (global_avg > 0 && best_score < global_avg * GLOBAL_OUTLIER_RATIO) {
             LOG_MODEM(DEBUG, "DPSK outlier FAIL: best=%.3f, global_avg=%.3f, ratio=%.2f < %.2f",
                       best_score, global_avg, best_score/global_avg, GLOBAL_OUTLIER_RATIO);

@@ -50,6 +50,12 @@ public:
     void setForcedModulation(Modulation mod) { forced_modulation_ = mod; }
     void setForcedCodeRate(CodeRate rate) { forced_code_rate_ = rate; }
 
+    // PING repetition for fading robustness
+    void setPingReps(int reps) { ping_reps_ = reps; }
+
+    // Channel random seed
+    void setChannelSeed(uint32_t seed) { channel_seed_ = seed; }
+
     bool runTest() {
         printHeader();
         initStations();
@@ -196,6 +202,12 @@ private:
     Modulation forced_modulation_ = Modulation::AUTO;
     CodeRate forced_code_rate_ = CodeRate::AUTO;
 
+    // PING repetition for fading robustness (default 1)
+    int ping_reps_ = 1;
+
+    // Channel random seed
+    uint32_t channel_seed_ = 42;
+
     // Timing
     std::chrono::steady_clock::time_point last_tick_time_ = std::chrono::steady_clock::now();
 
@@ -213,11 +225,12 @@ private:
                 case ChannelCondition::Flutter:  cfg = sim::itu_r_f1487::flutter(snr_db_); break;
                 default: cfg = sim::itu_r_f1487::awgn(snr_db_); break;
             }
-            hf_channel_ = std::make_unique<sim::WattersonChannel>(cfg, 42);
+            hf_channel_ = std::make_unique<sim::WattersonChannel>(cfg, channel_seed_);
         }
 
         // === Our station (ALPHA) ===
         modem_.setLogPrefix("ALPHA");
+        modem_.setPingRepetitions(ping_reps_);
         protocol_.setLocalCallsign("ALPHA");
         protocol_.setAutoAccept(true);
 
@@ -301,6 +314,7 @@ private:
         // === Virtual station (BRAVO) ===
         virtual_modem_ = std::make_unique<ModemEngine>();
         virtual_modem_->setLogPrefix("BRAVO");
+        virtual_modem_->setPingRepetitions(ping_reps_);
         virtual_protocol_.setLocalCallsign("BRAVO");
         virtual_protocol_.setAutoAccept(true);
 
@@ -488,6 +502,9 @@ private:
         std::cout << "Configuration:\n";
         std::cout << "  SNR:       " << snr_db_ << " dB\n";
         std::cout << "  Channel:   " << channelConditionName() << "\n";
+        if (ping_reps_ > 1) {
+            std::cout << "  PING reps: " << ping_reps_ << "x (fading robustness)\n";
+        }
         std::cout << "  Stations:  ALPHA <-> BRAVO\n";
         std::cout << "\n";
     }
@@ -562,6 +579,10 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Unknown channel: " << ch << " (use: awgn, good, moderate, poor, flutter)\n";
                 return 1;
             }
+        } else if ((arg == "--ping-reps" || arg == "-pr") && i + 1 < argc) {
+            sim.setPingReps(std::stoi(argv[++i]));
+        } else if ((arg == "--seed" || arg == "-s") && i + 1 < argc) {
+            sim.setChannelSeed(std::stoul(argv[++i]));
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - Fast batch processing\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
@@ -572,6 +593,7 @@ int main(int argc, char* argv[]) {
             std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK, OTFS\n";
             std::cout << "  --force-mod <mod>   Force modulation: DQPSK, QPSK, QAM16, D8PSK, etc.\n";
             std::cout << "  --force-rate <rate> Force code rate: R1/4, R1/2, R2/3, R3/4, R5/6\n";
+            std::cout << "  --ping-reps <n>     PING repetitions for fading (default: 1, use 2-3 for HF)\n";
             std::cout << "\nHF Channel Conditions (ITU-R F.1487):\n";
             std::cout << "  awgn      No fading, no multipath (baseline)\n";
             std::cout << "  good      0.5ms delay, 0.1 Hz Doppler (quiet mid-latitude)\n";

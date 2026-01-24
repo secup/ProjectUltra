@@ -154,6 +154,10 @@ public:
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
     bool isInterleavingEnabled() const { return interleaving_enabled_; }
 
+    // PING repetition for fading robustness (default 1, use 2-3 for HF)
+    void setPingRepetitions(int reps) { ping_repetitions_ = std::max(1, std::min(5, reps)); }
+    int getPingRepetitions() const { return ping_repetitions_; }
+
 private:
     ModemConfig config_;
     std::string log_prefix_ = "MODEM";
@@ -169,6 +173,9 @@ private:
     // Data frame modulation (negotiated after probing)
     Modulation data_modulation_ = Modulation::QPSK;
     CodeRate data_code_rate_ = CodeRate::R1_2;
+
+    // PING diversity (1 = normal, 2-3 = robust for fading channels)
+    int ping_repetitions_ = 1;
 
     // TX chain - OFDM
     std::unique_ptr<LDPCEncoder> encoder_;
