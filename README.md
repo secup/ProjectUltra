@@ -26,7 +26,7 @@ ProjectUltra is a software modem that achieves reliable, high-speed data transfe
 - **Strong FEC**: LDPC codes with rates from R1/4 to R5/6
 - **ARQ Protocol**: Reliable delivery with automatic retransmission
 - **GUI Application**: Real-time waterfall, constellation display, and message log
-- **CLI Tools**: Scriptable transmit/receive for automation
+- **CLI Tools**: Frame-level transmit/receive for testing and debugging
 
 ---
 
@@ -116,17 +116,21 @@ make -j4
 ./ultra_gui -sim         # Simulator mode (no radio needed)
 ```
 
-**CLI Tools:**
+**CLI Tools** (individual frames, not full protocol):
 ```bash
-# Transmit
-./ultra -s MYCALL -d THEIRCALL ptx "Hello World" | aplay -f FLOAT_LE -r 48000
+# Transmit single frame
+./ultra ptx "Hello World" -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000
 
-# Receive
+# Decode frames from audio
 arecord -f FLOAT_LE -r 48000 | ./ultra prx
 
 # Loopback test
-./ultra ptx "Test message" | ./ultra prx
+./ultra ptx "Test message" -s A -d B | ./ultra prx
 ```
+
+> **Note**: The CLI generates/decodes individual frames. It does not support
+> full protocol sessions (PING→CONNECT→DATA→DISCONNECT). For interactive
+> operation, use the GUI application.
 
 ---
 
