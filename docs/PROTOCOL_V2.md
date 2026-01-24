@@ -40,8 +40,153 @@ ULTRA (Universal Lightweight Transport for Radio Amateurs) Protocol v2 is design
 ├─────────────────────────────────────────────────────┤
 │  FEC Layer (LDPC Encoding/Decoding)                 │
 ├─────────────────────────────────────────────────────┤
-│  Physical Layer (OFDM/OTFS Modulation, Sync)        │
+│  Physical Layer (OFDM/DPSK/OTFS Modulation, Sync)   │
 └─────────────────────────────────────────────────────┘
+```
+
+---
+
+## Physical Layer
+
+### Waveform Modes
+
+The protocol supports multiple waveforms optimized for different channel conditions:
+
+| Mode | Value | Use Case | Min SNR | Max Throughput |
+|------|-------|----------|---------|----------------|
+| DPSK | 0x00 | Connection, low SNR | -8 dB | 250 bps |
+| OFDM | 0x01 | Data, good channels | 17 dB | 7.2 kbps |
+| OTFS_RAW | 0x02 | Data, Doppler channels | 20 dB | 3.4 kbps |
+| OTFS_EQ | 0x03 | Data, stable channels | 20 dB | 3.4 kbps |
+
+### Common Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Sample Rate | 48,000 Hz |
+| Center Frequency | 1,500 Hz |
+| Audio Bandwidth | ~2.8 kHz (300-3100 Hz) |
+| LDPC Codeword | 648 bits (81 bytes encoded) |
+
+### DPSK (Single-Carrier Differential PSK)
+
+Used for connection establishment and low-SNR conditions.
+
+| Parameter | Value |
+|-----------|-------|
+| Modulation | DQPSK (4-phase differential) |
+| Symbol Rate | 125 baud |
+| Samples/Symbol | 384 |
+| Preamble | Barker-13 sequence (×32 repeats) |
+| Sync Threshold | -8 dB SNR |
+
+**Frame Structure:**
+```
+┌──────────────┬─────────────────────────────────────┐
+│   Preamble   │            LDPC Codewords           │
+│  (13×32×384  │  (648 bits each, DQPSK modulated)   │
+│   samples)   │                                     │
+└──────────────┴─────────────────────────────────────┘
+```
+
+### OFDM (Orthogonal Frequency Division Multiplexing)
+
+Used for high-throughput data transfer on good channels.
+
+| Parameter | Standard Mode | NVIS Mode |
+|-----------|---------------|-----------|
+| FFT Size | 512 | 1024 |
+| Cyclic Prefix | 64 samples | 128 samples |
+| Data Carriers | 30 | 59 |
+| Symbol Duration | 12 ms | 24 ms |
+| Preamble | Schmidl-Cox (STS+LTS) | Same |
+
+**Supported Modulations:**
+- DQPSK, D8PSK (differential - no pilots needed)
+- QPSK, 16QAM, 32QAM (coherent - requires pilots)
+
+**Frame Structure:**
+```
+┌─────────┬─────────┬────────────────────────────────┐
+│   STS   │   LTS   │         OFDM Symbols           │
+│ (sync)  │ (chan)  │   (data + optional pilots)     │
+└─────────┴─────────┴────────────────────────────────┘
+```
+
+### OTFS (Orthogonal Time Frequency Space)
+
+Delay-Doppler domain modulation for channels with time-frequency dispersion.
+
+| Parameter | Value |
+|-----------|-------|
+| Delay Bins (M) | 32 |
+| Doppler Bins (N) | 16 |
+| FFT Size | 512 |
+| Cyclic Prefix | 64 samples |
+| Symbols per Frame | 512 (M × N) |
+| Bits per Frame | 648 (1 LDPC codeword) |
+| Preamble | Zadoff-Chu sequence (×4 repeats) |
+
+**OTFS Modes:**
+- **OTFS_RAW**: No TF equalization, relies on DD-domain diversity
+- **OTFS_EQ**: TF equalization from preamble, better for stable channels
+
+**Frame Structure:**
+```
+┌──────────────┬────────────────────────────────────┐
+│   Preamble   │         OTFS Data Frame            │
+│  (4× ZC sym) │  (N OFDM symbols, M subcarriers)   │
+│  2304 samp   │        9216 samples                │
+└──────────────┴────────────────────────────────────┘
+```
+
+**Multi-Codeword Messages:**
+OTFS transmits 1 LDPC codeword per frame. Multi-codeword messages use multiple frames with 10ms gaps:
+```
+┌─────────┬─────────┬─────┬─────────┬─────────┬─────┬─────────┬─────────┐
+│ Lead-in │ Preamble│Data │   Gap   │ Preamble│Data │   Gap   │  Tail   │
+│  150ms  │  (CW0)  │     │  10ms   │  (CW1)  │     │  10ms   │         │
+└─────────┴─────────┴─────┴─────────┴─────────┴─────┴─────────┴─────────┘
+```
+
+### PING/PONG Probe
+
+Fast presence detection before full connection handshake.
+
+| Parameter | Value |
+|-----------|-------|
+| Duration | ~1 second |
+| Waveform | DPSK (no FEC) |
+| Preamble | Barker-13 (×32) |
+| Payload | 4 bytes: "ULTR" magic |
+| Min SNR | -8 dB |
+
+**Probe Flow:**
+```
+Station A                          Station B
+    │                                   │
+    │──── PING "ULTR" ─────────────────►│
+    │                                   │ (detected in ~50ms)
+    │◄─── PONG "ULTR" ──────────────────│
+    │                                   │
+    │    (proceed to CONNECT if needed) │
+```
+
+### Waveform Negotiation
+
+1. **CONNECT** always uses DPSK (reliable at low SNR)
+2. **CONNECT** frame includes MODE_CAPS bitmap of supported waveforms
+3. Responder selects best mutual waveform based on measured SNR
+4. **CONNECT_ACK** includes NEGOTIATED waveform mode
+5. Subsequent DATA frames use negotiated waveform
+
+**MODE_CAPS Bitmap:**
+```
+Bit 0: DPSK supported (always 1)
+Bit 1: OFDM supported
+Bit 2: OTFS_RAW supported
+Bit 3: OTFS_EQ supported
+Bits 4-7: Reserved
 ```
 
 ---
@@ -554,4 +699,6 @@ Start with R1/4 (most robust). If PROBE_ACK indicates SNR > 10dB, can negotiate 
 
 ## Version
 
-**v2 (2026-01-18)**
+**v2.1 (2026-01-24)** - Added Physical Layer section with OFDM/DPSK/OTFS specs, PING/PONG probe, waveform negotiation
+
+**v2 (2026-01-18)** - Initial v2 protocol specification
