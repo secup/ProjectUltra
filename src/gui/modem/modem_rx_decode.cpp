@@ -171,10 +171,17 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
     {
         auto buffer = getBufferSnapshot();
-        SampleSpan span(buffer.data(), buffer.size());
 
-        dpsk_demodulator_->reset();
-        dpsk_demodulator_->findPreamble(span);
+        // Set up demodulator reference from last preamble symbol
+        // frame.data_start points to where DATA begins (after preamble)
+        // Reference symbol is one symbol before data start
+        int ref_offset = frame.data_start - symbol_samples;
+        if (ref_offset < 0 || ref_offset + symbol_samples > (int)buffer.size()) {
+            LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d", log_prefix_.c_str(), ref_offset);
+            return false;
+        }
+        SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+        dpsk_demodulator_->setReferenceSymbol(ref_sym);
 
         SampleSpan ping_span(buffer.data() + frame.data_start, samples_for_ping);
         auto ping_soft = dpsk_demodulator_->demodulateSoft(ping_span);
@@ -218,10 +225,15 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
     {
         auto buffer = getBufferSnapshot();
-        SampleSpan span(buffer.data(), buffer.size());
 
-        dpsk_demodulator_->reset();
-        dpsk_demodulator_->findPreamble(span);
+        // Set up demodulator reference from last preamble symbol
+        int ref_offset = frame.data_start - symbol_samples;
+        if (ref_offset < 0 || ref_offset + symbol_samples > (int)buffer.size()) {
+            LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d for CW0", log_prefix_.c_str(), ref_offset);
+            return false;
+        }
+        SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+        dpsk_demodulator_->setReferenceSymbol(ref_sym);
 
         SampleSpan cw0_span(buffer.data() + frame.data_start, samples_per_codeword);
         auto cw0_soft = dpsk_demodulator_->demodulateSoft(cw0_span);
@@ -265,10 +277,15 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     if (!waitForSamples(frame.data_start + total_samples)) return false;
 
     auto buffer = getBufferSnapshot();
-    SampleSpan span(buffer.data(), buffer.size());
 
-    dpsk_demodulator_->reset();
-    dpsk_demodulator_->findPreamble(span);
+    // Set up demodulator reference from last preamble symbol
+    int ref_offset = frame.data_start - symbol_samples;
+    if (ref_offset < 0 || ref_offset + symbol_samples > (int)buffer.size()) {
+        LOG_MODEM(WARN, "[%s] DPSK: Invalid ref_offset %d for full frame", log_prefix_.c_str(), ref_offset);
+        return false;
+    }
+    SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
+    dpsk_demodulator_->setReferenceSymbol(ref_sym);
 
     SampleSpan data_span(buffer.data() + frame.data_start, total_samples);
     auto soft_bits = dpsk_demodulator_->demodulateSoft(data_span);

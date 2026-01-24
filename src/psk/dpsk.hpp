@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ultra/types.hpp"
+#include "ultra/logging.hpp"
 #include <vector>
 #include <cmath>
 #include <complex>
@@ -290,7 +291,9 @@ public:
         int preamble_symbols = BARKER_LEN * REPEATS;  // 39
         int preamble_samples = preamble_symbols * symbol_len;
 
-        if ((int)samples.size() < preamble_samples + symbol_len) return -1;
+        // Require at least 1.5x preamble length to avoid premature detection
+        int min_required = preamble_samples + preamble_samples / 2;
+        if ((int)samples.size() < min_required) return -1;
 
         // === OPTIMIZATION 1: Energy detection pre-filter ===
         // Skip expensive correlation if channel is quiet (just noise)
@@ -321,8 +324,9 @@ public:
             expected_pattern.push_back(BARKER13[s % BARKER_LEN]);
         }
 
-        // Detection threshold
-        constexpr float DETECTION_THRESHOLD = 0.55f;
+        // Detection threshold - raised to 0.92 to reduce false positives in noise
+        // Real preamble achieves 0.98+ correlation in tests, noise rarely exceeds 0.90
+        constexpr float DETECTION_THRESHOLD = 0.92f;
         constexpr float MIN_SYMBOL_ENERGY = 0.001f;
 
         // Limit search range for performance (use optimization 2)
@@ -333,16 +337,22 @@ public:
 
         float best_score = 0;
         int best_offset = -1;
+        float sum_scores = 0;
+        int num_scores = 0;
 
-        // Coarse search
+        // Coarse search - track global average for validation
         for (int start = 0; start < max_search; start += search_step) {
             float score = computeDifferentialScore(samples, start, symbol_len,
                                                     expected_pattern, MIN_SYMBOL_ENERGY);
+            sum_scores += score;
+            num_scores++;
             if (score > best_score) {
                 best_score = score;
                 best_offset = start;
             }
         }
+
+        float global_avg = (num_scores > 0) ? sum_scores / num_scores : 0;
 
         // Fine search around best position
         if (best_offset >= 0 && best_score > DETECTION_THRESHOLD * 0.7f) {
@@ -359,10 +369,27 @@ public:
             }
         }
 
+        // Log best score for debugging (DEBUG level to reduce noise)
+        LOG_MODEM(DEBUG, "DPSK preamble search: best_score=%.3f at offset=%d, threshold=%.2f",
+                  best_score, best_offset, DETECTION_THRESHOLD);
+
         if (best_score < DETECTION_THRESHOLD) {
             // No preamble found - this is normal when monitoring silence/noise
             return -1;
         }
+
+        // === VALIDATION: Global outlier check ===
+        // A real preamble should be a clear outlier compared to the global average.
+        // In pure noise, all correlation scores are similar. With a real preamble,
+        // best_score >> global_avg.
+        constexpr float GLOBAL_OUTLIER_RATIO = 1.6f;  // Best must be 1.6x global average
+        if (global_avg > 0 && best_score < global_avg * GLOBAL_OUTLIER_RATIO) {
+            LOG_MODEM(DEBUG, "DPSK outlier FAIL: best=%.3f, global_avg=%.3f, ratio=%.2f < %.2f",
+                      best_score, global_avg, best_score/global_avg, GLOBAL_OUTLIER_RATIO);
+            return -1;
+        }
+        LOG_MODEM(DEBUG, "DPSK outlier OK: best=%.3f, global_avg=%.3f, ratio=%.2f",
+                  best_score, global_avg, (global_avg > 0) ? best_score/global_avg : 0.0f);
 
         // Estimate CFO for phase compensation
         estimated_cfo_ = estimateCFOTolerant(samples, best_offset, symbol_len, preamble_symbols, expected_pattern);
@@ -796,6 +823,13 @@ public:
         prev_symbol_ = Complex(1.0f, 0.0f);
         estimated_cfo_ = 0.0f;
         initial_phase_offset_ = 0.0f;
+        demod_carrier_phase_ = 0.0f;
+    }
+
+    // Set reference symbol from samples (used when preamble position is already known)
+    // This allows demodulation to start from a known position without re-running findPreamble
+    void setReferenceSymbol(SampleSpan ref_samples) {
+        prev_symbol_ = correlateSymbol(ref_samples);
         demod_carrier_phase_ = 0.0f;
     }
 

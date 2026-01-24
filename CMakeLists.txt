@@ -204,6 +204,19 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_single_frame PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_single_frame PRIVATE ultra_core)
 
+    # Acquisition profiling
+    add_executable(profile_acquisition
+        tools/profile_acquisition.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(profile_acquisition PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(profile_acquisition PRIVATE ultra_core)
+
     # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
     add_executable(test_hf_modem
         tools/test_hf_modem.cpp
