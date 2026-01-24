@@ -55,11 +55,19 @@ struct DecodeSync {
 
 // Add AWGN to signal
 void addNoise(std::vector<float>& samples, float snr_db, std::mt19937& rng) {
-    float signal_power = 0;
-    for (float s : samples) signal_power += s * s;
-    if (signal_power < 1e-10f) return;
-    signal_power /= samples.size();
+    // Calculate signal power only from active (non-silent) portions
+    // This matches test_hf_modem and gives correct SNR measurement
+    float signal_energy = 0;
+    size_t active_samples = 0;
+    for (float s : samples) {
+        if (std::abs(s) > 1e-6f) {
+            signal_energy += s * s;
+            active_samples++;
+        }
+    }
+    if (active_samples == 0) return;
 
+    float signal_power = signal_energy / active_samples;
     float noise_power = signal_power / std::pow(10.0f, snr_db / 10.0f);
     float noise_std = std::sqrt(noise_power);
 
