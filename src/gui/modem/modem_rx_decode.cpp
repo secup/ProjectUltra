@@ -178,8 +178,11 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
               log_prefix_.c_str(), frame.data_start, samples_for_ping,
               frame.data_start + samples_for_ping, getBufferSize());
     if (!waitForSamples(frame.data_start + samples_for_ping)) {
-        LOG_MODEM(WARN, "[%s] DPSK decode: waitForSamples failed (buf=%zu, needed=%d)",
-                  log_prefix_.c_str(), getBufferSize(), frame.data_start + samples_for_ping);
+        // Only warn if thread is still running (actual failure vs normal shutdown)
+        if (rx_decode_running_) {
+            LOG_MODEM(WARN, "[%s] DPSK decode: waitForSamples failed (buf=%zu, needed=%d)",
+                      log_prefix_.c_str(), getBufferSize(), frame.data_start + samples_for_ping);
+        }
         return false;
     }
 
@@ -711,72 +714,126 @@ void ModemEngine::processRxBuffer_OTFS() {
 
 // ============================================================================
 // DPSK BUFFER PROCESSING (Connected Mode)
+// Follows OFDM pattern: feed samples to demodulator, check for frame ready
 // ============================================================================
 
 void ModemEngine::processRxBuffer_DPSK() {
     using namespace rx_constants;
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
 
-    auto samples = getBufferSnapshot();
-    if (samples.size() < MIN_SAMPLES_FOR_DPSK) return;
+    // Get samples and move to demodulator (like OFDM)
+    std::vector<float> samples;
+    {
+        std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+        bool has_pending = mc_dpsk_demodulator_->isSynced() ||
+                          mc_dpsk_demodulator_->hasPendingData() ||
+                          dpsk_expected_codewords_ > 0;
 
-    const int symbol_samples = mc_dpsk_config_.samples_per_symbol;
-    const size_t training_len = mc_dpsk_config_.training_symbols * symbol_samples;
-    const size_t ref_symbol_len = symbol_samples;
-    const size_t chirp_total = chirp_sync_->getTotalSamples();
+        if (!has_pending && rx_sample_buffer_.size() < MIN_SAMPLES_FOR_DPSK) {
+            return;
+        }
+        samples = std::move(rx_sample_buffer_);
+        rx_sample_buffer_.clear();
+    }
 
-    // Search for chirp in buffer - limit to reasonable window
-    size_t max_search = chirp_total + 96000;  // chirp + 2s lead-in
-    size_t search_len = std::min(max_search, samples.size());
+    if (samples.empty() && !mc_dpsk_demodulator_->hasPendingData() &&
+        dpsk_accumulated_soft_bits_.empty() && dpsk_expected_codewords_ == 0) {
+        return;
+    }
 
-    SampleSpan search_span(samples.data(), search_len);
+    // Process through demodulator (handles chirp sync internally)
+    bool was_synced = mc_dpsk_demodulator_->isSynced();
+    SampleSpan span(samples.data(), samples.size());
+    bool frame_ready = mc_dpsk_demodulator_->process(span);
+    bool is_synced = mc_dpsk_demodulator_->isSynced();
 
-    DetectedFrame frame;
-    frame.waveform = protocol::WaveformMode::DPSK;
-    frame.timestamp = std::chrono::steady_clock::now();
+    // Handle sync loss mid-frame
+    if (was_synced && !is_synced && !dpsk_accumulated_soft_bits_.empty()) {
+        LOG_MODEM(INFO, "[%s] DPSK: Lost sync mid-frame, discarding", log_prefix_.c_str());
+        dpsk_accumulated_soft_bits_.clear();
+        dpsk_expected_codewords_ = 0;
+    }
 
-    float chirp_corr = 0.0f;
-    int chirp_start = chirp_sync_->detect(search_span, chirp_corr, 0.35f);
+    if (is_synced) {
+        updateStats([](LoopbackStats& s) { s.synced = true; });
+    }
 
-    if (chirp_start >= 0) {
-        size_t chirp_end = chirp_start + chirp_sync_->getTotalSamples();
-
-        // Check if we have enough data after chirp for training + ref + data
-        if (chirp_end + training_len + ref_symbol_len + 1000 < samples.size()) {
-            // Check energy in training sequence
-            float energy = 0.0f;
-            for (size_t i = chirp_end; i < chirp_end + training_len; i++) {
-                energy += samples[i] * samples[i];
-            }
-            float rms = std::sqrt(energy / training_len);
-
-            if (rms > 0.05f) {
-                // DPSK frame with chirp preamble
-                // Layout: [CHIRP][TRAINING][REF][DATA...]
-                size_t data_start = chirp_end + training_len + ref_symbol_len;
-
-                frame.data_start = static_cast<int>(data_start);
-                frame.has_chirp_preamble = true;
-
-                LOG_MODEM(INFO, "[%s] DPSK: Chirp preamble at %d, data at %zu (corr=%.3f)",
-                          log_prefix_.c_str(), chirp_start, data_start, chirp_corr);
-
-                rx_frame_state_.active = true;
-                rx_frame_state_.frame = frame;
-
-                bool success = rxDecodeDPSK(frame);
-                if (!success) {
-                    updateStats([](LoopbackStats& s) { s.frames_failed++; });
-                }
-
-                rx_frame_state_.clear();
-                return;
-            }
+    // Accumulate soft bits when frame ready
+    if (frame_ready) {
+        auto soft_bits = mc_dpsk_demodulator_->getSoftBits();
+        if (!soft_bits.empty()) {
+            // No interleaving for DPSK
+            dpsk_accumulated_soft_bits_.insert(dpsk_accumulated_soft_bits_.end(),
+                                               soft_bits.begin(), soft_bits.end());
         }
     }
 
-    // No chirp found - trim old samples if buffer too large
-    if (samples.size() > MAX_BUFFER_BEFORE_TRIM) {
-        consumeSamples(samples.size() - BUFFER_TRIM_TARGET);
+    // Check if we have enough bits for decoding
+    size_t num_codewords = dpsk_accumulated_soft_bits_.size() / LDPC_BLOCK;
+    if (num_codewords == 0) return;
+
+    // Decode first codeword to get frame header
+    if (dpsk_expected_codewords_ == 0 && num_codewords >= 1) {
+        std::vector<float> cw0_bits(dpsk_accumulated_soft_bits_.begin(),
+                                    dpsk_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+
+        Bytes cw0_data;
+        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+            auto cw_info = v2::identifyCodeword(cw0_data);
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw0_data);
+                if (header.valid) {
+                    dpsk_expected_codewords_ = header.total_cw;
+                    LOG_MODEM(INFO, "[%s] DPSK: Header valid, expecting %d codewords",
+                              log_prefix_.c_str(), dpsk_expected_codewords_);
+                } else {
+                    // Invalid header - discard this codeword
+                    LOG_MODEM(DEBUG, "[%s] DPSK: Invalid header, discarding", log_prefix_.c_str());
+                    dpsk_accumulated_soft_bits_.erase(dpsk_accumulated_soft_bits_.begin(),
+                                                      dpsk_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+                    return;
+                }
+            } else {
+                // Not a header codeword - discard
+                LOG_MODEM(DEBUG, "[%s] DPSK: Not a header codeword, discarding", log_prefix_.c_str());
+                dpsk_accumulated_soft_bits_.erase(dpsk_accumulated_soft_bits_.begin(),
+                                                  dpsk_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+                return;
+            }
+        } else {
+            // LDPC decode failed
+            LOG_MODEM(DEBUG, "[%s] DPSK: CW0 LDPC failed", log_prefix_.c_str());
+            dpsk_accumulated_soft_bits_.erase(dpsk_accumulated_soft_bits_.begin(),
+                                              dpsk_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+            updateStats([](LoopbackStats& s) { s.frames_failed++; });
+            return;
+        }
+    }
+
+    // Check if we have all expected codewords
+    if (dpsk_expected_codewords_ > 0 && num_codewords >= (size_t)dpsk_expected_codewords_) {
+        LOG_MODEM(INFO, "[%s] DPSK: Decoding %d codewords", log_prefix_.c_str(), dpsk_expected_codewords_);
+
+        // Extract soft bits for all codewords
+        std::vector<float> frame_soft_bits(
+            dpsk_accumulated_soft_bits_.begin(),
+            dpsk_accumulated_soft_bits_.begin() + dpsk_expected_codewords_ * LDPC_BLOCK);
+
+        // Decode all codewords
+        auto result = decodeCodewords(frame_soft_bits, dpsk_expected_codewords_, CodeRate::R1_4,
+                                      false, log_prefix_.c_str());
+
+        // Consume decoded bits
+        dpsk_accumulated_soft_bits_.erase(dpsk_accumulated_soft_bits_.begin(),
+                                          dpsk_accumulated_soft_bits_.begin() + dpsk_expected_codewords_ * LDPC_BLOCK);
+        dpsk_expected_codewords_ = 0;
+
+        if (result.success) {
+            deliverFrame(result.frame_data);
+            updateStats([](LoopbackStats& s) { s.frames_received++; });
+        } else {
+            updateStats([](LoopbackStats& s) { s.frames_failed++; });
+        }
     }
 }
 

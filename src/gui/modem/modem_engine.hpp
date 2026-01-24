@@ -248,6 +248,10 @@ private:
     std::vector<float> ofdm_accumulated_soft_bits_;
     int ofdm_expected_codewords_ = 0;
 
+    // DPSK multi-codeword accumulation (follows same pattern as OFDM)
+    std::vector<float> dpsk_accumulated_soft_bits_;
+    int dpsk_expected_codewords_ = 0;
+
     // OTFS multi-codeword accumulation (1 OTFS frame = 1 codeword)
     std::vector<float> otfs_accumulated_soft_bits_;
     int otfs_expected_codewords_ = 0;

@@ -304,9 +304,14 @@ int main(int argc, char* argv[]) {
         // Create fresh RX modem for each frame
         ModemEngine rx_modem;
         rx_modem.setLogPrefix("RX");
-        rx_modem.setConnected(true);
-        rx_modem.setHandshakeComplete(true);
-        rx_modem.setWaveformMode(waveform_mode);
+
+        // DPSK uses acquisition path (disconnected mode) for chirp detection
+        // Other modes use connected mode for direct buffer processing
+        if (waveform_mode != WaveformMode::DPSK) {
+            rx_modem.setConnected(true);
+            rx_modem.setHandshakeComplete(true);
+            rx_modem.setWaveformMode(waveform_mode);
+        }
 
         // Setup callback
         std::atomic<bool> got_frame{false};

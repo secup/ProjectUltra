@@ -1,19 +1,20 @@
 // multi_carrier_dpsk.hpp - Multi-Carrier DPSK for mid-SNR range
 //
 // Fills the gap between single-carrier DPSK (very low SNR) and OFDM (high SNR)
-// Based on VARA HF levels 5-10: 3-13 carriers at ~94 baud
+// Based on commercial HF modem levels 5-10: 3-13 carriers at ~94 baud
 //
 // Features:
 // - Configurable carrier count (3-16)
 // - ~94 baud symbol rate per carrier
 // - DQPSK modulation (differential, no pilots needed)
-// - Chirp sync (works at low SNR)
+// - Integrated chirp sync (follows OFDM demodulator pattern)
 // - Frequency diversity (survives selective fading)
 
 #pragma once
 
 #include "ultra/types.hpp"
 #include "ultra/dsp.hpp"
+#include "sync/chirp_sync.hpp"
 #include <vector>
 #include <complex>
 #include <cmath>
@@ -39,6 +40,13 @@ struct MultiCarrierDPSKConfig {
     // Training
     int training_symbols = 8;       // Training symbols for sync
 
+    // Chirp sync config
+    float chirp_f_start = 300.0f;
+    float chirp_f_end = 2700.0f;
+    float chirp_duration_ms = 500.0f;
+    int chirp_repetitions = 1;      // Single chirp for fading channels
+    float chirp_threshold = 0.35f;  // Detection threshold
+
     // Get carrier frequencies (evenly spaced)
     std::vector<float> getCarrierFreqs() const {
         std::vector<float> freqs(num_carriers);
@@ -62,6 +70,18 @@ struct MultiCarrierDPSKConfig {
     float getRawBitRate() const {
         return getSymbolRate() * num_carriers * bits_per_symbol;
     }
+
+    // Get chirp config for sync
+    sync::ChirpConfig getChirpConfig() const {
+        sync::ChirpConfig cfg;
+        cfg.sample_rate = sample_rate;
+        cfg.f_start = chirp_f_start;
+        cfg.f_end = chirp_f_end;
+        cfg.duration_ms = chirp_duration_ms;
+        cfg.repetitions = chirp_repetitions;
+        cfg.gap_ms = 0.0f;
+        return cfg;
+    }
 };
 
 // Multi-Carrier DPSK Modulator
@@ -72,7 +92,22 @@ public:
         , carrier_freqs_(cfg.getCarrierFreqs())
         , carrier_phases_(cfg.num_carriers, 0.0f)
         , prev_symbols_(cfg.num_carriers, Complex(1.0f, 0.0f))
+        , chirp_sync_(cfg.getChirpConfig())
     {
+    }
+
+    // Generate complete preamble: chirp + training + reference
+    Samples generatePreamble() {
+        Samples chirp = chirp_sync_.generate();
+        Samples training = generateTrainingSequence();
+        Samples ref = generateReferenceSymbol();
+
+        Samples preamble;
+        preamble.reserve(chirp.size() + training.size() + ref.size());
+        preamble.insert(preamble.end(), chirp.begin(), chirp.end());
+        preamble.insert(preamble.end(), training.begin(), training.end());
+        preamble.insert(preamble.end(), ref.begin(), ref.end());
+        return preamble;
     }
 
     // Generate training sequence (known pattern for all carriers)
@@ -83,7 +118,7 @@ public:
         // This creates orthogonal training across carriers
         for (int sym = 0; sym < config_.training_symbols; sym++) {
             for (int c = 0; c < config_.num_carriers; c++) {
-                // Phase rotation for training: carrier index * symbol index * 90°
+                // Phase rotation for training: carrier index * symbol index * 90deg
                 float phase_offset = (c * sym) * M_PI / 2.0f;
                 Complex training_sym = std::polar(1.0f, phase_offset);
 
@@ -118,7 +153,7 @@ public:
             float freq = carrier_freqs_[c];
             float phase_inc = 2.0f * M_PI * freq / config_.sample_rate;
 
-            // Reference symbol is +1 (0° phase) for all carriers
+            // Reference symbol is +1 (0 deg phase) for all carriers
             Complex ref_sym(1.0f, 0.0f);
             prev_symbols_[c] = ref_sym;
 
@@ -164,13 +199,13 @@ public:
                 // DQPSK: map bits to phase change
                 float phase_change = 0.0f;
                 if (config_.bits_per_symbol == 2) {
-                    // DQPSK: 00=+45°, 01=+135°, 11=-135°, 10=-45°
+                    // DQPSK: 00=+45deg, 01=+135deg, 11=-135deg, 10=-45deg
                     static const float dqpsk_phases[] = {
                         M_PI/4, 3*M_PI/4, -3*M_PI/4, -M_PI/4
                     };
                     phase_change = dqpsk_phases[symbol_bits];
                 } else {
-                    // DBPSK: 0=0°, 1=180°
+                    // DBPSK: 0=0deg, 1=180deg
                     phase_change = symbol_bits ? M_PI : 0.0f;
                 }
 
@@ -181,8 +216,6 @@ public:
                 prev_symbols_[c] = current;
 
                 // Generate carrier with this symbol
-                // Important: Each symbol starts at carrier phase 0 for proper
-                // differential demodulation. The modulation is in 'current'.
                 float freq = carrier_freqs_[c];
                 float phase_inc = 2.0f * M_PI * freq / config_.sample_rate;
 
@@ -206,57 +239,134 @@ public:
     }
 
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
+    const sync::ChirpSync& getChirpSync() const { return chirp_sync_; }
 
 private:
     MultiCarrierDPSKConfig config_;
     std::vector<float> carrier_freqs_;
     std::vector<float> carrier_phases_;
     std::vector<Complex> prev_symbols_;
+    sync::ChirpSync chirp_sync_;
 };
 
 // Multi-Carrier DPSK Demodulator
+// Follows OFDM demodulator pattern: process() feeds samples, returns true when frame ready
 class MultiCarrierDPSKDemodulator {
 public:
+    enum class State {
+        IDLE,           // Looking for chirp preamble
+        GOT_CHIRP,      // Chirp found, waiting for training + ref + data
+        FRAME_READY     // Frame demodulated, soft bits available
+    };
+
     explicit MultiCarrierDPSKDemodulator(const MultiCarrierDPSKConfig& cfg)
         : config_(cfg)
         , carrier_freqs_(cfg.getCarrierFreqs())
         , prev_symbols_(cfg.num_carriers, Complex(1.0f, 0.0f))
+        , chirp_sync_(cfg.getChirpConfig())
+        , state_(State::IDLE)
         , cfo_hz_(0.0f)
+        , chirp_position_(-1)
+        , last_chirp_corr_(0.0f)
     {
-        // Pre-compute mixing oscillators for each carrier
-        for (int c = 0; c < config_.num_carriers; c++) {
-            carrier_ncos_.emplace_back(carrier_freqs_[c], config_.sample_rate);
-        }
+        // Calculate expected sizes
+        chirp_samples_ = chirp_sync_.getTotalSamples();
+        training_samples_ = cfg.training_symbols * cfg.samples_per_symbol;
+        ref_samples_ = cfg.samples_per_symbol;
+        preamble_samples_ = chirp_samples_ + training_samples_ + ref_samples_;
     }
 
-    // Process training sequence for CFO estimation and phase sync
-    void processTraining(SampleSpan training) {
-        if (training.size() < (size_t)(config_.samples_per_symbol * config_.training_symbols)) {
-            return;
+    // Process incoming samples (like OFDM demodulator)
+    // Returns true when a frame is ready (soft bits available)
+    bool process(SampleSpan samples) {
+        // Append to internal buffer
+        sample_buffer_.insert(sample_buffer_.end(), samples.begin(), samples.end());
+
+        // State machine
+        switch (state_) {
+            case State::IDLE:
+                return processIdle();
+
+            case State::GOT_CHIRP:
+                return processGotChirp();
+
+            case State::FRAME_READY:
+                // Already have a frame ready, don't process more until getSoftBits() called
+                return true;
         }
+        return false;
+    }
+
+    // Get soft bits from demodulated frame
+    std::vector<float> getSoftBits() {
+        auto result = std::move(soft_bits_);
+        soft_bits_.clear();
+        if (state_ == State::FRAME_READY) {
+            state_ = State::IDLE;
+        }
+        return result;
+    }
+
+    // Check if synchronized (found chirp)
+    bool isSynced() const {
+        return state_ == State::GOT_CHIRP || state_ == State::FRAME_READY;
+    }
+
+    // Check if frame is ready
+    bool isFrameReady() const {
+        return state_ == State::FRAME_READY;
+    }
+
+    // Check if has pending data to process
+    bool hasPendingData() const {
+        return !sample_buffer_.empty() || state_ != State::IDLE;
+    }
+
+    // Get estimated CFO
+    float getEstimatedCFO() const { return cfo_hz_; }
+
+    // Get last chirp correlation value
+    float getLastChirpCorrelation() const { return last_chirp_corr_; }
+
+    // Set expected data size in bytes (to know when frame is complete)
+    void setExpectedDataBytes(size_t bytes) {
+        expected_data_bytes_ = bytes;
+    }
+
+    // Reset state
+    void reset() {
+        state_ = State::IDLE;
+        sample_buffer_.clear();
+        soft_bits_.clear();
+        prev_symbols_.assign(config_.num_carriers, Complex(1.0f, 0.0f));
+        cfo_hz_ = 0.0f;
+        chirp_position_ = -1;
+        last_chirp_corr_ = 0.0f;
+        expected_data_bytes_ = 0;
+    }
+
+    const MultiCarrierDPSKConfig& getConfig() const { return config_; }
+
+    // --- Legacy API for backward compatibility ---
+    // These are used by existing code that manually handles chirp detection
+
+    void processTraining(SampleSpan training) {
+        if (training.size() < training_samples_) return;
 
         // Estimate CFO from training sequence phase progression
-        // For now, simple approach: measure phase rotation per symbol
         std::vector<Complex> sym0(config_.num_carriers);
         std::vector<Complex> sym1(config_.num_carriers);
 
-        // Demodulate first and second training symbols
         for (int c = 0; c < config_.num_carriers; c++) {
             sym0[c] = demodulateOneSymbol(training.data(), c);
             sym1[c] = demodulateOneSymbol(training.data() + config_.samples_per_symbol, c);
         }
 
-        // Estimate CFO from phase difference (averaged across carriers)
         float phase_diff_sum = 0.0f;
         for (int c = 0; c < config_.num_carriers; c++) {
-            // Expected phase change between sym0 and sym1 in training
-            float expected_phase = (c * 1 - c * 0) * M_PI / 2.0f;  // From training pattern
+            float expected_phase = (c * 1 - c * 0) * M_PI / 2.0f;
             Complex expected_diff = std::polar(1.0f, expected_phase);
-
-            // Actual phase change
             Complex actual_diff = sym1[c] * std::conj(sym0[c]);
-
-            // Error is the difference
             Complex error = actual_diff * std::conj(expected_diff);
             phase_diff_sum += std::arg(error);
         }
@@ -264,21 +374,14 @@ public:
         float avg_phase_error = phase_diff_sum / config_.num_carriers;
         float symbol_duration = config_.samples_per_symbol / config_.sample_rate;
         cfo_hz_ = avg_phase_error / (2.0f * M_PI * symbol_duration);
-
-        // Clamp CFO estimate
         cfo_hz_ = std::max(-50.0f, std::min(50.0f, cfo_hz_));
     }
 
-    // Set reference from reference symbol
     void setReference(SampleSpan ref_symbol) {
-        if (ref_symbol.size() < (size_t)config_.samples_per_symbol) {
-            return;
-        }
+        if (ref_symbol.size() < (size_t)config_.samples_per_symbol) return;
 
-        // Demodulate reference symbol for each carrier
         for (int c = 0; c < config_.num_carriers; c++) {
             prev_symbols_[c] = demodulateOneSymbol(ref_symbol.data(), c);
-            // Normalize
             if (std::abs(prev_symbols_[c]) > 0.001f) {
                 prev_symbols_[c] /= std::abs(prev_symbols_[c]);
             } else {
@@ -287,59 +390,34 @@ public:
         }
     }
 
-    // Demodulate data to soft bits
     std::vector<float> demodulateSoft(SampleSpan data) {
         int num_symbols = data.size() / config_.samples_per_symbol;
         std::vector<float> soft_bits;
         soft_bits.reserve(num_symbols * config_.num_carriers * config_.bits_per_symbol);
 
-        // Track signal power for proper LLR scaling
-        float avg_power = 0.0f;
-        int power_count = 0;
-
         for (int sym = 0; sym < num_symbols; sym++) {
             const float* sym_data = data.data() + sym * config_.samples_per_symbol;
 
             for (int c = 0; c < config_.num_carriers; c++) {
-                // Demodulate this carrier
                 Complex current = demodulateOneSymbol(sym_data, c);
                 float mag = std::abs(current);
 
-                // Track average power
-                avg_power += mag * mag;
-                power_count++;
-
-                // Normalize for differential decode
                 Complex normalized = (mag > 0.0001f) ? current / mag : Complex(1.0f, 0.0f);
-
-                // Differential decode
                 Complex diff = normalized * std::conj(prev_symbols_[c]);
                 prev_symbols_[c] = normalized;
 
-                // Extract soft bits based on phase
                 float phase = std::arg(diff);
-
-                // Confidence based on how "clean" the phase is
-                // Scale to produce LLR-like values in reasonable range for LDPC
-                // With 8 carriers at 1/8 amplitude each, mag is ~0.125
-                // Scale up to get soft bits in [-5, +5] range
                 float confidence = mag * config_.num_carriers * 4.0f;
 
-                // Normalize phase to [0, 2π) like the existing DPSK code
                 while (phase < 0) phase += 2.0f * M_PI;
                 while (phase >= 2.0f * M_PI) phase -= 2.0f * M_PI;
 
                 if (config_.bits_per_symbol == 2) {
-                    // DQPSK: Phases 45°, 135°, 225°, 315° → bits 00, 01, 10, 11
-                    // MSB (bit 0): 0 in upper half (sin>0), 1 in lower half (sin<0)
-                    // LSB (bit 1): 0 at 45°/225°, 1 at 135°/315° → sin(2*phase)
                     float sb0 = confidence * std::sin(phase);
                     float sb1 = confidence * std::sin(2.0f * phase);
-
                     soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb0)));
                     soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb1)));
                 } else {
-                    // DBPSK: 0 → 0°, 1 → 180°
                     float sb = confidence * std::cos(phase);
                     soft_bits.push_back(std::max(-10.0f, std::min(10.0f, sb)));
                 }
@@ -349,27 +427,117 @@ public:
         return soft_bits;
     }
 
-    // Get estimated CFO
-    float getEstimatedCFO() const { return cfo_hz_; }
-
-    // Reset state
-    void reset() {
-        prev_symbols_.assign(config_.num_carriers, Complex(1.0f, 0.0f));
-        cfo_hz_ = 0.0f;
-        for (auto& nco : carrier_ncos_) {
-            nco.reset();
+private:
+    // Process in IDLE state - look for chirp
+    bool processIdle() {
+        // Need enough samples to search for chirp
+        size_t min_samples = chirp_samples_ + 96000;  // chirp + 2s search window
+        if (sample_buffer_.size() < min_samples) {
+            // Trim buffer if too large
+            if (sample_buffer_.size() > 2 * min_samples) {
+                size_t trim = sample_buffer_.size() - min_samples;
+                sample_buffer_.erase(sample_buffer_.begin(), sample_buffer_.begin() + trim);
+            }
+            return false;
         }
+
+        // Search for chirp
+        SampleSpan search_span(sample_buffer_.data(), sample_buffer_.size());
+        float corr = 0.0f;
+        int chirp_start = chirp_sync_.detect(search_span, corr, config_.chirp_threshold);
+
+        if (chirp_start >= 0) {
+            // Check if there's signal energy after chirp (not just PING)
+            size_t chirp_end = chirp_start + chirp_samples_;
+            if (chirp_end + training_samples_ + ref_samples_ + 1000 < sample_buffer_.size()) {
+                float energy = 0.0f;
+                for (size_t i = chirp_end; i < chirp_end + training_samples_; i++) {
+                    energy += sample_buffer_[i] * sample_buffer_[i];
+                }
+                float rms = std::sqrt(energy / training_samples_);
+
+                if (rms > 0.05f) {
+                    // Found DPSK frame
+                    chirp_position_ = chirp_start;
+                    last_chirp_corr_ = corr;
+                    state_ = State::GOT_CHIRP;
+
+                    // Remove samples before chirp
+                    if (chirp_start > 0) {
+                        sample_buffer_.erase(sample_buffer_.begin(),
+                                            sample_buffer_.begin() + chirp_start);
+                        chirp_position_ = 0;
+                    }
+                    return processGotChirp();
+                }
+            }
+        }
+
+        // No chirp found - trim old samples
+        if (sample_buffer_.size() > min_samples) {
+            size_t trim = sample_buffer_.size() - min_samples / 2;
+            sample_buffer_.erase(sample_buffer_.begin(), sample_buffer_.begin() + trim);
+        }
+        return false;
     }
 
-    const MultiCarrierDPSKConfig& getConfig() const { return config_; }
+    // Process in GOT_CHIRP state - wait for complete frame
+    bool processGotChirp() {
+        // Calculate how many samples we need
+        size_t data_samples = 0;
+        if (expected_data_bytes_ > 0) {
+            int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+            int num_symbols = (expected_data_bytes_ * 8 + bits_per_symbol - 1) / bits_per_symbol;
+            data_samples = num_symbols * config_.samples_per_symbol;
+        } else {
+            // Default: assume at least 1 LDPC codeword (648 bits)
+            int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+            int num_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+            data_samples = num_symbols * config_.samples_per_symbol;
+        }
 
-private:
+        size_t total_needed = preamble_samples_ + data_samples;
+
+        if (sample_buffer_.size() < total_needed) {
+            return false;  // Wait for more samples
+        }
+
+        // CFO sanity check - high CFO indicates false positive
+        size_t training_start = chirp_samples_;
+        SampleSpan train_span(sample_buffer_.data() + training_start, training_samples_);
+        processTraining(train_span);
+
+        if (std::abs(cfo_hz_) > 5.0f) {
+            // False positive - reset and keep searching
+            sample_buffer_.erase(sample_buffer_.begin(),
+                                sample_buffer_.begin() + chirp_samples_);
+            state_ = State::IDLE;
+            return false;
+        }
+
+        // Process reference symbol
+        size_t ref_start = chirp_samples_ + training_samples_;
+        SampleSpan ref_span(sample_buffer_.data() + ref_start, ref_samples_);
+        setReference(ref_span);
+
+        // Demodulate data
+        size_t data_start = preamble_samples_;
+        SampleSpan data_span(sample_buffer_.data() + data_start, data_samples);
+        soft_bits_ = demodulateSoft(data_span);
+
+        // Consume processed samples
+        sample_buffer_.erase(sample_buffer_.begin(),
+                            sample_buffer_.begin() + total_needed);
+
+        state_ = State::FRAME_READY;
+        return true;
+    }
+
     // Demodulate one symbol period for one carrier
     Complex demodulateOneSymbol(const float* samples, int carrier_idx) {
         float freq = carrier_freqs_[carrier_idx] + cfo_hz_;
         float phase_inc = 2.0f * M_PI * freq / config_.sample_rate;
 
-        // Matched filter: mix down and integrate
         Complex sum(0.0f, 0.0f);
         float phase = 0.0f;
 
@@ -382,34 +550,28 @@ private:
         return sum / (float)config_.samples_per_symbol;
     }
 
-    // Simple NCO class
-    class NCO {
-    public:
-        NCO(float freq, float sample_rate)
-            : phase_inc_(2.0f * M_PI * freq / sample_rate), phase_(0.0f) {}
-
-        Complex next() {
-            Complex out = std::polar(1.0f, phase_);
-            phase_ += phase_inc_;
-            if (phase_ > 2.0f * M_PI) phase_ -= 2.0f * M_PI;
-            return out;
-        }
-
-        void reset() { phase_ = 0.0f; }
-
-    private:
-        float phase_inc_;
-        float phase_;
-    };
-
     MultiCarrierDPSKConfig config_;
     std::vector<float> carrier_freqs_;
     std::vector<Complex> prev_symbols_;
-    std::vector<NCO> carrier_ncos_;
+    sync::ChirpSync chirp_sync_;
+
+    // State machine
+    State state_;
+    Samples sample_buffer_;
+    std::vector<float> soft_bits_;
     float cfo_hz_;
+    int chirp_position_;
+    float last_chirp_corr_;
+    size_t expected_data_bytes_ = 0;
+
+    // Precomputed sizes
+    size_t chirp_samples_;
+    size_t training_samples_;
+    size_t ref_samples_;
+    size_t preamble_samples_;
 };
 
-// Preset configurations matching VARA speed levels
+// Preset configurations matching commercial HF modem speed levels
 namespace mc_dpsk_presets {
 
 // Level 5 equivalent: 3 carriers, ~270 bps raw
@@ -418,8 +580,6 @@ inline MultiCarrierDPSKConfig level5() {
     cfg.num_carriers = 3;
     cfg.samples_per_symbol = 512;  // 93.75 baud
     cfg.bits_per_symbol = 2;       // DQPSK
-    // Raw: 93.75 * 3 * 2 = 562.5 bps
-    // With R1/4: 140 bps, R1/2: 281 bps
     return cfg;
 }
 
@@ -429,7 +589,6 @@ inline MultiCarrierDPSKConfig level6() {
     cfg.num_carriers = 4;
     cfg.samples_per_symbol = 512;
     cfg.bits_per_symbol = 2;
-    // Raw: 93.75 * 4 * 2 = 750 bps
     return cfg;
 }
 
@@ -439,7 +598,6 @@ inline MultiCarrierDPSKConfig level7() {
     cfg.num_carriers = 6;
     cfg.samples_per_symbol = 512;
     cfg.bits_per_symbol = 2;
-    // Raw: 93.75 * 6 * 2 = 1125 bps
     return cfg;
 }
 
@@ -449,7 +607,6 @@ inline MultiCarrierDPSKConfig level8() {
     cfg.num_carriers = 8;
     cfg.samples_per_symbol = 512;
     cfg.bits_per_symbol = 2;
-    // Raw: 93.75 * 8 * 2 = 1500 bps
     return cfg;
 }
 
@@ -459,7 +616,6 @@ inline MultiCarrierDPSKConfig level9() {
     cfg.num_carriers = 10;
     cfg.samples_per_symbol = 512;
     cfg.bits_per_symbol = 2;
-    // Raw: 93.75 * 10 * 2 = 1875 bps
     return cfg;
 }
 
@@ -469,7 +625,6 @@ inline MultiCarrierDPSKConfig level10() {
     cfg.num_carriers = 13;
     cfg.samples_per_symbol = 512;
     cfg.bits_per_symbol = 2;
-    // Raw: 93.75 * 13 * 2 = 2437.5 bps
     return cfg;
 }
 
