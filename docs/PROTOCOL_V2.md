@@ -54,10 +54,15 @@ The protocol supports multiple waveforms optimized for different channel conditi
 
 | Mode | Value | Use Case | Min SNR | Max Throughput |
 |------|-------|----------|---------|----------------|
-| DPSK | 0x00 | Connection, low SNR | -8 dB | 250 bps |
-| OFDM | 0x01 | Data, good channels | 17 dB | 7.2 kbps |
+| OFDM | 0x00 | Data, high SNR channels | 17 dB | 7.2 kbps |
+| OTFS_EQ | 0x01 | Data, stable channels | 20 dB | 3.4 kbps |
 | OTFS_RAW | 0x02 | Data, Doppler channels | 20 dB | 3.4 kbps |
-| OTFS_EQ | 0x03 | Data, stable channels | 20 dB | 3.4 kbps |
+| MFSK | 0x03 | Very low SNR (reserved) | -17 dB | 50 bps |
+| DPSK | 0x04 | Connection, low SNR | -8 dB | 250 bps |
+| AUTO | 0xFF | Let receiver decide | - | - |
+
+**Note:** CONNECT/CONNECT_ACK always use DPSK (robust for initial handshake).
+DISCONNECT and DATA use the negotiated waveform.
 
 ### Common Parameters
 
@@ -182,11 +187,14 @@ Station A                          Station B
 
 **MODE_CAPS Bitmap:**
 ```
-Bit 0: DPSK supported (always 1)
-Bit 1: OFDM supported
-Bit 2: OTFS_RAW supported
-Bit 3: OTFS_EQ supported
-Bits 4-7: Reserved
+Bit 0 (0x01): OFDM supported
+Bit 1 (0x02): OTFS_EQ supported
+Bit 2 (0x04): OTFS_RAW supported
+Bit 3 (0x08): MFSK supported (reserved)
+Bit 4 (0x10): DPSK supported
+Bits 5-7: Reserved
+
+ALL = 0x1F (all modes supported)
 ```
 
 ---
@@ -209,11 +217,13 @@ Bits 4-7: Reserved
 | CONNECT_NAK | 0x14 | Connection rejected | 3 CW (full callsigns) |
 | DISCONNECT | 0x15 | End connection | 3 CW (full callsigns) |
 | KEEPALIVE | 0x16 | Maintain connection | 1 CW (control) |
+| MODE_CHANGE | 0x17 | Request modulation/rate change | 1 CW (control) |
 | ACK | 0x20 | Acknowledge data | 1 CW (control) |
 | NACK | 0x21 | Request retransmit (bitmap) | 1 CW (control) |
 | DATA | 0x30 | Data segment | Variable |
 | DATA_START | 0x31 | First segment (with metadata) | Variable |
-| DATA_END | 0x32 | Last segment (with checksum) | Variable |
+| DATA_CONT | 0x32 | Continuation segment | Variable |
+| DATA_END | 0x33 | Last segment (with checksum) | Variable |
 | BEACON | 0x40 | CQ broadcast | 1 CW (control) |
 
 **Frame Categories:**
@@ -240,6 +250,25 @@ Total: 20 bytes = 160 bits < 162 bits (fits in 1 R1/4 codeword)
 - **DST_HASH** (3 bytes): 24-bit hash of destination callsign (0xFFFFFF = broadcast)
 - **PAYLOAD** (6 bytes): Type-specific payload data
 - **CRC16** (2 bytes): CRC-16 CCITT over all preceding bytes
+
+#### MODE_CHANGE Payload (6 bytes)
+
+```
+┌───────────┬───────────┬───────────┬───────────┬──────────────────┐
+│    MOD    │   RATE    │    SNR    │  REASON   │    Reserved      │
+│    1B     │    1B     │    1B     │    1B     │       2B         │
+└───────────┴───────────┴───────────┴───────────┴──────────────────┘
+```
+
+- **MOD** (1 byte): New modulation (see Modulation enum)
+- **RATE** (1 byte): New code rate (0=R1/4, 1=R1/2, 2=R2/3, 3=R3/4, 4=R5/6)
+- **SNR** (1 byte): Current measured SNR (encoded: `value*4 - 10 = dB`, range -10 to +53.75 dB)
+- **REASON** (1 byte): Change reason:
+  - 0x00 = CHANNEL_IMPROVED (SNR increased)
+  - 0x01 = CHANNEL_DEGRADED (SNR decreased)
+  - 0x02 = USER_REQUEST (manual selection)
+  - 0x03 = INITIAL_SETUP (first negotiation)
+- **Reserved** (2 bytes): Set to 0
 
 ### Connect Frame Format (41 bytes - 3 codewords)
 
