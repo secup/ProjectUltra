@@ -168,6 +168,19 @@ Complex mapBits(uint32_t bits, Modulation mod) {
     }
 }
 
+// LLR clipping for numerical stability
+constexpr float MAX_LLR = 30.0f;
+constexpr float MIN_LLR_MAG = 0.001f;
+constexpr float QAM16_THRESHOLD = 0.6324555320336759f;  // 2/sqrt(10)
+
+inline float clipLLR(float llr) {
+    float clipped = std::max(-MAX_LLR, std::min(MAX_LLR, llr));
+    if (std::abs(clipped) < MIN_LLR_MAG) {
+        clipped = (clipped >= 0) ? MIN_LLR_MAG : -MIN_LLR_MAG;
+    }
+    return clipped;
+}
+
 // Soft demapping with proper LLR scaling
 // LLR convention: negative = bit 1, positive = bit 0
 void softDemap(const Complex& symbol, Modulation mod, float noise_var,
@@ -177,19 +190,36 @@ void softDemap(const Complex& symbol, Modulation mod, float noise_var,
 
     switch (mod) {
         case Modulation::BPSK: {
-            llrs.push_back(-2.0f * symbol.real() / noise_var);
+            llrs.push_back(clipLLR(-2.0f * symbol.real() / noise_var));
             break;
         }
         case Modulation::QPSK: {
             float scale = -2.0f * QPSK_SCALE / noise_var;
-            llrs.push_back(symbol.real() * scale);
-            llrs.push_back(symbol.imag() * scale);
+            llrs.push_back(clipLLR(symbol.real() * scale));
+            llrs.push_back(clipLLR(symbol.imag() * scale));
+            break;
+        }
+        case Modulation::QAM16: {
+            // 16-QAM: 4 bits per symbol
+            // Gray code: levels[] = {-3, -1, 3, 1} for bits 00,01,10,11
+            float I = symbol.real();
+            float Q = symbol.imag();
+            float scale = 2.0f / noise_var;
+
+            // I bits (bits 3,2 of 4-bit word)
+            llrs.push_back(clipLLR(-scale * I));                              // bit3 (MSB): sign
+            llrs.push_back(clipLLR(scale * (std::abs(I) - QAM16_THRESHOLD))); // bit2: outer/inner
+
+            // Q bits (bits 1,0 of 4-bit word)
+            llrs.push_back(clipLLR(-scale * Q));                              // bit1: sign
+            llrs.push_back(clipLLR(scale * (std::abs(Q) - QAM16_THRESHOLD))); // bit0: outer/inner
             break;
         }
         default: {
-            float scale = -2.0f / noise_var;
-            llrs.push_back(symbol.real() * scale);
-            llrs.push_back(symbol.imag() * scale);
+            // Fallback for other modulations - treat as QPSK
+            float scale = -2.0f * QPSK_SCALE / noise_var;
+            llrs.push_back(clipLLR(symbol.real() * scale));
+            llrs.push_back(clipLLR(symbol.imag() * scale));
             break;
         }
     }
@@ -391,7 +421,7 @@ struct OTFSDemodulator::Impl {
     float estimated_noise_var = 0.1f;
 
     std::vector<Complex> sync_sequence;
-    float sync_threshold = 0.7f;
+    float sync_threshold = 0.7f;  // Threshold for sync detection
 
     Impl(const OTFSConfig& cfg)
         : config(cfg)
@@ -435,8 +465,41 @@ struct OTFSDemodulator::Impl {
             R += samples[i + sym_len] * samples[i + sym_len];
         }
 
+        // Minimum energy check to reject false positives on silence
+        float avg_energy = R / sym_len;
+        if (avg_energy < 1e-6f) return false;
+
         float metric = std::abs(P) / (R + 1e-10f);
         return metric > sync_threshold;
+    }
+
+    // Fine synchronization using cross-correlation with known preamble
+    // The preamble has 4 identical OFDM symbols, so Schmidl-Cox gives flat response
+    // Instead, find where the correlation metric first exceeds a high threshold
+    size_t fineSyncPreamble(const float* samples, size_t count, size_t search_range) {
+        size_t sym_len = config.fft_size + config.cp_length;
+        if (count < 2 * sym_len + search_range) return 0;
+
+        // Find where metric transitions from rising to stable (preamble start)
+        // The metric rises linearly as we enter the preamble
+        // Find the first position where metric > 0.98 (nearly perfect)
+        for (size_t offset = 0; offset < search_range; ++offset) {
+            float P = 0, R = 0;
+            for (size_t i = 0; i < sym_len; ++i) {
+                P += samples[offset + i] * samples[offset + i + sym_len];
+                R += samples[offset + i + sym_len] * samples[offset + i + sym_len];
+            }
+
+            float metric = std::abs(P) / (R + 1e-10f);
+            if (metric > 0.98f) {
+                // Found the transition point - this is approximately where preamble starts
+                // Actually we're sym_len samples into the preamble at this point
+                // because we need both windows to be in the preamble for metric=1.0
+                return offset;
+            }
+        }
+
+        return 0;
     }
 
     void demodulateSymbol(const std::vector<Complex>& baseband, uint32_t symbol_idx) {
@@ -461,7 +524,8 @@ struct OTFSDemodulator::Impl {
     }
 
     // Estimate channel from preamble (known Zadoff-Chu sequence)
-    void estimateChannelFromPreamble(const float* preamble_samples, size_t preamble_len, size_t preamble_start) {
+    // NOTE: TX resets mixer at start of preamble, so we use offset 0 (not accumulated sample count)
+    void estimateChannelFromPreamble(const float* preamble_samples, size_t preamble_len) {
         size_t sym_len = config.fft_size + config.cp_length;
 
         if (preamble_len < 4 * sym_len) return;
@@ -473,7 +537,8 @@ struct OTFSDemodulator::Impl {
 
         for (int sym = 0; sym < 4; ++sym) {
             size_t sym_offset = sym * sym_len;
-            auto baseband = toBaseband(preamble_samples + sym_offset, sym_len, preamble_start + sym_offset);
+            // TX mixer resets at preamble start, so use sym_offset only (not accumulated position)
+            auto baseband = toBaseband(preamble_samples + sym_offset, sym_len, sym_offset);
 
             std::vector<Complex> time_domain(baseband.begin() + config.cp_length,
                                               baseband.begin() + config.cp_length + config.fft_size);
@@ -492,6 +557,7 @@ struct OTFSDemodulator::Impl {
                         Complex h = received * std::conj(expected) / expected_mag_sq;
                         h_sum[m] += h;
 
+                        // Estimate noise from last symbol only (to avoid correlation with channel est)
                         if (sym == 3) {
                             Complex error = received - h * expected;
                             total_noise_power += std::norm(error);
@@ -511,9 +577,10 @@ struct OTFSDemodulator::Impl {
             }
         }
 
-        // Update noise variance
+        // Update noise variance from preamble error (single symbol for speed)
         if (noise_samples > 0) {
             estimated_noise_var = total_noise_power / noise_samples;
+            // Clamp to reasonable range to avoid numerical issues
             estimated_noise_var = std::max(0.001f, std::min(1.0f, estimated_noise_var));
         }
 
@@ -527,13 +594,12 @@ struct OTFSDemodulator::Impl {
             return;
         }
 
-        // Apply channel estimate to all OFDM symbols
+        // Apply channel estimate to all OFDM symbols using zero-forcing
         for (uint32_t n = 0; n < config.N; ++n) {
             for (uint32_t m = 0; m < config.M; ++m) {
                 Complex received = tf_buffer[n * config.M + m];
                 Complex h = channel_est[m];
 
-                // Zero-forcing equalization
                 float h_mag_sq = std::norm(h);
                 if (h_mag_sq > 0.01f) {
                     tf_equalized[n * config.M + m] = received * std::conj(h) / h_mag_sq;
@@ -562,12 +628,28 @@ bool OTFSDemodulator::process(SampleSpan samples) {
             if (impl_->sample_buffer.size() < 2 * sym_len) return false;
 
             if (impl_->detectSyncReal(impl_->sample_buffer.data(), 2 * sym_len)) {
+                // Coarse sync detected - now do fine sync to find exact preamble start
+                size_t search_range = sym_len / 4;  // Search within one slide distance
+                size_t fine_offset = 0;
+
+                if (impl_->sample_buffer.size() >= preamble_len + search_range) {
+                    fine_offset = impl_->fineSyncPreamble(
+                        impl_->sample_buffer.data(), impl_->sample_buffer.size(), search_range);
+
+                    // Remove samples before the fine-tuned preamble start
+                    if (fine_offset > 0) {
+                        impl_->total_samples_processed += fine_offset;
+                        impl_->sample_buffer.erase(impl_->sample_buffer.begin(),
+                                                   impl_->sample_buffer.begin() + fine_offset);
+                    }
+                }
+
                 if (impl_->sample_buffer.size() >= preamble_len) {
                     // Estimate channel from preamble BEFORE removing it
-                    // Pass absolute sample position for proper mixer phase alignment
+                    // TX resets mixer at preamble start, so no absolute offset needed
                     if (impl_->config.tf_equalization) {
                         impl_->estimateChannelFromPreamble(
-                            impl_->sample_buffer.data(), preamble_len, impl_->total_samples_processed);
+                            impl_->sample_buffer.data(), preamble_len);
                     }
 
                     impl_->total_samples_processed += preamble_len;
@@ -593,8 +675,9 @@ bool OTFSDemodulator::process(SampleSpan samples) {
         else if (impl_->state == Impl::State::SYNCED) {
             if (impl_->sample_buffer.size() < sym_len) return false;
 
-            size_t symbol_offset = impl_->current_frame_start +
-                                   impl_->symbols_received * sym_len;
+            // TX resets mixer at start of data section, so offset is just symbols_received * sym_len
+            // (not including any accumulated lead-in or preamble offset)
+            size_t symbol_offset = impl_->symbols_received * sym_len;
             auto baseband = impl_->toBaseband(impl_->sample_buffer.data(), sym_len,
                                                symbol_offset);
             impl_->demodulateSymbol(baseband, impl_->symbols_received);
@@ -622,23 +705,34 @@ bool OTFSDemodulator::process(SampleSpan samples) {
             // Step 2: SFFT to get DD symbols
             sfft(impl_->tf_equalized, impl_->dd_symbols, impl_->config.M, impl_->config.N);
 
-            // Step 3: Normalize DD symbols (critical for soft demapping without TF eq)
-            // OTFS spreads channel across DD grid; we need to normalize for proper LLR
+            // Step 3: Normalize DD symbols to unit power
+            // The SFFT spreads energy, so we need to rescale to expected constellation magnitude
             float avg_power = 0;
+            size_t nonzero_count = 0;
             for (const auto& sym : impl_->dd_symbols) {
-                avg_power += std::norm(sym);
-            }
-            avg_power /= impl_->dd_symbols.size();
-
-            if (avg_power > 0.01f) {
-                // Target power for QPSK is 1.0 (each symbol has mag ~0.707)
-                float scale = 1.0f / std::sqrt(avg_power);
-                for (auto& sym : impl_->dd_symbols) {
-                    sym *= scale;
+                float p = std::norm(sym);
+                if (p > 1e-8f) {
+                    avg_power += p;
+                    nonzero_count++;
                 }
-                // Adjust noise variance estimate based on scaling
-                impl_->estimated_noise_var = 0.1f;  // Reset to reasonable value after normalization
             }
+
+            float scale = 1.0f;
+            if (nonzero_count > 0) {
+                avg_power /= nonzero_count;
+                if (avg_power > 1e-6f) {
+                    scale = 1.0f / std::sqrt(avg_power);
+                    for (auto& sym : impl_->dd_symbols) {
+                        sym *= scale;
+                    }
+                }
+            }
+
+            // Step 3b: Use a fixed noise variance for consistent LLR scaling
+            // After normalization, symbols have unit power, so use a fixed noise variance
+            // that gives good LDPC performance across typical SNR range (15-35 dB)
+            // Noise variance of 0.1 corresponds to ~10 dB SNR, which gives reasonable LLR range
+            impl_->estimated_noise_var = 0.1f;
 
             // Step 4: Generate soft bits from DD symbols
             impl_->soft_bits.clear();
