@@ -74,6 +74,7 @@ int main(int argc, char* argv[]) {
     std::string output_file = "hf_modem_test.f32";
     WaveformMode waveform_mode = WaveformMode::OFDM;
     std::string channel_type = "awgn";  // awgn, good, moderate, poor
+    uint32_t channel_seed = 0;  // 0 = random
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -116,6 +117,8 @@ int main(int argc, char* argv[]) {
                 fprintf(stderr, "Unknown channel type: %s (use: awgn, good, moderate, poor)\n", channel_type.c_str());
                 return 1;
             }
+        } else if (arg == "--seed" && i + 1 < argc) {
+            channel_seed = std::stoul(argv[++i]);
         } else if (arg == "-h" || arg == "--help") {
             printf("HF Modem Pipeline Test\n\n");
             printf("Tests full ModemEngine audio pipeline (same as real HF rig)\n\n");
@@ -277,7 +280,15 @@ int main(int argc, char* argv[]) {
             ch_cfg.path2_gain = 0.8f;
         }
 
-        WattersonChannel channel(ch_cfg, 42);
+        // Use provided seed or generate random for realistic HF simulation
+        uint32_t seed = channel_seed;
+        if (seed == 0) {
+            std::random_device rd;
+            seed = rd();
+        }
+        printf("Channel seed: %u (use --seed %u to reproduce)\n", seed, seed);
+
+        WattersonChannel channel(ch_cfg, seed);
         SampleSpan input_span(full_audio.data(), full_audio.size());
         full_audio = channel.process(input_span);
     }
