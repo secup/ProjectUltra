@@ -271,6 +271,54 @@ power necessary. Be ready to QSY if causing interference.
 
 ---
 
+## Research Roadmap
+
+**Goal: Exceed industry-leading HF modem speeds (currently ~8.5 kbps in 2.8 kHz bandwidth)**
+
+ProjectUltra is a research platform for investigating advanced modulation and coding techniques for HF channels. Our target is **10+ kbps** throughput while maintaining robustness.
+
+### Techniques Under Investigation
+
+| Technique | Expected Gain | Status | References |
+|-----------|---------------|--------|------------|
+| **OTFS** | 20% SE over OFDM, full diversity | Implemented, needs HF testing | [arxiv.org/pdf/2302.14224](https://arxiv.org/pdf/2302.14224) |
+| **AFDM** | >1 dB over OTFS, lower pilots | Not yet implemented | [arxiv.org/html/2507.21704v3](https://arxiv.org/html/2507.21704v3) |
+| **Turbo DPSK** | 4.65 dB on Rayleigh fading | Planned | [Turbo DPSK paper](https://www.academia.edu/81703561/Turbo_DPSK_iterative_differential_PSK_demodulation_and_channel_decoding) |
+| **Faster-than-Nyquist** | 25% more bits (Mazo limit) | Planned | [IEEE ComSoc overview](https://www.comsoc.org/publications/ctn/running-faster-nyquist-idea-whose-time-may-have-come) |
+| **SC-LDPC** | 0.07 dB from capacity | Planned | [SC-LDPC tutorial](https://www.itsoc.org/sites/default/files/2021-03/laurent.schmalen@kit.edu%20-%20ESIT_20_Schmalen.pdf) |
+| **OFDM-IM** | 2x SE via index modulation | Planned | [arxiv.org/html/2501.15437v1](https://arxiv.org/html/2501.15437v1) |
+
+### Why These Techniques?
+
+**OTFS/AFDM**: Traditional OFDM suffers from inter-carrier interference (ICI) when Doppler spread is high. OTFS and AFDM work in the delay-Doppler domain, achieving full diversity over doubly-selective channels. Literature shows AFDM outperforms OTFS by >1 dB with simpler channel estimation.
+
+**Turbo DPSK**: Our single-carrier DPSK already works to -11 dB SNR. Adding iterative (turbo) processing between the DPSK demodulator and LDPC decoder could push this to -15 dB or improve throughput at higher SNR.
+
+**Faster-than-Nyquist**: By accepting controlled intersymbol interference and using iterative detection, FTN can transmit 25% more symbols in the same bandwidth (Mazo limit: τ=0.8).
+
+**Spatially-Coupled LDPC**: Our current LDPC codes are from IEEE 802.11n. SC-LDPC codes achieve threshold saturation, approaching capacity within 0.07 dB on fading channels.
+
+### Current Benchmarks
+
+| Mode | ProjectUltra | Industry Leader | Gap |
+|------|--------------|-----------------|-----|
+| Max throughput | 7.2 kbps | 8.5 kbps | -15% |
+| Low-SNR floor | -11 dB | ~0 dB | **+11 dB better** |
+| Doppler tolerance | Untested | Good | TBD |
+
+### How to Contribute
+
+We're looking for collaborators interested in:
+- Implementing AFDM modulation
+- Adding turbo processing to DPSK
+- Testing OTFS on real HF recordings
+- SC-LDPC code design and optimization
+- FTN with iterative ISI cancellation
+
+If you have expertise in these areas, please open an issue or reach out!
+
+---
+
 ## Contributing
 
 Contributions welcome! Areas of interest:
