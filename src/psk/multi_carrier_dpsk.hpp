@@ -628,6 +628,31 @@ inline MultiCarrierDPSKConfig level10() {
     return cfg;
 }
 
+// Ultra levels: More carriers for higher throughput
+// These are ProjectUltra-specific, tested on HF fading channels
+
+// Level 11 (Ultra): 20 carriers, ~3750 bps raw
+// TESTED: 100% success on moderate/poor fading @ 10-20 dB
+// Sweet spot for fading channels - ~105 Hz carrier spacing
+inline MultiCarrierDPSKConfig level11_ultra() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 20;
+    cfg.samples_per_symbol = 512;
+    cfg.bits_per_symbol = 2;
+    return cfg;
+}
+
+// Level 12 (Ultra): 30 carriers, ~5625 bps raw
+// TESTED: 100% success on GOOD channels @ 25 dB only
+// Carrier spacing too tight (~68 Hz) for fading
+inline MultiCarrierDPSKConfig level12_ultra() {
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 30;
+    cfg.samples_per_symbol = 512;
+    cfg.bits_per_symbol = 2;
+    return cfg;
+}
+
 } // namespace mc_dpsk_presets
 
 } // namespace ultra

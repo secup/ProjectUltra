@@ -230,7 +230,8 @@ private:
 
         // === Our station (ALPHA) ===
         modem_.setLogPrefix("ALPHA");
-        modem_.setPingRepetitions(ping_reps_);
+        // TODO: setPingRepetitions not yet implemented
+        // modem_.setPingRepetitions(ping_reps_);
         protocol_.setLocalCallsign("ALPHA");
         protocol_.setAutoAccept(true);
 
@@ -314,7 +315,8 @@ private:
         // === Virtual station (BRAVO) ===
         virtual_modem_ = std::make_unique<ModemEngine>();
         virtual_modem_->setLogPrefix("BRAVO");
-        virtual_modem_->setPingRepetitions(ping_reps_);
+        // TODO: setPingRepetitions not yet implemented
+        // virtual_modem_->setPingRepetitions(ping_reps_);
         virtual_protocol_.setLocalCallsign("BRAVO");
         virtual_protocol_.setAutoAccept(true);
 

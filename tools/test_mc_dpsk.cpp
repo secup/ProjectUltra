@@ -28,6 +28,7 @@ int main(int argc, char* argv[]) {
     int num_carriers = 8;
     float snr_db = 10.0f;
     std::string channel_type = "moderate";
+    std::string rate_str = "r14";  // Default R1/4
     int trials = 10;
 
     for (int i = 1; i < argc; i++) {
@@ -37,16 +38,33 @@ int main(int argc, char* argv[]) {
             snr_db = std::stof(argv[++i]);
         } else if (strcmp(argv[i], "--channel") == 0 && i + 1 < argc) {
             channel_type = argv[++i];
+        } else if (strcmp(argv[i], "--rate") == 0 && i + 1 < argc) {
+            rate_str = argv[++i];
         } else if (strcmp(argv[i], "--trials") == 0 && i + 1 < argc) {
             trials = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             std::cout << "Usage: " << argv[0] << " [options]\n";
-            std::cout << "  --carriers N   Number of carriers (3-16, default: 8)\n";
+            std::cout << "  --carriers N   Number of carriers (3-40, default: 8)\n";
             std::cout << "  --snr dB       SNR in dB (default: 10)\n";
             std::cout << "  --channel X    Channel type: awgn, good, moderate, poor (default: moderate)\n";
+            std::cout << "  --rate X       Code rate: r14, r12, r23, r34 (default: r14)\n";
             std::cout << "  --trials N     Number of trials (default: 10)\n";
             return 0;
         }
+    }
+
+    // Parse code rate
+    CodeRate code_rate = CodeRate::R1_4;
+    float rate_efficiency = 0.25f;
+    if (rate_str == "r12" || rate_str == "R12") {
+        code_rate = CodeRate::R1_2;
+        rate_efficiency = 0.5f;
+    } else if (rate_str == "r23" || rate_str == "R23") {
+        code_rate = CodeRate::R2_3;
+        rate_efficiency = 0.667f;
+    } else if (rate_str == "r34" || rate_str == "R34") {
+        code_rate = CodeRate::R3_4;
+        rate_efficiency = 0.75f;
     }
 
     constexpr float SAMPLE_RATE = 48000.0f;
@@ -63,12 +81,13 @@ int main(int argc, char* argv[]) {
 
     auto carrier_freqs = mc_cfg.getCarrierFreqs();
 
+    float net_bps = mc_cfg.getRawBitRate() * rate_efficiency;
     std::cout << "Configuration:\n";
     std::cout << "  Carriers: " << num_carriers << "\n";
     std::cout << "  Symbol rate: " << mc_cfg.getSymbolRate() << " baud\n";
     std::cout << "  Raw bit rate: " << mc_cfg.getRawBitRate() << " bps\n";
-    std::cout << "  With R1/4: " << mc_cfg.getRawBitRate() * 0.25f << " bps\n";
-    std::cout << "  With R1/2: " << mc_cfg.getRawBitRate() * 0.5f << " bps\n";
+    std::cout << "  Code rate: " << rate_str << " (" << (rate_efficiency * 100) << "% efficiency)\n";
+    std::cout << "  Net throughput: " << net_bps << " bps\n";
     std::cout << "  Carrier frequencies: ";
     for (size_t i = 0; i < carrier_freqs.size(); i++) {
         if (i > 0) std::cout << ", ";
@@ -90,10 +109,16 @@ int main(int argc, char* argv[]) {
     ChirpSync chirp_sync(chirp_cfg);
 
     // Test data - one LDPC codeword
-    Bytes test_data = {0x55, 0x4C, 0x12, 0x01};  // v2 magic
-    test_data.resize(protocol::v2::BYTES_PER_CODEWORD, 0xAA);
+    // Data bytes depend on code rate
+    size_t data_bytes = protocol::v2::BYTES_PER_CODEWORD;  // 20 bytes for R1/4
+    if (code_rate == CodeRate::R1_2) data_bytes = 40;
+    else if (code_rate == CodeRate::R2_3) data_bytes = 54;
+    else if (code_rate == CodeRate::R3_4) data_bytes = 60;
 
-    LDPCEncoder encoder(CodeRate::R1_4);
+    Bytes test_data = {0x55, 0x4C, 0x12, 0x01};  // v2 magic
+    test_data.resize(data_bytes, 0xAA);
+
+    LDPCEncoder encoder(code_rate);
     Bytes encoded = encoder.encode(test_data);
 
     std::cout << "Test data: " << test_data.size() << " bytes -> "
@@ -232,7 +257,7 @@ int main(int argc, char* argv[]) {
             sb_max = std::max(sb_max, sb);
         }
 
-        LDPCDecoder decoder(CodeRate::R1_4);
+        LDPCDecoder decoder(code_rate);
         Bytes decoded = decoder.decodeSoft(cw_bits);
 
         if (!decoder.lastDecodeSuccess()) {
