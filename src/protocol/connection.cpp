@@ -498,7 +498,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                 } else {
                     // Check if we need to fall back to MFSK after DPSK_ATTEMPTS
                     if (connect_retry_count_ == DPSK_ATTEMPTS &&
-                        connect_waveform_ == WaveformMode::DPSK) {
+                        connect_waveform_ == WaveformMode::MC_DPSK) {
                         connect_waveform_ = WaveformMode::MFSK;
                         LOG_MODEM(WARN, "Connection: Falling back to MFSK after %d DPSK attempts",
                                   DPSK_ATTEMPTS);
@@ -609,7 +609,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     file_transfer_.cancel();
 
     // Reset connect waveform to DPSK for next connection attempt
-    connect_waveform_ = WaveformMode::DPSK;
+    connect_waveform_ = WaveformMode::MC_DPSK;
 
     LOG_MODEM(INFO, "Connection: Disconnected from %s (%s)",
               old_remote.c_str(), reason.c_str());
@@ -693,7 +693,7 @@ void Connection::reset() {
     mode_change_retry_count_ = 0;
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;
-    connect_waveform_ = WaveformMode::DPSK;  // Reset to DPSK for next connect attempt
+    connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
     arq_.reset();
     file_transfer_.cancel();
     LOG_MODEM(DEBUG, "Connection: Full reset");

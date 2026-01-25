@@ -105,12 +105,12 @@ void ModemEngine::acquisitionLoop() {
 
                 DetectedFrame frame;
                 frame.data_start = static_cast<int>(data_start);
-                frame.waveform = protocol::WaveformMode::DPSK;
+                frame.waveform = protocol::WaveformMode::MC_DPSK;
                 frame.timestamp = std::chrono::steady_clock::now();
                 frame.has_chirp_preamble = true;  // Use training + ref for CFO estimation
 
                 detected_frame_queue_.push(frame);
-                last_rx_waveform_ = protocol::WaveformMode::DPSK;
+                last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
 
                 LOG_MODEM(INFO, "[%s] Acquisition: Chirp+DPSK frame, data at %zu (corr=%.3f)",
                           log_prefix_.c_str(), data_start, chirp_corr);
@@ -182,9 +182,19 @@ void ModemEngine::rxDecodeLoop() {
                 if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC) {
                     processRxBuffer_OTFS();
                 }
-            } else if (waveform_mode_ == protocol::WaveformMode::DPSK) {
+            } else if (waveform_mode_ == protocol::WaveformMode::MC_DPSK) {
                 if (buf_size > MIN_SAMPLES_FOR_DPSK) {
                     processRxBuffer_DPSK();
+                }
+            } else if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP_PILOTS) {
+                // OFDM_CHIRP_PILOTS: chirp preamble + OFDM QPSK with pilots
+                bool has_pending = ofdm_demodulator_->isSynced() ||
+                                  ofdm_demodulator_->hasPendingData() ||
+                                  ofdm_expected_codewords_ > 0 ||
+                                  ofdm_chirp_found_;
+
+                if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC || has_pending) {
+                    processRxBuffer_OFDM_CHIRP();
                 }
             }
 
@@ -203,11 +213,11 @@ void ModemEngine::rxDecodeLoop() {
 
         LOG_MODEM(INFO, "[%s] Processing %s frame at %d",
                   log_prefix_.c_str(),
-                  frame.waveform == protocol::WaveformMode::DPSK ? "DPSK" : "OFDM",
+                  frame.waveform == protocol::WaveformMode::MC_DPSK ? "DPSK" : "OFDM",
                   frame.data_start);
 
         bool success = false;
-        if (frame.waveform == protocol::WaveformMode::DPSK) {
+        if (frame.waveform == protocol::WaveformMode::MC_DPSK) {
             success = rxDecodeDPSK(frame);
         }
 

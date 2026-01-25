@@ -132,15 +132,15 @@ int main(int argc, char* argv[]) {
             if (mode == "ofdm") {
                 waveform_mode = WaveformMode::OFDM_NVIS;
             } else if (mode == "dpsk") {
-                waveform_mode = WaveformMode::DPSK;
+                waveform_mode = WaveformMode::MC_DPSK;
             } else if (mode == "otfs" || mode == "otfs_eq") {
                 waveform_mode = WaveformMode::OTFS_EQ;
             } else if (mode == "otfs_raw") {
                 waveform_mode = WaveformMode::OTFS_RAW;
-            } else if (mode == "chirp_pilots" || mode == "ofdm_chirp_pilots") {
+            } else if (mode == "chirp" || mode == "chirp_pilots" || mode == "ofdm_chirp_pilots") {
                 waveform_mode = WaveformMode::OFDM_CHIRP_PILOTS;
             } else {
-                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp_pilots, dpsk, otfs, otfs_raw)\n", mode.c_str());
+                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp, dpsk, otfs, otfs_raw)\n", mode.c_str());
                 return 1;
             }
         } else if (arg == "--nvis") {
@@ -181,8 +181,8 @@ int main(int argc, char* argv[]) {
 
     const char* waveform_name = "?";
     if (waveform_mode == WaveformMode::OFDM_NVIS) waveform_name = "OFDM";
-    else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) waveform_name = "OFDM-CHIRP-PILOTS";
-    else if (waveform_mode == WaveformMode::DPSK) waveform_name = "DPSK";
+    else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) waveform_name = "OFDM-CHIRP";
+    else if (waveform_mode == WaveformMode::MC_DPSK) waveform_name = "MC-DPSK";
     else if (waveform_mode == WaveformMode::OTFS_EQ) waveform_name = "OTFS-EQ";
     else if (waveform_mode == WaveformMode::OTFS_RAW) waveform_name = "OTFS-RAW";
 
@@ -210,6 +210,13 @@ int main(int argc, char* argv[]) {
             nvis_cfg.modulation = Modulation::QPSK;
         }
         tx_modem.setConfig(nvis_cfg);
+    } else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) {
+        // For OFDM_CHIRP_PILOTS in standard mode, enable pilots with coherent QPSK
+        ModemConfig cfg = tx_modem.getConfig();
+        cfg.use_pilots = true;
+        cfg.pilot_spacing = 4;
+        cfg.modulation = Modulation::QPSK;
+        tx_modem.setConfig(cfg);
     }
 
     // Set connected state so TX uses the selected waveform (not DPSK connect waveform)
@@ -371,7 +378,7 @@ int main(int argc, char* argv[]) {
 
         // DPSK uses acquisition path (disconnected mode) for chirp detection
         // Other modes use connected mode for direct buffer processing
-        if (waveform_mode != WaveformMode::DPSK) {
+        if (waveform_mode != WaveformMode::MC_DPSK) {
             rx_modem.setConnected(true);
             rx_modem.setHandshakeComplete(true);
             rx_modem.setWaveformMode(waveform_mode);
@@ -429,7 +436,7 @@ int main(int argc, char* argv[]) {
         // Wait for RX threads to process
         // With real-time playback, RX processes during feed, but still need time to finish decode
         // DPSK needs longer wait because chirp detection scans large buffer (takes ~6s)
-        int max_wait_iters = (waveform_mode == WaveformMode::DPSK) ? 1000 : 100;
+        int max_wait_iters = (waveform_mode == WaveformMode::MC_DPSK) ? 1000 : 100;
         for (int wait = 0; wait < max_wait_iters && !got_frame; wait++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }

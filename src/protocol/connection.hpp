@@ -245,7 +245,7 @@ private:
 
     // Adaptive calling waveform (DPSK first, fallback to MFSK)
     // Start with DPSK medium (DQPSK 62b R1/4), switch to MFSK after 5 attempts
-    WaveformMode connect_waveform_ = WaveformMode::DPSK;
+    WaveformMode connect_waveform_ = WaveformMode::MC_DPSK;
     static constexpr int DPSK_ATTEMPTS = 5;  // Attempts 1-5 use DPSK
     // Attempts 6-10 use MFSK (config_.connect_retries = 10)
 

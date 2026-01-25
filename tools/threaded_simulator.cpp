@@ -364,8 +364,8 @@ int main(int argc, char* argv[]) {
     bravo.setMeasuredSNR(snr_db);
 
     // Use DPSK for initial connection (works at lower SNR)
-    alpha.setInitialWaveform(WaveformMode::DPSK);
-    bravo.setInitialWaveform(WaveformMode::DPSK);
+    alpha.setInitialWaveform(WaveformMode::MC_DPSK);
+    bravo.setInitialWaveform(WaveformMode::MC_DPSK);
 
     // Start the stations
     std::cout << "Starting stations...\n";

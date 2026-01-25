@@ -428,7 +428,7 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
             case WaveformMode::OTFS_EQ:  return ModeCapabilities::OTFS_EQ;
             case WaveformMode::OTFS_RAW: return ModeCapabilities::OTFS_RAW;
             case WaveformMode::MFSK:     return ModeCapabilities::MFSK;
-            case WaveformMode::DPSK:     return ModeCapabilities::DPSK;
+            case WaveformMode::MC_DPSK:     return ModeCapabilities::MC_DPSK;
             default: return 0;
         }
     };
@@ -466,9 +466,9 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
         return WaveformMode::MFSK;
     }
 
-    if (snr < 17.0f && (common & ModeCapabilities::DPSK)) {
+    if (snr < 17.0f && (common & ModeCapabilities::MC_DPSK)) {
         LOG_MODEM(INFO, "Connection: Selected DPSK for low/mid SNR (%.1f dB)", snr);
-        return WaveformMode::DPSK;
+        return WaveformMode::MC_DPSK;
     }
 
     // Default priority for adequate SNR: OFDM > OTFS > DPSK > MFSK
@@ -478,7 +478,7 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     }
     if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
     if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
-    if (common & ModeCapabilities::DPSK) return WaveformMode::DPSK;
+    if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;
     if (common & ModeCapabilities::MFSK) return WaveformMode::MFSK;
 
     return WaveformMode::OFDM_NVIS;

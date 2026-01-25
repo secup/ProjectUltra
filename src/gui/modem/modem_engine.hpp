@@ -162,8 +162,8 @@ private:
 
     // Waveform mode state
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_NVIS;
-    protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::DPSK;
-    protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::DPSK;
+    protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
+    protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
     bool handshake_complete_ = false;
     bool use_connected_waveform_once_ = false;
@@ -248,6 +248,9 @@ private:
     std::vector<float> ofdm_accumulated_soft_bits_;
     int ofdm_expected_codewords_ = 0;
 
+    // OFDM_CHIRP state (chirp-based timing sync + OFDM demodulation)
+    bool ofdm_chirp_found_ = false;
+
     // DPSK multi-codeword accumulation (follows same pattern as OFDM)
     std::vector<float> dpsk_accumulated_soft_bits_;
     int dpsk_expected_codewords_ = 0;
@@ -305,6 +308,7 @@ private:
     void processRxBuffer_OFDM();
     void processRxBuffer_OTFS();
     void processRxBuffer_DPSK();
+    void processRxBuffer_OFDM_CHIRP();
 };
 
 } // namespace gui

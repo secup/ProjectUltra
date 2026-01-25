@@ -174,8 +174,8 @@ ProfileResult profileDPSK(float snr_db, size_t lead_silence, std::mt19937& rng) 
 
     // Create modem engine in DPSK mode for TX
     ModemEngine tx_modem;
-    tx_modem.setWaveformMode(WaveformMode::DPSK);
-    tx_modem.setConnectWaveform(WaveformMode::DPSK);
+    tx_modem.setWaveformMode(WaveformMode::MC_DPSK);
+    tx_modem.setConnectWaveform(WaveformMode::MC_DPSK);
 
     // Create TX frame
     auto frame = v2::ConnectFrame::makeConnect("TEST1", "TEST2", 0xFF, 0, 0xFF, 0xFF);
@@ -193,8 +193,8 @@ ProfileResult profileDPSK(float snr_db, size_t lead_silence, std::mt19937& rng) 
 
     // Create fresh RX modem
     ModemEngine rx_modem;
-    rx_modem.setWaveformMode(WaveformMode::DPSK);
-    rx_modem.setConnectWaveform(WaveformMode::DPSK);
+    rx_modem.setWaveformMode(WaveformMode::MC_DPSK);
+    rx_modem.setConnectWaveform(WaveformMode::MC_DPSK);
 
     DecodeSync sync;
     rx_modem.setRawDataCallback([&](const Bytes& data) {
@@ -257,8 +257,8 @@ ProfileResult profilePING(float snr_db, size_t lead_silence, std::mt19937& rng) 
 
     // Create modem engine for TX
     ModemEngine tx_modem;
-    tx_modem.setWaveformMode(WaveformMode::DPSK);
-    tx_modem.setConnectWaveform(WaveformMode::DPSK);
+    tx_modem.setWaveformMode(WaveformMode::MC_DPSK);
+    tx_modem.setConnectWaveform(WaveformMode::MC_DPSK);
 
     // Generate PING signal
     auto tx_samples = tx_modem.transmitPing();
@@ -272,8 +272,8 @@ ProfileResult profilePING(float snr_db, size_t lead_silence, std::mt19937& rng) 
 
     // Create fresh RX modem
     ModemEngine rx_modem;
-    rx_modem.setWaveformMode(WaveformMode::DPSK);
-    rx_modem.setConnectWaveform(WaveformMode::DPSK);
+    rx_modem.setWaveformMode(WaveformMode::MC_DPSK);
+    rx_modem.setConnectWaveform(WaveformMode::MC_DPSK);
 
     DecodeSync sync;
     rx_modem.setPingReceivedCallback([&](float snr) {

@@ -55,7 +55,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     }
 
     switch (mode) {
-        case protocol::WaveformMode::DPSK:
+        case protocol::WaveformMode::MC_DPSK:
             dpsk_demodulator_->reset();
             LOG_MODEM(INFO, "DPSK mode active: %d-PSK, %d samples/sym, %.1f bps",
                       dpsk_config_.num_phases(),
@@ -108,7 +108,7 @@ void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
     use_connected_waveform_once_ = false;
 
     // Configure DPSK for medium preset (DQPSK 62b R1/4) for connection attempts
-    if (mode == protocol::WaveformMode::DPSK) {
+    if (mode == protocol::WaveformMode::MC_DPSK) {
         dpsk_config_ = dpsk_presets::medium();  // DQPSK 62.5 baud
         dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
         dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
@@ -262,7 +262,7 @@ protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     // DPSK works down to -11 dB SNR (tested), so we use it for low SNR
     // OFDM requires ~17 dB for reliable sync detection
     if (snr_db < 17.0f) {
-        return protocol::WaveformMode::DPSK;
+        return protocol::WaveformMode::MC_DPSK;
     } else {
         return protocol::WaveformMode::OFDM_NVIS;
     }

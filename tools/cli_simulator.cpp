@@ -544,7 +544,7 @@ static CodeRate parseCodeRate(const std::string& s) {
 // Helper to parse waveform string
 static WaveformMode parseWaveform(const std::string& s) {
     if (s == "OFDM" || s == "ofdm") return WaveformMode::OFDM_NVIS;
-    if (s == "DPSK" || s == "dpsk") return WaveformMode::DPSK;
+    if (s == "DPSK" || s == "dpsk") return WaveformMode::MC_DPSK;
     if (s == "OTFS" || s == "otfs" || s == "otfs_eq") return WaveformMode::OTFS_EQ;
     if (s == "otfs_raw" || s == "OTFS_RAW") return WaveformMode::OTFS_RAW;
     return WaveformMode::AUTO;

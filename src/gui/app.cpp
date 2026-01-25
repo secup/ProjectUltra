@@ -174,7 +174,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                 // Reset waveform mode to OFDM when disconnected
                 modem_.setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
                 // Reset connect waveform to DPSK for next connection attempt
-                modem_.setConnectWaveform(protocol::WaveformMode::DPSK);
+                modem_.setConnectWaveform(protocol::WaveformMode::MC_DPSK);
                 break;
         }
         rx_log_.push_back(msg);
@@ -264,7 +264,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
     protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
         const char* mode_name = "OFDM";
         switch (mode) {
-            case protocol::WaveformMode::DPSK: mode_name = "DPSK"; break;
+            case protocol::WaveformMode::MC_DPSK: mode_name = "MC-DPSK"; break;
             case protocol::WaveformMode::MFSK: mode_name = "MFSK"; break;
             case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS-EQ"; break;
             case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS-RAW"; break;
@@ -540,7 +540,7 @@ void App::initVirtualStation() {
     virtual_protocol_.setModeNegotiatedCallback([this](protocol::WaveformMode mode) {
         const char* mode_name = "OFDM";
         switch (mode) {
-            case protocol::WaveformMode::DPSK: mode_name = "DPSK"; break;
+            case protocol::WaveformMode::MC_DPSK: mode_name = "MC-DPSK"; break;
             case protocol::WaveformMode::MFSK: mode_name = "MFSK"; break;
             case protocol::WaveformMode::OTFS_EQ: mode_name = "OTFS-EQ"; break;
             case protocol::WaveformMode::OTFS_RAW: mode_name = "OTFS-RAW"; break;
@@ -1077,7 +1077,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         auto waveform = modem_.getWaveformMode();
         const char* wf_str = protocol::waveformModeToString(waveform);
         ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM_NVIS) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
-                          (waveform == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
+                          (waveform == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                        ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
         ImGui::Text("RX:");
@@ -1127,7 +1127,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         auto connect_wf = protocol_.getConnectWaveform();
         const char* wf_str = protocol::waveformModeToString(connect_wf);
         ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM_NVIS) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
-                          (connect_wf == protocol::WaveformMode::DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
+                          (connect_wf == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                          ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
         ImGui::TextColored(wf_color, "%s R1/4 (calling)", wf_str);
