@@ -685,9 +685,9 @@ void Connection::reset() {
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
     connected_time_ms_ = 0;
-    negotiated_mode_ = WaveformMode::OFDM;
-    remote_capabilities_ = ModeCapabilities::OFDM;
-    remote_preferred_ = WaveformMode::OFDM;
+    negotiated_mode_ = WaveformMode::OFDM_NVIS;
+    remote_capabilities_ = ModeCapabilities::OFDM_NVIS;
+    remote_preferred_ = WaveformMode::OFDM_NVIS;
     mode_change_pending_ = false;
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;

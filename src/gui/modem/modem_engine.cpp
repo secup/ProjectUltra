@@ -290,7 +290,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
         // Interleave for OFDM - OTFS has built-in time-frequency diversity
         bool use_interleaving = interleaving_enabled_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM);
+                                (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS);
         for (const auto& cw : encoded_cws) {
             if (use_interleaving) {
                 Bytes interleaved = interleaver_.interleave(cw);
@@ -314,7 +314,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         // Interleave for OFDM - OTFS has built-in time-frequency diversity
         bool use_interleaving = interleaving_enabled_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM);
+                                (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS);
         to_modulate = use_interleaving ? interleaver_.interleave(encoded) : encoded;
     }
 

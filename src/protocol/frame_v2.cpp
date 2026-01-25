@@ -14,7 +14,7 @@ namespace protocol {
 
 const char* waveformModeToString(WaveformMode mode) {
     switch (mode) {
-        case WaveformMode::OFDM:       return "OFDM";
+        case WaveformMode::OFDM_NVIS:  return "OFDM-NVIS";
         case WaveformMode::OTFS_EQ:    return "OTFS-EQ";
         case WaveformMode::OTFS_RAW:   return "OTFS-RAW";
         case WaveformMode::MFSK:       return "MFSK";

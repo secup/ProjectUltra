@@ -168,7 +168,7 @@ void ModemEngine::rxDecodeLoop() {
         if (connected_) {
             size_t buf_size = getBufferSize();
 
-            if (waveform_mode_ == protocol::WaveformMode::OFDM) {
+            if (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS) {
                 bool has_pending = ofdm_demodulator_->isSynced() ||
                                   ofdm_demodulator_->hasPendingData() ||
                                   ofdm_expected_codewords_ > 0;

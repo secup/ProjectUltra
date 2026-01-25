@@ -88,7 +88,7 @@ ProfileResult profileOFDM(float snr_db, size_t lead_silence, std::mt19937& rng) 
     ModemEngine tx_modem;
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
-    tx_modem.setWaveformMode(WaveformMode::OFDM);
+    tx_modem.setWaveformMode(WaveformMode::OFDM_NVIS);
 
     // Create TX frame
     auto frame = v2::ConnectFrame::makeConnect("TEST1", "TEST2", 0xFF, 0, 0xFF, 0xFF);
@@ -107,7 +107,7 @@ ProfileResult profileOFDM(float snr_db, size_t lead_silence, std::mt19937& rng) 
     // Create fresh RX modem in connected mode to process OFDM
     ModemEngine rx_modem;
     rx_modem.setConnected(true);
-    rx_modem.setWaveformMode(WaveformMode::OFDM);
+    rx_modem.setWaveformMode(WaveformMode::OFDM_NVIS);
 
     DecodeSync sync;
     rx_modem.setRawDataCallback([&](const Bytes& data) {

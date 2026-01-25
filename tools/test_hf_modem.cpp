@@ -104,7 +104,7 @@ int main(int argc, char* argv[]) {
     bool save_audio = false;
     bool play_audio = false;
     std::string output_file = "hf_modem_test.f32";
-    WaveformMode waveform_mode = WaveformMode::OFDM;
+    WaveformMode waveform_mode = WaveformMode::OFDM_NVIS;
     std::string channel_type = "awgn";  // awgn, good, moderate, poor
     uint32_t channel_seed = 0;  // 0 = random
     bool use_nvis = false;  // Use NVIS config (1024 FFT, 59 carriers)
@@ -130,7 +130,7 @@ int main(int argc, char* argv[]) {
         } else if ((arg == "-w" || arg == "--waveform") && i + 1 < argc) {
             std::string mode = argv[++i];
             if (mode == "ofdm") {
-                waveform_mode = WaveformMode::OFDM;
+                waveform_mode = WaveformMode::OFDM_NVIS;
             } else if (mode == "dpsk") {
                 waveform_mode = WaveformMode::DPSK;
             } else if (mode == "otfs" || mode == "otfs_eq") {
@@ -180,7 +180,7 @@ int main(int argc, char* argv[]) {
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
 
     const char* waveform_name = "?";
-    if (waveform_mode == WaveformMode::OFDM) waveform_name = "OFDM";
+    if (waveform_mode == WaveformMode::OFDM_NVIS) waveform_name = "OFDM";
     else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) waveform_name = "OFDM-CHIRP-PILOTS";
     else if (waveform_mode == WaveformMode::DPSK) waveform_name = "DPSK";
     else if (waveform_mode == WaveformMode::OTFS_EQ) waveform_name = "OTFS-EQ";
@@ -233,7 +233,7 @@ int main(int argc, char* argv[]) {
     // Generate a test frame to determine frame length
     v2::ConnectFrame test_frame = v2::ConnectFrame::makeConnect(
         "TEST0", "DEST", protocol::ModeCapabilities::ALL,
-        static_cast<uint8_t>(WaveformMode::OFDM));
+        static_cast<uint8_t>(WaveformMode::OFDM_NVIS));
     auto test_audio = tx_modem.transmit(test_frame.serialize());
     float frame_duration_sec = test_audio.size() / 48000.0f;
 
@@ -264,7 +264,7 @@ int main(int argc, char* argv[]) {
             "TEST" + std::to_string(i),  // Unique source callsign
             "DEST",
             protocol::ModeCapabilities::ALL,
-            static_cast<uint8_t>(WaveformMode::OFDM)
+            static_cast<uint8_t>(WaveformMode::OFDM_NVIS)
         );
         frame.seq = static_cast<uint16_t>(i + 1);
 

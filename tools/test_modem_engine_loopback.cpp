@@ -91,7 +91,7 @@ int main() {
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
     tx_modem.setDataMode(Modulation::DQPSK, CodeRate::R2_3);
-    tx_modem.setWaveformMode(protocol::WaveformMode::OFDM);
+    tx_modem.setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
 
     // Track received messages
     std::vector<Bytes> received_frames;
@@ -118,7 +118,7 @@ int main() {
         rx_modem->setConnected(true);
         rx_modem->setHandshakeComplete(true);
         rx_modem->setDataMode(Modulation::DQPSK, CodeRate::R2_3);
-        rx_modem->setWaveformMode(protocol::WaveformMode::OFDM);
+        rx_modem->setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
         rx_modem->setRawDataCallback([&](const Bytes& data) {
             received_frames.push_back(data);
         });

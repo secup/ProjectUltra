@@ -126,7 +126,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Use measured SNR from modem (set via setMeasuredSNR)
         snr_db = measured_snr_db_;
 
-        WaveformMode channel_recommended = WaveformMode::OFDM;
+        WaveformMode channel_recommended = WaveformMode::OFDM_NVIS;
         if (doppler_spread_hz > 5.0f) {
             channel_recommended = WaveformMode::OTFS_RAW;
         } else if (snr_db > 20.0f && delay_spread_ms < 1.0f) {
@@ -418,13 +418,13 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
 
     if (common == 0) {
         LOG_MODEM(WARN, "Connection: No common waveform modes! Falling back to OFDM");
-        return WaveformMode::OFDM;
+        return WaveformMode::OFDM_NVIS;
     }
 
     // Helper to convert WaveformMode to capability bit
     auto modeToBit = [](WaveformMode mode) -> uint8_t {
         switch (mode) {
-            case WaveformMode::OFDM:     return ModeCapabilities::OFDM;
+            case WaveformMode::OFDM_NVIS:     return ModeCapabilities::OFDM_NVIS;
             case WaveformMode::OTFS_EQ:  return ModeCapabilities::OTFS_EQ;
             case WaveformMode::OTFS_RAW: return ModeCapabilities::OTFS_RAW;
             case WaveformMode::MFSK:     return ModeCapabilities::MFSK;
@@ -472,16 +472,16 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     }
 
     // Default priority for adequate SNR: OFDM > OTFS > DPSK > MFSK
-    if (common & ModeCapabilities::OFDM) {
+    if (common & ModeCapabilities::OFDM_NVIS) {
         LOG_MODEM(INFO, "Connection: Selected OFDM (SNR=%.1f dB)", snr);
-        return WaveformMode::OFDM;
+        return WaveformMode::OFDM_NVIS;
     }
     if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
     if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
     if (common & ModeCapabilities::DPSK) return WaveformMode::DPSK;
     if (common & ModeCapabilities::MFSK) return WaveformMode::MFSK;
 
-    return WaveformMode::OFDM;
+    return WaveformMode::OFDM_NVIS;
 }
 
 } // namespace protocol

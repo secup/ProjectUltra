@@ -61,7 +61,7 @@ int main(int argc, char* argv[]) {
     // Create v2 CONNECT frame (same as test_hf_modem)
     v2::ConnectFrame frame = v2::ConnectFrame::makeConnect(
         "TEST0", "DEST", protocol::ModeCapabilities::ALL,
-        static_cast<uint8_t>(protocol::WaveformMode::OFDM));
+        static_cast<uint8_t>(protocol::WaveformMode::OFDM_NVIS));
     frame.seq = 1;
     Bytes frame_data = frame.serialize();
 

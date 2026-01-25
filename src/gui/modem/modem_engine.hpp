@@ -161,7 +161,7 @@ private:
     std::string log_prefix_ = "MODEM";
 
     // Waveform mode state
-    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM;
+    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_NVIS;
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::DPSK;
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::DPSK;
     bool connected_ = false;

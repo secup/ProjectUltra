@@ -26,7 +26,7 @@ namespace FrameFlags {
 
 // Modulation modes for adaptive selection (negotiated in CONNECT)
 enum class WaveformMode : uint8_t {
-    OFDM       = 0x00,  // Standard OFDM with Schmidl-Cox sync (17+ dB)
+    OFDM_NVIS  = 0x00,  // High-speed OFDM with Schmidl-Cox sync (17+ dB, good conditions)
     OTFS_EQ    = 0x01,  // OTFS with TF equalization (best for Good channels)
     OTFS_RAW   = 0x02,  // OTFS without TF eq (best for Poor channels)
     MFSK       = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
@@ -37,13 +37,13 @@ enum class WaveformMode : uint8_t {
 
 // Mode capabilities bitmap (for CONNECT payload)
 namespace ModeCapabilities {
-    constexpr uint8_t OFDM       = 0x01;
+    constexpr uint8_t OFDM_NVIS  = 0x01;
     constexpr uint8_t OTFS_EQ    = 0x02;
     constexpr uint8_t OTFS_RAW   = 0x04;
     constexpr uint8_t MFSK       = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
     constexpr uint8_t DPSK       = 0x10;  // Single-carrier DPSK for extreme low SNR (-8 to 0 dB)
     constexpr uint8_t OFDM_CHIRP_PILOTS = 0x20;  // OFDM with chirp sync + pilots (fading)
-    constexpr uint8_t ALL        = OFDM | OTFS_EQ | OTFS_RAW | MFSK | DPSK | OFDM_CHIRP_PILOTS;
+    constexpr uint8_t ALL        = OFDM_NVIS | OTFS_EQ | OTFS_RAW | MFSK | DPSK | OFDM_CHIRP_PILOTS;
 }
 
 const char* waveformModeToString(WaveformMode mode);
@@ -54,7 +54,7 @@ struct ChannelReport {
     float snr_db = 0.0f;           // Measured SNR (dB)
     float delay_spread_ms = 0.0f;  // RMS delay spread (ms)
     float doppler_spread_hz = 0.0f; // Doppler spread (Hz)
-    WaveformMode recommended_mode = WaveformMode::OFDM;
+    WaveformMode recommended_mode = WaveformMode::OFDM_NVIS;
     uint8_t capabilities = ModeCapabilities::ALL;
 
     // Encode to bytes for transmission (5 bytes)
