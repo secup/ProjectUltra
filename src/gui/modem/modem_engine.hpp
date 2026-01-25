@@ -302,6 +302,9 @@ private:
     std::chrono::steady_clock::time_point last_rx_complete_time_;
     uint32_t turnaround_delay_ms_ = 200;
 
+    // Estimated CFO from peer (detected during connection, persists for connected mode)
+    float peer_cfo_hz_ = 0.0f;
+
     // Helper methods
     void rebuildFilters();
     void updateChannelEnergy(const std::vector<float>& samples);

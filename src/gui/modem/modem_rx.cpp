@@ -118,16 +118,17 @@ void ModemEngine::acquisitionLoop() {
                 frame.waveform = protocol::WaveformMode::MC_DPSK;
                 frame.timestamp = std::chrono::steady_clock::now();
                 frame.has_chirp_preamble = true;  // Use training + ref for CFO estimation
+                frame.cfo_hz = cfo_hz;            // Pass CFO for correction in decoder
 
                 detected_frame_queue_.push(frame);
                 last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
 
-                LOG_MODEM(INFO, "[%s] Acquisition: Chirp+DPSK frame, data at %zu (corr=%.3f)",
-                          log_prefix_.c_str(), data_start, chirp_corr);
+                LOG_MODEM(INFO, "[%s] Acquisition: Chirp+DPSK frame, data at %zu (corr=%.3f, CFO=%.1f Hz)",
+                          log_prefix_.c_str(), data_start, chirp_corr, cfo_hz);
             } else {
                 // PING (chirp only, no data)
-                LOG_MODEM(INFO, "[%s] Acquisition: Chirp PING at %d (corr=%.3f)",
-                          log_prefix_.c_str(), chirp_start, chirp_corr);
+                LOG_MODEM(INFO, "[%s] Acquisition: Chirp PING at %d (corr=%.3f, CFO=%.1f Hz)",
+                          log_prefix_.c_str(), chirp_start, chirp_corr, cfo_hz);
 
                 if (chirp_end > samples.size()) chirp_end = samples.size();
                 consumeSamples(chirp_end);

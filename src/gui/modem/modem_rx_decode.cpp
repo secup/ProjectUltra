@@ -201,28 +201,40 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
         if (frame.has_chirp_preamble) {
             // Chirp frame: Layout is [CHIRP][TRAINING][REF][DATA...]
-            // Use training sequence for CFO estimation
+            // Use dual chirp CFO estimate (accurate ±50 Hz)
             int training_offset = ref_offset - training_samples;
             if (training_offset < 0) {
                 LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d", log_prefix_.c_str(), training_offset);
                 return false;
             }
-            LOG_MODEM(DEBUG, "[%s] DPSK decode: training=%d, ref=%d, data=%d",
-                      log_prefix_.c_str(), training_offset, ref_offset, frame.data_start);
+            LOG_MODEM(DEBUG, "[%s] DPSK decode: training=%d, ref=%d, data=%d, dual_chirp_cfo=%.1f Hz",
+                      log_prefix_.c_str(), training_offset, ref_offset, frame.data_start, frame.cfo_hz);
+
+            // Set CFO from dual chirp estimate BEFORE processing training
+            // This allows the demodulator to use the correct carrier frequencies
+            if (std::abs(frame.cfo_hz) > 0.1f) {
+                mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
+                LOG_MODEM(INFO, "[%s] DPSK: Using dual chirp CFO=%.1f Hz for correction",
+                          log_prefix_.c_str(), frame.cfo_hz);
+            }
+
             SampleSpan training_span(buffer.data() + training_offset, training_samples);
             SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
             mc_dpsk_demodulator_->processTraining(training_span);
 
-            // CFO sanity check: real signals have low CFO
-            // High CFO indicates false positive chirp detection on noise
-            // Relaxed to 5 Hz for fading channels (phase distortion increases apparent CFO)
-            float cfo = mc_dpsk_demodulator_->getEstimatedCFO();
-            if (std::abs(cfo) > 5.0f) {
-                LOG_MODEM(INFO, "[%s] DPSK: Rejecting frame - CFO %.1f Hz too high (false positive)",
-                          log_prefix_.c_str(), cfo);
+            // CFO sanity check: with dual chirp, we trust larger CFO values
+            // Training-based CFO should confirm the dual chirp estimate
+            float training_cfo = mc_dpsk_demodulator_->getEstimatedCFO();
+            float cfo_diff = std::abs(training_cfo - frame.cfo_hz);
+            if (std::abs(frame.cfo_hz) < 0.1f && std::abs(training_cfo) > 5.0f) {
+                // No dual chirp CFO but high training CFO - likely false positive
+                LOG_MODEM(INFO, "[%s] DPSK: Rejecting frame - training CFO %.1f Hz too high (no dual chirp)",
+                          log_prefix_.c_str(), training_cfo);
                 mc_dpsk_demodulator_->reset();
                 return false;
             }
+            // If we have dual chirp CFO, use it (already set above)
+            // The demodulator will correct for it during demodulation
 
             mc_dpsk_demodulator_->setReference(ref_span);
         } else {
@@ -273,10 +285,14 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
         if (frame.has_chirp_preamble) {
             // Chirp frame: use training + ref for CFO estimation
+            // Set dual chirp CFO before processing training
             int training_offset = ref_offset - training_samples;
             if (training_offset < 0) {
                 LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d for CW0", log_prefix_.c_str(), training_offset);
                 return false;
+            }
+            if (std::abs(frame.cfo_hz) > 0.1f) {
+                mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
             }
             SampleSpan training_span(buffer.data() + training_offset, training_samples);
             SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
@@ -372,6 +388,12 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     mc_dpsk_demodulator_->reset();
 
     if (result.success) {
+        // Save CFO for connected mode - peer's frequency offset persists
+        if (std::abs(frame.cfo_hz) > 0.1f) {
+            peer_cfo_hz_ = frame.cfo_hz;
+            LOG_MODEM(INFO, "[%s] DPSK: Saving peer CFO=%.1f Hz for connected mode",
+                      log_prefix_.c_str(), peer_cfo_hz_);
+        }
         deliverFrame(result.frame_data);
         return true;
     }

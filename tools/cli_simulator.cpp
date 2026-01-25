@@ -56,6 +56,12 @@ public:
     // Channel random seed
     void setChannelSeed(uint32_t seed) { channel_seed_ = seed; }
 
+    // Carrier frequency offset (Hz)
+    void setCFO(float cfo) {
+        fprintf(stderr, "[CLI] setCFO called with %.1f Hz\n", cfo);
+        cfo_hz_ = cfo;
+    }
+
     bool runTest() {
         printHeader();
         initStations();
@@ -191,6 +197,7 @@ private:
 
     // Config
     float snr_db_ = 20.0f;
+    float cfo_hz_ = 0.0f;  // Carrier frequency offset (Hz)
     bool verbose_ = false;
     bool no_reply_ = false;
     ChannelCondition channel_condition_ = ChannelCondition::AWGN;
@@ -215,7 +222,9 @@ private:
         // Reset timing baseline
         last_tick_time_ = std::chrono::steady_clock::now();
 
-        // Initialize HF channel if not AWGN
+        // Initialize HF channel if needed (fading conditions)
+        // NOTE: CFO is applied via modem tx_cfo_hz, not channel
+        // This is because the channel's baseband CFO approach doesn't work well for wideband chirps
         if (channel_condition_ != ChannelCondition::AWGN) {
             sim::WattersonChannel::Config cfg;
             switch (channel_condition_) {
@@ -225,10 +234,19 @@ private:
                 case ChannelCondition::Flutter:  cfg = sim::itu_r_f1487::flutter(snr_db_); break;
                 default: cfg = sim::itu_r_f1487::awgn(snr_db_); break;
             }
+            cfg.cfo_hz = 0.0f;  // No channel CFO - use modem tx_cfo_hz instead
             hf_channel_ = std::make_unique<sim::WattersonChannel>(cfg, channel_seed_);
         }
 
         // === Our station (ALPHA) ===
+        // Apply CFO via modem tx_cfo_hz (shifts chirp frequencies during generation)
+        fprintf(stderr, "[CLI] initStations: cfo_hz_ = %.1f\n", cfo_hz_);
+        if (std::abs(cfo_hz_) > 0.001f) {
+            fprintf(stderr, "[CLI] Setting TX CFO = %.1f Hz on ALPHA modem\n", cfo_hz_);
+            auto cfg = modem_.getConfig();
+            cfg.tx_cfo_hz = cfo_hz_;
+            modem_.setConfig(cfg);
+        }
         modem_.setLogPrefix("ALPHA");
         // TODO: setPingRepetitions not yet implemented
         // modem_.setPingRepetitions(ping_reps_);
@@ -462,7 +480,13 @@ private:
     void applyChannel(std::vector<float>& samples) {
         if (samples.empty()) return;
 
+        static int apply_count = 0;
         if (hf_channel_) {
+            // Debug: show CFO being applied (first few times)
+            if (apply_count++ < 3) {
+                fprintf(stderr, "[CHANNEL] Applying CFO=%.1f Hz to %zu samples\n",
+                        hf_channel_->getActualCFO(), samples.size());
+            }
             // Use Watterson fading channel (includes noise)
             SampleSpan span(samples.data(), samples.size());
             samples = hf_channel_->process(span);
@@ -503,6 +527,9 @@ private:
         std::cout << "\n";
         std::cout << "Configuration:\n";
         std::cout << "  SNR:       " << snr_db_ << " dB\n";
+        if (std::abs(cfo_hz_) > 0.001f) {
+            std::cout << "  CFO:       " << cfo_hz_ << " Hz\n";
+        }
         std::cout << "  Channel:   " << channelConditionName() << "\n";
         if (ping_reps_ > 1) {
             std::cout << "  PING reps: " << ping_reps_ << "x (fading robustness)\n";
@@ -585,11 +612,14 @@ int main(int argc, char* argv[]) {
             sim.setPingReps(std::stoi(argv[++i]));
         } else if ((arg == "--seed" || arg == "-s") && i + 1 < argc) {
             sim.setChannelSeed(std::stoul(argv[++i]));
+        } else if ((arg == "--cfo") && i + 1 < argc) {
+            sim.setCFO(std::stof(argv[++i]));
         } else if (arg == "--help" || arg == "-h") {
             std::cout << "CLI Simulator - Fast batch processing\n\n";
             std::cout << "Usage: " << argv[0] << " [options]\n\n";
             std::cout << "Options:\n";
             std::cout << "  --snr <dB>          Set channel SNR (default: 20)\n";
+            std::cout << "  --cfo <Hz>          Carrier frequency offset (default: 0)\n";
             std::cout << "  --channel <type>    HF channel: awgn, good, moderate, poor, flutter\n";
             std::cout << "  --verbose           Enable verbose logging\n";
             std::cout << "  --force-waveform <mode>  Force waveform: OFDM, DPSK, OTFS\n";

@@ -43,7 +43,7 @@ struct MultiCarrierDPSKConfig {
     // Chirp sync config
     float chirp_f_start = 300.0f;
     float chirp_f_end = 2700.0f;
-    float chirp_duration_ms = 250.0f;  // 250ms each for up/down chirps
+    float chirp_duration_ms = 500.0f;  // 500ms each for up/down chirps
     bool use_dual_chirp = true;        // Up+down chirp for CFO estimation
     float chirp_threshold = 0.15f;     // Detection threshold (lower for dual chirp)
 
@@ -325,6 +325,9 @@ public:
     // Get estimated CFO
     float getEstimatedCFO() const { return cfo_hz_; }
 
+    // Set CFO (from external estimation like dual chirp)
+    void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; }
+
     // Get last chirp correlation value
     float getLastChirpCorrelation() const { return last_chirp_corr_; }
 
@@ -353,7 +356,10 @@ public:
     void processTraining(SampleSpan training) {
         if (training.size() < training_samples_) return;
 
-        // Estimate CFO from training sequence phase progression
+        // Estimate RESIDUAL CFO from training sequence phase progression
+        // This measures what's LEFT after any pre-set CFO (from dual chirp) is applied
+        // Note: demodulateOneSymbol uses current cfo_hz_, so if dual chirp pre-set it,
+        // this will estimate the residual (should be near zero if dual chirp is accurate)
         std::vector<Complex> sym0(config_.num_carriers);
         std::vector<Complex> sym1(config_.num_carriers);
 
@@ -373,7 +379,11 @@ public:
 
         float avg_phase_error = phase_diff_sum / config_.num_carriers;
         float symbol_duration = config_.samples_per_symbol / config_.sample_rate;
-        cfo_hz_ = avg_phase_error / (2.0f * M_PI * symbol_duration);
+        float residual_cfo = avg_phase_error / (2.0f * M_PI * symbol_duration);
+
+        // ADD residual to existing CFO (don't replace)
+        // This allows dual chirp to pre-set rough CFO, training refines it
+        cfo_hz_ += residual_cfo;
         cfo_hz_ = std::max(-50.0f, std::min(50.0f, cfo_hz_));
     }
 
@@ -443,10 +453,11 @@ private:
             return false;
         }
 
-        // Search for chirp
+        // Search for chirp using dual chirp detection for CFO estimation
         SampleSpan search_span(sample_buffer_.data(), sample_buffer_.size());
-        float corr = 0.0f;
-        int chirp_start = chirp_sync_.detect(search_span, corr, config_.chirp_threshold);
+        auto chirp_result = chirp_sync_.detectDualChirp(search_span, config_.chirp_threshold);
+        int chirp_start = chirp_result.success ? chirp_result.up_chirp_start : -1;
+        float corr = std::max(chirp_result.up_correlation, chirp_result.down_correlation);
 
         if (chirp_start >= 0) {
             // Check if there's signal energy after chirp (not just PING)
@@ -459,9 +470,10 @@ private:
                 float rms = std::sqrt(energy / training_samples_);
 
                 if (rms > 0.05f) {
-                    // Found DPSK frame
+                    // Found DPSK frame - save CFO estimate from dual chirp
                     chirp_position_ = chirp_start;
                     last_chirp_corr_ = corr;
+                    cfo_hz_ = chirp_result.cfo_hz;  // Use dual chirp CFO estimate
                     state_ = State::GOT_CHIRP;
 
                     // Remove samples before chirp
@@ -506,20 +518,21 @@ private:
 
         size_t total_needed = preamble_samples_ + data_samples;
 
-        // Debug: log sample counts
-        printf("[MC-DPSK] GOT_CHIRP: buf=%zu, chirp=%zu, train=%zu, ref=%zu, data=%zu, total_needed=%zu\n",
-               sample_buffer_.size(), chirp_samples_, training_samples_, ref_samples_, data_samples, total_needed);
-
         if (sample_buffer_.size() < total_needed) {
             return false;  // Wait for more samples
         }
 
-        // CFO sanity check - high CFO indicates false positive
+        // Save dual chirp CFO estimate before training processing
+        float dual_chirp_cfo = cfo_hz_;
+
+        // Process training sequence to refine CFO estimate
         size_t training_start = chirp_samples_;
         SampleSpan train_span(sample_buffer_.data() + training_start, training_samples_);
         processTraining(train_span);
 
-        if (std::abs(cfo_hz_) > 5.0f) {
+        // CFO sanity check: only reject if NO dual chirp CFO but high training CFO
+        // If we have dual chirp CFO, trust it (works up to ±35 Hz)
+        if (std::abs(dual_chirp_cfo) < 0.1f && std::abs(cfo_hz_) > 5.0f) {
             // False positive - reset and keep searching
             sample_buffer_.erase(sample_buffer_.begin(),
                                 sample_buffer_.begin() + chirp_samples_);

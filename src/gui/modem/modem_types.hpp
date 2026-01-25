@@ -40,6 +40,7 @@ struct DetectedFrame {
     protocol::WaveformMode waveform = protocol::WaveformMode::OFDM_NVIS;
     std::chrono::steady_clock::time_point timestamp;  // When detected
     bool has_chirp_preamble = false;        // True if chirp-based (has training sequence)
+    float cfo_hz = 0.0f;                    // Estimated CFO from dual chirp (Hz)
 
     bool valid() const { return data_start >= 0; }
 };
