@@ -76,6 +76,10 @@ public:
 
         // Apply CFO offset (for testing - simulates radio frequency error)
         float cfo = config_.tx_cfo_hz;
+        if (std::abs(cfo) > 0.001f) {
+            fprintf(stderr, "[CHIRP-TX] Generating chirp with CFO=%.1f Hz (f_start=%.0f+%.0f, f_end=%.0f+%.0f)\n",
+                    cfo, config_.f_start, cfo, config_.f_end, cfo);
+        }
 
         // ===== Generate UP-CHIRP (300 → 2700 Hz) =====
         float f_start_up = config_.f_start + cfo;  // 300 + CFO
@@ -399,12 +403,17 @@ public:
         // Actual gap from detected positions
         int actual_gap = down_pos - up_pos;
 
+        // DEBUG: Print positions and gaps
+        fprintf(stderr, "[CHIRP] up_pos=%d, down_pos=%d, actual_gap=%d, expected_gap=%d, cfo_to_samples=%.1f\n",
+                up_pos, down_pos, actual_gap, expected_gap, cfo_to_samples);
+
         // Position errors from expected
         // up_pos should be at true_start, but shifts by -CFO * cfo_to_samples
         // down_pos should be at true_start + chirp_len + gap, but shifts by +CFO * cfo_to_samples
         // So: actual_gap - expected_gap = 2 * CFO * cfo_to_samples
         float gap_error = static_cast<float>(actual_gap - expected_gap);
         result.cfo_hz = gap_error / (2.0f * cfo_to_samples);
+        fprintf(stderr, "[CHIRP] gap_error=%.1f, estimated CFO=%.1f Hz\n", gap_error, result.cfo_hz);
 
         // Correct positions using estimated CFO
         float up_correction = result.cfo_hz * cfo_to_samples;

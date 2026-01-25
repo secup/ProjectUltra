@@ -55,14 +55,14 @@ ModemEngine::ModemEngine() {
     dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     // Chirp sync for robust presence detection on fading channels
-    // Single chirp works better on fading - 2 reps can confuse detection
+    // Dual chirp (up + down) enables CFO estimation via radar technique
     sync::ChirpConfig chirp_cfg;
     chirp_cfg.sample_rate = config_.sample_rate;
     chirp_cfg.f_start = 300.0f;     // Start frequency (Hz)
     chirp_cfg.f_end = 2700.0f;      // End frequency (Hz)
-    chirp_cfg.duration_ms = 500.0f; // 500ms single chirp (temporarily disabled dual chirp for debug)
-    chirp_cfg.gap_ms = 100.0f;      // Gap after chirp
-    chirp_cfg.use_dual_chirp = false; // Temporarily disabled for debugging
+    chirp_cfg.duration_ms = 500.0f; // 500ms per chirp (up + down = 1.0s chirps + gaps)
+    chirp_cfg.gap_ms = 100.0f;      // Gap between up and down chirps
+    chirp_cfg.use_dual_chirp = true; // Enable dual chirp for CFO estimation
     chirp_cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
 
@@ -142,9 +142,9 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     chirp_cfg.sample_rate = config_.sample_rate;
     chirp_cfg.f_start = 300.0f;
     chirp_cfg.f_end = 2700.0f;
-    chirp_cfg.duration_ms = 500.0f;  // 500ms single chirp
-    chirp_cfg.gap_ms = 100.0f;       // Gap after chirp
-    chirp_cfg.use_dual_chirp = false; // Temporarily disabled for debugging
+    chirp_cfg.duration_ms = 500.0f;  // 500ms per chirp (up + down = 1.0s chirps + gaps)
+    chirp_cfg.gap_ms = 100.0f;       // Gap between up and down chirps
+    chirp_cfg.use_dual_chirp = true; // Enable dual chirp for CFO estimation
     chirp_cfg.tx_cfo_hz = config_.tx_cfo_hz;
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
 

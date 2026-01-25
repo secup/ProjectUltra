@@ -243,6 +243,10 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(test_chirp_cfo tools/test_chirp_cfo.cpp)
     target_link_libraries(test_chirp_cfo PRIVATE m)
 
+    # Chirp CFO shift test (isolated correlation test)
+    add_executable(test_chirp_cfo_shift tools/test_chirp_cfo_shift.cpp)
+    target_link_libraries(test_chirp_cfo_shift PRIVATE m)
+
     # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
     add_executable(test_hf_modem
         tools/test_hf_modem.cpp
