@@ -286,7 +286,7 @@ public:
             if (estimated_snr < 0.0f) {
                 tx_waveform = WaveformMode::MFSK;
             } else if (estimated_snr < 15.0f) {
-                tx_waveform = WaveformMode::DPSK;
+                tx_waveform = WaveformMode::MC_DPSK;
             } else {
                 tx_waveform = WaveformMode::OFDM_NVIS;
             }
@@ -330,7 +330,7 @@ public:
         Samples preamble, audio;
 
         // Modulate based on waveform mode
-        if (tx_waveform == WaveformMode::DPSK) {
+        if (tx_waveform == WaveformMode::MC_DPSK) {
             // Select optimal DPSK configuration based on estimated SNR
             auto [optimal_cfg, optimal_rate] = selectOptimalDPSK(estimated_snr);
             if (dpsk_config.samples_per_symbol != optimal_cfg.samples_per_symbol ||
@@ -354,7 +354,7 @@ public:
         // Combine with padding for DPSK/MFSK (preamble detection may slide forward)
         // Add padding of 10% of audio length at the end to prevent data truncation
         size_t padding = 0;
-        if (tx_waveform == WaveformMode::DPSK || tx_waveform == WaveformMode::MFSK) {
+        if (tx_waveform == WaveformMode::MC_DPSK || tx_waveform == WaveformMode::MFSK) {
             padding = audio.size() / 10;
         }
 
@@ -392,13 +392,13 @@ public:
             if (estimated_snr < 0.0f) {
                 rx_waveform = WaveformMode::MFSK;
             } else if (estimated_snr < 15.0f) {
-                rx_waveform = WaveformMode::DPSK;
+                rx_waveform = WaveformMode::MC_DPSK;
             } else {
                 rx_waveform = WaveformMode::OFDM_NVIS;
             }
         }
 
-        if (rx_waveform == WaveformMode::DPSK) {
+        if (rx_waveform == WaveformMode::MC_DPSK) {
             // Select optimal DPSK configuration based on estimated SNR
             auto [optimal_cfg, optimal_rate] = selectOptimalDPSK(estimated_snr);
             if (dpsk_config.samples_per_symbol != optimal_cfg.samples_per_symbol ||
@@ -510,7 +510,7 @@ public:
 
         // Reset appropriate demodulator
         switch (mode) {
-            case WaveformMode::DPSK:
+            case WaveformMode::MC_DPSK:
                 dpsk_demodulator->reset();
                 break;
             case WaveformMode::MFSK:
@@ -890,8 +890,8 @@ bool test_dpsk_waveform_loopback() {
     AdaptiveTestStation bob("Bob", "TEST2");
 
     // Set both stations to use DPSK after connection
-    alice.setWaveformMode(WaveformMode::DPSK);
-    bob.setWaveformMode(WaveformMode::DPSK);
+    alice.setWaveformMode(WaveformMode::MC_DPSK);
+    bob.setWaveformMode(WaveformMode::MC_DPSK);
 
     // Use DQPSK at 125 baud (default fast preset)
     alice.setDPSKMode(DPSKModulation::DQPSK, 384);
@@ -1003,9 +1003,9 @@ bool test_waveform_mode_selection() {
     TestCase cases[] = {
         {-5.0f,  WaveformMode::MFSK, "-5 dB -> MFSK"},
         {-0.1f,  WaveformMode::MFSK, "-0.1 dB -> MFSK (boundary)"},
-        { 0.0f,  WaveformMode::DPSK, "0 dB -> DPSK (MFSK threshold is < 0)"},
-        { 5.0f,  WaveformMode::DPSK, "5 dB -> DPSK"},
-        { 9.9f,  WaveformMode::DPSK, "9.9 dB -> DPSK (boundary)"},
+        { 0.0f,  WaveformMode::MC_DPSK, "0 dB -> DPSK (MFSK threshold is < 0)"},
+        { 5.0f,  WaveformMode::MC_DPSK, "5 dB -> DPSK"},
+        { 9.9f,  WaveformMode::MC_DPSK, "9.9 dB -> DPSK (boundary)"},
         {10.0f,  WaveformMode::OFDM_NVIS, "10 dB -> OFDM (DPSK threshold is < 10)"},
         {20.0f,  WaveformMode::OFDM_NVIS, "20 dB -> OFDM"},
     };
@@ -1017,7 +1017,7 @@ bool test_waveform_mode_selection() {
         if (tc.snr_db < 0.0f) {
             recommended_mode = WaveformMode::MFSK;
         } else if (tc.snr_db < 10.0f) {
-            recommended_mode = WaveformMode::DPSK;
+            recommended_mode = WaveformMode::MC_DPSK;
         } else {
             recommended_mode = WaveformMode::OFDM_NVIS;
         }
