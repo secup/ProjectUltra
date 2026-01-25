@@ -43,6 +43,7 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
 
         baseband[i] = mixed;
     }
+
     return baseband;
 }
 
@@ -63,6 +64,140 @@ std::vector<Complex> OFDMDemodulator::Impl::extractSymbol(const std::vector<Comp
 // =============================================================================
 // CHANNEL ESTIMATION
 // =============================================================================
+
+void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples, size_t num_symbols) {
+    // Estimate channel response from LTS (Long Training Sequence) symbols
+    // This is used by processPresynced() for OFDM_CHIRP mode where we have
+    // training symbols but no ongoing pilots.
+    //
+    // The LTS carries:
+    //   - sync_sequence on data carriers
+    //   - pilot_sequence on pilot carriers (if use_pilots=true)
+    //
+    // We estimate H for BOTH data and pilot carriers so that subsequent
+    // updateChannelEstimate() calls can use pilots for tracking.
+    //
+    // We average over multiple training symbols for robustness.
+    // We also estimate noise variance from the variance of H estimates.
+
+    LOG_DEMOD(DEBUG, "estimateChannelFromLTS: num_symbols=%zu, symbol_samples=%zu, first_sample=%.6f",
+             num_symbols, symbol_samples, training_samples[0]);
+
+    if (num_symbols == 0 || data_carrier_indices.empty()) return;
+
+    // Store per-symbol channel estimates for noise estimation (data carriers only for now)
+    std::vector<std::vector<Complex>> h_per_symbol(num_symbols);
+    for (auto& v : h_per_symbol) v.resize(data_carrier_indices.size());
+
+    // Accumulate channel estimates from each training symbol
+    std::vector<Complex> h_sum_data(data_carrier_indices.size(), Complex(0, 0));
+    std::vector<Complex> h_sum_pilot(pilot_carrier_indices.size(), Complex(0, 0));
+    size_t valid_symbols = 0;
+
+    // Process each training symbol using the main mixer (it will be advanced)
+    const float* ptr = training_samples;
+    for (size_t sym = 0; sym < num_symbols; ++sym) {
+        // Use toBaseband and extractSymbol like normal demodulation
+        SampleSpan sym_span(ptr, symbol_samples);
+        auto baseband = toBaseband(sym_span);
+        auto freq = extractSymbol(baseband, 0);
+
+        // Estimate H for each data carrier
+        for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+            int idx = data_carrier_indices[i];
+            Complex rx = freq[idx];
+            Complex tx = sync_sequence[i % sync_sequence.size()];
+
+            // H = rx / tx (LS estimate)
+            if (std::abs(tx) > 0.01f) {
+                Complex h_ls = rx / tx;
+                h_sum_data[i] += h_ls;
+                h_per_symbol[sym][i] = h_ls;
+            }
+        }
+
+        // Estimate H for each pilot carrier (LTS includes pilots!)
+        for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+            int idx = pilot_carrier_indices[i];
+            Complex rx = freq[idx];
+            Complex tx = pilot_sequence[i];  // Pilots use pilot_sequence, not sync_sequence
+
+            // H = rx / tx (LS estimate)
+            if (std::abs(tx) > 0.01f) {
+                Complex h_ls = rx / tx;
+                h_sum_pilot[i] += h_ls;
+            }
+
+            // DEBUG: Log raw pilot values for each training symbol
+            if (sym == 0 && i < 4) {
+                LOG_DEMOD(DEBUG, "LTS sym=%zu pilot[%zu] idx=%d: rx=(%.4f,%.4f) |rx|=%.4f tx=(%.1f,%.1f)",
+                         sym, i, idx, rx.real(), rx.imag(), std::abs(rx), tx.real(), tx.imag());
+            }
+        }
+
+        valid_symbols++;
+        ptr += symbol_samples;
+    }
+
+    if (valid_symbols == 0) return;
+
+    // Average and store channel estimate for data carriers
+    float inv_count = 1.0f / valid_symbols;
+    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+        int idx = data_carrier_indices[i];
+        channel_estimate[idx] = h_sum_data[i] * inv_count;
+    }
+
+    // Average and store channel estimate for pilot carriers
+    for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
+        int idx = pilot_carrier_indices[i];
+        channel_estimate[idx] = h_sum_pilot[i] * inv_count;
+    }
+
+    LOG_DEMOD(INFO, "LTS channel estimate: %zu data + %zu pilot carriers",
+              data_carrier_indices.size(), pilot_carrier_indices.size());
+
+    // For coherent modes with pilots, skip noise/CFO estimation from LTS.
+    // The pilot tracking in updateChannelEstimate() will handle these.
+    // LTS gives us initial channel estimate; pilots refine it per symbol.
+    //
+    // Note: For differential modes (DQPSK) without pilots, the old noise/CFO
+    // estimation code could be re-enabled, but differential modes don't need
+    // as precise channel tracking anyway.
+
+    // Compute average channel response for logging
+    Complex h_avg(0, 0);
+    float h_mag_sum = 0;
+    for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
+        int idx = data_carrier_indices[i];
+        h_avg += channel_estimate[idx];
+        h_mag_sum += std::abs(channel_estimate[idx]);
+    }
+    h_avg /= float(data_carrier_indices.size());
+    float h_mag_avg = h_mag_sum / data_carrier_indices.size();
+
+    // Estimate SNR from channel estimate and noise
+    if (h_mag_avg > 1e-6f && noise_variance > 1e-10f) {
+        float signal_power = h_mag_avg * h_mag_avg;
+        estimated_snr_linear = signal_power / noise_variance;
+        estimated_snr_linear = std::max(0.1f, std::min(10000.0f, estimated_snr_linear));
+        LOG_DEMOD(INFO, "LTS SNR estimate: %.1f dB",
+                  10.0f * std::log10(estimated_snr_linear));
+    }
+
+    LOG_DEMOD(INFO, "LTS channel estimate: %zu symbols, |H|_avg=%.3f, phase_avg=%.1f°",
+              valid_symbols, h_mag_avg, std::arg(h_avg) * 180.0f / M_PI);
+
+    // DON'T set carrier_phase_initialized here - let updateChannelEstimate() do it
+    // on the first data symbol. This ensures we use fresh pilot data for phase
+    // recovery instead of potentially noisy LTS estimates.
+    //
+    // The LTS channel estimates provide magnitude and approximate phase.
+    // The first data symbol's pilots will refine the common phase offset.
+
+    // Mark that we have a valid channel estimate (for smoothing factor selection)
+    snr_symbol_count = num_symbols;
+}
 
 void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& freq_domain) {
     // For FIRST symbol after sync, use pilot estimate directly (no smoothing)
@@ -101,16 +236,15 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
 
     // DEBUG: Log first symbol's pilot analysis
     if (soft_bits.empty()) {
-        LOG_DEMOD(DEBUG, "=== First symbol pilot analysis ===");
+        LOG_DEMOD(DEBUG, "=== First DATA symbol pilot analysis (snr_symbol_count=%d) ===", snr_symbol_count);
         for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
             int idx = pilot_carrier_indices[i];
-            LOG_DEMOD(DEBUG, "Pilot[%zu] idx=%d: tx=(%.1f,%.1f) rx=(%.2f,%.2f) H=(%.2f,%.2f) |H|=%.2f phase=%.1f°",
+            LOG_DEMOD(DEBUG, "DATA pilot[%zu] idx=%d: rx=(%.4f,%.4f) |rx|=%.4f tx=(%.1f,%.1f) H=(%.2f,%.2f) |H|=%.2f",
                       i, idx,
+                      freq_domain[idx].real(), freq_domain[idx].imag(), std::abs(freq_domain[idx]),
                       pilot_sequence[i].real(), pilot_sequence[i].imag(),
-                      freq_domain[idx].real(), freq_domain[idx].imag(),
                       h_ls_all[i].real(), h_ls_all[i].imag(),
-                      std::abs(h_ls_all[i]),
-                      std::arg(h_ls_all[i]) * 180.0f / M_PI);
+                      std::abs(h_ls_all[i]));
         }
         LOG_DEMOD(DEBUG, "H avg: (%.2f,%.2f), |H|=%.2f, phase=%.1f deg",
                   (h_sum / float(pilot_carrier_indices.size())).real(),
@@ -467,29 +601,43 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
     std::vector<Complex> equalized(data_carrier_indices.size());
     carrier_noise_var.resize(data_carrier_indices.size());
 
-    // For differential modulation, skip equalization entirely
+    // For differential modulation: apply pilot_phase_correction to track common phase drift
+    // This is updated after each symbol via decision-directed tracking
     bool is_differential = (mod == Modulation::DBPSK || mod == Modulation::DQPSK || mod == Modulation::D8PSK);
 
     if (is_differential) {
-        // Return raw symbols with phase/timing corrections
+        // For differential modes on fading channels, use ZF equalization with the
+        // channel estimate from LTS + decision-directed updates.
+        //
+        // Key insight: DQPSK measures phase DIFFERENCES between consecutive symbols.
+        // ZF equalization divides by H, so if H changes between symbols, we get:
+        //   diff = (rx[n]/H[n]) * conj(rx[n-1]/H[n-1])
+        // If we use the SAME H estimate for both, errors cancel somewhat.
+        //
+        // The channel_estimate[] is updated by decision-directed tracking in
+        // demodulateSymbol(), so it adapts over the frame.
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             int idx = data_carrier_indices[i];
+            Complex received = freq_domain[idx];
+            Complex h = channel_estimate[idx];
+            float h_power = std::norm(h);
 
+            // Apply timing correction
             int k = idx;
             if (k > (int)config.fft_size / 2) k -= config.fft_size;
-
             float timing_phase = 2.0f * M_PI * k * timing_offset_samples / config.fft_size;
             Complex timing_correction = std::exp(Complex(0, timing_phase));
 
-            equalized[i] = freq_domain[idx] * pilot_phase_correction * timing_correction;
-
-            float h_power = std::norm(channel_estimate[idx]);
-            if (h_power < 1e-6f) {
-                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
-            } else {
+            // ZF equalization per carrier, then common phase correction
+            if (h_power > 1e-6f) {
+                equalized[i] = received * std::conj(h) / h_power * pilot_phase_correction * timing_correction;
                 carrier_noise_var[i] = noise_variance / h_power;
-                carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
+            } else {
+                // Deep fade - just apply phase correction, mark as unreliable
+                equalized[i] = received * pilot_phase_correction * timing_correction;
+                carrier_noise_var[i] = MAX_CARRIER_NOISE_VAR;
             }
+            carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, std::min(MAX_CARRIER_NOISE_VAR, carrier_noise_var[i]));
         }
         return equalized;
     }

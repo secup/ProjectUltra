@@ -838,6 +838,242 @@ void ModemEngine::processRxBuffer_DPSK() {
 }
 
 // ============================================================================
+// OFDM_CHIRP FRAME DECODE (Connected Mode)
+// Uses chirp preamble for robust timing sync, then OFDM DQPSK demodulation
+// ============================================================================
+
+void ModemEngine::processRxBuffer_OFDM_CHIRP() {
+    using namespace rx_constants;
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+
+    // Calculate symbol duration from config
+    const size_t symbol_samples = config_.getSymbolDuration();  // CP + FFT
+
+    // Get samples
+    std::vector<float> samples;
+    {
+        std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+        bool has_pending = ofdm_demodulator_->isSynced() ||
+                          ofdm_demodulator_->hasPendingData() ||
+                          ofdm_expected_codewords_ > 0 ||
+                          ofdm_chirp_found_;
+
+        if (!has_pending && rx_sample_buffer_.size() < MIN_SAMPLES_FOR_OFDM_SYNC) {
+            return;
+        }
+        samples = std::move(rx_sample_buffer_);
+        rx_sample_buffer_.clear();
+    }
+
+    if (samples.empty() && !ofdm_demodulator_->hasPendingData() &&
+        ofdm_accumulated_soft_bits_.empty() && ofdm_expected_codewords_ == 0) {
+        return;
+    }
+
+    // If we haven't found chirp yet, search for it
+    if (!ofdm_chirp_found_ && !ofdm_demodulator_->isSynced()) {
+        const size_t chirp_samples = chirp_sync_->getTotalSamples();
+        const size_t training_samples = symbol_samples * 2;  // 2 LTS symbols
+
+        // Need chirp + training + at least one data symbol
+        size_t min_for_detection = chirp_samples + training_samples + symbol_samples;
+        if (samples.size() < min_for_detection) {
+            // Put samples back
+            std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+            rx_sample_buffer_.insert(rx_sample_buffer_.begin(), samples.begin(), samples.end());
+            return;
+        }
+
+        // Search for chirp
+        float chirp_corr = 0.0f;
+        SampleSpan search_span(samples.data(), samples.size());
+        int chirp_start = chirp_sync_->detect(search_span, chirp_corr, 0.35f);
+
+        if (chirp_start < 0) {
+            // No chirp found - consume older samples to prevent buffer growth
+            // Keep enough for next detection attempt
+            size_t keep = std::min(samples.size(), chirp_samples * 2);
+            size_t discard = samples.size() > keep ? samples.size() - keep : 0;
+            if (discard > 0) {
+                std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+                rx_sample_buffer_.insert(rx_sample_buffer_.begin(),
+                                        samples.begin() + discard, samples.end());
+            } else {
+                std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+                rx_sample_buffer_.insert(rx_sample_buffer_.begin(), samples.begin(), samples.end());
+            }
+            return;
+        }
+
+        // Chirp found!
+        ofdm_chirp_found_ = true;
+        size_t chirp_end_offset = chirp_start + chirp_samples;
+
+        LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Chirp found at %d (corr=%.3f), training at %zu",
+                  log_prefix_.c_str(), chirp_start, chirp_corr, chirp_end_offset);
+
+        // Discard samples before chirp end (keep training + data)
+        if (chirp_end_offset > 0 && chirp_end_offset < samples.size()) {
+            samples.erase(samples.begin(), samples.begin() + chirp_end_offset);
+        }
+    }
+
+    // If chirp was previously found but samples were returned to buffer
+    if (ofdm_chirp_found_ && !ofdm_demodulator_->isSynced() && samples.empty()) {
+        return;
+    }
+
+    // Process through OFDM demodulator using pre-synced path (bypasses Schmidl-Cox)
+    bool was_synced = ofdm_demodulator_->isSynced();
+
+    // processPresynced expects samples starting at first LTS training symbol
+    // It will use first 2 symbols for channel estimation, then demodulate the rest
+    // IMPORTANT: Limit samples to reasonable frame size to avoid demodulating noise/margins
+    // Conservative estimate: 4 codewords = 4 * 648 bits / 60 bits/sym = 43 data symbols
+    // Plus 2 training = 45 symbols * 564 samples = 25380
+    // Use 26000 with small margin - larger frames will need multiple passes
+    constexpr size_t MAX_FRAME_SAMPLES = 26000;
+    size_t process_samples = std::min(samples.size(), MAX_FRAME_SAMPLES);
+    SampleSpan span(samples.data(), process_samples);
+    bool frame_ready = ofdm_demodulator_->processPresynced(span, 2);
+    bool is_synced = true;  // processPresynced always "syncs"
+
+    // Handle sync loss mid-frame (shouldn't happen with processPresynced but be safe)
+    if (was_synced && !ofdm_demodulator_->isSynced() && !ofdm_accumulated_soft_bits_.empty()) {
+        LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Lost sync mid-frame, discarding", log_prefix_.c_str());
+        ofdm_accumulated_soft_bits_.clear();
+        ofdm_expected_codewords_ = 0;
+        ofdm_chirp_found_ = false;
+    }
+
+    if (is_synced) {
+        updateStats([this](LoopbackStats& s) {
+            s.snr_db = ofdm_demodulator_->getEstimatedSNR();
+            s.synced = true;
+        });
+    }
+
+    // Accumulate soft bits (getSoftBits returns 648 at a time, so loop to get all)
+    if (frame_ready) {
+        size_t total_bits = 0;
+        while (true) {
+            auto soft_bits = ofdm_demodulator_->getSoftBits();
+            if (soft_bits.empty()) break;
+
+            total_bits += soft_bits.size();
+
+            // OFDM_CHIRP uses interleaving like regular OFDM
+            if (interleaving_enabled_) {
+                auto deinterleaved = deinterleaveCodewords(soft_bits);
+                ofdm_accumulated_soft_bits_.insert(ofdm_accumulated_soft_bits_.end(),
+                                                   deinterleaved.begin(), deinterleaved.end());
+            } else {
+                ofdm_accumulated_soft_bits_.insert(ofdm_accumulated_soft_bits_.end(),
+                                                   soft_bits.begin(), soft_bits.end());
+            }
+        }
+
+        LOG_MODEM(INFO, "[%s] OFDM_CHIRP: frame_ready, got %zu soft bits, accumulated %zu total",
+                  log_prefix_.c_str(), total_bits, ofdm_accumulated_soft_bits_.size());
+
+        // Reset for next frame
+        ofdm_chirp_found_ = false;
+        ofdm_demodulator_->reset();
+    }
+
+    size_t num_codewords = ofdm_accumulated_soft_bits_.size() / LDPC_BLOCK;
+    LOG_MODEM(DEBUG, "[%s] OFDM_CHIRP: accumulated=%zu, num_codewords=%zu, expected=%d",
+              log_prefix_.c_str(), ofdm_accumulated_soft_bits_.size(), num_codewords, ofdm_expected_codewords_);
+    if (num_codewords == 0) return;
+
+    // Probe CW0 to get expected count
+    if (ofdm_expected_codewords_ == 0 && num_codewords >= 1) {
+        std::vector<float> cw0_bits(ofdm_accumulated_soft_bits_.begin(),
+                                     ofdm_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+
+        LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Probing CW0 (first 5 soft bits: %.2f %.2f %.2f %.2f %.2f)",
+                  log_prefix_.c_str(),
+                  cw0_bits.size() > 0 ? cw0_bits[0] : 0,
+                  cw0_bits.size() > 1 ? cw0_bits[1] : 0,
+                  cw0_bits.size() > 2 ? cw0_bits[2] : 0,
+                  cw0_bits.size() > 3 ? cw0_bits[3] : 0,
+                  cw0_bits.size() > 4 ? cw0_bits[4] : 0);
+
+        Bytes cw0_data;
+        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+            LOG_MODEM(INFO, "[%s] OFDM_CHIRP: CW0 LDPC OK, first bytes: %02x %02x %02x %02x",
+                      log_prefix_.c_str(),
+                      cw0_data.size() > 0 ? cw0_data[0] : 0,
+                      cw0_data.size() > 1 ? cw0_data[1] : 0,
+                      cw0_data.size() > 2 ? cw0_data[2] : 0,
+                      cw0_data.size() > 3 ? cw0_data[3] : 0);
+            auto cw_info = v2::identifyCodeword(cw0_data);
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw0_data);
+                if (header.valid) {
+                    ofdm_expected_codewords_ = header.total_cw;
+                    LOG_MODEM(INFO, "[%s] OFDM_CHIRP: CW0 decoded, expecting %d codewords",
+                              log_prefix_.c_str(), ofdm_expected_codewords_);
+                }
+            }
+        } else {
+            LOG_MODEM(WARN, "[%s] OFDM_CHIRP: CW0 LDPC FAILED", log_prefix_.c_str());
+        }
+    }
+
+    // Wait for all codewords
+    if (ofdm_expected_codewords_ > 0 && num_codewords < (size_t)ofdm_expected_codewords_) {
+        return;
+    }
+
+    if (ofdm_expected_codewords_ == 0) {
+        return; // CW0 failed, keep waiting
+    }
+
+    // --- Process complete frame ---
+    auto accumulated = std::move(ofdm_accumulated_soft_bits_);
+    ofdm_accumulated_soft_bits_.clear();
+    int expected = ofdm_expected_codewords_;
+    ofdm_expected_codewords_ = 0;
+
+    num_codewords = accumulated.size() / LDPC_BLOCK;
+    if (expected > 0 && (size_t)expected < num_codewords) {
+        num_codewords = expected;
+    }
+
+    // First decode CW0 to get frame type for rate selection
+    v2::FrameType frame_type = v2::FrameType::PROBE;
+    {
+        std::vector<float> cw0_bits(accumulated.begin(), accumulated.begin() + LDPC_BLOCK);
+        Bytes cw0_data;
+        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+            auto cw_info = v2::identifyCodeword(cw0_data);
+            if (cw_info.type == v2::CodewordType::HEADER) {
+                auto header = v2::parseHeader(cw0_data);
+                if (header.valid) frame_type = header.type;
+            }
+        }
+    }
+
+    bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
+    auto result = decodeCodewords(accumulated, num_codewords, data_code_rate_,
+                                   use_adaptive, log_prefix_.c_str());
+
+    LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Decoded %d/%d codewords",
+              log_prefix_.c_str(), result.codewords_ok,
+              result.codewords_ok + result.codewords_failed);
+
+    if (result.success && !result.frame_data.empty()) {
+        deliverFrame(result.frame_data);
+        notifyFrameParsed(result.frame_data, result.frame_type);
+    } else {
+        updateStats([&](LoopbackStats& s) {
+            if (result.codewords_failed > 0) s.frames_failed++;
+        });
+    }
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 

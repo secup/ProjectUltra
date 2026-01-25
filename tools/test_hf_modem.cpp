@@ -54,6 +54,38 @@ void addNoise(std::vector<float>& samples, float snr_db, std::mt19937& rng) {
     for (float& s : samples) s += noise(rng);
 }
 
+// Apply AWGN calibrated to OFDM signal (excludes chirp which has different power)
+// frame_positions: list of (audio_start, chirp_len, training_len, data_len) tuples
+void addNoiseOFDM(std::vector<float>& samples, float snr_db, std::mt19937& rng,
+                  const std::vector<std::tuple<size_t, size_t, size_t, size_t>>& frame_positions) {
+    // Calculate signal power from OFDM regions only (training + data, not chirp)
+    float signal_energy = 0;
+    size_t active_samples = 0;
+
+    for (const auto& [start, chirp_len, training_len, data_len] : frame_positions) {
+        // OFDM starts after chirp
+        size_t ofdm_start = start + chirp_len;
+        size_t ofdm_end = ofdm_start + training_len + data_len;
+
+        for (size_t i = ofdm_start; i < ofdm_end && i < samples.size(); i++) {
+            float s = samples[i];
+            if (std::abs(s) > 1e-6f) {
+                signal_energy += s * s;
+                active_samples++;
+            }
+        }
+    }
+
+    if (active_samples == 0) return;
+
+    float signal_power = signal_energy / active_samples;
+    float noise_power = signal_power / std::pow(10.0f, snr_db / 10.0f);
+    float noise_std = std::sqrt(noise_power);
+
+    std::normal_distribution<float> noise(0.0f, noise_std);
+    for (float& s : samples) s += noise(rng);
+}
+
 // Save audio for debugging
 bool saveAudio(const std::vector<float>& audio, const std::string& filename) {
     std::ofstream file(filename, std::ios::binary);
@@ -166,6 +198,9 @@ int main(int argc, char* argv[]) {
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
     tx_modem.setWaveformMode(waveform_mode);
+    // Interleaving enabled by default
+    // Disable TX filter to avoid group delay mismatch (RX doesn't filter)
+    tx_modem.setFilterEnabled(false);
 
     // Generate frames with random timing
     struct TestFrame {
@@ -248,8 +283,27 @@ int main(int argc, char* argv[]) {
     printf("Applying %s channel (SNR=%.1f dB)...\n", channel_type.c_str(), snr_db);
 
     if (channel_type == "awgn") {
-        // Simple AWGN - good for baseline testing
-        addNoise(full_audio, snr_db, rng);
+        // For OFDM_CHIRP: calibrate noise to OFDM signal (not chirp)
+        if (waveform_mode == WaveformMode::OFDM_CHIRP) {
+            // Build frame position info for OFDM power calibration
+            // TX structure: [LEAD_IN: 7200][CHIRP: 24000][TRAINING: 1128][DATA][TAIL]
+            constexpr size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 7200
+            constexpr size_t CHIRP_SAMPLES = 24000;
+            constexpr size_t TRAINING_SAMPLES = 2 * 564;  // 1128
+
+            std::vector<std::tuple<size_t, size_t, size_t, size_t>> frame_positions;
+            for (int i = 0; i < num_frames; i++) {
+                // Position in audio where signal (including lead-in) starts
+                size_t signal_start = frames[i].audio_start + LEAD_IN_SAMPLES;
+                // Data length = total - lead_in - chirp - training - tail
+                size_t data_len = frames[i].audio_len - LEAD_IN_SAMPLES - CHIRP_SAMPLES - TRAINING_SAMPLES - 576*2;
+                frame_positions.emplace_back(signal_start, CHIRP_SAMPLES, TRAINING_SAMPLES, data_len);
+            }
+            addNoiseOFDM(full_audio, snr_db, rng, frame_positions);
+        } else {
+            // Simple AWGN - good for baseline testing
+            addNoise(full_audio, snr_db, rng);
+        }
     } else {
         // HF fading channel (Watterson model)
         WattersonChannel::Config ch_cfg;
@@ -323,6 +377,7 @@ int main(int argc, char* argv[]) {
             rx_modem.setHandshakeComplete(true);
             rx_modem.setWaveformMode(waveform_mode);
         }
+        // Interleaving enabled by default for both TX and RX
 
         // Setup callback
         std::atomic<bool> got_frame{false};

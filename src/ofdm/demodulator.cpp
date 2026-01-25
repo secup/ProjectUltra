@@ -316,6 +316,84 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
             }
         }
     }
+
+    // Decision-directed tracking for differential modes without pilots
+    // Two-stage tracking:
+    // 1. Per-carrier channel tracking: update channel_estimate[] for frequency-selective fading
+    // 2. Common phase tracking: update pilot_phase_correction for overall drift
+    if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && !dbpsk_prev_equalized.empty()) {
+        // Skip first symbol to let differential decoding establish reference
+        if (snr_symbol_count >= 1) {
+            Complex phase_error_sum(0, 0);
+            int valid_count = 0;
+
+            // Per-carrier tracking: update channel_estimate based on decoded symbol
+            // This handles frequency-selective fading where each carrier drifts differently
+            float dd_alpha = (snr_symbol_count < 3) ? 0.3f : 0.15f;  // Faster initial, then slower
+
+            for (size_t i = 0; i < equalized.size(); ++i) {
+                int idx = data_carrier_indices[i];
+                Complex prev_sym = (i < dbpsk_prev_equalized.size()) ? dbpsk_prev_equalized[i] : Complex(1, 0);
+                float signal_power = std::abs(equalized[i]) * std::abs(prev_sym);
+
+                // Only track strong carriers
+                if (signal_power > 0.1f) {
+                    Complex diff = equalized[i] * std::conj(prev_sym);
+                    float phase = std::atan2(diff.imag(), diff.real());
+
+                    // Map to nearest constellation point
+                    float expected_phase;
+                    if (mod == Modulation::DQPSK) {
+                        int quadrant = (int)std::round(phase * 2.0f / M_PI);
+                        quadrant = ((quadrant % 4) + 4) % 4;
+                        expected_phase = quadrant * M_PI / 2.0f;
+                    } else {
+                        int octant = (int)std::round(phase * 4.0f / M_PI);
+                        octant = ((octant % 8) + 8) % 8;
+                        expected_phase = octant * M_PI / 4.0f;
+                    }
+
+                    // Phase error for this carrier
+                    float phase_error = phase - expected_phase;
+                    while (phase_error > M_PI) phase_error -= 2 * M_PI;
+                    while (phase_error < -M_PI) phase_error += 2 * M_PI;
+
+                    // Per-carrier channel update: rotate channel_estimate to correct the error
+                    // Only update if error is small (likely correct decoding)
+                    float max_error_rad = (mod == Modulation::DQPSK) ? 0.7f : 0.35f;  // ~40° for DQPSK
+                    if (std::abs(phase_error) < max_error_rad) {
+                        Complex phase_correction = Complex(std::cos(-phase_error * dd_alpha),
+                                                           std::sin(-phase_error * dd_alpha));
+                        channel_estimate[idx] *= phase_correction;
+                    }
+
+                    // Accumulate for common phase tracking
+                    phase_error_sum += signal_power * Complex(std::cos(phase_error), std::sin(phase_error));
+                    valid_count++;
+                }
+            }
+
+            // Common phase tracking: update pilot_phase_correction
+            if (valid_count >= 5) {
+                float avg_phase_error = std::atan2(phase_error_sum.imag(), phase_error_sum.real());
+                Complex correction = Complex(std::cos(-avg_phase_error), std::sin(-avg_phase_error));
+
+                float alpha = (snr_symbol_count < 5) ? 0.5f : 0.2f;
+                pilot_phase_correction = pilot_phase_correction *
+                    std::pow(std::abs(correction), alpha) *
+                    Complex(std::cos(alpha * std::arg(correction)),
+                            std::sin(alpha * std::arg(correction)));
+
+                float mag = std::abs(pilot_phase_correction);
+                if (mag > 0.01f) pilot_phase_correction /= mag;
+
+                if (snr_symbol_count < 10) {
+                    LOG_DEMOD(DEBUG, "DD tracking: avg_err=%.1f°, valid=%d",
+                              avg_phase_error * 180.0f / M_PI, valid_count);
+                }
+            }
+        }
+    }
 }
 
 void OFDMDemodulator::Impl::updateQuality() {
@@ -764,14 +842,21 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     const float* ptr = samples.data();
     size_t remaining = samples.size();
 
-    // === Skip training symbols - they're for channel est which pilots handle ===
-    // For differential modulation, we just need consistent phase reference
-    // The data symbols will self-correct via differential detection
+    // === Process training symbols for channel estimation ===
+    // Even for differential modulation (DQPSK), we need channel estimation on
+    // fading channels where different carriers experience different attenuation.
+    //
+    // estimateChannelFromLTS uses toBaseband() which advances the mixer,
+    // so we don't need to advance it separately here.
     if (training_symbols > 0) {
-        ptr += training_symbols * impl_->symbol_samples;
-        remaining -= training_symbols * impl_->symbol_samples;
+        size_t training_samples_count = training_symbols * impl_->symbol_samples;
+
+        // Use training symbols for channel estimation (this advances the mixer)
+        impl_->estimateChannelFromLTS(ptr, training_symbols);
+
+        ptr += training_samples_count;
+        remaining -= training_samples_count;
         impl_->synced_symbol_count = training_symbols;
-        impl_->snr_symbol_count = training_symbols;
     }
 
     // Initialize reference for differential demodulation to (1,0)
@@ -782,6 +867,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
              training_symbols, remaining);
 
     // === PHASE 2: Process data symbols ===
+    LOG_DEMOD(DEBUG, "DATA phase: first_sample=%.6f, remaining=%zu", *ptr, remaining);
     impl_->rx_buffer.insert(impl_->rx_buffer.end(), ptr, ptr + remaining);
 
     while (impl_->rx_buffer.size() >= impl_->symbol_samples) {
@@ -789,7 +875,12 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
         auto bb = impl_->toBaseband(sym_samples);
         auto fd = impl_->extractSymbol(bb, 0);
 
-        impl_->updateChannelEstimate(fd);
+        // For coherent modes with pilots, we MUST call updateChannelEstimate for per-symbol
+        // pilot tracking. The LTS estimate is just a starting point - pilots refine it.
+        // For differential modes without pilots, we can skip it (LTS estimate is sufficient).
+        if (!impl_->pilot_carrier_indices.empty()) {
+            impl_->updateChannelEstimate(fd);
+        }
         auto eq = impl_->equalize(fd);
         impl_->demodulateSymbol(eq, impl_->config.modulation);
 

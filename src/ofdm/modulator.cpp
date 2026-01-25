@@ -218,7 +218,6 @@ struct OFDMModulator::Impl {
             freq_domain[data_carrier_indices[i]] = data_symbols[i];
         }
 
-
         // Add pilots
         if (include_pilots) {
             for (size_t i = 0; i < pilot_carrier_indices.size(); ++i) {
@@ -553,6 +552,13 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
         auto long_sym = impl_->createOFDMSymbol(lts_data, true);  // Returns CP + FFT samples
         auto lts_real = impl_->complexToReal(long_sym);
         training.insert(training.end(), lts_real.begin(), lts_real.end());
+
+        // Add guard interval to match modulate() symbol structure
+        // This ensures processPresynced() skips the exact right number of samples
+        for (uint32_t g = 0; g < impl_->config.symbol_guard; ++g) {
+            training.push_back(0);
+            impl_->mixer.next();  // Keep mixer in sync
+        }
     }
 
     return training;

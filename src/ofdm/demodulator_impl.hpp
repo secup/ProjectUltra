@@ -146,6 +146,7 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> toBaseband(SampleSpan samples);
     std::vector<Complex> extractSymbol(const std::vector<Complex>& baseband, size_t offset);
     void updateChannelEstimate(const std::vector<Complex>& freq_domain);
+    void estimateChannelFromLTS(const float* training_samples, size_t num_symbols);
     void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void lmsUpdate(int idx, Complex received, Complex reference);

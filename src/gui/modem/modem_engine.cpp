@@ -55,8 +55,8 @@ ModemEngine::ModemEngine() {
     dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
     // Multi-Carrier DPSK (for fading channels - frequency diversity)
-    // Default to 8 carriers, 93.75 baud, DQPSK
-    mc_dpsk_config_ = mc_dpsk_presets::level8();
+    // Using level10: 13 carriers, 93.75 baud, DQPSK (~1203 bps)
+    mc_dpsk_config_ = mc_dpsk_presets::level10();
     mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
     mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
 
@@ -288,9 +288,10 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         }
 
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
-        // Only interleave for OFDM - OTFS has built-in time-frequency diversity
+        // Interleave for OFDM and OFDM_CHIRP - OTFS has built-in time-frequency diversity
         bool use_interleaving = interleaving_enabled_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM);
+                                (waveform_mode_ == protocol::WaveformMode::OFDM ||
+                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
         for (const auto& cw : encoded_cws) {
             if (use_interleaving) {
                 Bytes interleaved = interleaver_.interleave(cw);
@@ -312,9 +313,10 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         LOG_MODEM(INFO, "TX raw: %zu bytes -> %zu encoded (rate=%d)",
                   data.size(), encoded.size(), static_cast<int>(tx_code_rate));
 
-        // Only interleave for OFDM - OTFS has built-in time-frequency diversity
+        // Interleave for OFDM and OFDM_CHIRP - OTFS has built-in time-frequency diversity
         bool use_interleaving = interleaving_enabled_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM);
+                                (waveform_mode_ == protocol::WaveformMode::OFDM ||
+                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
         to_modulate = use_interleaving ? interleaver_.interleave(encoded) : encoded;
     }
 
@@ -438,21 +440,31 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     } else if (use_ofdm_chirp) {
         // OFDM_CHIRP: Low-SNR mode with chirp sync + DQPSK (no pilots)
         // Chirp provides robust timing sync at 0-17 dB SNR
-        // DQPSK is differential so no channel estimation needed
+        // DQPSK is differential - channel tracking via decision-directed updates
         LOG_MODEM(INFO, "[%s] TX: Using OFDM_CHIRP (chirp sync + DQPSK, no pilots)",
                   log_prefix_.c_str());
+
+        // Create modulator with DQPSK + no pilots - all carriers are data
+        // Channel tracking done via LTS estimation + decision-directed updates
+        ModemConfig chirp_config = config_;
+        chirp_config.modulation = Modulation::DQPSK;
+        chirp_config.use_pilots = false;  // DQPSK doesn't need pilots
+        OFDMModulator chirp_modulator(chirp_config);
 
         // Generate chirp preamble for robust timing sync
         Samples chirp = chirp_sync_->generate();
 
-        // Force DQPSK for chirp mode (differential = no pilots needed)
-        Modulation chirp_modulation = Modulation::DQPSK;
+        // Generate LTS training symbols for channel estimation
+        // generateTrainingSymbols() resets mixer so training + data are phase-coherent
+        Samples training = chirp_modulator.generateTrainingSymbols(2);
 
-        // Generate OFDM data with DQPSK
-        modulated = ofdm_modulator_->modulate(to_modulate, chirp_modulation);
+        // Generate OFDM data with DQPSK (no pilots)
+        modulated = chirp_modulator.modulate(to_modulate, Modulation::DQPSK);
 
-        // Preamble is chirp only
-        preamble = std::move(chirp);
+        // Preamble is chirp + training symbols
+        preamble.reserve(chirp.size() + training.size());
+        preamble.insert(preamble.end(), chirp.begin(), chirp.end());
+        preamble.insert(preamble.end(), training.begin(), training.end());
     } else {
         // Standard OFDM: High-SNR mode with Schmidl-Cox sync
         // Supports higher-order modulations (16QAM, 32QAM) with pilot-based equalization
@@ -734,6 +746,15 @@ void ModemEngine::reset() {
 
     ofdm_demodulator_->reset();
     adaptive_.reset();
+
+    // Reset codeword accumulation state
+    ofdm_accumulated_soft_bits_.clear();
+    ofdm_expected_codewords_ = 0;
+    ofdm_chirp_found_ = false;
+    dpsk_accumulated_soft_bits_.clear();
+    dpsk_expected_codewords_ = 0;
+    otfs_accumulated_soft_bits_.clear();
+    otfs_expected_codewords_ = 0;
 
     // Reset RX state and clear queues
     rx_frame_state_.clear();

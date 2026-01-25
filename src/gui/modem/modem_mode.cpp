@@ -70,6 +70,35 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                       otfs_config_.M, otfs_config_.N);
             break;
 
+        case protocol::WaveformMode::OFDM_CHIRP: {
+            // OFDM_CHIRP uses DQPSK (differential) with no pilots
+            // Channel tracking via LTS estimation + decision-directed updates
+            ModemConfig chirp_config = config_;
+            chirp_config.modulation = Modulation::DQPSK;
+            chirp_config.use_pilots = false;  // DQPSK doesn't need pilots
+            ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(chirp_config);
+            LOG_MODEM(INFO, "OFDM_CHIRP mode active: %d carriers (DQPSK, no pilots)",
+                      chirp_config.num_carriers);
+            break;
+        }
+
+        case protocol::WaveformMode::OFDM_CHIRP_PILOTS: {
+            // OFDM_CHIRP_PILOTS uses coherent QPSK with pilots for fading channels
+            // Chirp provides robust sync, pilots enable channel tracking
+            ModemConfig chirp_pilots_config = config_;
+            chirp_pilots_config.modulation = Modulation::QPSK;
+            chirp_pilots_config.use_pilots = true;
+            chirp_pilots_config.pilot_spacing = 4;  // Every 4th carrier = pilot
+            chirp_pilots_config.scattered_pilots = true;  // Rotate pilots each symbol
+            ofdm_modulator_ = std::make_unique<OFDMModulator>(chirp_pilots_config);
+            ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(chirp_pilots_config);
+            uint32_t data_carriers = chirp_pilots_config.getDataCarriers();
+            LOG_MODEM(INFO, "OFDM_CHIRP_PILOTS mode active: %d carriers (%d data, %d pilots, QPSK)",
+                      chirp_pilots_config.num_carriers, data_carriers,
+                      chirp_pilots_config.num_carriers - data_carriers);
+            break;
+        }
+
         case protocol::WaveformMode::OFDM:
         default:
             ofdm_demodulator_->reset();
