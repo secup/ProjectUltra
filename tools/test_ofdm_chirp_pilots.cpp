@@ -100,10 +100,8 @@ int main(int argc, char* argv[]) {
     std::cout << "  Trials: " << trials << "\n\n";
 
     // Chirp sync config
-    // IMPORTANT: Chirp amplitude must match OFDM signal levels for correct SNR!
-    // OFDM has avg_power ~0.0001 (RMS ~0.01), so chirp amplitude should be ~0.02
-    // Default chirp amplitude of 0.8 is ~500x higher, causing terrible OFDM SNR
-    // when noise is calibrated to the combined signal.
+    // Note: Chirp amplitude (default 0.5) now matches OFDM output_scale (default 40)
+    // Both give similar RMS levels (~0.35-0.4) for consistent SNR calibration
     ChirpConfig chirp_cfg;
     chirp_cfg.sample_rate = SAMPLE_RATE;
     chirp_cfg.f_start = 300.0f;
@@ -111,7 +109,6 @@ int main(int argc, char* argv[]) {
     chirp_cfg.duration_ms = 500.0f;
     chirp_cfg.repetitions = 1;
     chirp_cfg.gap_ms = 0.0f;
-    chirp_cfg.amplitude = 0.02f;  // Match OFDM power level
     ChirpSync chirp_sync(chirp_cfg);
 
     // Test data - depends on code rate

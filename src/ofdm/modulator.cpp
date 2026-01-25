@@ -265,11 +265,14 @@ struct OFDMModulator::Impl {
     }
 
     Samples complexToReal(const std::vector<Complex>& complex_signal) {
-        // Mix up to center frequency and take real part
+        // Mix up to center frequency, take real part, and apply output scaling
+        // OFDM raw output has very low RMS due to FFT spreading (num_carriers/fft_size)
+        // Scale up to match chirp/preamble levels for consistent audio
         Samples real_signal(complex_signal.size());
+        float scale = config.output_scale;
         for (size_t i = 0; i < complex_signal.size(); ++i) {
             Complex mixed = complex_signal[i] * mixer.next();
-            real_signal[i] = mixed.real();
+            real_signal[i] = mixed.real() * scale;
         }
         return real_signal;
     }

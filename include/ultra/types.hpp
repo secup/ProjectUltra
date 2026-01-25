@@ -173,6 +173,12 @@ struct ModemConfig {
     float rls_lambda = 0.99f;           // RLS forgetting factor (0.95-0.999)
     bool decision_directed = true;      // Use past decisions as reference
 
+    // Output amplitude scaling
+    // OFDM raw output has very low RMS (~0.01) due to FFT spreading
+    // Scale up to match chirp/preamble levels for consistent audio output
+    // Default 40x gives RMS ~0.4, matching chirp amplitude ~0.5
+    float output_scale = 40.0f;
+
     // Synchronization settings
     float sync_threshold = 0.80f;       // Correlation threshold for sync (0.7-0.95)
 

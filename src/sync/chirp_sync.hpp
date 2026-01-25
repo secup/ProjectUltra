@@ -30,7 +30,7 @@ struct ChirpConfig {
     float duration_ms = 500.0f;  // Chirp duration (ms)
     int repetitions = 2;         // Number of chirp repetitions
     float gap_ms = 100.0f;       // Gap between repetitions (ms)
-    float amplitude = 0.8f;      // Output amplitude
+    float amplitude = 0.5f;      // Output amplitude (matched to OFDM output_scale=40)
 };
 
 class ChirpSync {
