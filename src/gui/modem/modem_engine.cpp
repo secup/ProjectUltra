@@ -288,10 +288,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         }
 
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
-        // Interleave for OFDM and OFDM_CHIRP - OTFS has built-in time-frequency diversity
+        // Interleave for OFDM - OTFS has built-in time-frequency diversity
         bool use_interleaving = interleaving_enabled_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM ||
-                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
+                                (waveform_mode_ == protocol::WaveformMode::OFDM);
         for (const auto& cw : encoded_cws) {
             if (use_interleaving) {
                 Bytes interleaved = interleaver_.interleave(cw);
@@ -313,10 +312,9 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         LOG_MODEM(INFO, "TX raw: %zu bytes -> %zu encoded (rate=%d)",
                   data.size(), encoded.size(), static_cast<int>(tx_code_rate));
 
-        // Interleave for OFDM and OFDM_CHIRP - OTFS has built-in time-frequency diversity
+        // Interleave for OFDM - OTFS has built-in time-frequency diversity
         bool use_interleaving = interleaving_enabled_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM ||
-                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
+                                (waveform_mode_ == protocol::WaveformMode::OFDM);
         to_modulate = use_interleaving ? interleaver_.interleave(encoded) : encoded;
     }
 
@@ -365,7 +363,6 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     bool use_dpsk = (active_waveform == protocol::WaveformMode::DPSK);
     bool use_otfs = (active_waveform == protocol::WaveformMode::OTFS_EQ ||
                      active_waveform == protocol::WaveformMode::OTFS_RAW);
-    bool use_ofdm_chirp = (active_waveform == protocol::WaveformMode::OFDM_CHIRP);
 
     Samples preamble, modulated;
 
@@ -437,34 +434,6 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         // preamble is empty for OTFS (already included in modulated)
         preamble.clear();
-    } else if (use_ofdm_chirp) {
-        // OFDM_CHIRP: Low-SNR mode with chirp sync + DQPSK (no pilots)
-        // Chirp provides robust timing sync at 0-17 dB SNR
-        // DQPSK is differential - channel tracking via decision-directed updates
-        LOG_MODEM(INFO, "[%s] TX: Using OFDM_CHIRP (chirp sync + DQPSK, no pilots)",
-                  log_prefix_.c_str());
-
-        // Create modulator with DQPSK + no pilots - all carriers are data
-        // Channel tracking done via LTS estimation + decision-directed updates
-        ModemConfig chirp_config = config_;
-        chirp_config.modulation = Modulation::DQPSK;
-        chirp_config.use_pilots = false;  // DQPSK doesn't need pilots
-        OFDMModulator chirp_modulator(chirp_config);
-
-        // Generate chirp preamble for robust timing sync
-        Samples chirp = chirp_sync_->generate();
-
-        // Generate LTS training symbols for channel estimation
-        // generateTrainingSymbols() resets mixer so training + data are phase-coherent
-        Samples training = chirp_modulator.generateTrainingSymbols(2);
-
-        // Generate OFDM data with DQPSK (no pilots)
-        modulated = chirp_modulator.modulate(to_modulate, Modulation::DQPSK);
-
-        // Preamble is chirp + training symbols
-        preamble.reserve(chirp.size() + training.size());
-        preamble.insert(preamble.end(), chirp.begin(), chirp.end());
-        preamble.insert(preamble.end(), training.begin(), training.end());
     } else {
         // Standard OFDM: High-SNR mode with Schmidl-Cox sync
         // Supports higher-order modulations (16QAM, 32QAM) with pilot-based equalization
@@ -750,7 +719,6 @@ void ModemEngine::reset() {
     // Reset codeword accumulation state
     ofdm_accumulated_soft_bits_.clear();
     ofdm_expected_codewords_ = 0;
-    ofdm_chirp_found_ = false;
     dpsk_accumulated_soft_bits_.clear();
     dpsk_expected_codewords_ = 0;
     otfs_accumulated_soft_bits_.clear();

@@ -186,15 +186,6 @@ void ModemEngine::rxDecodeLoop() {
                 if (buf_size > MIN_SAMPLES_FOR_DPSK) {
                     processRxBuffer_DPSK();
                 }
-            } else if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
-                // OFDM_CHIRP: chirp preamble + OFDM DQPSK data
-                bool has_pending = ofdm_demodulator_->isSynced() ||
-                                  ofdm_demodulator_->hasPendingData() ||
-                                  ofdm_expected_codewords_ > 0;
-
-                if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC || has_pending) {
-                    processRxBuffer_OFDM_CHIRP();
-                }
             }
 
             std::this_thread::sleep_for(std::chrono::milliseconds(DECODE_POLL_MS));

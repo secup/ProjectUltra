@@ -67,8 +67,8 @@ std::vector<Complex> OFDMDemodulator::Impl::extractSymbol(const std::vector<Comp
 
 void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples, size_t num_symbols) {
     // Estimate channel response from LTS (Long Training Sequence) symbols
-    // This is used by processPresynced() for OFDM_CHIRP mode where we have
-    // training symbols but no ongoing pilots.
+    // This is used by processPresynced() for chirp-synced modes where we have
+    // training symbols for initial channel estimation.
     //
     // The LTS carries:
     //   - sync_sequence on data carriers

@@ -107,6 +107,7 @@ int main(int argc, char* argv[]) {
     WaveformMode waveform_mode = WaveformMode::OFDM;
     std::string channel_type = "awgn";  // awgn, good, moderate, poor
     uint32_t channel_seed = 0;  // 0 = random
+    bool use_nvis = false;  // Use NVIS config (1024 FFT, 59 carriers)
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -130,18 +131,20 @@ int main(int argc, char* argv[]) {
             std::string mode = argv[++i];
             if (mode == "ofdm") {
                 waveform_mode = WaveformMode::OFDM;
-            } else if (mode == "chirp" || mode == "ofdm_chirp") {
-                waveform_mode = WaveformMode::OFDM_CHIRP;
             } else if (mode == "dpsk") {
                 waveform_mode = WaveformMode::DPSK;
             } else if (mode == "otfs" || mode == "otfs_eq") {
                 waveform_mode = WaveformMode::OTFS_EQ;
             } else if (mode == "otfs_raw") {
                 waveform_mode = WaveformMode::OTFS_RAW;
+            } else if (mode == "chirp_pilots" || mode == "ofdm_chirp_pilots") {
+                waveform_mode = WaveformMode::OFDM_CHIRP_PILOTS;
             } else {
-                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp, dpsk, otfs, otfs_raw)\n", mode.c_str());
+                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp_pilots, dpsk, otfs, otfs_raw)\n", mode.c_str());
                 return 1;
             }
+        } else if (arg == "--nvis") {
+            use_nvis = true;
         } else if ((arg == "-c" || arg == "--channel") && i + 1 < argc) {
             channel_type = argv[++i];
             if (channel_type != "awgn" && channel_type != "good" &&
@@ -158,7 +161,8 @@ int main(int argc, char* argv[]) {
             printf("  --snr <dB>       SNR level (default: 25)\n");
             printf("  --frames <n>     Number of frames (default: 10)\n");
             printf("  --duration <s>   Audio duration in seconds (default: 30)\n");
-            printf("  -w, --waveform   Waveform mode: ofdm, chirp, dpsk, otfs, otfs_raw (default: ofdm)\n");
+            printf("  -w, --waveform   Waveform mode: ofdm, chirp_pilots, dpsk, otfs (default: ofdm)\n");
+            printf("  --nvis           Use NVIS config (1024 FFT, 59 carriers) for high-speed\n");
             printf("  -c, --channel    Channel type: awgn, good, moderate, poor (default: awgn)\n");
             printf("  -p, --play       Play audio through speakers\n");
             printf("  --save           Save audio file for playback\n");
@@ -177,7 +181,7 @@ int main(int argc, char* argv[]) {
 
     const char* waveform_name = "?";
     if (waveform_mode == WaveformMode::OFDM) waveform_name = "OFDM";
-    else if (waveform_mode == WaveformMode::OFDM_CHIRP) waveform_name = "OFDM-CHIRP";
+    else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) waveform_name = "OFDM-CHIRP-PILOTS";
     else if (waveform_mode == WaveformMode::DPSK) waveform_name = "DPSK";
     else if (waveform_mode == WaveformMode::OTFS_EQ) waveform_name = "OTFS-EQ";
     else if (waveform_mode == WaveformMode::OTFS_RAW) waveform_name = "OTFS-RAW";
@@ -187,13 +191,27 @@ int main(int argc, char* argv[]) {
     printf("  Channel:    %s\n", channel_type.c_str());
     printf("  Frames:     %d\n", num_frames);
     printf("  Duration:   %.0f seconds\n", duration_sec);
-    printf("  Waveform:   %s\n\n", waveform_name);
+    printf("  Waveform:   %s\n", waveform_name);
+    printf("  Config:     %s\n\n", use_nvis ? "NVIS (1024 FFT, 59 carriers)" : "Standard (512 FFT, 30 carriers)");
 
     // ========================================
     // TX Setup - Generate v2 frames
     // ========================================
     ModemEngine tx_modem;
     tx_modem.setLogPrefix("TX");
+
+    // Apply NVIS config if requested (1024 FFT, 59 carriers for high-speed)
+    if (use_nvis) {
+        ModemConfig nvis_cfg = presets::nvis_mode();
+        // For OFDM_CHIRP_PILOTS, enable pilots with coherent QPSK
+        if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) {
+            nvis_cfg.use_pilots = true;
+            nvis_cfg.pilot_spacing = 4;
+            nvis_cfg.modulation = Modulation::QPSK;
+        }
+        tx_modem.setConfig(nvis_cfg);
+    }
+
     // Set connected state so TX uses the selected waveform (not DPSK connect waveform)
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
@@ -283,27 +301,8 @@ int main(int argc, char* argv[]) {
     printf("Applying %s channel (SNR=%.1f dB)...\n", channel_type.c_str(), snr_db);
 
     if (channel_type == "awgn") {
-        // For OFDM_CHIRP: calibrate noise to OFDM signal (not chirp)
-        if (waveform_mode == WaveformMode::OFDM_CHIRP) {
-            // Build frame position info for OFDM power calibration
-            // TX structure: [LEAD_IN: 7200][CHIRP: 24000][TRAINING: 1128][DATA][TAIL]
-            constexpr size_t LEAD_IN_SAMPLES = 48000 * 150 / 1000;  // 7200
-            constexpr size_t CHIRP_SAMPLES = 24000;
-            constexpr size_t TRAINING_SAMPLES = 2 * 564;  // 1128
-
-            std::vector<std::tuple<size_t, size_t, size_t, size_t>> frame_positions;
-            for (int i = 0; i < num_frames; i++) {
-                // Position in audio where signal (including lead-in) starts
-                size_t signal_start = frames[i].audio_start + LEAD_IN_SAMPLES;
-                // Data length = total - lead_in - chirp - training - tail
-                size_t data_len = frames[i].audio_len - LEAD_IN_SAMPLES - CHIRP_SAMPLES - TRAINING_SAMPLES - 576*2;
-                frame_positions.emplace_back(signal_start, CHIRP_SAMPLES, TRAINING_SAMPLES, data_len);
-            }
-            addNoiseOFDM(full_audio, snr_db, rng, frame_positions);
-        } else {
-            // Simple AWGN - good for baseline testing
-            addNoise(full_audio, snr_db, rng);
-        }
+        // Simple AWGN - good for baseline testing
+        addNoise(full_audio, snr_db, rng);
     } else {
         // HF fading channel (Watterson model)
         WattersonChannel::Config ch_cfg;

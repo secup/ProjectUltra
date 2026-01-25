@@ -234,11 +234,6 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_ofdm_chirp_pilots PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_ofdm_chirp_pilots PRIVATE ultra_core)
 
-    # OFDM with chirp sync basic test
-    add_executable(test_ofdm_chirp_basic tools/test_ofdm_chirp_basic.cpp)
-    target_include_directories(test_ofdm_chirp_basic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_ofdm_chirp_basic PRIVATE ultra_core)
-
     # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
     add_executable(test_hf_modem
         tools/test_hf_modem.cpp
