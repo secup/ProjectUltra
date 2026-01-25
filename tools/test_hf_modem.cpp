@@ -108,6 +108,7 @@ int main(int argc, char* argv[]) {
     std::string channel_type = "awgn";  // awgn, good, moderate, poor
     uint32_t channel_seed = 0;  // 0 = random
     bool use_nvis = false;  // Use NVIS config (1024 FFT, 59 carriers)
+    bool no_interleave = false;  // Disable channel interleaving
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -137,8 +138,8 @@ int main(int argc, char* argv[]) {
                 waveform_mode = WaveformMode::OTFS_EQ;
             } else if (mode == "otfs_raw") {
                 waveform_mode = WaveformMode::OTFS_RAW;
-            } else if (mode == "chirp" || mode == "chirp_pilots" || mode == "ofdm_chirp_pilots") {
-                waveform_mode = WaveformMode::OFDM_CHIRP_PILOTS;
+            } else if (mode == "chirp" || mode == "ofdm_chirp") {
+                waveform_mode = WaveformMode::OFDM_CHIRP;
             } else {
                 fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp, dpsk, otfs, otfs_raw)\n", mode.c_str());
                 return 1;
@@ -154,6 +155,8 @@ int main(int argc, char* argv[]) {
             }
         } else if (arg == "--seed" && i + 1 < argc) {
             channel_seed = std::stoul(argv[++i]);
+        } else if (arg == "--no-interleave") {
+            no_interleave = true;
         } else if (arg == "-h" || arg == "--help") {
             printf("HF Modem Pipeline Test\n\n");
             printf("Tests full ModemEngine audio pipeline (same as real HF rig)\n\n");
@@ -181,7 +184,7 @@ int main(int argc, char* argv[]) {
 
     const char* waveform_name = "?";
     if (waveform_mode == WaveformMode::OFDM_NVIS) waveform_name = "OFDM";
-    else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) waveform_name = "OFDM-CHIRP";
+    else if (waveform_mode == WaveformMode::OFDM_CHIRP) waveform_name = "OFDM-CHIRP";
     else if (waveform_mode == WaveformMode::MC_DPSK) waveform_name = "MC-DPSK";
     else if (waveform_mode == WaveformMode::OTFS_EQ) waveform_name = "OTFS-EQ";
     else if (waveform_mode == WaveformMode::OTFS_RAW) waveform_name = "OTFS-RAW";
@@ -203,19 +206,17 @@ int main(int argc, char* argv[]) {
     // Apply NVIS config if requested (1024 FFT, 59 carriers for high-speed)
     if (use_nvis) {
         ModemConfig nvis_cfg = presets::nvis_mode();
-        // For OFDM_CHIRP_PILOTS, enable pilots with coherent QPSK
-        if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) {
-            nvis_cfg.use_pilots = true;
-            nvis_cfg.pilot_spacing = 4;
-            nvis_cfg.modulation = Modulation::QPSK;
+        // For OFDM_CHIRP, use DQPSK (differential, no pilots)
+        if (waveform_mode == WaveformMode::OFDM_CHIRP) {
+            nvis_cfg.use_pilots = false;
+            nvis_cfg.modulation = Modulation::DQPSK;
         }
         tx_modem.setConfig(nvis_cfg);
-    } else if (waveform_mode == WaveformMode::OFDM_CHIRP_PILOTS) {
-        // For OFDM_CHIRP_PILOTS in standard mode, enable pilots with coherent QPSK
+    } else if (waveform_mode == WaveformMode::OFDM_CHIRP) {
+        // For OFDM_CHIRP in standard mode, use DQPSK (differential, no pilots)
         ModemConfig cfg = tx_modem.getConfig();
-        cfg.use_pilots = true;
-        cfg.pilot_spacing = 4;
-        cfg.modulation = Modulation::QPSK;
+        cfg.use_pilots = false;
+        cfg.modulation = Modulation::DQPSK;
         tx_modem.setConfig(cfg);
     }
 
@@ -223,7 +224,10 @@ int main(int argc, char* argv[]) {
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
     tx_modem.setWaveformMode(waveform_mode);
-    // Interleaving enabled by default
+    // Control interleaving
+    if (no_interleave) {
+        tx_modem.setInterleavingEnabled(false);
+    }
     // Disable TX filter to avoid group delay mismatch (RX doesn't filter)
     tx_modem.setFilterEnabled(false);
 
@@ -383,7 +387,10 @@ int main(int argc, char* argv[]) {
             rx_modem.setHandshakeComplete(true);
             rx_modem.setWaveformMode(waveform_mode);
         }
-        // Interleaving enabled by default for both TX and RX
+        // Match TX interleaving setting
+        if (no_interleave) {
+            rx_modem.setInterleavingEnabled(false);
+        }
 
         // Setup callback
         std::atomic<bool> got_frame{false};

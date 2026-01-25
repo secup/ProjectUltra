@@ -929,9 +929,9 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
     // processPresynced expects samples starting at first LTS training symbol
     // It will use first 2 symbols for channel estimation, then demodulate the rest
     // IMPORTANT: Limit samples to reasonable frame size to avoid demodulating noise/margins
-    // Conservative estimate: 4 codewords with OFDM_CHIRP_PILOTS (22 data carriers, 44 bits/sym)
-    // 4 * 648 bits / 44 bits/sym = 59 data symbols + 2 training = 61 symbols * 564 = 34,404
-    // Use 35000 to accommodate both OFDM_CHIRP (60 bits/sym) and OFDM_CHIRP_PILOTS (44 bits/sym)
+    // Conservative estimate: 4 codewords with OFDM_CHIRP (30 data carriers, 60 bits/sym DQPSK)
+    // 4 * 648 bits / 60 bits/sym = 44 data symbols + 2 training = 46 symbols * 564 = 25,944
+    // Use 35000 for safety margin
     constexpr size_t MAX_FRAME_SAMPLES = 35000;
     size_t process_samples = std::min(samples.size(), MAX_FRAME_SAMPLES);
     SampleSpan span(samples.data(), process_samples);
@@ -1090,11 +1090,16 @@ bool ModemEngine::waitForSamples(size_t required) {
 std::vector<float> ModemEngine::deinterleaveCodewords(const std::vector<float>& soft_bits) {
     std::vector<float> result;
 
+    if (!channel_interleaver_) {
+        // No interleaver configured - return as-is
+        return std::vector<float>(soft_bits.begin(), soft_bits.end());
+    }
+
     for (size_t i = 0; i + v2::LDPC_CODEWORD_BITS <= soft_bits.size();
          i += v2::LDPC_CODEWORD_BITS) {
         std::vector<float> cw_bits(soft_bits.begin() + i,
                                     soft_bits.begin() + i + v2::LDPC_CODEWORD_BITS);
-        auto deinterleaved = interleaver_.deinterleave(cw_bits);
+        auto deinterleaved = channel_interleaver_->deinterleave(cw_bits);
         result.insert(result.end(), deinterleaved.begin(), deinterleaved.end());
     }
 

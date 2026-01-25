@@ -186,8 +186,8 @@ void ModemEngine::rxDecodeLoop() {
                 if (buf_size > MIN_SAMPLES_FOR_DPSK) {
                     processRxBuffer_DPSK();
                 }
-            } else if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP_PILOTS) {
-                // OFDM_CHIRP_PILOTS: chirp preamble + OFDM QPSK with pilots
+            } else if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+                // OFDM_CHIRP: chirp preamble + OFDM DQPSK (differential)
                 bool has_pending = ofdm_demodulator_->isSynced() ||
                                   ofdm_demodulator_->hasPendingData() ||
                                   ofdm_expected_codewords_ > 0 ||

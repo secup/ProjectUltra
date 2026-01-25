@@ -31,7 +31,7 @@ enum class WaveformMode : uint8_t {
     OTFS_RAW   = 0x02,  // OTFS without TF eq (best for Poor channels)
     MFSK       = 0x03,  // MFSK for very low SNR (-17 dB to +3 dB)
     MC_DPSK    = 0x04,  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
-    OFDM_CHIRP_PILOTS = 0x05,  // OFDM with chirp sync + coherent QPSK + pilots (fading channels)
+    OFDM_CHIRP = 0x05,  // OFDM with chirp sync + DQPSK (low SNR fading channels)
     AUTO       = 0xFF,  // Automatic selection (let receiver decide)
 };
 
@@ -42,8 +42,8 @@ namespace ModeCapabilities {
     constexpr uint8_t OTFS_RAW   = 0x04;
     constexpr uint8_t MFSK       = 0x08;  // MFSK for very low SNR (-17 to +3 dB)
     constexpr uint8_t MC_DPSK    = 0x10;  // Multi-Carrier DPSK for low SNR with fading (0-10 dB)
-    constexpr uint8_t OFDM_CHIRP_PILOTS = 0x20;  // OFDM with chirp sync + pilots (fading)
-    constexpr uint8_t ALL        = OFDM_NVIS | OTFS_EQ | OTFS_RAW | MFSK | MC_DPSK | OFDM_CHIRP_PILOTS;
+    constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync + DQPSK (fading)
+    constexpr uint8_t ALL        = OFDM_NVIS | OTFS_EQ | OTFS_RAW | MFSK | MC_DPSK | OFDM_CHIRP;
 }
 
 const char* waveformModeToString(WaveformMode mode);

@@ -281,9 +281,12 @@ private:
     // Adaptive modulation controller
     AdaptiveModeController adaptive_;
 
-    // Interleaver (enabled by default for OFDM)
-    Interleaver interleaver_{6, 108};
+    // Channel interleaver for time-frequency diversity on fading channels
+    // Spreads consecutive LDPC bits across different OFDM symbols
+    std::unique_ptr<ChannelInterleaver> channel_interleaver_;
+    size_t interleaver_bits_per_symbol_ = 60;  // Default for OFDM_CHIRP (30 carriers × 2 bits DQPSK)
     bool interleaving_enabled_ = true;
+    void updateChannelInterleaver(size_t bits_per_symbol);
 
     // Audio filters
     FilterConfig filter_config_;

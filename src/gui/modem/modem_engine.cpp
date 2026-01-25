@@ -71,6 +71,10 @@ ModemEngine::ModemEngine() {
     chirp_cfg.gap_ms = 0.0f;
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
 
+    // Channel interleaver for time-frequency diversity on fading channels
+    // Default: 60 bits/symbol for OFDM_CHIRP (30 data carriers × 2 bits DQPSK)
+    updateChannelInterleaver(60);
+
     // Initialize audio filters
     rebuildFilters();
 
@@ -288,13 +292,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         }
 
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
-        // Interleave for OFDM modes - OTFS has built-in time-frequency diversity
-        bool use_interleaving = interleaving_enabled_ &&
+        // Channel interleaver spreads bits across OFDM symbols for time diversity
+        bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
                                 (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS ||
-                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP_PILOTS);
+                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
         for (const auto& cw : encoded_cws) {
             if (use_interleaving) {
-                Bytes interleaved = interleaver_.interleave(cw);
+                Bytes interleaved = channel_interleaver_->interleave(cw);
                 to_modulate.insert(to_modulate.end(), interleaved.begin(), interleaved.end());
             } else {
                 to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
@@ -313,11 +317,11 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         LOG_MODEM(INFO, "TX raw: %zu bytes -> %zu encoded (rate=%d)",
                   data.size(), encoded.size(), static_cast<int>(tx_code_rate));
 
-        // Interleave for OFDM modes - OTFS has built-in time-frequency diversity
-        bool use_interleaving = interleaving_enabled_ &&
+        // Channel interleaver spreads bits across OFDM symbols for time diversity
+        bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
                                 (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS ||
-                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP_PILOTS);
-        to_modulate = use_interleaving ? interleaver_.interleave(encoded) : encoded;
+                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
+        to_modulate = use_interleaving ? channel_interleaver_->interleave(encoded) : encoded;
     }
 
     // Modulation selection
@@ -365,7 +369,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     bool use_dpsk = (active_waveform == protocol::WaveformMode::MC_DPSK);
     bool use_otfs = (active_waveform == protocol::WaveformMode::OTFS_EQ ||
                      active_waveform == protocol::WaveformMode::OTFS_RAW);
-    bool use_ofdm_chirp_pilots = (active_waveform == protocol::WaveformMode::OFDM_CHIRP_PILOTS);
+    bool use_ofdm_chirp_pilots = (active_waveform == protocol::WaveformMode::OFDM_CHIRP);
 
     Samples preamble, modulated;
 
@@ -438,17 +442,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // preamble is empty for OTFS (already included in modulated)
         preamble.clear();
     } else if (use_ofdm_chirp_pilots) {
-        // OFDM_CHIRP_PILOTS: Mid-SNR mode with chirp sync + coherent QPSK + pilots
-        // Chirp provides robust timing sync, pilots enable channel tracking on fading
-        LOG_MODEM(INFO, "[%s] TX: Using OFDM_CHIRP_PILOTS (chirp sync + QPSK with pilots)",
+        // OFDM_CHIRP: Mid-SNR mode with chirp sync + DQPSK (differential)
+        // Chirp provides robust timing sync at low SNR
+        // DQPSK is robust to phase drift on fading channels (no pilots needed)
+        LOG_MODEM(INFO, "[%s] TX: Using OFDM_CHIRP (chirp sync + DQPSK)",
                   log_prefix_.c_str());
 
-        // Create modulator with QPSK + pilots for channel tracking
+        // Create modulator with DQPSK (no pilots - all carriers are data)
         ModemConfig chirp_config = config_;
-        chirp_config.modulation = Modulation::QPSK;
-        chirp_config.use_pilots = true;
-        chirp_config.pilot_spacing = 4;  // Every 4th carrier is a pilot
-        chirp_config.scattered_pilots = true;  // Rotate pilots each symbol
+        chirp_config.modulation = Modulation::DQPSK;
+        chirp_config.use_pilots = false;
         OFDMModulator chirp_modulator(chirp_config);
 
         // Generate chirp preamble for robust timing sync
@@ -457,8 +460,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // Generate LTS training symbols for initial channel estimation
         Samples training = chirp_modulator.generateTrainingSymbols(2);
 
-        // Generate OFDM data with QPSK + pilots
-        modulated = chirp_modulator.modulate(to_modulate, Modulation::QPSK);
+        // Generate OFDM data with DQPSK
+        modulated = chirp_modulator.modulate(to_modulate, Modulation::DQPSK);
 
         // Preamble is chirp + training symbols
         preamble.reserve(chirp.size() + training.size());
@@ -767,6 +770,18 @@ void ModemEngine::reset() {
         std::lock_guard<std::mutex> lock2(stats_mutex_);
         stats_ = LoopbackStats{};
     }
+}
+
+void ModemEngine::updateChannelInterleaver(size_t bits_per_symbol) {
+    if (bits_per_symbol == interleaver_bits_per_symbol_ && channel_interleaver_) {
+        return;  // Already configured
+    }
+
+    interleaver_bits_per_symbol_ = bits_per_symbol;
+    channel_interleaver_ = std::make_unique<ChannelInterleaver>(bits_per_symbol, protocol::v2::LDPC_CODEWORD_BITS);
+
+    LOG_MODEM(INFO, "Channel interleaver updated: %zu bits/symbol, symbol separation=%zu",
+              bits_per_symbol, channel_interleaver_->getSymbolSeparation());
 }
 
 } // namespace gui

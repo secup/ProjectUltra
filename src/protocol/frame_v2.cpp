@@ -19,7 +19,7 @@ const char* waveformModeToString(WaveformMode mode) {
         case WaveformMode::OTFS_RAW:   return "OTFS-RAW";
         case WaveformMode::MFSK:       return "MFSK";
         case WaveformMode::MC_DPSK:    return "MC-DPSK";
-        case WaveformMode::OFDM_CHIRP_PILOTS: return "OFDM-CHIRP-PILOTS";
+        case WaveformMode::OFDM_CHIRP: return "OFDM-CHIRP";
         case WaveformMode::AUTO:       return "AUTO";
         default:                       return "UNKNOWN";
     }
