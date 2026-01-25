@@ -54,22 +54,28 @@ ModemEngine::ModemEngine() {
     dpsk_modulator_ = std::make_unique<DPSKModulator>(dpsk_config_);
     dpsk_demodulator_ = std::make_unique<DPSKDemodulator>(dpsk_config_);
 
-    // Multi-Carrier DPSK (for fading channels - frequency diversity)
-    // Using level10: 13 carriers, 93.75 baud, DQPSK (~1203 bps)
-    mc_dpsk_config_ = mc_dpsk_presets::level10();
-    mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
-    mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
-
     // Chirp sync for robust presence detection on fading channels
     // Single chirp works better on fading - 2 reps can confuse detection
     sync::ChirpConfig chirp_cfg;
     chirp_cfg.sample_rate = config_.sample_rate;
     chirp_cfg.f_start = 300.0f;     // Start frequency (Hz)
     chirp_cfg.f_end = 2700.0f;      // End frequency (Hz)
-    chirp_cfg.duration_ms = 500.0f; // 500ms chirp
-    chirp_cfg.repetitions = 1;      // Single chirp for fading channels
-    chirp_cfg.gap_ms = 0.0f;
+    chirp_cfg.duration_ms = 500.0f; // 500ms single chirp (temporarily disabled dual chirp for debug)
+    chirp_cfg.gap_ms = 100.0f;      // Gap after chirp
+    chirp_cfg.use_dual_chirp = false; // Temporarily disabled for debugging
+    chirp_cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation
     chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
+
+    // Multi-Carrier DPSK (for fading channels - frequency diversity)
+    // Using level10: 13 carriers, 93.75 baud, DQPSK (~1203 bps)
+    // IMPORTANT: Sync chirp config with modem's chirp_sync_ so TX and RX use same chirp
+    mc_dpsk_config_ = mc_dpsk_presets::level10();
+    mc_dpsk_config_.chirp_f_start = chirp_cfg.f_start;
+    mc_dpsk_config_.chirp_f_end = chirp_cfg.f_end;
+    mc_dpsk_config_.chirp_duration_ms = chirp_cfg.duration_ms;
+    mc_dpsk_config_.use_dual_chirp = chirp_cfg.use_dual_chirp;
+    mc_dpsk_modulator_ = std::make_unique<MultiCarrierDPSKModulator>(mc_dpsk_config_);
+    mc_dpsk_demodulator_ = std::make_unique<MultiCarrierDPSKDemodulator>(mc_dpsk_config_);
 
     // Channel interleaver for time-frequency diversity on fading channels
     // Default: 60 bits/symbol for OFDM_CHIRP (30 data carriers × 2 bits DQPSK)
@@ -130,6 +136,17 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     otfs_config_.modulation = Modulation::QPSK;
     otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
     otfs_demodulator_ = std::make_unique<OTFSDemodulator>(otfs_config_);
+
+    // Recreate chirp sync with new CFO setting (for simulation)
+    sync::ChirpConfig chirp_cfg;
+    chirp_cfg.sample_rate = config_.sample_rate;
+    chirp_cfg.f_start = 300.0f;
+    chirp_cfg.f_end = 2700.0f;
+    chirp_cfg.duration_ms = 500.0f;  // 500ms single chirp
+    chirp_cfg.gap_ms = 100.0f;       // Gap after chirp
+    chirp_cfg.use_dual_chirp = false; // Temporarily disabled for debugging
+    chirp_cfg.tx_cfo_hz = config_.tx_cfo_hz;
+    chirp_sync_ = std::make_unique<sync::ChirpSync>(chirp_cfg);
 
     // Rebuild filters with new sample rate
     rebuildFilters();
@@ -293,9 +310,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
         // Channel interleaver spreads bits across OFDM symbols for time diversity
+        // IMPORTANT: Determine actual waveform for this TX (not just waveform_mode_)
+        // When not connected, waveform_mode_ may still be OFDM_NVIS but we're actually using MC-DPSK
+        protocol::WaveformMode tx_waveform = use_connected_waveform_once_ ? waveform_mode_ :
+                                             (!connected_ ? connect_waveform_ :
+                                              (!handshake_complete_ ? last_rx_waveform_ : waveform_mode_));
         bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS ||
-                                 waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
+                                (tx_waveform == protocol::WaveformMode::OFDM_NVIS ||
+                                 tx_waveform == protocol::WaveformMode::OFDM_CHIRP);
         for (const auto& cw : encoded_cws) {
             if (use_interleaving) {
                 Bytes interleaved = channel_interleaver_->interleave(cw);
@@ -305,7 +327,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
             }
         }
 
-        LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes", to_modulate.size());
+        LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes, first 8: %02x %02x %02x %02x %02x %02x %02x %02x",
+                  to_modulate.size(),
+                  to_modulate.size() > 0 ? to_modulate[0] : 0,
+                  to_modulate.size() > 1 ? to_modulate[1] : 0,
+                  to_modulate.size() > 2 ? to_modulate[2] : 0,
+                  to_modulate.size() > 3 ? to_modulate[3] : 0,
+                  to_modulate.size() > 4 ? to_modulate[4] : 0,
+                  to_modulate.size() > 5 ? to_modulate[5] : 0,
+                  to_modulate.size() > 6 ? to_modulate[6] : 0,
+                  to_modulate.size() > 7 ? to_modulate[7] : 0);
     } else {
         // === Raw Data Path (non-v2 frame) ===
         // Use connected code rate if still connected OR for disconnect ACK

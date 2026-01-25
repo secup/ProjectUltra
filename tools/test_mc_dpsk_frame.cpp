@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) {
     chirp_cfg.f_start = 300.0f;
     chirp_cfg.f_end = 2700.0f;
     chirp_cfg.duration_ms = 500.0f;
-    chirp_cfg.repetitions = 1;  // Single chirp for fading channels
+    chirp_cfg.use_dual_chirp = true;  // Single chirp for fading channels
     chirp_cfg.gap_ms = 0.0f;
     ChirpSync chirp_sync(chirp_cfg);
 

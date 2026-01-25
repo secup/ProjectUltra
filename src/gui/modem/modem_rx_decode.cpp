@@ -207,8 +207,8 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                 LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d", log_prefix_.c_str(), training_offset);
                 return false;
             }
-            LOG_MODEM(DEBUG, "[%s] DPSK decode: chirp frame, training_offset=%d, ref_offset=%d",
-                      log_prefix_.c_str(), training_offset, ref_offset);
+            LOG_MODEM(DEBUG, "[%s] DPSK decode: training=%d, ref=%d, data=%d",
+                      log_prefix_.c_str(), training_offset, ref_offset, frame.data_start);
             SampleSpan training_span(buffer.data() + training_offset, training_samples);
             SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
             mc_dpsk_demodulator_->processTraining(training_span);
@@ -302,6 +302,10 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
         // Note: DPSK mode does NOT use interleaving (TX only interleaves for OFDM)
         std::vector<float> cw0_bits(cw0_soft.begin(), cw0_soft.begin() + v2::LDPC_CODEWORD_BITS);
         // No interleaving for DPSK
+
+
+        LOG_MODEM(DEBUG, "[%s] DPSK CW0: calling LDPC with %zu bits",
+                  log_prefix_.c_str(), cw0_bits.size());
 
         Bytes cw0_data;
         if (!decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
@@ -729,6 +733,13 @@ void ModemEngine::processRxBuffer_DPSK() {
                           mc_dpsk_demodulator_->hasPendingData() ||
                           dpsk_expected_codewords_ > 0;
 
+        // Log when we have significant samples to process
+        if (rx_sample_buffer_.size() > MIN_SAMPLES_FOR_DPSK) {
+            LOG_MODEM(INFO, "[%s] DPSK RX: buf=%zu (>min), pending=%d, synced=%d",
+                      log_prefix_.c_str(), rx_sample_buffer_.size(), has_pending,
+                      mc_dpsk_demodulator_->isSynced());
+        }
+
         if (!has_pending && rx_sample_buffer_.size() < MIN_SAMPLES_FOR_DPSK) {
             return;
         }
@@ -747,6 +758,12 @@ void ModemEngine::processRxBuffer_DPSK() {
     bool frame_ready = mc_dpsk_demodulator_->process(span);
     bool is_synced = mc_dpsk_demodulator_->isSynced();
 
+    if (samples.size() > 10000 || is_synced || frame_ready) {
+        LOG_MODEM(INFO, "[%s] DPSK demod: fed %zu, synced=%d->%d, ready=%d, corr=%.3f",
+                  log_prefix_.c_str(), samples.size(), was_synced, is_synced,
+                  frame_ready, mc_dpsk_demodulator_->getLastChirpCorrelation());
+    }
+
     // Handle sync loss mid-frame
     if (was_synced && !is_synced && !dpsk_accumulated_soft_bits_.empty()) {
         LOG_MODEM(INFO, "[%s] DPSK: Lost sync mid-frame, discarding", log_prefix_.c_str());
@@ -761,15 +778,22 @@ void ModemEngine::processRxBuffer_DPSK() {
     // Accumulate soft bits when frame ready
     if (frame_ready) {
         auto soft_bits = mc_dpsk_demodulator_->getSoftBits();
+        LOG_MODEM(INFO, "[%s] DPSK: frame_ready, getSoftBits() returned %zu bits",
+                  log_prefix_.c_str(), soft_bits.size());
         if (!soft_bits.empty()) {
             // No interleaving for DPSK
             dpsk_accumulated_soft_bits_.insert(dpsk_accumulated_soft_bits_.end(),
                                                soft_bits.begin(), soft_bits.end());
+            LOG_MODEM(INFO, "[%s] DPSK: accumulated %zu total bits (%zu codewords)",
+                      log_prefix_.c_str(), dpsk_accumulated_soft_bits_.size(),
+                      dpsk_accumulated_soft_bits_.size() / v2::LDPC_CODEWORD_BITS);
         }
     }
 
     // Check if we have enough bits for decoding
     size_t num_codewords = dpsk_accumulated_soft_bits_.size() / LDPC_BLOCK;
+    LOG_MODEM(DEBUG, "[%s] DPSK: accumulated_bits=%zu, num_codewords=%zu, expected=%d",
+              log_prefix_.c_str(), dpsk_accumulated_soft_bits_.size(), num_codewords, dpsk_expected_codewords_);
     if (num_codewords == 0) return;
 
     // Decode first codeword to get frame header
@@ -823,15 +847,22 @@ void ModemEngine::processRxBuffer_DPSK() {
         auto result = decodeCodewords(frame_soft_bits, dpsk_expected_codewords_, CodeRate::R1_4,
                                       false, log_prefix_.c_str());
 
-        // Consume decoded bits
-        dpsk_accumulated_soft_bits_.erase(dpsk_accumulated_soft_bits_.begin(),
-                                          dpsk_accumulated_soft_bits_.begin() + dpsk_expected_codewords_ * LDPC_BLOCK);
+        LOG_MODEM(INFO, "[%s] DPSK: decode result: success=%d, ok=%d, failed=%d, data_size=%zu",
+                  log_prefix_.c_str(), result.success, result.codewords_ok, result.codewords_failed,
+                  result.frame_data.size());
+
+        // Clear ALL accumulated bits after decode (not just the expected codewords)
+        // The demodulator may return extra trailing bits that would corrupt the next frame
+        dpsk_accumulated_soft_bits_.clear();
         dpsk_expected_codewords_ = 0;
 
         if (result.success) {
+            LOG_MODEM(INFO, "[%s] DPSK: Frame decoded successfully, delivering %zu bytes",
+                      log_prefix_.c_str(), result.frame_data.size());
             deliverFrame(result.frame_data);
             updateStats([](LoopbackStats& s) { s.frames_received++; });
         } else {
+            LOG_MODEM(WARN, "[%s] DPSK: Frame decode FAILED", log_prefix_.c_str());
             updateStats([](LoopbackStats& s) { s.frames_failed++; });
         }
     }
@@ -884,12 +915,12 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
             return;
         }
 
-        // Search for chirp
-        float chirp_corr = 0.0f;
+        // Search for chirp using dual chirp detection (up + down chirp)
+        // This gives robust CFO estimation down to -20 dB SNR with ±2 Hz accuracy!
         SampleSpan search_span(samples.data(), samples.size());
-        int chirp_start = chirp_sync_->detect(search_span, chirp_corr, 0.35f);
+        auto chirp_result = chirp_sync_->detectDualChirp(search_span, 0.15f);
 
-        if (chirp_start < 0) {
+        if (!chirp_result.success) {
             // No chirp found - consume older samples to prevent buffer growth
             // Keep enough for next detection attempt
             size_t keep = std::min(samples.size(), chirp_samples * 2);
@@ -905,16 +936,28 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
             return;
         }
 
-        // Chirp found!
+        // Chirp found! Get CFO-corrected position and CFO estimate
+        int chirp_start = chirp_result.up_chirp_start;
+        float cfo_hz = chirp_result.cfo_hz;
+        float chirp_corr = std::max(chirp_result.up_correlation, chirp_result.down_correlation);
+
         ofdm_chirp_found_ = true;
         size_t chirp_end_offset = chirp_start + chirp_samples;
 
-        LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Chirp found at %d (corr=%.3f), training at %zu",
-                  log_prefix_.c_str(), chirp_start, chirp_corr, chirp_end_offset);
+        LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Dual chirp found at %d (corr=%.3f), CFO=%.1f Hz, training at %zu",
+                  log_prefix_.c_str(), chirp_start, chirp_corr, cfo_hz, chirp_end_offset);
 
         // Discard samples before chirp end (keep training + data)
         if (chirp_end_offset > 0 && chirp_end_offset < samples.size()) {
             samples.erase(samples.begin(), samples.begin() + chirp_end_offset);
+        }
+
+        // === APPLY CFO CORRECTION ===
+        // Set CFO on demodulator - toBaseband() will apply frequency correction
+        if (std::abs(cfo_hz) > 0.5f) {
+            ofdm_demodulator_->setFrequencyOffset(cfo_hz);
+        } else {
+            ofdm_demodulator_->setFrequencyOffset(0.0f);
         }
     }
 

@@ -264,12 +264,20 @@ float OFDMDemodulator::Impl::estimateCoarseCFO(size_t sync_offset) {
 // CFO ESTIMATION FROM TRAINING SYMBOLS (for chirp-sync mode)
 // =============================================================================
 //
-// Uses cyclic prefix correlation to estimate CFO.
-// CP is a copy of the last part of the symbol, so correlation gives CFO phase.
-// This method is robust to frequency-selective fading (unlike carrier comparison).
+// Uses SYMBOL-TO-SYMBOL correlation (not CP correlation).
+// Training symbols are identical, so correlating sym1 with sym2 gives CFO phase.
+//
+// This method is ROBUST to multipath because:
+// - Both symbols experience the same channel distortion
+// - The distortion cancels out in the correlation
+// - Only the CFO-induced phase rotation remains
+//
+// Phase difference = 2π × CFO × T_symbol
+// where T_symbol = (fft_size + cp_len) / sample_rate
 //
 float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_t num_symbols) {
-    if (num_symbols < 1) {
+    if (num_symbols < 2) {
+        LOG_SYNC(DEBUG, "CFO estimation needs at least 2 training symbols, got %zu", num_symbols);
         return 0.0f;
     }
 
@@ -277,59 +285,64 @@ float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_
     size_t cp_len = config.getCyclicPrefix();
     size_t sym_len = symbol_samples;  // CP + FFT + guard
 
-    // Convert to analytic signal for complex correlation
-    auto analytic = toAnalytic(samples, sym_len);
+    // Need at least 2 symbols
+    size_t total_samples = 2 * sym_len;
 
-    // Cyclic prefix correlation:
-    // CP (first cp_len samples) should match end of FFT (last cp_len samples)
-    // CP starts at: 0
-    // Matching portion starts at: cp_len + (fft_len - cp_len) = fft_len
+    // Convert both symbols to analytic signal
+    auto analytic = toAnalytic(samples, total_samples);
+
+    // Symbol-to-symbol correlation:
+    // Correlate symbol 1 with symbol 2
+    // Symbol 1: samples [0, sym_len)
+    // Symbol 2: samples [sym_len, 2*sym_len)
     //
-    // With CFO, there's a phase difference: exp(j * 2π * cfo * fft_len / fs)
-    Complex P(0.0f, 0.0f);
-    for (size_t i = 0; i < cp_len; ++i) {
-        // CP sample at position i
-        // Corresponding FFT sample at position fft_len + i (end of symbol)
-        // But symbol layout is: [CP | FFT | guard]
-        // So CP sample is at index i, FFT end sample is at index cp_len + fft_len - cp_len + i = fft_len + i
-        // Wait, that's wrong. Let me think again...
-        //
-        // Symbol layout: [CP (cp_len) | FFT body (fft_len - cp_len) | end (cp_len) | guard]
-        // No wait, CP is copy of END of FFT:
-        // FFT output: [0...fft_len-1]
-        // CP = FFT[fft_len-cp_len ... fft_len-1]
-        // TX symbol: [CP | FFT]
-        //
-        // So in received symbol:
-        // - CP is at indices [0, cp_len)
-        // - Matching FFT portion is at indices [fft_len, fft_len + cp_len) = [cp_len + fft_len - cp_len, cp_len + fft_len)
-        //   Wait, that's also wrong.
-        //
-        // TX symbol: CP (cp_len samples) + full FFT (fft_len samples) = cp_len + fft_len total
-        // CP = last cp_len samples of FFT output
-        // So in received symbol (ignoring guard):
-        // - CP at indices [0, cp_len)
-        // - Full FFT at indices [cp_len, cp_len + fft_len)
-        // - The END of FFT (which matches CP) is at indices [cp_len + fft_len - cp_len, cp_len + fft_len) = [fft_len, cp_len + fft_len)
-        //
-        // Correlation: conj(CP[i]) * FFT_end[i] where FFT_end[i] = sample[fft_len + i]
+    // For best results, correlate just the FFT portion (skip CP and guard)
+    // Symbol 1 FFT: [cp_len, cp_len + fft_len)
+    // Symbol 2 FFT: [sym_len + cp_len, sym_len + cp_len + fft_len)
 
-        if (i < analytic.size() && fft_len + i < analytic.size()) {
-            P += std::conj(analytic[i]) * analytic[fft_len + i];
+    Complex P(0.0f, 0.0f);
+    float E1 = 0.0f, E2 = 0.0f;
+
+    size_t s1_start = cp_len;                    // Symbol 1 FFT start
+    size_t s2_start = sym_len + cp_len;          // Symbol 2 FFT start
+
+    for (size_t i = 0; i < fft_len; ++i) {
+        if (s1_start + i < analytic.size() && s2_start + i < analytic.size()) {
+            Complex z1 = analytic[s1_start + i];
+            Complex z2 = analytic[s2_start + i];
+            P += std::conj(z1) * z2;
+            E1 += std::norm(z1);
+            E2 += std::norm(z2);
         }
     }
 
-    // Phase is due to CFO over fft_len samples
+    // Normalize and check quality
+    float corr_mag = std::abs(P) / std::sqrt(E1 * E2 + 1e-10f);
+
+    if (corr_mag < 0.3f) {
+        LOG_SYNC(WARN, "CFO estimation: low correlation (%.3f) - training symbols may be corrupted", corr_mag);
+        return 0.0f;
+    }
+
+    // Phase is due to CFO over one symbol period
+    // Symbol period = (fft_len + cp_len + guard) / fs = sym_len / fs
     float phase = std::atan2(P.imag(), P.real());
 
-    // CFO = phase × fs / (2π × fft_len)
-    float cfo_hz = phase * config.sample_rate / (2.0f * M_PI * fft_len);
+    // CFO = phase × fs / (2π × sym_len)
+    // Note: We use sym_len (full symbol including guard) because that's the
+    // actual time between corresponding samples in sym1 and sym2
+    float cfo_hz = phase * config.sample_rate / (2.0f * M_PI * sym_len);
 
-    // Clamp to reasonable range (±50 Hz for typical HF radios)
-    cfo_hz = std::max(-50.0f, std::min(50.0f, cfo_hz));
+    // Maximum unambiguous CFO = fs / (2 × sym_len)
+    // For sym_len=592 at 48kHz: max_cfo = 48000/(2×592) = 40.5 Hz
+    // For sym_len=1184 at 48kHz: max_cfo = 48000/(2×1184) = 20.3 Hz
+    float max_cfo = config.sample_rate / (2.0f * sym_len);
 
-    LOG_SYNC(INFO, "CFO from CP correlation: phase=%.3f rad, CFO=%.1f Hz",
-             phase, cfo_hz);
+    LOG_SYNC(INFO, "CFO from training symbols: phase=%.3f rad (%.1f°), corr=%.3f, CFO=%.1f Hz (max ±%.1f Hz)",
+             phase, phase * 180.0f / M_PI, corr_mag, cfo_hz, max_cfo);
+
+    // Clamp to unambiguous range
+    cfo_hz = std::max(-max_cfo, std::min(max_cfo, cfo_hz));
 
     return cfo_hz;
 }

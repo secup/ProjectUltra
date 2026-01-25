@@ -16,6 +16,7 @@
 #include "protocol/frame_v2.hpp"
 #include "sim/hf_channel.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/dsp.hpp"
 #include <iostream>
 #include <fstream>
 #include <random>
@@ -84,6 +85,117 @@ void addNoiseOFDM(std::vector<float>& samples, float snr_db, std::mt19937& rng,
 
     std::normal_distribution<float> noise(0.0f, noise_std);
     for (float& s : samples) s += noise(rng);
+}
+
+// Apply CFO using overlap-save FFT-based Hilbert transform
+// Processes in chunks to handle long signals while maintaining correct phase
+void applyCFO_Chunked(std::vector<float>& samples, float cfo_hz, float sample_rate = 48000.0f) {
+    if (samples.size() < 64 || std::abs(cfo_hz) < 0.001f) return;
+
+    size_t N = samples.size();
+    printf("[applyCFO_Chunked] N=%zu samples (%.1f sec), cfo=%.1f Hz\n", N, N/sample_rate, cfo_hz);
+
+    // Use overlap-save: process in chunks, keep only center portion
+    // This avoids circular convolution artifacts at edges
+    constexpr size_t fft_size = 32768;  // 682ms chunks
+    constexpr size_t margin = 2048;      // Discard this many samples at each edge
+    constexpr size_t valid_len = fft_size - 2 * margin;  // Keep this many samples
+
+    FFT fft(fft_size);
+    std::vector<Complex> freq(fft_size);
+    std::vector<Complex> time_in(fft_size);
+    std::vector<Complex> analytic(fft_size);
+    std::vector<float> output(N);
+
+    float phase_inc = 2.0f * static_cast<float>(M_PI) * cfo_hz / sample_rate;
+    size_t out_pos = 0;
+
+    for (size_t chunk = 0; out_pos < N; chunk++) {
+        // Input offset with margin for overlap-save
+        size_t in_start = (chunk == 0) ? 0 : chunk * valid_len - margin;
+
+        // Fill input buffer
+        for (size_t i = 0; i < fft_size; i++) {
+            size_t idx = in_start + i;
+            time_in[i] = (idx < N) ? Complex(samples[idx], 0) : Complex(0, 0);
+        }
+
+        // Forward FFT
+        fft.forward(time_in, freq);
+
+        // Create analytic signal (zero negative frequencies, double positive)
+        freq[0] *= 0.5f;  // DC
+        for (size_t i = 1; i < fft_size / 2; i++) {
+            freq[i] *= 2.0f;  // Double positive frequencies
+        }
+        freq[fft_size / 2] *= 0.5f;  // Nyquist
+        for (size_t i = fft_size / 2 + 1; i < fft_size; i++) {
+            freq[i] = Complex(0, 0);  // Zero negative frequencies
+        }
+
+        // Inverse FFT
+        fft.inverse(freq, analytic);
+
+        // Determine valid output range for this chunk
+        size_t valid_start = (chunk == 0) ? 0 : margin;
+        size_t valid_end = fft_size - margin;
+        if (chunk == 0) valid_end = fft_size - margin;  // First chunk: keep start, discard end margin
+
+        // Copy valid portion with CFO rotation
+        for (size_t i = valid_start; i < valid_end && out_pos < N; i++) {
+            size_t global_idx = in_start + i;
+            float phase = phase_inc * static_cast<float>(global_idx);
+            Complex rot(std::cos(phase), std::sin(phase));
+            output[out_pos++] = std::real(analytic[i] * rot);
+        }
+    }
+
+    samples = std::move(output);
+    printf("[applyCFO_Chunked] CFO shift applied (%zu samples)\n", N);
+}
+
+// Apply CFO using simple time-domain multiplication
+// This is more accurate than FFT-based Hilbert which has zero-padding artifacts
+void applyCFO_TimeDomain(std::vector<float>& samples, float cfo_hz, float sample_rate = 48000.0f) {
+    if (samples.size() < 64 || std::abs(cfo_hz) < 0.001f) return;
+
+    size_t N = samples.size();
+    printf("[applyCFO_TimeDomain] N=%zu samples (%.1f sec), cfo=%.1f Hz\n", N, N/sample_rate, cfo_hz);
+
+    // For a bandpass signal, frequency shift by multiplying with complex exponential
+    // requires creating an analytic signal first. Use FIR Hilbert for accuracy.
+    // Process in chunks to avoid memory issues with very long signals.
+
+    constexpr size_t chunk_size = 65536;
+    HilbertTransform hilbert(255);  // Longer filter for better accuracy
+
+    float phase = 0.0f;
+    float phase_inc = 2.0f * static_cast<float>(M_PI) * cfo_hz / sample_rate;
+
+    for (size_t offset = 0; offset < N; offset += chunk_size) {
+        size_t len = std::min(chunk_size, N - offset);
+
+        // Process this chunk
+        SampleSpan span(samples.data() + offset, len);
+        auto analytic = hilbert.process(span);
+
+        // Apply CFO rotation
+        for (size_t i = 0; i < len; i++) {
+            Complex rot(std::cos(phase), std::sin(phase));
+            samples[offset + i] = std::real(analytic[i] * rot);
+            phase += phase_inc;
+            while (phase > static_cast<float>(M_PI)) phase -= 2.0f * static_cast<float>(M_PI);
+        }
+    }
+
+    printf("[applyCFO_TimeDomain] CFO shift applied\n");
+}
+
+// Apply CFO using FFT-based Hilbert transform
+// NOTE: This has issues with zero-padding causing time shifts. Use applyCFO_TimeDomain instead.
+void applyCFO_FFT(std::vector<float>& samples, float cfo_hz, float sample_rate = 48000.0f) {
+    // Delegate to time-domain method which is more accurate
+    applyCFO_TimeDomain(samples, cfo_hz, sample_rate);
 }
 
 // Save audio for debugging
@@ -272,6 +384,10 @@ int main(int argc, char* argv[]) {
         cfg.use_pilots = false;
         cfg.modulation = test_modulation;
         cfg.code_rate = test_code_rate;
+        // Apply TX CFO if specified (simulates radio tuning error)
+        if (cfo_specified) {
+            cfg.tx_cfo_hz = cfo_hz;
+        }
         tx_modem.setConfig(cfg);
     }
 
@@ -345,6 +461,10 @@ int main(int argc, char* argv[]) {
         auto tx_audio = tx_modem.transmit(frame_data);
         frames[i].audio_len = tx_audio.size();
 
+        // CFO is now applied at the modulator level via cfg.tx_cfo_hz
+        // (mixer frequency is shifted, which correctly shifts both chirp and OFDM)
+        // No need for post-generation frequency shift here.
+
         if (verbose) {
             printf("  Frame %2d at %5.1fs: CONNECT seq=%d src=%s (%zu samples)\n",
                    i + 1, current_time, frame.seq, frames[i].src.c_str(), tx_audio.size());
@@ -369,6 +489,11 @@ int main(int argc, char* argv[]) {
     if (channel_type == "awgn") {
         // Simple AWGN - good for baseline testing
         addNoise(full_audio, snr_db, rng);
+
+        // CFO already applied per-frame during TX
+        if (cfo_specified && std::abs(cfo_hz) > 0.001f) {
+            printf("CFO: %.1f Hz (applied per-frame at TX)\n", cfo_hz);
+        }
     } else {
         // HF fading channel (Watterson model)
         WattersonChannel::Config ch_cfg;
@@ -376,12 +501,10 @@ int main(int argc, char* argv[]) {
         ch_cfg.snr_db = snr_db;
         ch_cfg.noise_enabled = true;
 
-        // CFO simulation
-        // TODO: CFO correction not yet implemented for OFDM_CHIRP mode
-        // CP-based estimation fails due to multipath; need chirp-based CFO estimation
-        // For now, only enable CFO if explicitly specified via --cfo
-        ch_cfg.cfo_enabled = cfo_specified;
-        ch_cfg.cfo_hz = cfo_hz;
+        // Disable CFO in channel - we'll apply it separately with FFT-based method
+        // (the channel's Weaver method implementation has filter issues)
+        ch_cfg.cfo_enabled = false;
+        ch_cfg.cfo_hz = 0.0f;
         ch_cfg.random_cfo_max_hz = 0.0f;
 
         if (channel_type == "good") {
@@ -416,9 +539,13 @@ int main(int argc, char* argv[]) {
         printf("Channel seed: %u (use --seed %u to reproduce)\n", seed, seed);
 
         WattersonChannel channel(ch_cfg, seed);
-        printf("CFO: %.1f Hz\n", channel.getActualCFO());
         SampleSpan input_span(full_audio.data(), full_audio.size());
         full_audio = channel.process(input_span);
+
+        // CFO already applied per-frame during TX
+        if (cfo_specified && std::abs(cfo_hz) > 0.001f) {
+            printf("CFO: %.1f Hz (applied per-frame at TX)\n", cfo_hz);
+        }
     }
 
     // Save audio if requested

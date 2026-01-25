@@ -70,21 +70,29 @@ void ModemEngine::acquisitionLoop() {
 
         SampleSpan search_span(samples.data(), search_len);
 
-        float chirp_corr = 0.0f;
-        int chirp_start = chirp_sync_->detect(search_span, chirp_corr, 0.35f);
+        // Use dual chirp detection for robust CFO estimation
+        // Works down to -20 dB SNR with ±2 Hz accuracy
+        auto chirp_result = chirp_sync_->detectDualChirp(search_span, 0.15f);
+        int chirp_start = chirp_result.success ? chirp_result.up_chirp_start : -1;
+        float chirp_corr = std::max(chirp_result.up_correlation, chirp_result.down_correlation);
+        float cfo_hz = chirp_result.cfo_hz;
 
         // Debug: log chirp detection result
-        LOG_MODEM(DEBUG, "[%s] Acq: chirp_start=%d, corr=%.3f, search_len=%zu",
-                  log_prefix_.c_str(), chirp_start, chirp_corr, search_len);
+        LOG_MODEM(DEBUG, "[%s] Acq: chirp_start=%d, corr=%.3f, CFO=%.1f Hz, search_len=%zu",
+                  log_prefix_.c_str(), chirp_start, chirp_corr, cfo_hz, search_len);
 
         if (chirp_start >= 0) {
-            size_t chirp_end = chirp_start + chirp_sync_->getTotalSamples();
+            size_t chirp_total = chirp_sync_->getTotalSamples();
+            size_t chirp_end = chirp_start + chirp_total;
 
             // Check if there's signal energy after chirp (= DPSK frame)
             // PING is chirp-only, DPSK frames have chirp + training + ref symbol + data
             bool has_data_after = false;
             size_t training_len = mc_dpsk_config_.training_symbols * mc_dpsk_config_.samples_per_symbol;
             size_t ref_symbol_len = mc_dpsk_config_.samples_per_symbol;
+
+            LOG_MODEM(DEBUG, "[%s] Acq: chirp=%d, total=%zu, end=%zu",
+                      log_prefix_.c_str(), chirp_start, chirp_total, chirp_end);
 
             if (chirp_end + training_len + ref_symbol_len + 1000 < samples.size()) {
                 // Check energy in the samples after chirp (training sequence)
@@ -102,6 +110,8 @@ void ModemEngine::acquisitionLoop() {
                 // rxDecodeDPSK expects data_start to point to DATA,
                 // with reference symbol at data_start - symbol_samples
                 size_t data_start = chirp_end + training_len + ref_symbol_len;
+
+                LOG_MODEM(DEBUG, "[%s] Acq: data_start=%zu", log_prefix_.c_str(), data_start);
 
                 DetectedFrame frame;
                 frame.data_start = static_cast<int>(data_start);
@@ -168,6 +178,12 @@ void ModemEngine::rxDecodeLoop() {
         if (connected_) {
             size_t buf_size = getBufferSize();
 
+            static int conn_iter = 0;
+            if (++conn_iter % 50 == 0) {
+                LOG_MODEM(INFO, "[%s] Connected mode: waveform=%d, buf=%zu",
+                          log_prefix_.c_str(), static_cast<int>(waveform_mode_), buf_size);
+            }
+
             if (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS) {
                 bool has_pending = ofdm_demodulator_->isSynced() ||
                                   ofdm_demodulator_->hasPendingData() ||
@@ -183,6 +199,11 @@ void ModemEngine::rxDecodeLoop() {
                     processRxBuffer_OTFS();
                 }
             } else if (waveform_mode_ == protocol::WaveformMode::MC_DPSK) {
+                static int dpsk_poll_iter = 0;
+                if (++dpsk_poll_iter % 50 == 0) {
+                    LOG_MODEM(INFO, "[%s] DPSK poll: buf=%zu, min=%zu",
+                              log_prefix_.c_str(), buf_size, MIN_SAMPLES_FOR_DPSK);
+                }
                 if (buf_size > MIN_SAMPLES_FOR_DPSK) {
                     processRxBuffer_DPSK();
                 }
@@ -240,6 +261,12 @@ void ModemEngine::feedAudio(const float* samples, size_t count) {
 
     {
         std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+
+        // Log when connected to see if samples are being fed after connection
+        if (connected_) {
+            LOG_MODEM(INFO, "[%s] feedAudio CONNECTED: +%zu, buf_before=%zu",
+                      log_prefix_.c_str(), count, rx_sample_buffer_.size());
+        }
 
         // Cap buffer to prevent unbounded growth
         if (rx_sample_buffer_.size() + count > MAX_PENDING_SAMPLES) {

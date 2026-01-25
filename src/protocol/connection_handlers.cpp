@@ -126,17 +126,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Use measured SNR from modem (set via setMeasuredSNR)
         snr_db = measured_snr_db_;
 
-        WaveformMode channel_recommended = WaveformMode::OFDM_NVIS;
-        if (doppler_spread_hz > 5.0f) {
-            channel_recommended = WaveformMode::OTFS_RAW;
-        } else if (snr_db > 20.0f && delay_spread_ms < 1.0f) {
-            channel_recommended = WaveformMode::OTFS_EQ;
-        }
-
-        if (remote_pref == WaveformMode::AUTO) {
-            remote_pref = channel_recommended;
-        }
-
+        // Let negotiateMode() handle AUTO mode with SNR-based selection
+        // Don't override remote_pref here - negotiateMode() has the correct SNR thresholds
         negotiated_mode_ = negotiateMode(remote_caps, remote_pref);
 
         LOG_MODEM(INFO, "Connection: Negotiated waveform mode: %s",

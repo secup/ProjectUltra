@@ -764,6 +764,13 @@ float OFDMDemodulator::getFrequencyOffset() const {
     return impl_->freq_offset_hz;
 }
 
+void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
+    impl_->freq_offset_hz = cfo_hz;
+    impl_->freq_offset_filtered = cfo_hz;
+    // Reset correction phase so it starts from 0 with the new offset
+    impl_->freq_correction_phase = 0.0f;
+}
+
 Symbol OFDMDemodulator::getConstellationSymbols() const {
     std::lock_guard<std::mutex> lock(impl_->constellation_mutex);
     return impl_->constellation_symbols;
@@ -819,9 +826,10 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->estimated_snr_linear = 1.0f;
     impl_->noise_variance = 0.1f;
 
-    // Reset CFO tracking
-    impl_->freq_offset_hz = 0.0f;
-    impl_->freq_offset_filtered = 0.0f;
+    // Preserve pre-set CFO (e.g., from chirp-based estimation)
+    // Only reset the correction phase so it starts fresh
+    // impl_->freq_offset_hz = 0.0f;  // KEEP the pre-set value!
+    // impl_->freq_offset_filtered = 0.0f;  // KEEP the pre-set value!
     impl_->freq_correction_phase = 0.0f;
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
@@ -842,19 +850,20 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     const float* ptr = samples.data();
     size_t remaining = samples.size();
 
-    // === PHASE 1a: CFO estimation (DISABLED - not working with multipath) ===
-    // TODO: Implement chirp-based CFO estimation
-    // Current CP-based method fails because multipath (1ms delay = 48 samples)
-    // corrupts the cyclic prefix correlation.
-    // For now, assume CFO is zero. Real deployment needs CFO correction.
+    // === PHASE 1a: CFO estimation from training symbols ===
+    // Uses symbol-to-symbol correlation (robust to multipath).
+    // Training symbols are identical, so phase difference = 2π × CFO × T_symbol
     //
-    // if (training_symbols >= 2) {
-    //     float cfo = impl_->estimateCFOFromTraining(ptr, training_symbols);
-    //     impl_->freq_offset_hz = cfo;
-    //     impl_->freq_offset_filtered = cfo;
-    //     impl_->mixer.reset();
-    //     impl_->mixer.setFrequency(impl_->config.center_freq + cfo);
-    // }
+    // If CFO was pre-set externally (e.g., from chirp), we keep that value.
+    // Otherwise, estimate from training symbols.
+    if (training_symbols >= 2 && std::abs(impl_->freq_offset_hz) < 0.1f) {
+        float cfo = impl_->estimateCFOFromTraining(ptr, training_symbols);
+        impl_->freq_offset_hz = cfo;
+        impl_->freq_offset_filtered = cfo;
+        LOG_SYNC(INFO, "CFO from training: %.1f Hz", cfo);
+    } else if (std::abs(impl_->freq_offset_hz) >= 0.1f) {
+        LOG_SYNC(INFO, "Using pre-set CFO: %.1f Hz", impl_->freq_offset_hz);
+    }
 
     // === PHASE 1b: Process training symbols for channel estimation ===
     // Even for differential modulation (DQPSK), we need channel estimation on

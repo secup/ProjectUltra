@@ -179,6 +179,11 @@ struct ModemConfig {
     // Default 40x gives RMS ~0.4, matching chirp amplitude ~0.5
     float output_scale = 40.0f;
 
+    // Simulation: TX carrier frequency offset (Hz)
+    // Simulates radio tuning error - shifts ALL frequencies by this amount
+    // Default 0 = no CFO. Set to e.g. ±20 Hz for testing CFO tolerance.
+    float tx_cfo_hz = 0.0f;
+
     // Synchronization settings
     float sync_threshold = 0.80f;       // Correlation threshold for sync (0.7-0.95)
 

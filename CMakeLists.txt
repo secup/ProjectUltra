@@ -234,6 +234,15 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(test_ofdm_chirp_pilots PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_ofdm_chirp_pilots PRIVATE ultra_core)
 
+    # Chirp detection robustness test (CFO tolerance, low SNR)
+    add_executable(test_chirp_robust tools/test_chirp_robust.cpp)
+    target_include_directories(test_chirp_robust PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_chirp_robust PRIVATE ultra_core)
+
+    # Up/Down chirp CFO estimation test (radar technique)
+    add_executable(test_chirp_cfo tools/test_chirp_cfo.cpp)
+    target_link_libraries(test_chirp_cfo PRIVATE m)
+
     # HF Modem Test - Full ModemEngine pipeline with realistic HF conditions
     add_executable(test_hf_modem
         tools/test_hf_modem.cpp
@@ -340,3 +349,50 @@ if(ULTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+add_executable(test_fft_shift tools/test_fft_shift.cpp)
+target_link_libraries(test_fft_shift ultra_core)
+
+add_executable(test_cfo_fft tools/test_cfo_fft.cpp)
+target_link_libraries(test_cfo_fft ultra_core)
+
+add_executable(test_cfo_verify tools/test_cfo_verify.cpp)
+target_link_libraries(test_cfo_verify ultra_core)
+
+add_executable(analyze_cfo /tmp/analyze_cfo.cpp)
+target_link_libraries(analyze_cfo ultra_core)
+
+add_executable(check_amplitudes /tmp/check_amplitudes.cpp)
+target_link_libraries(check_amplitudes ultra_core)
+
+add_executable(test_cfo_frame2 /tmp/test_cfo_frame2.cpp)
+target_link_libraries(test_cfo_frame2 ultra_core)
+add_executable(test_cfo_frame3 /tmp/test_cfo_frame3.cpp)
+target_link_libraries(test_cfo_frame3 ultra_core)
+add_executable(test_cfo_known_pos /tmp/test_cfo_known_pos.cpp)
+target_link_libraries(test_cfo_known_pos ultra_core)
+add_executable(test_cfo_no_leadin /tmp/test_cfo_no_leadin.cpp)
+target_link_libraries(test_cfo_no_leadin ultra_core)
+add_executable(test_cfo_direct /tmp/test_cfo_direct.cpp)
+target_link_libraries(test_cfo_direct ultra_core)
+add_executable(test_cfo_tolerance /tmp/test_cfo_tolerance.cpp)
+target_link_libraries(test_cfo_tolerance ultra_core)
+
+add_executable(test_cfo_estimate tools/test_cfo_estimate.cpp)
+target_link_libraries(test_cfo_estimate PRIVATE ultra_core)
+target_include_directories(test_cfo_estimate PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_executable(test_cfo_hilbert tools/test_cfo_hilbert.cpp)
+target_link_libraries(test_cfo_hilbert PRIVATE ultra_core)
+target_include_directories(test_cfo_hilbert PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_executable(test_cfo_hilbert2 tools/test_cfo_hilbert2.cpp)
+target_link_libraries(test_cfo_hilbert2 PRIVATE ultra_core)
+target_include_directories(test_cfo_hilbert2 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_executable(test_cfo_padded tools/test_cfo_padded.cpp)
+target_link_libraries(test_cfo_padded PRIVATE ultra_core)
+target_include_directories(test_cfo_padded PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_executable(test_cfo_spectrum tools/test_cfo_spectrum.cpp)
+target_link_libraries(test_cfo_spectrum PRIVATE ultra_core)
+target_include_directories(test_cfo_spectrum PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_executable(test_cfo_fft_debug tools/test_cfo_fft_debug.cpp)
+target_link_libraries(test_cfo_fft_debug PRIVATE ultra_core)
+target_include_directories(test_cfo_fft_debug PRIVATE ${CMAKE_SOURCE_DIR}/src)

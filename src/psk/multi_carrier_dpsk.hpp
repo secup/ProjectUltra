@@ -43,9 +43,9 @@ struct MultiCarrierDPSKConfig {
     // Chirp sync config
     float chirp_f_start = 300.0f;
     float chirp_f_end = 2700.0f;
-    float chirp_duration_ms = 500.0f;
-    int chirp_repetitions = 1;      // Single chirp for fading channels
-    float chirp_threshold = 0.35f;  // Detection threshold
+    float chirp_duration_ms = 250.0f;  // 250ms each for up/down chirps
+    bool use_dual_chirp = true;        // Up+down chirp for CFO estimation
+    float chirp_threshold = 0.15f;     // Detection threshold (lower for dual chirp)
 
     // Get carrier frequencies (evenly spaced)
     std::vector<float> getCarrierFreqs() const {
@@ -78,8 +78,8 @@ struct MultiCarrierDPSKConfig {
         cfg.f_start = chirp_f_start;
         cfg.f_end = chirp_f_end;
         cfg.duration_ms = chirp_duration_ms;
-        cfg.repetitions = chirp_repetitions;
-        cfg.gap_ms = 0.0f;
+        cfg.gap_ms = 100.0f;  // Gap between up and down chirps
+        cfg.use_dual_chirp = use_dual_chirp;  // Use configured value
         return cfg;
     }
 };
@@ -431,11 +431,13 @@ private:
     // Process in IDLE state - look for chirp
     bool processIdle() {
         // Need enough samples to search for chirp
-        size_t min_samples = chirp_samples_ + 96000;  // chirp + 2s search window
+        // In connected mode, frames arrive predictably so we use a smaller window
+        // chirp (24000) + training (4096) + ref (512) + some data margin
+        size_t min_samples = chirp_samples_ + training_samples_ + ref_samples_ + 4000;
         if (sample_buffer_.size() < min_samples) {
-            // Trim buffer if too large
-            if (sample_buffer_.size() > 2 * min_samples) {
-                size_t trim = sample_buffer_.size() - min_samples;
+            // Trim buffer if too large (keep 4x min_samples as search window)
+            if (sample_buffer_.size() > 4 * min_samples) {
+                size_t trim = sample_buffer_.size() - 2 * min_samples;
                 sample_buffer_.erase(sample_buffer_.begin(), sample_buffer_.begin() + trim);
             }
             return false;
@@ -490,13 +492,23 @@ private:
             int num_symbols = (expected_data_bytes_ * 8 + bits_per_symbol - 1) / bits_per_symbol;
             data_samples = num_symbols * config_.samples_per_symbol;
         } else {
-            // Default: assume at least 1 LDPC codeword (648 bits)
-            int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
-            int num_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
-            data_samples = num_symbols * config_.samples_per_symbol;
+            // Default: demodulate all remaining samples after preamble
+            // The header decoder will determine how many codewords are present
+            if (sample_buffer_.size() > preamble_samples_) {
+                data_samples = sample_buffer_.size() - preamble_samples_;
+            } else {
+                // Need at least 1 LDPC codeword (648 bits) minimum
+                int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+                int num_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+                data_samples = num_symbols * config_.samples_per_symbol;
+            }
         }
 
         size_t total_needed = preamble_samples_ + data_samples;
+
+        // Debug: log sample counts
+        printf("[MC-DPSK] GOT_CHIRP: buf=%zu, chirp=%zu, train=%zu, ref=%zu, data=%zu, total_needed=%zu\n",
+               sample_buffer_.size(), chirp_samples_, training_samples_, ref_samples_, data_samples, total_needed);
 
         if (sample_buffer_.size() < total_needed) {
             return false;  // Wait for more samples

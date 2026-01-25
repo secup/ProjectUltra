@@ -129,8 +129,13 @@ struct OFDMModulator::Impl {
     Impl(const ModemConfig& cfg)
         : config(cfg)
         , fft(cfg.fft_size)
-        , mixer(cfg.center_freq, cfg.sample_rate)
+        , mixer(cfg.center_freq + cfg.tx_cfo_hz, cfg.sample_rate)  // Apply TX CFO to carrier
     {
+        if (std::abs(cfg.tx_cfo_hz) > 0.01f) {
+            printf("[OFDM_MOD] *** CFO=%.1f Hz applied (mixer: %.1f + %.1f = %.1f Hz) ***\n",
+                   cfg.tx_cfo_hz, (float)cfg.center_freq, cfg.tx_cfo_hz,
+                   cfg.center_freq + cfg.tx_cfo_hz);
+        }
         setupCarriers();
         generateSequences();
     }

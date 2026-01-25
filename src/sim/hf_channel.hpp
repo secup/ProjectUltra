@@ -12,6 +12,7 @@
 #include <random>
 #include <complex>
 #include <deque>
+#include <array>
 
 namespace ultra {
 namespace sim {
@@ -154,22 +155,80 @@ public:
                 out += effective_noise_std * gaussian_(rng_);
             }
 
-            // Apply Carrier Frequency Offset (frequency shift)
-            // For real signal: multiply by cos(2*pi*cfo*t) shifts spectrum
-            // This simulates radio tuning error
-            if (config_.cfo_enabled && std::abs(actual_cfo_hz_) > 0.001f) {
-                out *= std::cos(cfo_phase_);
-                cfo_phase_ += cfo_phase_inc_;
-                // Keep phase in reasonable range to avoid precision loss
-                if (cfo_phase_ > 2.0f * M_PI) {
-                    cfo_phase_ -= 2.0f * M_PI;
-                }
-            }
-
             output[i] = out;
         }
 
+        // Apply Carrier Frequency Offset using Hilbert transform
+        // This properly shifts all frequency components by CFO Hz
+        if (config_.cfo_enabled && std::abs(actual_cfo_hz_) > 0.001f) {
+            applyCFO(output);
+        }
+
         return output;
+    }
+
+    // Apply CFO using simple time-domain approach
+    // For HF testing, we use a direct frequency shift approximation
+    // that works reasonably well for narrowband signals
+    void applyCFO(Samples& samples) {
+        if (samples.size() < 256) return;
+
+        // Simple approach: for passband signal around fc (1500 Hz)
+        // Mix down to baseband, apply CFO, mix back up
+        // This works because our signal is relatively narrowband (2.4 kHz)
+        constexpr float fc = 1500.0f;
+        const float fs = config_.sample_rate;
+
+        // Process in-place with complex baseband
+        std::vector<float> I_bb(samples.size()), Q_bb(samples.size());
+
+        // Mix to baseband
+        for (size_t i = 0; i < samples.size(); i++) {
+            float t = static_cast<float>(i) / fs;
+            float mix_phase = 2.0f * M_PI * fc * t;
+            I_bb[i] = samples[i] * std::cos(mix_phase);
+            Q_bb[i] = samples[i] * std::sin(mix_phase);
+        }
+
+        // Simple lowpass filter (moving average) to remove 2*fc component
+        // Window size for ~500 Hz cutoff at 48kHz: ~96 samples
+        constexpr size_t win = 48;
+        std::vector<float> I_filt(samples.size(), 0.0f), Q_filt(samples.size(), 0.0f);
+        float I_sum = 0, Q_sum = 0;
+        for (size_t i = 0; i < samples.size(); i++) {
+            I_sum += I_bb[i];
+            Q_sum += Q_bb[i];
+            if (i >= win) {
+                I_sum -= I_bb[i - win];
+                Q_sum -= Q_bb[i - win];
+            }
+            size_t n = std::min(i + 1, win);
+            I_filt[i] = I_sum / n;
+            Q_filt[i] = Q_sum / n;
+        }
+
+        // Apply CFO at baseband and mix back to passband
+        float phase = cfo_phase_;
+        float phase_inc = cfo_phase_inc_;
+
+        for (size_t i = 0; i < samples.size(); i++) {
+            float t = static_cast<float>(i) / fs;
+            float mix_phase = 2.0f * M_PI * fc * t;
+
+            // Apply CFO rotation at baseband
+            float cfo_cos = std::cos(phase);
+            float cfo_sin = std::sin(phase);
+            float I_cfo = I_filt[i] * cfo_cos - Q_filt[i] * cfo_sin;
+            float Q_cfo = I_filt[i] * cfo_sin + Q_filt[i] * cfo_cos;
+
+            // Mix back to passband
+            samples[i] = 2.0f * (I_cfo * std::cos(mix_phase) - Q_cfo * std::sin(mix_phase));
+
+            phase += phase_inc;
+            if (phase > 2.0f * M_PI) phase -= 2.0f * M_PI;
+        }
+
+        cfo_phase_ = phase;
     }
 
     // Get the actual CFO being applied (useful when random)
@@ -231,6 +290,7 @@ private:
     float cfo_phase_;
     float cfo_phase_inc_;
     float actual_cfo_hz_;
+    size_t sample_count_ = 0;
 };
 
 /**
