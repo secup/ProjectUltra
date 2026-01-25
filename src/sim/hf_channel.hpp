@@ -43,6 +43,12 @@ public:
         // Typical HF: 0.1 Hz (quiet) to 2 Hz (disturbed)
         float doppler_spread_hz = 1.0f;
 
+        // Carrier Frequency Offset in Hz (radio tuning error)
+        // Typical HF: ±10-50 Hz from imperfect tuning
+        // Set to 0 for no CFO, or use random_cfo_hz for random offset
+        float cfo_hz = 0.0f;
+        float random_cfo_max_hz = 0.0f;  // If >0, randomize CFO in ±this range
+
         // Path gains (usually equal for worst-case)
         float path1_gain = 0.707f;  // -3dB each for equal power
         float path2_gain = 0.707f;
@@ -54,6 +60,7 @@ public:
         bool fading_enabled = true;
         bool multipath_enabled = true;
         bool noise_enabled = true;
+        bool cfo_enabled = true;
     };
 
     explicit WattersonChannel(const Config& config, uint32_t seed = 42)
@@ -82,6 +89,15 @@ public:
         // Initialize fading states (complex for Rayleigh)
         fading1_ = std::complex<float>(1.0f, 0.0f);
         fading2_ = std::complex<float>(1.0f, 0.0f);
+
+        // Initialize CFO
+        cfo_phase_ = 0.0f;
+        actual_cfo_hz_ = config.cfo_hz;
+        if (config.random_cfo_max_hz > 0.0f) {
+            std::uniform_real_distribution<float> cfo_dist(-config.random_cfo_max_hz, config.random_cfo_max_hz);
+            actual_cfo_hz_ = cfo_dist(rng_);
+        }
+        cfo_phase_inc_ = 2.0f * M_PI * actual_cfo_hz_ / config.sample_rate;
     }
 
     // Process samples through the channel
@@ -138,11 +154,26 @@ public:
                 out += effective_noise_std * gaussian_(rng_);
             }
 
+            // Apply Carrier Frequency Offset (frequency shift)
+            // For real signal: multiply by cos(2*pi*cfo*t) shifts spectrum
+            // This simulates radio tuning error
+            if (config_.cfo_enabled && std::abs(actual_cfo_hz_) > 0.001f) {
+                out *= std::cos(cfo_phase_);
+                cfo_phase_ += cfo_phase_inc_;
+                // Keep phase in reasonable range to avoid precision loss
+                if (cfo_phase_ > 2.0f * M_PI) {
+                    cfo_phase_ -= 2.0f * M_PI;
+                }
+            }
+
             output[i] = out;
         }
 
         return output;
     }
+
+    // Get the actual CFO being applied (useful when random)
+    float getActualCFO() const { return actual_cfo_hz_; }
 
     // Get current fading magnitude (for monitoring)
     float getFadingMagnitude() const {
@@ -195,6 +226,11 @@ private:
 
     std::complex<float> fading1_;
     std::complex<float> fading2_;
+
+    // CFO state
+    float cfo_phase_;
+    float cfo_phase_inc_;
+    float actual_cfo_hz_;
 };
 
 /**

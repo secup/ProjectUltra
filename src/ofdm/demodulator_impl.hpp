@@ -136,6 +136,7 @@ struct OFDMDemodulator::Impl {
     float measureCorrelation(size_t offset, float* out_energy = nullptr);
     bool detectSync(size_t offset);
     float estimateCoarseCFO(size_t sync_offset);
+    float estimateCFOFromTraining(const float* samples, size_t num_symbols);
     size_t refineLTSTiming(size_t coarse_sts_start);
     std::vector<float> trialDemodulate(size_t data_start_offset, size_t num_symbols);
     std::pair<bool, int> huntForCodeword(size_t candidate_sync_pos);

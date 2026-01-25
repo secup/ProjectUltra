@@ -842,7 +842,21 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     const float* ptr = samples.data();
     size_t remaining = samples.size();
 
-    // === Process training symbols for channel estimation ===
+    // === PHASE 1a: CFO estimation (DISABLED - not working with multipath) ===
+    // TODO: Implement chirp-based CFO estimation
+    // Current CP-based method fails because multipath (1ms delay = 48 samples)
+    // corrupts the cyclic prefix correlation.
+    // For now, assume CFO is zero. Real deployment needs CFO correction.
+    //
+    // if (training_symbols >= 2) {
+    //     float cfo = impl_->estimateCFOFromTraining(ptr, training_symbols);
+    //     impl_->freq_offset_hz = cfo;
+    //     impl_->freq_offset_filtered = cfo;
+    //     impl_->mixer.reset();
+    //     impl_->mixer.setFrequency(impl_->config.center_freq + cfo);
+    // }
+
+    // === PHASE 1b: Process training symbols for channel estimation ===
     // Even for differential modulation (DQPSK), we need channel estimation on
     // fading channels where different carriers experience different attenuation.
     //

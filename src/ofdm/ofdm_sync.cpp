@@ -261,6 +261,80 @@ float OFDMDemodulator::Impl::estimateCoarseCFO(size_t sync_offset) {
 }
 
 // =============================================================================
+// CFO ESTIMATION FROM TRAINING SYMBOLS (for chirp-sync mode)
+// =============================================================================
+//
+// Uses cyclic prefix correlation to estimate CFO.
+// CP is a copy of the last part of the symbol, so correlation gives CFO phase.
+// This method is robust to frequency-selective fading (unlike carrier comparison).
+//
+float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_t num_symbols) {
+    if (num_symbols < 1) {
+        return 0.0f;
+    }
+
+    size_t fft_len = config.fft_size;
+    size_t cp_len = config.getCyclicPrefix();
+    size_t sym_len = symbol_samples;  // CP + FFT + guard
+
+    // Convert to analytic signal for complex correlation
+    auto analytic = toAnalytic(samples, sym_len);
+
+    // Cyclic prefix correlation:
+    // CP (first cp_len samples) should match end of FFT (last cp_len samples)
+    // CP starts at: 0
+    // Matching portion starts at: cp_len + (fft_len - cp_len) = fft_len
+    //
+    // With CFO, there's a phase difference: exp(j * 2π * cfo * fft_len / fs)
+    Complex P(0.0f, 0.0f);
+    for (size_t i = 0; i < cp_len; ++i) {
+        // CP sample at position i
+        // Corresponding FFT sample at position fft_len + i (end of symbol)
+        // But symbol layout is: [CP | FFT | guard]
+        // So CP sample is at index i, FFT end sample is at index cp_len + fft_len - cp_len + i = fft_len + i
+        // Wait, that's wrong. Let me think again...
+        //
+        // Symbol layout: [CP (cp_len) | FFT body (fft_len - cp_len) | end (cp_len) | guard]
+        // No wait, CP is copy of END of FFT:
+        // FFT output: [0...fft_len-1]
+        // CP = FFT[fft_len-cp_len ... fft_len-1]
+        // TX symbol: [CP | FFT]
+        //
+        // So in received symbol:
+        // - CP is at indices [0, cp_len)
+        // - Matching FFT portion is at indices [fft_len, fft_len + cp_len) = [cp_len + fft_len - cp_len, cp_len + fft_len)
+        //   Wait, that's also wrong.
+        //
+        // TX symbol: CP (cp_len samples) + full FFT (fft_len samples) = cp_len + fft_len total
+        // CP = last cp_len samples of FFT output
+        // So in received symbol (ignoring guard):
+        // - CP at indices [0, cp_len)
+        // - Full FFT at indices [cp_len, cp_len + fft_len)
+        // - The END of FFT (which matches CP) is at indices [cp_len + fft_len - cp_len, cp_len + fft_len) = [fft_len, cp_len + fft_len)
+        //
+        // Correlation: conj(CP[i]) * FFT_end[i] where FFT_end[i] = sample[fft_len + i]
+
+        if (i < analytic.size() && fft_len + i < analytic.size()) {
+            P += std::conj(analytic[i]) * analytic[fft_len + i];
+        }
+    }
+
+    // Phase is due to CFO over fft_len samples
+    float phase = std::atan2(P.imag(), P.real());
+
+    // CFO = phase × fs / (2π × fft_len)
+    float cfo_hz = phase * config.sample_rate / (2.0f * M_PI * fft_len);
+
+    // Clamp to reasonable range (±50 Hz for typical HF radios)
+    cfo_hz = std::max(-50.0f, std::min(50.0f, cfo_hz));
+
+    LOG_SYNC(INFO, "CFO from CP correlation: phase=%.3f rad, CFO=%.1f Hz",
+             phase, cfo_hz);
+
+    return cfo_hz;
+}
+
+// =============================================================================
 // LTS FINE TIMING
 // =============================================================================
 

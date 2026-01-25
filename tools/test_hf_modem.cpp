@@ -109,6 +109,10 @@ int main(int argc, char* argv[]) {
     uint32_t channel_seed = 0;  // 0 = random
     bool use_nvis = false;  // Use NVIS config (1024 FFT, 59 carriers)
     bool no_interleave = false;  // Disable channel interleaving
+    Modulation test_modulation = Modulation::DQPSK;  // Default for chirp mode
+    CodeRate test_code_rate = CodeRate::R1_2;  // Default code rate
+    float cfo_hz = 0.0f;  // Carrier frequency offset (0 = random ±20 Hz for fading channels)
+    bool cfo_specified = false;  // Was --cfo explicitly set?
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -157,6 +161,39 @@ int main(int argc, char* argv[]) {
             channel_seed = std::stoul(argv[++i]);
         } else if (arg == "--no-interleave") {
             no_interleave = true;
+        } else if ((arg == "-m" || arg == "--mod") && i + 1 < argc) {
+            std::string mod = argv[++i];
+            if (mod == "dqpsk") {
+                test_modulation = Modulation::DQPSK;
+            } else if (mod == "d8psk") {
+                test_modulation = Modulation::D8PSK;
+            } else if (mod == "qpsk") {
+                test_modulation = Modulation::QPSK;
+            } else if (mod == "16qam") {
+                test_modulation = Modulation::QAM16;
+            } else {
+                fprintf(stderr, "Unknown modulation: %s (use: dqpsk, d8psk, qpsk, 16qam)\n", mod.c_str());
+                return 1;
+            }
+        } else if ((arg == "-r" || arg == "--rate") && i + 1 < argc) {
+            std::string rate = argv[++i];
+            if (rate == "1/4" || rate == "r1/4") {
+                test_code_rate = CodeRate::R1_4;
+            } else if (rate == "1/2" || rate == "r1/2") {
+                test_code_rate = CodeRate::R1_2;
+            } else if (rate == "2/3" || rate == "r2/3") {
+                test_code_rate = CodeRate::R2_3;
+            } else if (rate == "3/4" || rate == "r3/4") {
+                test_code_rate = CodeRate::R3_4;
+            } else if (rate == "5/6" || rate == "r5/6") {
+                test_code_rate = CodeRate::R5_6;
+            } else {
+                fprintf(stderr, "Unknown code rate: %s (use: 1/4, 1/2, 2/3, 3/4, 5/6)\n", rate.c_str());
+                return 1;
+            }
+        } else if (arg == "--cfo" && i + 1 < argc) {
+            cfo_hz = std::stof(argv[++i]);
+            cfo_specified = true;
         } else if (arg == "-h" || arg == "--help") {
             printf("HF Modem Pipeline Test\n\n");
             printf("Tests full ModemEngine audio pipeline (same as real HF rig)\n\n");
@@ -164,7 +201,10 @@ int main(int argc, char* argv[]) {
             printf("  --snr <dB>       SNR level (default: 25)\n");
             printf("  --frames <n>     Number of frames (default: 10)\n");
             printf("  --duration <s>   Audio duration in seconds (default: 30)\n");
-            printf("  -w, --waveform   Waveform mode: ofdm, chirp_pilots, dpsk, otfs (default: ofdm)\n");
+            printf("  -w, --waveform   Waveform mode: ofdm, chirp, dpsk, otfs (default: ofdm)\n");
+            printf("  -m, --mod        Modulation: dqpsk, d8psk, qpsk, 16qam (default: dqpsk for chirp)\n");
+            printf("  -r, --rate       Code rate: 1/4, 1/2, 2/3, 3/4, 5/6 (default: 1/2)\n");
+            printf("  --cfo <Hz>       Carrier frequency offset (default: random ±20 Hz for fading)\n");
             printf("  --nvis           Use NVIS config (1024 FFT, 59 carriers) for high-speed\n");
             printf("  -c, --channel    Channel type: awgn, good, moderate, poor (default: awgn)\n");
             printf("  -p, --play       Play audio through speakers\n");
@@ -195,6 +235,19 @@ int main(int argc, char* argv[]) {
     printf("  Frames:     %d\n", num_frames);
     printf("  Duration:   %.0f seconds\n", duration_sec);
     printf("  Waveform:   %s\n", waveform_name);
+    const char* mod_name = "?";
+    if (test_modulation == Modulation::DQPSK) mod_name = "DQPSK";
+    else if (test_modulation == Modulation::D8PSK) mod_name = "D8PSK";
+    else if (test_modulation == Modulation::QPSK) mod_name = "QPSK";
+    else if (test_modulation == Modulation::QAM16) mod_name = "16QAM";
+    printf("  Modulation: %s\n", mod_name);
+    const char* rate_name = "?";
+    if (test_code_rate == CodeRate::R1_4) rate_name = "R1/4";
+    else if (test_code_rate == CodeRate::R1_2) rate_name = "R1/2";
+    else if (test_code_rate == CodeRate::R2_3) rate_name = "R2/3";
+    else if (test_code_rate == CodeRate::R3_4) rate_name = "R3/4";
+    else if (test_code_rate == CodeRate::R5_6) rate_name = "R5/6";
+    printf("  Code Rate:  %s\n", rate_name);
     printf("  Config:     %s\n\n", use_nvis ? "NVIS (1024 FFT, 59 carriers)" : "Standard (512 FFT, 30 carriers)");
 
     // ========================================
@@ -206,17 +259,19 @@ int main(int argc, char* argv[]) {
     // Apply NVIS config if requested (1024 FFT, 59 carriers for high-speed)
     if (use_nvis) {
         ModemConfig nvis_cfg = presets::nvis_mode();
-        // For OFDM_CHIRP, use DQPSK (differential, no pilots)
+        // For OFDM_CHIRP, use differential modulation (no pilots)
         if (waveform_mode == WaveformMode::OFDM_CHIRP) {
             nvis_cfg.use_pilots = false;
-            nvis_cfg.modulation = Modulation::DQPSK;
+            nvis_cfg.modulation = test_modulation;
+            nvis_cfg.code_rate = test_code_rate;
         }
         tx_modem.setConfig(nvis_cfg);
     } else if (waveform_mode == WaveformMode::OFDM_CHIRP) {
-        // For OFDM_CHIRP in standard mode, use DQPSK (differential, no pilots)
+        // For OFDM_CHIRP in standard mode, use differential modulation (no pilots)
         ModemConfig cfg = tx_modem.getConfig();
         cfg.use_pilots = false;
-        cfg.modulation = Modulation::DQPSK;
+        cfg.modulation = test_modulation;
+        cfg.code_rate = test_code_rate;
         tx_modem.setConfig(cfg);
     }
 
@@ -321,6 +376,14 @@ int main(int argc, char* argv[]) {
         ch_cfg.snr_db = snr_db;
         ch_cfg.noise_enabled = true;
 
+        // CFO simulation
+        // TODO: CFO correction not yet implemented for OFDM_CHIRP mode
+        // CP-based estimation fails due to multipath; need chirp-based CFO estimation
+        // For now, only enable CFO if explicitly specified via --cfo
+        ch_cfg.cfo_enabled = cfo_specified;
+        ch_cfg.cfo_hz = cfo_hz;
+        ch_cfg.random_cfo_max_hz = 0.0f;
+
         if (channel_type == "good") {
             ch_cfg.fading_enabled = true;
             ch_cfg.multipath_enabled = true;
@@ -353,6 +416,7 @@ int main(int argc, char* argv[]) {
         printf("Channel seed: %u (use --seed %u to reproduce)\n", seed, seed);
 
         WattersonChannel channel(ch_cfg, seed);
+        printf("CFO: %.1f Hz\n", channel.getActualCFO());
         SampleSpan input_span(full_audio.data(), full_audio.size());
         full_audio = channel.process(input_span);
     }
@@ -379,6 +443,23 @@ int main(int argc, char* argv[]) {
         // Create fresh RX modem for each frame
         ModemEngine rx_modem;
         rx_modem.setLogPrefix("RX");
+
+        // Configure RX to match TX settings (modulation, FFT size, code rate, etc.)
+        if (use_nvis) {
+            ModemConfig nvis_cfg = presets::nvis_mode();
+            if (waveform_mode == WaveformMode::OFDM_CHIRP) {
+                nvis_cfg.use_pilots = false;
+                nvis_cfg.modulation = test_modulation;
+                nvis_cfg.code_rate = test_code_rate;
+            }
+            rx_modem.setConfig(nvis_cfg);
+        } else if (waveform_mode == WaveformMode::OFDM_CHIRP) {
+            ModemConfig cfg = rx_modem.getConfig();
+            cfg.use_pilots = false;
+            cfg.modulation = test_modulation;
+            cfg.code_rate = test_code_rate;
+            rx_modem.setConfig(cfg);
+        }
 
         // DPSK uses acquisition path (disconnected mode) for chirp detection
         // Other modes use connected mode for direct buffer processing
