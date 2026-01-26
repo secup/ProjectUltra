@@ -282,11 +282,13 @@ public:
         }
 
         // Find correlation peak around the given position
-        constexpr size_t CORR_WINDOW = 480;  // 10ms
-        constexpr size_t SEARCH_RANGE = 600;  // ±12.5ms = ±60 Hz CFO range
+        constexpr int CORR_WINDOW = 480;  // 10ms
+        constexpr int SEARCH_RANGE = 600;  // ±12.5ms = ±60 Hz CFO range
 
-        int search_start = std::max(size_t(0), chirp_start - SEARCH_RANGE);
-        int search_end = std::min(samples.size() - chirp_len, chirp_start + SEARCH_RANGE);
+        // Use signed arithmetic to avoid underflow
+        int search_start = std::max(0, static_cast<int>(chirp_start) - SEARCH_RANGE);
+        int search_end = std::max(0, std::min(static_cast<int>(samples.size()) - static_cast<int>(chirp_len),
+                                               static_cast<int>(chirp_start) + SEARCH_RANGE));
 
         float best_corr = 0.0f;
         int corr_peak = static_cast<int>(chirp_start);
@@ -350,7 +352,8 @@ public:
         if (!config_.use_dual_chirp) {
             // Fall back to single chirp detection using full template correlation
             // (more accurate timing than detectRobust's short-window correlation)
-            auto [pos, corr] = detectChirpTemplate(samples, up_chirp_template_, threshold);
+            auto [pos, corr] = detectChirpTemplate(samples, up_chirp_template_, up_chirp_template_cos_,
+                                                    template_energy_, threshold);
             if (pos >= 0) {
                 result.success = true;
                 result.up_chirp_start = pos;
@@ -363,15 +366,55 @@ public:
         const size_t gap_samples = static_cast<size_t>(config_.sample_rate * config_.gap_ms / 1000.0f);
 
         if (samples.size() < 2 * chirp_len + gap_samples) {
+            fprintf(stderr, "[DUAL-CHIRP] Not enough samples: %zu < %zu\n",
+                    samples.size(), 2 * chirp_len + gap_samples);
             return result;  // Not enough samples
         }
 
-        // Detect UP chirp
-        auto [up_pos, up_corr] = detectChirpTemplate(samples, up_chirp_template_, threshold);
+        // DEBUG: Check template and signal energy
+        static int debug_count = 0;
+        if (++debug_count % 10 == 1) {  // Log occasionally
+            float tmpl_energy = 0.0f;
+            for (float s : up_chirp_template_) tmpl_energy += s * s;
+
+            // Check signal energy at a few positions
+            float sig_energy_start = 0.0f, sig_energy_mid = 0.0f;
+            size_t mid = samples.size() / 4;  // ~25% into buffer
+            for (size_t i = 0; i < std::min(chirp_len, (size_t)1000); i++) {
+                sig_energy_start += samples[i] * samples[i];
+                if (mid + i < samples.size()) sig_energy_mid += samples[mid + i] * samples[mid + i];
+            }
+            fprintf(stderr, "[DUAL-CHIRP] tmpl_energy=%.1f, sig@0=%.4f, sig@%zu=%.4f\n",
+                    tmpl_energy, std::sqrt(sig_energy_start/1000), mid, std::sqrt(sig_energy_mid/1000));
+            fprintf(stderr, "[DUAL-CHIRP] config: f_start=%.0f, f_end=%.0f, duration=%.0f ms, chirp_len=%zu\n",
+                    config_.f_start, config_.f_end, config_.duration_ms, chirp_len);
+
+            // Compute correlation at expected chirp position (~20000)
+            if (chirp_len < samples.size()) {
+                size_t test_pos = 20000;  // Expected chirp position
+                if (test_pos + chirp_len < samples.size()) {
+                    float test_corr = 0.0f, test_sig_energy = 0.0f;
+                    for (size_t i = 0; i < chirp_len; i++) {
+                        float s = samples[test_pos + i];
+                        float t = up_chirp_template_[i];
+                        test_corr += s * t;
+                        test_sig_energy += s * s;
+                    }
+                    float denom = std::sqrt(test_sig_energy * tmpl_energy);
+                    float norm_corr = (denom > 1e-10f) ? std::abs(test_corr) / denom : 0.0f;
+                    fprintf(stderr, "[DUAL-CHIRP] corr at pos 20000: %.4f (sig_energy=%.1f)\n",
+                            norm_corr, test_sig_energy);
+                }
+            }
+        }
+
+        // Detect UP chirp using COMPLEX correlation (CFO-tolerant!)
+        auto [up_pos, up_corr] = detectChirpTemplate(samples, up_chirp_template_, up_chirp_template_cos_,
+                                                      template_energy_, threshold);
+        result.up_correlation = up_corr;  // Always store for debugging
         if (up_pos < 0) {
             return result;  // Up chirp not found
         }
-        result.up_correlation = up_corr;
 
         // Detect DOWN chirp (search after UP chirp)
         size_t down_search_start = up_pos + chirp_len / 2;  // Start searching after up chirp
@@ -381,7 +424,9 @@ public:
 
         SampleSpan down_search(samples.data() + down_search_start,
                                samples.size() - down_search_start);
-        auto [down_pos_rel, down_corr] = detectChirpTemplate(down_search, down_chirp_template_, threshold);
+        // Detect DOWN chirp using COMPLEX correlation (CFO-tolerant!)
+        auto [down_pos_rel, down_corr] = detectChirpTemplate(down_search, down_chirp_template_, down_chirp_template_cos_,
+                                                              down_template_energy_, threshold);
 
         if (down_pos_rel < 0) {
             return result;  // Down chirp not found
@@ -403,17 +448,12 @@ public:
         // Actual gap from detected positions
         int actual_gap = down_pos - up_pos;
 
-        // DEBUG: Print positions and gaps
-        fprintf(stderr, "[CHIRP] up_pos=%d, down_pos=%d, actual_gap=%d, expected_gap=%d, cfo_to_samples=%.1f\n",
-                up_pos, down_pos, actual_gap, expected_gap, cfo_to_samples);
-
         // Position errors from expected
         // up_pos should be at true_start, but shifts by -CFO * cfo_to_samples
         // down_pos should be at true_start + chirp_len + gap, but shifts by +CFO * cfo_to_samples
         // So: actual_gap - expected_gap = 2 * CFO * cfo_to_samples
         float gap_error = static_cast<float>(actual_gap - expected_gap);
         result.cfo_hz = gap_error / (2.0f * cfo_to_samples);
-        fprintf(stderr, "[CHIRP] gap_error=%.1f, estimated CFO=%.1f Hz\n", gap_error, result.cfo_hz);
 
         // Correct positions using estimated CFO
         float up_correction = result.cfo_hz * cfo_to_samples;
@@ -466,33 +506,35 @@ public:
 
 private:
     ChirpConfig config_;
-    Samples up_chirp_template_;    // Up-chirp (300→2700 Hz)
-    Samples down_chirp_template_;  // Down-chirp (2700→300 Hz)
+    Samples up_chirp_template_;        // Up-chirp sin (300→2700 Hz)
+    Samples up_chirp_template_cos_;    // Up-chirp cos (for complex correlation)
+    Samples down_chirp_template_;      // Down-chirp sin (2700→300 Hz)
+    Samples down_chirp_template_cos_;  // Down-chirp cos (for complex correlation)
     float template_energy_ = 0.0f;
     float down_template_energy_ = 0.0f;
 
-    // Detect chirp using specific template, returns (position, correlation)
+    // Detect chirp using COMPLEX correlation (CFO-tolerant!)
+    // Takes sin and cos templates for I/Q correlation
+    // Returns: (position, correlation) where position is the TRUE chirp start
     std::pair<int, float> detectChirpTemplate(SampleSpan samples,
-                                               const Samples& chirp_template,
+                                               const Samples& tmpl_sin,
+                                               const Samples& tmpl_cos,
+                                               float tmpl_energy,
                                                float threshold) const {
-        const size_t chirp_len = chirp_template.size();
+        const size_t chirp_len = tmpl_sin.size();
         if (samples.size() < chirp_len) {
             return {-1, 0.0f};
         }
 
         const size_t search_len = samples.size() - chirp_len;
 
-        // Calculate template energy
-        float tmpl_energy = 0.0f;
-        for (float s : chirp_template) tmpl_energy += s * s;
-
         float best_corr = 0.0f;
         int best_pos = -1;
 
-        // Coarse search
+        // Coarse search with complex correlation (CFO-tolerant!)
         constexpr size_t COARSE_STEP = 48;  // 1ms at 48kHz
         for (size_t pos = 0; pos < search_len; pos += COARSE_STEP) {
-            float corr = computeTemplateCorrelation(samples, pos, chirp_template, tmpl_energy);
+            float corr = computeComplexTemplateCorrelation(samples, pos, tmpl_sin, tmpl_cos, tmpl_energy);
             if (corr > best_corr) {
                 best_corr = corr;
                 best_pos = static_cast<int>(pos);
@@ -500,6 +542,11 @@ private:
         }
 
         if (best_pos < 0 || best_corr < threshold * 0.3f) {
+            // Debug: log when chirp search fails
+            if (samples.size() > 50000) {
+                fprintf(stderr, "[CHIRP] FAIL: buf=%zu, max_corr=%.3f at pos=%d (threshold=%.2f)\n",
+                        samples.size(), best_corr, best_pos, threshold);
+            }
             return {-1, best_corr};
         }
 
@@ -508,7 +555,7 @@ private:
         int fine_end = std::min(static_cast<int>(search_len), best_pos + static_cast<int>(COARSE_STEP));
 
         for (int pos = fine_start; pos <= fine_end; pos++) {
-            float corr = computeTemplateCorrelation(samples, pos, chirp_template, tmpl_energy);
+            float corr = computeComplexTemplateCorrelation(samples, pos, tmpl_sin, tmpl_cos, tmpl_energy);
             if (corr > best_corr) {
                 best_corr = corr;
                 best_pos = pos;
@@ -517,9 +564,9 @@ private:
 
         // Parabolic interpolation for sub-sample accuracy
         if (best_pos > 0 && best_pos < static_cast<int>(search_len) - 1) {
-            float c0 = computeTemplateCorrelation(samples, best_pos - 1, chirp_template, tmpl_energy);
+            float c0 = computeComplexTemplateCorrelation(samples, best_pos - 1, tmpl_sin, tmpl_cos, tmpl_energy);
             float c1 = best_corr;
-            float c2 = computeTemplateCorrelation(samples, best_pos + 1, chirp_template, tmpl_energy);
+            float c2 = computeComplexTemplateCorrelation(samples, best_pos + 1, tmpl_sin, tmpl_cos, tmpl_energy);
 
             float denom = 2.0f * (c0 - 2.0f * c1 + c2);
             if (std::abs(denom) > 1e-10f) {
@@ -530,11 +577,50 @@ private:
             }
         }
 
+        if (best_corr < threshold && samples.size() > 50000) {
+            // Debug: chirp below threshold after fine search
+            fprintf(stderr, "[CHIRP] WEAK: buf=%zu, best_corr=%.3f at pos=%d (need %.2f)\n",
+                    samples.size(), best_corr, best_pos, threshold);
+        }
         return (best_corr >= threshold) ? std::make_pair(best_pos, best_corr)
                                         : std::make_pair(-1, best_corr);
     }
 
-    // Compute normalized correlation with specific template
+    // Compute normalized COMPLEX correlation with sin/cos templates
+    // Returns magnitude sqrt(I² + Q²) which is CFO-invariant!
+    //
+    // Why this works:
+    // - Real correlation oscillates at beat frequency (CFO Hz)
+    // - Complex correlation: correlate with exp(-j*phase) = cos - j*sin
+    // - Magnitude |I + jQ| doesn't oscillate - it's the envelope
+    // - Peak position is at true chirp start, regardless of CFO
+    //
+    float computeComplexTemplateCorrelation(SampleSpan samples, size_t offset,
+                                             const Samples& tmpl_sin,
+                                             const Samples& tmpl_cos,
+                                             float tmpl_energy) const {
+        if (offset + tmpl_sin.size() > samples.size()) return 0.0f;
+
+        float corr_I = 0.0f;  // In-phase (cos correlation)
+        float corr_Q = 0.0f;  // Quadrature (sin correlation)
+        float sig_energy = 0.0f;
+
+        for (size_t i = 0; i < tmpl_sin.size(); i++) {
+            float s = samples[offset + i];
+            // Complex correlation: s * exp(-j*phase) = s*cos(phase) - j*s*sin(phase)
+            corr_I += s * tmpl_cos[i];
+            corr_Q += s * tmpl_sin[i];
+            sig_energy += s * s;
+        }
+
+        float denom = std::sqrt(sig_energy * tmpl_energy);
+        if (denom < 1e-10f) return 0.0f;
+
+        // Return magnitude of complex correlation (CFO-invariant!)
+        return std::sqrt(corr_I * corr_I + corr_Q * corr_Q) / denom;
+    }
+
+    // Legacy real correlation (kept for reference, not used)
     float computeTemplateCorrelation(SampleSpan samples, size_t offset,
                                       const Samples& chirp_template,
                                       float tmpl_energy) const {
@@ -579,23 +665,27 @@ private:
     void generateTemplate() {
         size_t chirp_samples = getChirpSamples();
 
-        // Generate up-chirp template
+        // Generate up-chirp template (sin + cos for complex correlation)
         up_chirp_template_.resize(chirp_samples);
+        up_chirp_template_cos_.resize(chirp_samples);
         template_energy_ = 0.0f;
         for (size_t i = 0; i < chirp_samples; i++) {
             float t = static_cast<float>(i) / config_.sample_rate;
             float phase = generateUpChirpPhase(t);
             up_chirp_template_[i] = std::sin(phase);
+            up_chirp_template_cos_[i] = std::cos(phase);
             template_energy_ += up_chirp_template_[i] * up_chirp_template_[i];
         }
 
-        // Generate down-chirp template
+        // Generate down-chirp template (sin + cos for complex correlation)
         down_chirp_template_.resize(chirp_samples);
+        down_chirp_template_cos_.resize(chirp_samples);
         down_template_energy_ = 0.0f;
         for (size_t i = 0; i < chirp_samples; i++) {
             float t = static_cast<float>(i) / config_.sample_rate;
             float phase = generateDownChirpPhase(t);
             down_chirp_template_[i] = std::sin(phase);
+            down_chirp_template_cos_[i] = std::cos(phase);
             down_template_energy_ += down_chirp_template_[i] * down_chirp_template_[i];
         }
     }
