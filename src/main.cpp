@@ -92,7 +92,7 @@ WaveformType parseWaveform(const char* s) {
 protocol::WaveformMode toWaveformMode(WaveformType w) {
     switch (w) {
         case WaveformType::DPSK: return protocol::WaveformMode::MC_DPSK;
-        default: return protocol::WaveformMode::OFDM_NVIS;
+        default: return protocol::WaveformMode::OFDM_COX;
     }
 }
 

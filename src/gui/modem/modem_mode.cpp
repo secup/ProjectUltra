@@ -84,7 +84,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
             break;
         }
 
-        case protocol::WaveformMode::OFDM_NVIS:
+        case protocol::WaveformMode::OFDM_COX:
         default:
             ofdm_demodulator_->reset();
             LOG_MODEM(INFO, "OFDM mode active: %d carriers, %s",
@@ -263,7 +263,7 @@ protocol::WaveformMode ModemEngine::recommendWaveformMode(float snr_db) {
     if (snr_db < 17.0f) {
         return protocol::WaveformMode::MC_DPSK;
     } else {
-        return protocol::WaveformMode::OFDM_NVIS;
+        return protocol::WaveformMode::OFDM_COX;
     }
 }
 

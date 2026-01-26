@@ -150,7 +150,7 @@ public:
     CodeRate data_code_rate = CodeRate::R1_2;
 
     // Negotiated waveform mode (OFDM, DPSK, MFSK)
-    WaveformMode waveform_mode = WaveformMode::OFDM_NVIS;
+    WaveformMode waveform_mode = WaveformMode::OFDM_COX;
 
     // Frame type tracking for verification
     std::vector<v2::FrameType> tx_frame_types;
@@ -288,7 +288,7 @@ public:
             } else if (estimated_snr < 15.0f) {
                 tx_waveform = WaveformMode::MC_DPSK;
             } else {
-                tx_waveform = WaveformMode::OFDM_NVIS;
+                tx_waveform = WaveformMode::OFDM_COX;
             }
         } else if (connected) {
             // Connected: Use negotiated waveform and data mode
@@ -299,7 +299,7 @@ public:
             // Fallback: Robust mode
             tx_mod = Modulation::BPSK;
             tx_rate = CodeRate::R1_4;
-            tx_waveform = WaveformMode::OFDM_NVIS;
+            tx_waveform = WaveformMode::OFDM_COX;
         }
 
         // Track for verification
@@ -394,7 +394,7 @@ public:
             } else if (estimated_snr < 15.0f) {
                 rx_waveform = WaveformMode::MC_DPSK;
             } else {
-                rx_waveform = WaveformMode::OFDM_NVIS;
+                rx_waveform = WaveformMode::OFDM_COX;
             }
         }
 
@@ -562,7 +562,7 @@ public:
         mfsk_demodulator->reset();
         connected = false;
         remote_call.clear();
-        waveform_mode = WaveformMode::OFDM_NVIS;
+        waveform_mode = WaveformMode::OFDM_COX;
         tx_frame_types.clear();
         tx_modulations.clear();
         tx_waveform_modes.clear();
@@ -1006,8 +1006,8 @@ bool test_waveform_mode_selection() {
         { 0.0f,  WaveformMode::MC_DPSK, "0 dB -> DPSK (MFSK threshold is < 0)"},
         { 5.0f,  WaveformMode::MC_DPSK, "5 dB -> DPSK"},
         { 9.9f,  WaveformMode::MC_DPSK, "9.9 dB -> DPSK (boundary)"},
-        {10.0f,  WaveformMode::OFDM_NVIS, "10 dB -> OFDM (DPSK threshold is < 10)"},
-        {20.0f,  WaveformMode::OFDM_NVIS, "20 dB -> OFDM"},
+        {10.0f,  WaveformMode::OFDM_COX, "10 dB -> OFDM (DPSK threshold is < 10)"},
+        {20.0f,  WaveformMode::OFDM_COX, "20 dB -> OFDM"},
     };
 
     int passed = 0;
@@ -1019,7 +1019,7 @@ bool test_waveform_mode_selection() {
         } else if (tc.snr_db < 10.0f) {
             recommended_mode = WaveformMode::MC_DPSK;
         } else {
-            recommended_mode = WaveformMode::OFDM_NVIS;
+            recommended_mode = WaveformMode::OFDM_COX;
         }
 
         if (recommended_mode == tc.expected_mode) {

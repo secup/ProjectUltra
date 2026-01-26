@@ -185,7 +185,7 @@ void ModemEngine::rxDecodeLoop() {
                           log_prefix_.c_str(), static_cast<int>(waveform_mode_), buf_size);
             }
 
-            if (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS) {
+            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX) {
                 bool has_pending = ofdm_demodulator_->isSynced() ||
                                   ofdm_demodulator_->hasPendingData() ||
                                   ofdm_expected_codewords_ > 0;

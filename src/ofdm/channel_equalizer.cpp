@@ -89,6 +89,13 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     LOG_DEMOD(DEBUG, "estimateChannelFromLTS: num_symbols=%zu, symbol_samples=%zu, first_sample=%.6f",
              num_symbols, symbol_samples, training_samples[0]);
 
+    // DEBUG: Print carrier indices
+    fprintf(stderr, "[LTS-DBG] RX carrier indices (first 5): ");
+    for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+        fprintf(stderr, "%d ", data_carrier_indices[i]);
+    }
+    fprintf(stderr, "(total %zu)\n", data_carrier_indices.size());
+
     if (num_symbols == 0 || data_carrier_indices.empty()) return;
 
     // Store per-symbol channel estimates for noise estimation (data carriers only for now)
@@ -107,6 +114,22 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
         SampleSpan sym_span(ptr, symbol_samples);
         auto baseband = toBaseband(sym_span);
         auto freq = extractSymbol(baseband, 0);
+
+        // DEBUG: Print first few freq domain values on first training symbol
+        if (sym == 0) {
+            fprintf(stderr, "[LTS-DBG] RX freq[idx] for first 5 carriers: ");
+            for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+                int idx = data_carrier_indices[i];
+                fprintf(stderr, "[%d]=(%.3f,%.3f) ", idx, freq[idx].real(), freq[idx].imag());
+            }
+            fprintf(stderr, "\n");
+            fprintf(stderr, "[LTS-DBG] TX sync_seq for first 5 carriers: ");
+            for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+                Complex tx = sync_sequence[i % sync_sequence.size()];
+                fprintf(stderr, "(%.3f,%.3f) ", tx.real(), tx.imag());
+            }
+            fprintf(stderr, "\n");
+        }
 
         // Estimate H for each data carrier
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
@@ -193,6 +216,14 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     LOG_DEMOD(INFO, "LTS channel estimate: %zu symbols, |H|_avg=%.3f, phase_avg=%.1f°",
               valid_symbols, h_mag_avg, std::arg(h_avg) * 180.0f / M_PI);
+
+    // DEBUG: Print first few channel estimates
+    fprintf(stderr, "[LTS-DBG] First 5 H estimates: ");
+    for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+        int idx = data_carrier_indices[i];
+        fprintf(stderr, "(%.3f,%.3f) ", channel_estimate[idx].real(), channel_estimate[idx].imag());
+    }
+    fprintf(stderr, "\n");
 
     // DON'T set carrier_phase_initialized here - let updateChannelEstimate() do it
     // on the first data symbol. This ensures we use fresh pilot data for phase
@@ -718,7 +749,18 @@ std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>&
 }
 
 std::vector<Complex> OFDMDemodulator::Impl::equalize(const std::vector<Complex>& freq_domain) {
-    return equalize(freq_domain, config.modulation);
+    auto result = equalize(freq_domain, config.modulation);
+
+    // DEBUG: Print first few equalized symbols on first data symbol
+    if (soft_bits.empty() && !result.empty()) {
+        fprintf(stderr, "[EQ-DBG] First 5 equalized (sym 0): ");
+        for (size_t i = 0; i < std::min(size_t(5), result.size()); ++i) {
+            fprintf(stderr, "(%.3f,%.3f) ", result[i].real(), result[i].imag());
+        }
+        fprintf(stderr, "\n");
+    }
+
+    return result;
 }
 
 } // namespace ultra

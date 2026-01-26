@@ -546,10 +546,10 @@ bool test_mode_negotiation_default() {
 
     // Both should have negotiated to OFDM (default)
     std::cout << "\n";
-    if (alice.protocol->getNegotiatedMode() != WaveformMode::OFDM_NVIS) {
+    if (alice.protocol->getNegotiatedMode() != WaveformMode::OFDM_COX) {
         FAIL("Alice didn't negotiate to OFDM");
     }
-    if (bob.protocol->getNegotiatedMode() != WaveformMode::OFDM_NVIS) {
+    if (bob.protocol->getNegotiatedMode() != WaveformMode::OFDM_COX) {
         FAIL("Bob didn't negotiate to OFDM");
     }
 
@@ -603,7 +603,7 @@ bool test_mode_negotiation_capability_fallback() {
 
     // Alice prefers OTFS-RAW but Bob only supports OFDM
     alice.protocol->setModeCapabilities(ModeCapabilities::ALL);
-    bob.protocol->setModeCapabilities(ModeCapabilities::OFDM_NVIS);  // Only OFDM
+    bob.protocol->setModeCapabilities(ModeCapabilities::OFDM_COX);  // Only OFDM
     alice.protocol->setPreferredMode(WaveformMode::OTFS_RAW);
     bob.protocol->setPreferredMode(WaveformMode::AUTO);
 
@@ -624,7 +624,7 @@ bool test_mode_negotiation_capability_fallback() {
     if (alice_mode != bob_mode) FAIL("Modes don't match!");
 
     // Should fall back to OFDM (Bob's only supported mode)
-    if (alice_mode != WaveformMode::OFDM_NVIS) {
+    if (alice_mode != WaveformMode::OFDM_COX) {
         FAIL("Didn't fall back to OFDM");
     }
 

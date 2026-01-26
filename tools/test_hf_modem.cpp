@@ -216,7 +216,7 @@ int main(int argc, char* argv[]) {
     bool save_audio = false;
     bool play_audio = false;
     std::string output_file = "hf_modem_test.f32";
-    WaveformMode waveform_mode = WaveformMode::OFDM_NVIS;
+    WaveformMode waveform_mode = WaveformMode::OFDM_COX;
     std::string channel_type = "awgn";  // awgn, good, moderate, poor
     uint32_t channel_seed = 0;  // 0 = random
     bool use_nvis = false;  // Use NVIS config (1024 FFT, 59 carriers)
@@ -246,8 +246,8 @@ int main(int argc, char* argv[]) {
             play_audio = true;
         } else if ((arg == "-w" || arg == "--waveform") && i + 1 < argc) {
             std::string mode = argv[++i];
-            if (mode == "ofdm") {
-                waveform_mode = WaveformMode::OFDM_NVIS;
+            if (mode == "ofdm" || mode == "cox" || mode == "ofdm_cox") {
+                waveform_mode = WaveformMode::OFDM_COX;
             } else if (mode == "dpsk") {
                 waveform_mode = WaveformMode::MC_DPSK;
             } else if (mode == "otfs" || mode == "otfs_eq") {
@@ -257,7 +257,7 @@ int main(int argc, char* argv[]) {
             } else if (mode == "chirp" || mode == "ofdm_chirp") {
                 waveform_mode = WaveformMode::OFDM_CHIRP;
             } else {
-                fprintf(stderr, "Unknown waveform mode: %s (use: ofdm, chirp, dpsk, otfs, otfs_raw)\n", mode.c_str());
+                fprintf(stderr, "Unknown waveform mode: %s (use: cox, chirp, dpsk, otfs, otfs_raw)\n", mode.c_str());
                 return 1;
             }
         } else if (arg == "--nvis") {
@@ -335,7 +335,7 @@ int main(int argc, char* argv[]) {
     printf("╚══════════════════════════════════════════════════════════════╝\n\n");
 
     const char* waveform_name = "?";
-    if (waveform_mode == WaveformMode::OFDM_NVIS) waveform_name = "OFDM";
+    if (waveform_mode == WaveformMode::OFDM_COX) waveform_name = "OFDM-COX";
     else if (waveform_mode == WaveformMode::OFDM_CHIRP) waveform_name = "OFDM-CHIRP";
     else if (waveform_mode == WaveformMode::MC_DPSK) waveform_name = "MC-DPSK";
     else if (waveform_mode == WaveformMode::OTFS_EQ) waveform_name = "OTFS-EQ";
@@ -392,6 +392,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Set connected state so TX uses the selected waveform (not DPSK connect waveform)
+    // Set data mode BEFORE setConnected so modulator/demodulator are configured correctly
+    tx_modem.setDataMode(test_modulation, test_code_rate);
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
     tx_modem.setWaveformMode(waveform_mode);
@@ -415,7 +417,7 @@ int main(int argc, char* argv[]) {
     // Generate a test frame to determine frame length
     v2::ConnectFrame test_frame = v2::ConnectFrame::makeConnect(
         "TEST0", "DEST", protocol::ModeCapabilities::ALL,
-        static_cast<uint8_t>(WaveformMode::OFDM_NVIS));
+        static_cast<uint8_t>(WaveformMode::OFDM_COX));
     auto test_audio = tx_modem.transmit(test_frame.serialize());
     float frame_duration_sec = test_audio.size() / 48000.0f;
 
@@ -446,7 +448,7 @@ int main(int argc, char* argv[]) {
             "TEST" + std::to_string(i),  // Unique source callsign
             "DEST",
             protocol::ModeCapabilities::ALL,
-            static_cast<uint8_t>(WaveformMode::OFDM_NVIS)
+            static_cast<uint8_t>(WaveformMode::OFDM_COX)
         );
         frame.seq = static_cast<uint16_t>(i + 1);
 
@@ -591,6 +593,8 @@ int main(int argc, char* argv[]) {
         // DPSK uses acquisition path (disconnected mode) for chirp detection
         // Other modes use connected mode for direct buffer processing
         if (waveform_mode != WaveformMode::MC_DPSK) {
+            // Set data mode BEFORE setConnected so demodulator is configured correctly
+            rx_modem.setDataMode(test_modulation, test_code_rate);
             rx_modem.setConnected(true);
             rx_modem.setHandshakeComplete(true);
             rx_modem.setWaveformMode(waveform_mode);
@@ -599,6 +603,9 @@ int main(int argc, char* argv[]) {
         if (no_interleave) {
             rx_modem.setInterleavingEnabled(false);
         }
+
+        // Give RX threads time to start before feeding audio
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
         // Setup callback
         std::atomic<bool> got_frame{false};
@@ -652,7 +659,7 @@ int main(int argc, char* argv[]) {
         // With real-time playback, RX processes during feed, but still need time to finish decode
         // Chirp-based modes (MC-DPSK, OFDM_CHIRP) need longer wait because chirp detection scans large buffer
         bool uses_chirp = (waveform_mode == WaveformMode::MC_DPSK || waveform_mode == WaveformMode::OFDM_CHIRP);
-        int max_wait_iters = uses_chirp ? 1000 : 100;
+        int max_wait_iters = uses_chirp ? 1000 : 200;  // Increased from 100 to 200 for thread timing
         for (int wait = 0; wait < max_wait_iters && !got_frame; wait++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }

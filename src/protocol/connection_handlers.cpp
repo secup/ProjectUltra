@@ -409,13 +409,13 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
 
     if (common == 0) {
         LOG_MODEM(WARN, "Connection: No common waveform modes! Falling back to OFDM");
-        return WaveformMode::OFDM_NVIS;
+        return WaveformMode::OFDM_COX;
     }
 
     // Helper to convert WaveformMode to capability bit
     auto modeToBit = [](WaveformMode mode) -> uint8_t {
         switch (mode) {
-            case WaveformMode::OFDM_NVIS:     return ModeCapabilities::OFDM_NVIS;
+            case WaveformMode::OFDM_COX:     return ModeCapabilities::OFDM_COX;
             case WaveformMode::OTFS_EQ:  return ModeCapabilities::OTFS_EQ;
             case WaveformMode::OTFS_RAW: return ModeCapabilities::OTFS_RAW;
             case WaveformMode::MFSK:     return ModeCapabilities::MFSK;
@@ -463,16 +463,16 @@ WaveformMode Connection::negotiateMode(uint8_t remote_caps, WaveformMode remote_
     }
 
     // Default priority for adequate SNR: OFDM > OTFS > DPSK > MFSK
-    if (common & ModeCapabilities::OFDM_NVIS) {
+    if (common & ModeCapabilities::OFDM_COX) {
         LOG_MODEM(INFO, "Connection: Selected OFDM (SNR=%.1f dB)", snr);
-        return WaveformMode::OFDM_NVIS;
+        return WaveformMode::OFDM_COX;
     }
     if (common & ModeCapabilities::OTFS_EQ) return WaveformMode::OTFS_EQ;
     if (common & ModeCapabilities::OTFS_RAW) return WaveformMode::OTFS_RAW;
     if (common & ModeCapabilities::MC_DPSK) return WaveformMode::MC_DPSK;
     if (common & ModeCapabilities::MFSK) return WaveformMode::MFSK;
 
-    return WaveformMode::OFDM_NVIS;
+    return WaveformMode::OFDM_COX;
 }
 
 } // namespace protocol

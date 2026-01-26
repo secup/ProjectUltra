@@ -4,6 +4,7 @@
 #include "modem_engine.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
+#include "waveform/waveform_factory.hpp"
 #include <cstring>
 #include <algorithm>
 #include <fstream>
@@ -311,13 +312,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
         // Channel interleaver spreads bits across OFDM symbols for time diversity
         // IMPORTANT: Determine actual waveform for this TX (not just waveform_mode_)
-        // When not connected, waveform_mode_ may still be OFDM_NVIS but we're actually using MC-DPSK
+        // When not connected, waveform_mode_ may still be OFDM_COX but we're actually using MC-DPSK
         // For disconnect ACK (use_connected_waveform_once_), use disconnect_waveform_ (saved negotiated mode)
         protocol::WaveformMode tx_waveform = use_connected_waveform_once_ ? disconnect_waveform_ :
                                              (!connected_ ? connect_waveform_ :
                                               (!handshake_complete_ ? last_rx_waveform_ : waveform_mode_));
         bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
-                                (tx_waveform == protocol::WaveformMode::OFDM_NVIS ||
+                                (tx_waveform == protocol::WaveformMode::OFDM_COX ||
                                  tx_waveform == protocol::WaveformMode::OFDM_CHIRP);
         for (const auto& cw : encoded_cws) {
             if (use_interleaving) {
@@ -351,7 +352,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
         // Channel interleaver spreads bits across OFDM symbols for time diversity
         bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
-                                (waveform_mode_ == protocol::WaveformMode::OFDM_NVIS ||
+                                (waveform_mode_ == protocol::WaveformMode::OFDM_COX ||
                                  waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP);
         to_modulate = use_interleaving ? channel_interleaver_->interleave(encoded) : encoded;
     }
@@ -403,26 +404,22 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     bool use_dpsk = (active_waveform == protocol::WaveformMode::MC_DPSK);
     bool use_otfs = (active_waveform == protocol::WaveformMode::OTFS_EQ ||
                      active_waveform == protocol::WaveformMode::OTFS_RAW);
-    bool use_ofdm_chirp_pilots = (active_waveform == protocol::WaveformMode::OFDM_CHIRP);
+    bool use_ofdm_chirp = (active_waveform == protocol::WaveformMode::OFDM_CHIRP);
 
     Samples preamble, modulated;
 
     if (use_dpsk) {
-        // Use Multi-Carrier DPSK for frequency diversity against fading
+        // MC-DPSK: Use direct modulator for now (IWaveform TX needs debugging)
         LOG_MODEM(INFO, "[%s] TX: Using MC-DPSK modulation (%d carriers, %d samples/sym)",
                   log_prefix_.c_str(), mc_dpsk_config_.num_carriers, mc_dpsk_config_.samples_per_symbol);
 
-        // Reset modulator state
         mc_dpsk_modulator_->reset();
 
-        // Use chirp preamble for robust fading channel sync
-        // Then add training sequence for CFO estimation
-        // Then add one reference symbol for differential demodulation
+        // Generate: chirp + training + reference symbol
         Samples chirp = chirp_sync_->generate();
         Samples training = mc_dpsk_modulator_->generateTrainingSequence();
         Samples ref_symbol = mc_dpsk_modulator_->generateReferenceSymbol();
 
-        // Combine: chirp + training + reference symbol as preamble
         preamble.reserve(chirp.size() + training.size() + ref_symbol.size());
         preamble.insert(preamble.end(), chirp.begin(), chirp.end());
         preamble.insert(preamble.end(), training.begin(), training.end());
@@ -431,7 +428,6 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         modulated = mc_dpsk_modulator_->modulate(to_modulate);
     } else if (use_otfs) {
         // OTFS: 1 codeword per frame, multiple frames for multi-codeword messages
-        // Each encoded codeword is 81 bytes (648 bits)
         constexpr size_t BYTES_PER_CODEWORD = 81;
         size_t num_codewords = (to_modulate.size() + BYTES_PER_CODEWORD - 1) / BYTES_PER_CODEWORD;
 
@@ -440,77 +436,77 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   active_waveform == protocol::WaveformMode::OTFS_EQ ? "TF-EQ" : "RAW",
                   otfs_config_.M, otfs_config_.N, num_codewords, num_codewords);
 
-        // Configure OTFS equalization mode
         otfs_config_.tf_equalization = (active_waveform == protocol::WaveformMode::OTFS_EQ);
         otfs_modulator_ = std::make_unique<OTFSModulator>(otfs_config_);
 
-        // Generate one OTFS frame per codeword
-        const size_t INTER_FRAME_GAP = 480;  // 10ms gap between frames
+        const size_t INTER_FRAME_GAP = 480;
 
         for (size_t cw = 0; cw < num_codewords; cw++) {
-            // Extract this codeword's bytes
             size_t start = cw * BYTES_PER_CODEWORD;
             size_t end = std::min(start + BYTES_PER_CODEWORD, to_modulate.size());
             Bytes cw_data(to_modulate.begin() + start, to_modulate.begin() + end);
 
-            // Pad if last codeword is partial
             while (cw_data.size() < BYTES_PER_CODEWORD) {
                 cw_data.push_back(0);
             }
 
-            // Map to DD grid and modulate
             auto dd_symbols = otfs_modulator_->mapToDD(cw_data, tx_modulation);
             auto frame_preamble = otfs_modulator_->generatePreamble();
             auto frame_data = otfs_modulator_->modulate(dd_symbols, tx_modulation);
 
-            // Append preamble + data
             modulated.insert(modulated.end(), frame_preamble.begin(), frame_preamble.end());
             modulated.insert(modulated.end(), frame_data.begin(), frame_data.end());
 
-            // Add gap between frames (except after last)
             if (cw + 1 < num_codewords) {
                 modulated.resize(modulated.size() + INTER_FRAME_GAP, 0.0f);
             }
         }
 
-        // preamble is empty for OTFS (already included in modulated)
         preamble.clear();
-    } else if (use_ofdm_chirp_pilots) {
-        // OFDM_CHIRP: Mid-SNR mode with chirp sync + DQPSK (differential)
-        // Chirp provides robust timing sync at low SNR
-        // DQPSK is robust to phase drift on fading channels (no pilots needed)
+    } else if (use_ofdm_chirp) {
+        // OFDM_CHIRP: Chirp sync + DQPSK (differential)
         LOG_MODEM(INFO, "[%s] TX: Using OFDM_CHIRP (chirp sync + DQPSK)",
                   log_prefix_.c_str());
 
-        // Create modulator with DQPSK (no pilots - all carriers are data)
         ModemConfig chirp_config = config_;
         chirp_config.modulation = Modulation::DQPSK;
         chirp_config.use_pilots = false;
         OFDMModulator chirp_modulator(chirp_config);
 
-        // Generate chirp preamble for robust timing sync
         Samples chirp = chirp_sync_->generate();
-
-        // Generate LTS training symbols for initial channel estimation
         Samples training = chirp_modulator.generateTrainingSymbols(2);
+        fprintf(stderr, "[OFDM_CHIRP-TX] Carriers=%d, FFT=%d, symlen=%d, training_samples=%zu\n",
+                chirp_config.getDataCarriers(), chirp_config.fft_size,
+                chirp_config.getSymbolDuration(), training.size());
+        // Print first 10 training samples
+        fprintf(stderr, "[OFDM_CHIRP-TX] First 10 training samples: %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+                training.size() > 0 ? training[0] : 0.0f, training.size() > 1 ? training[1] : 0.0f,
+                training.size() > 2 ? training[2] : 0.0f, training.size() > 3 ? training[3] : 0.0f,
+                training.size() > 4 ? training[4] : 0.0f, training.size() > 5 ? training[5] : 0.0f,
+                training.size() > 6 ? training[6] : 0.0f, training.size() > 7 ? training[7] : 0.0f,
+                training.size() > 8 ? training[8] : 0.0f, training.size() > 9 ? training[9] : 0.0f);
+        // DEBUG: Print first few bytes being modulated
+        fprintf(stderr, "[OFDM_CHIRP-TX] to_modulate[0..5]: ");
+        for (size_t i = 0; i < std::min(size_t(6), to_modulate.size()); ++i) {
+            fprintf(stderr, "%02x ", to_modulate[i]);
+        }
+        fprintf(stderr, "\n");
 
-        // Generate OFDM data with DQPSK
         modulated = chirp_modulator.modulate(to_modulate, Modulation::DQPSK);
+        fprintf(stderr, "[OFDM_CHIRP-TX] modulated_samples=%zu, first_data: %.4f %.4f\n",
+                modulated.size(),
+                modulated.size() > 0 ? modulated[0] : 0.0f,
+                modulated.size() > 1 ? modulated[1] : 0.0f);
 
-        // Preamble is chirp + training symbols
         preamble.reserve(chirp.size() + training.size());
         preamble.insert(preamble.end(), chirp.begin(), chirp.end());
         preamble.insert(preamble.end(), training.begin(), training.end());
     } else {
-        // Standard OFDM: High-SNR mode with Schmidl-Cox sync
-        // Supports higher-order modulations (16QAM, 32QAM) with pilot-based equalization
+        // Standard OFDM: Schmidl-Cox sync
         LOG_MODEM(INFO, "[%s] TX: Using OFDM (Schmidl-Cox sync, %s)",
                   log_prefix_.c_str(), modulationToString(tx_modulation));
 
-        // Generate Schmidl-Cox preamble (STS + LTS) for timing and channel estimation
         preamble = ofdm_modulator_->generatePreamble();
-
-        // Generate OFDM data with selected modulation
         modulated = ofdm_modulator_->modulate(to_modulate, tx_modulation);
     }
 
@@ -597,6 +593,36 @@ std::vector<float> ModemEngine::transmitPong() {
     // (Ping = initiator probe, Pong = responder reply)
     LOG_MODEM(INFO, "[%s] TX PONG (same as PING)", log_prefix_.c_str());
     return transmitPing();
+}
+
+// ============================================================================
+// WAVEFORM ABSTRACTION HELPERS
+// ============================================================================
+
+void ModemEngine::ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, CodeRate rate) {
+    // Check if we need to create or reconfigure the waveform
+    if (active_tx_waveform_ && active_tx_waveform_->getMode() == mode) {
+        // Same mode - just reconfigure modulation/rate if needed
+        if (active_tx_waveform_->getModulation() != mod ||
+            active_tx_waveform_->getCodeRate() != rate) {
+            active_tx_waveform_->configure(mod, rate);
+            LOG_MODEM(INFO, "[%s] TX waveform reconfigured: %s %s",
+                      log_prefix_.c_str(), modulationToString(mod), codeRateToString(rate));
+        }
+        return;
+    }
+
+    // Create new waveform using factory
+    active_tx_waveform_ = WaveformFactory::create(mode, config_);
+    if (active_tx_waveform_) {
+        active_tx_waveform_->configure(mod, rate);
+        LOG_MODEM(INFO, "[%s] TX waveform created: %s, %s %s",
+                  log_prefix_.c_str(), active_tx_waveform_->getName().c_str(),
+                  modulationToString(mod), codeRateToString(rate));
+    } else {
+        LOG_MODEM(ERROR, "[%s] Failed to create TX waveform for mode %d",
+                  log_prefix_.c_str(), static_cast<int>(mode));
+    }
 }
 
 // ============================================================================

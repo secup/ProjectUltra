@@ -14,6 +14,7 @@
 #include "sync/chirp_sync.hpp"  // ChirpSync for robust fading channel detection
 #include "../adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
+#include "waveform/waveform_interface.hpp"  // IWaveform abstraction
 #include <memory>
 #include <vector>
 #include <queue>
@@ -165,7 +166,7 @@ private:
     std::string log_prefix_ = "MODEM";
 
     // Waveform mode state
-    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_NVIS;
+    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_COX;
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode disconnect_waveform_ = protocol::WaveformMode::MC_DPSK;  // Saved for ACK
@@ -204,6 +205,10 @@ private:
 
     // Chirp sync for robust presence detection on fading channels
     std::unique_ptr<sync::ChirpSync> chirp_sync_;
+
+    // IWaveform abstraction for TX (gradually transitioning from direct modulators)
+    // This will eventually replace the individual modulator pointers
+    std::unique_ptr<IWaveform> active_tx_waveform_;
 
     // ========================================================================
     // RX ARCHITECTURE
@@ -313,6 +318,9 @@ private:
     // Helper methods
     void rebuildFilters();
     void updateChannelEnergy(const std::vector<float>& samples);
+
+    // IWaveform TX helper - ensures active_tx_waveform_ is configured for the given mode
+    void ensureTxWaveform(protocol::WaveformMode mode, Modulation mod, CodeRate rate);
     std::vector<float> getBufferSnapshot() const;
     size_t getBufferSize() const;
     void consumeSamples(size_t count);

@@ -545,6 +545,13 @@ Samples OFDMModulator::generateTrainingSymbols(int count) {
     // Initialize DBPSK state for differential modes
     impl_->dbpsk_prev_symbols.assign(impl_->data_carrier_indices.size(), Complex(1, 0));
 
+    // DEBUG: Print carrier indices
+    fprintf(stderr, "[LTS-TX-DBG] TX carrier indices (first 5): ");
+    for (size_t i = 0; i < std::min(size_t(5), impl_->data_carrier_indices.size()); ++i) {
+        fprintf(stderr, "%d ", impl_->data_carrier_indices[i]);
+    }
+    fprintf(stderr, "(total %zu)\n", impl_->data_carrier_indices.size());
+
     Samples training;
 
     // Generate LTS: known sequence on all carriers

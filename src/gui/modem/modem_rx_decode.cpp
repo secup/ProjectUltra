@@ -926,14 +926,19 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
     }
 
     // If we haven't found chirp yet, search for it
+    fprintf(stderr, "[OFDM_CHIRP-DBG] Check: ofdm_chirp_found_=%d, isSynced=%d\n",
+            ofdm_chirp_found_ ? 1 : 0, ofdm_demodulator_->isSynced() ? 1 : 0);
     if (!ofdm_chirp_found_ && !ofdm_demodulator_->isSynced()) {
         const size_t chirp_samples = chirp_sync_->getTotalSamples();
         const size_t training_samples = symbol_samples * 2;  // 2 LTS symbols
 
         // Need chirp + training + at least one data symbol
         size_t min_for_detection = chirp_samples + training_samples + symbol_samples;
+        fprintf(stderr, "[OFDM_CHIRP-DBG] Chirp detection: samples=%zu, min_for_detection=%zu\n",
+                samples.size(), min_for_detection);
         if (samples.size() < min_for_detection) {
             // Put samples back
+            fprintf(stderr, "[OFDM_CHIRP-DBG] Not enough samples, returning\n");
             std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
             rx_sample_buffer_.insert(rx_sample_buffer_.begin(), samples.begin(), samples.end());
             return;
@@ -941,8 +946,10 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
 
         // Search for chirp using dual chirp detection (up + down chirp)
         // This gives robust CFO estimation down to -20 dB SNR with ±2 Hz accuracy!
+        fprintf(stderr, "[OFDM_CHIRP-DBG] Calling detectDualChirp...\n");
         SampleSpan search_span(samples.data(), samples.size());
         auto chirp_result = chirp_sync_->detectDualChirp(search_span, 0.15f);
+        fprintf(stderr, "[OFDM_CHIRP-DBG] detectDualChirp returned success=%d\n", chirp_result.success ? 1 : 0);
 
         if (!chirp_result.success) {
             // No chirp found - consume older samples to prevent buffer growth
@@ -972,8 +979,11 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
                   log_prefix_.c_str(), chirp_start, chirp_corr, cfo_hz, chirp_end_offset);
 
         // Discard samples before chirp end (keep training + data)
+        fprintf(stderr, "[OFDM_CHIRP-DBG] Chirp found: start=%d, chirp_samples=%zu, end_offset=%zu, samples_before=%zu\n",
+                chirp_start, chirp_samples, chirp_end_offset, samples.size());
         if (chirp_end_offset > 0 && chirp_end_offset < samples.size()) {
             samples.erase(samples.begin(), samples.begin() + chirp_end_offset);
+            fprintf(stderr, "[OFDM_CHIRP-DBG] After erase: samples_after=%zu (for OFDM)\n", samples.size());
         }
 
         // === APPLY CFO CORRECTION ===
@@ -1003,8 +1013,21 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
     // Use 35000 for safety margin
     constexpr size_t MAX_FRAME_SAMPLES = 35000;
     size_t process_samples = std::min(samples.size(), MAX_FRAME_SAMPLES);
+    fprintf(stderr, "[OFDM_CHIRP-DBG] RX config: carriers=%d, FFT=%d, symlen=%d, use_pilots=%d\n",
+            config_.getDataCarriers(), config_.fft_size, config_.getSymbolDuration(),
+            config_.use_pilots ? 1 : 0);
+    fprintf(stderr, "[OFDM_CHIRP-DBG] Calling processPresynced with %zu samples (from %zu total)\n",
+            process_samples, samples.size());
+    // Print first 10 samples
+    fprintf(stderr, "[OFDM_CHIRP-DBG] First 10 samples for OFDM: %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+            samples.size() > 0 ? samples[0] : 0.0f, samples.size() > 1 ? samples[1] : 0.0f,
+            samples.size() > 2 ? samples[2] : 0.0f, samples.size() > 3 ? samples[3] : 0.0f,
+            samples.size() > 4 ? samples[4] : 0.0f, samples.size() > 5 ? samples[5] : 0.0f,
+            samples.size() > 6 ? samples[6] : 0.0f, samples.size() > 7 ? samples[7] : 0.0f,
+            samples.size() > 8 ? samples[8] : 0.0f, samples.size() > 9 ? samples[9] : 0.0f);
     SampleSpan span(samples.data(), process_samples);
     bool frame_ready = ofdm_demodulator_->processPresynced(span, 2);
+    fprintf(stderr, "[OFDM_CHIRP-DBG] processPresynced returned frame_ready=%d\n", frame_ready ? 1 : 0);
     bool is_synced = true;  // processPresynced always "syncs"
 
     // Handle sync loss mid-frame (shouldn't happen with processPresynced but be safe)
@@ -1025,10 +1048,17 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
     // Accumulate soft bits (getSoftBits returns 648 at a time, so loop to get all)
     if (frame_ready) {
         size_t total_bits = 0;
+        int batch = 0;
         while (true) {
             auto soft_bits = ofdm_demodulator_->getSoftBits();
             if (soft_bits.empty()) break;
 
+            if (batch == 0 && soft_bits.size() >= 10) {
+                fprintf(stderr, "[OFDM_CHIRP-DBG] First 10 soft bits: %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f\n",
+                        soft_bits[0], soft_bits[1], soft_bits[2], soft_bits[3], soft_bits[4],
+                        soft_bits[5], soft_bits[6], soft_bits[7], soft_bits[8], soft_bits[9]);
+            }
+            batch++;
             total_bits += soft_bits.size();
 
             // OFDM_CHIRP uses interleaving like regular OFDM

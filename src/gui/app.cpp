@@ -172,7 +172,7 @@ App::App(const Options& opts) : options_(opts), sim_ui_visible_(opts.enable_sim)
                     msg = "[SYS] Disconnected" + (info.empty() ? "" : ": " + info);
                 }
                 // Reset waveform mode to OFDM when disconnected
-                modem_.setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
+                modem_.setWaveformMode(protocol::WaveformMode::OFDM_COX);
                 // Reset connect waveform to DPSK for next connection attempt
                 modem_.setConnectWaveform(protocol::WaveformMode::MC_DPSK);
                 break;
@@ -517,7 +517,7 @@ void App::initVirtualStation() {
             case protocol::ConnectionState::DISCONNECTED:
                 msg += "Virtual station disconnected";
                 // Reset waveform mode to OFDM when disconnected
-                virtual_modem_->setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
+                virtual_modem_->setWaveformMode(protocol::WaveformMode::OFDM_COX);
                 break;
             default:
                 return;  // Don't log intermediate states
@@ -1076,7 +1076,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         // Row 1: Remote's negotiated mode + implied channel condition
         auto waveform = modem_.getWaveformMode();
         const char* wf_str = protocol::waveformModeToString(waveform);
-        ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM_NVIS) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+        ImVec4 wf_color = (waveform == protocol::WaveformMode::OFDM_COX) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
                           (waveform == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (waveform == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                        ImVec4(0.6f, 0.6f, 0.6f, 1.0f);
@@ -1147,7 +1147,7 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         // Show actual waveform being used for connection attempt (always R1/4)
         auto connect_wf = protocol_.getConnectWaveform();
         const char* wf_str = protocol::waveformModeToString(connect_wf);
-        ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM_NVIS) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
+        ImVec4 wf_color = (connect_wf == protocol::WaveformMode::OFDM_COX) ? ImVec4(0.4f, 0.8f, 1.0f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MC_DPSK) ? ImVec4(0.8f, 0.8f, 0.4f, 1.0f) :
                           (connect_wf == protocol::WaveformMode::MFSK) ? ImVec4(0.8f, 0.4f, 0.8f, 1.0f) :
                                                                          ImVec4(0.6f, 0.6f, 0.6f, 1.0f);

@@ -177,7 +177,7 @@ public:
             } else if (state == ConnectionState::DISCONNECTED) {
                 connected_ = false;
                 modem_.setConnected(false);
-                modem_.setWaveformMode(WaveformMode::OFDM_NVIS);
+                modem_.setWaveformMode(WaveformMode::OFDM_COX);
                 LOG_INFO("MODEM", "[%s] DISCONNECTED", callsign_.c_str());
             }
         });

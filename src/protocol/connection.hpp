@@ -211,9 +211,9 @@ private:
     CodeRate pending_forced_code_rate_ = CodeRate::AUTO;
 
     // Waveform mode
-    WaveformMode negotiated_mode_ = WaveformMode::OFDM_NVIS;
-    uint8_t remote_capabilities_ = ModeCapabilities::OFDM_NVIS;
-    WaveformMode remote_preferred_ = WaveformMode::OFDM_NVIS;
+    WaveformMode negotiated_mode_ = WaveformMode::OFDM_COX;
+    uint8_t remote_capabilities_ = ModeCapabilities::OFDM_COX;
+    WaveformMode remote_preferred_ = WaveformMode::OFDM_COX;
 
     // Data modulation and code rate (adaptive)
     Modulation data_modulation_ = Modulation::DQPSK;

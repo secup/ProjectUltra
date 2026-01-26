@@ -228,7 +228,7 @@ TestResult runSingleTest(const TestConfig& cfg, int msg_idx) {
     tx_modem.setConnected(true);
     tx_modem.setHandshakeComplete(true);
     tx_modem.setDataMode(Modulation::DQPSK, cfg.code_rate);
-    tx_modem.setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
+    tx_modem.setWaveformMode(protocol::WaveformMode::OFDM_COX);
 
     // Create RX modem
     auto rx_modem = std::make_unique<ModemEngine>();
@@ -236,7 +236,7 @@ TestResult runSingleTest(const TestConfig& cfg, int msg_idx) {
     rx_modem->setConnected(true);
     rx_modem->setHandshakeComplete(true);
     rx_modem->setDataMode(Modulation::DQPSK, cfg.code_rate);
-    rx_modem->setWaveformMode(protocol::WaveformMode::OFDM_NVIS);
+    rx_modem->setWaveformMode(protocol::WaveformMode::OFDM_COX);
 
     std::vector<Bytes> received_frames;
     rx_modem->setRawDataCallback([&](const Bytes& data) {
