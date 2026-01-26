@@ -770,6 +770,9 @@ void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
     impl_->freq_offset_filtered = cfo_hz;
     // Reset correction phase so it starts from 0 with the new offset
     impl_->freq_correction_phase = 0.0f;
+    // Mark that CFO was explicitly provided (e.g., from chirp detection)
+    // This tells processPresynced() to trust this value instead of re-estimating
+    impl_->chirp_cfo_estimated = true;
 }
 
 Symbol OFDMDemodulator::getConstellationSymbols() const {
@@ -856,15 +859,23 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     // Uses symbol-to-symbol correlation (robust to multipath).
     // Training symbols are identical, so phase difference = 2π × CFO × T_symbol
     //
-    // If CFO was pre-set externally (e.g., from chirp), we keep that value.
-    // Otherwise, estimate from training symbols.
-    if (training_symbols >= 2 && std::abs(impl_->freq_offset_hz) < 0.1f) {
+    // IMPORTANT: If chirp-based CFO estimation was performed (any value, including 0),
+    // we TRUST that value because chirp detection is more robust at low SNR.
+    // Training symbol CFO estimation requires baseband downconversion to work correctly,
+    // which needs a CFO estimate in the first place (chicken-and-egg problem).
+    //
+    // The chirp_cfo_estimated flag is set via setFrequencyOffset() when chirp provides CFO.
+    // For now, we SKIP training CFO estimation when chirp sync was used.
+    // TODO: The training CFO estimation has a bug where it measures carrier phase advance
+    // instead of actual CFO. Need to investigate createOFDMSymbol/complexToReal phase coherence.
+    if (training_symbols >= 2 && !impl_->chirp_cfo_estimated && std::abs(impl_->freq_offset_hz) < 0.1f) {
         float cfo = impl_->estimateCFOFromTraining(ptr, training_symbols);
         impl_->freq_offset_hz = cfo;
         impl_->freq_offset_filtered = cfo;
         LOG_SYNC(INFO, "CFO from training: %.1f Hz", cfo);
-    } else if (std::abs(impl_->freq_offset_hz) >= 0.1f) {
-        LOG_SYNC(INFO, "Using pre-set CFO: %.1f Hz", impl_->freq_offset_hz);
+    } else {
+        LOG_SYNC(INFO, "Using pre-set CFO: %.1f Hz (chirp=%s)", impl_->freq_offset_hz,
+                 impl_->chirp_cfo_estimated ? "yes" : "no");
     }
 
     // === PHASE 1b: Process training symbols for channel estimation ===
@@ -918,6 +929,9 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     LOG_SYNC(INFO, "processPresynced: total %d symbols, got %zu soft bits",
              impl_->synced_symbol_count.load(), impl_->soft_bits.size());
 
+    fprintf(stderr, "[OFDM-DBG] processPresynced: %d symbols, %zu soft bits, need %d\n",
+            impl_->synced_symbol_count.load(), impl_->soft_bits.size(), LDPC_BLOCK_SIZE);
+
     return impl_->soft_bits.size() >= LDPC_BLOCK_SIZE;
 }
 
@@ -936,6 +950,7 @@ void OFDMDemodulator::reset() {
     impl_->freq_offset_hz = 0.0f;
     impl_->freq_offset_filtered = 0.0f;
     impl_->freq_correction_phase = 0.0f;
+    impl_->chirp_cfo_estimated = false;
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
     impl_->pilot_phase_correction = Complex(1, 0);

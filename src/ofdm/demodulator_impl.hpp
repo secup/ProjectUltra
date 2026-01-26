@@ -73,6 +73,7 @@ struct OFDMDemodulator::Impl {
     // Frequency offset estimation and correction
     float freq_offset_hz = 0.0f;
     float freq_offset_filtered = 0.0f;
+    bool chirp_cfo_estimated = false;  // True if CFO was set externally (e.g., chirp)
     std::vector<Complex> prev_pilot_phases;
     int symbols_since_sync = 0;
     float freq_correction_phase = 0.0f;

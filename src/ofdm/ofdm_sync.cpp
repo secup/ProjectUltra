@@ -288,10 +288,24 @@ float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_
     // Need at least 2 symbols
     size_t total_samples = 2 * sym_len;
 
-    // Convert both symbols to analytic signal
-    auto analytic = toAnalytic(samples, total_samples);
+    // IMPORTANT: Must downconvert to baseband BEFORE correlating!
+    // toAnalytic() only does Hilbert transform (stays at passband frequency).
+    // Passband correlation would see carrier phase rotation (fc × T_symbol),
+    // which is NOT CFO - it's just normal carrier phase advance.
+    //
+    // Solution: Use a local mixer to downconvert to baseband, then correlate.
+    // The mixer runs at center_freq, same as TX used for upconversion.
 
-    // Symbol-to-symbol correlation:
+    NCO local_mixer(config.center_freq, config.sample_rate);
+
+    // Downconvert both symbols to baseband
+    std::vector<Complex> baseband(total_samples);
+    for (size_t i = 0; i < total_samples; ++i) {
+        Complex osc = local_mixer.next();
+        baseband[i] = samples[i] * std::conj(osc);
+    }
+
+    // Symbol-to-symbol correlation at BASEBAND:
     // Correlate symbol 1 with symbol 2
     // Symbol 1: samples [0, sym_len)
     // Symbol 2: samples [sym_len, 2*sym_len)
@@ -307,9 +321,9 @@ float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_
     size_t s2_start = sym_len + cp_len;          // Symbol 2 FFT start
 
     for (size_t i = 0; i < fft_len; ++i) {
-        if (s1_start + i < analytic.size() && s2_start + i < analytic.size()) {
-            Complex z1 = analytic[s1_start + i];
-            Complex z2 = analytic[s2_start + i];
+        if (s1_start + i < baseband.size() && s2_start + i < baseband.size()) {
+            Complex z1 = baseband[s1_start + i];
+            Complex z2 = baseband[s2_start + i];
             P += std::conj(z1) * z2;
             E1 += std::norm(z1);
             E2 += std::norm(z2);
