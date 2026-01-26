@@ -152,6 +152,10 @@ public:
     DPSKModulation getDPSKModulation() const { return dpsk_config_.modulation; }
     const DPSKConfig& getDPSKConfig() const { return dpsk_config_; }
 
+    // MC-DPSK getters for status display
+    int getMCDPSKCarriers() const { return mc_dpsk_config_.num_carriers; }
+    float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
+
     // Interleaving control
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
     bool isInterleavingEnabled() const { return interleaving_enabled_; }
@@ -164,6 +168,7 @@ private:
     protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_NVIS;
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
     protocol::WaveformMode last_rx_waveform_ = protocol::WaveformMode::MC_DPSK;
+    protocol::WaveformMode disconnect_waveform_ = protocol::WaveformMode::MC_DPSK;  // Saved for ACK
     bool connected_ = false;
     bool handshake_complete_ = false;
     bool use_connected_waveform_once_ = false;

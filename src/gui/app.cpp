@@ -1084,14 +1084,35 @@ void App::renderCompactChannelStatus(const LoopbackStats& stats, Modulation data
         ImGui::SameLine();
         ImGui::TextColored(wf_color, "%s", wf_str);
         ImGui::SameLine();
-        ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
-        ImGui::SameLine();
-        // Show implied channel condition from their mode choice
+
+        // Show mode-appropriate settings and throughput
+        float throughput_bps = 0.0f;
         ImVec4 mode_quality_color;
-        const char* mode_quality = getModeImpliedQuality(data_mod, data_rate, mode_quality_color);
-        ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
+        const char* mode_quality = "Good";
+
+        if (waveform == protocol::WaveformMode::MC_DPSK) {
+            // For MC-DPSK, just show carrier count (DQPSK R1/4 is implicit)
+            int carriers = modem_.getMCDPSKCarriers();
+            throughput_bps = modem_.getMCDPSKThroughput();
+            ImGui::Text("%d carriers", carriers);
+            // Quality based on SNR for MC-DPSK
+            if (stats.snr_db >= 10.0f) {
+                mode_quality = "Good"; mode_quality_color = ImVec4(0.2f, 1.0f, 0.2f, 1.0f);
+            } else if (stats.snr_db >= 5.0f) {
+                mode_quality = "Fair"; mode_quality_color = ImVec4(1.0f, 1.0f, 0.2f, 1.0f);
+            } else if (stats.snr_db >= 0.0f) {
+                mode_quality = "Poor"; mode_quality_color = ImVec4(1.0f, 0.5f, 0.2f, 1.0f);
+            } else {
+                mode_quality = "Very Poor"; mode_quality_color = ImVec4(1.0f, 0.1f, 0.1f, 1.0f);
+            }
+        } else {
+            // For OFDM modes, show negotiated modulation/rate
+            ImGui::Text("%s %s", modulationToString(data_mod), codeRateToString(data_rate));
+            mode_quality = getModeImpliedQuality(data_mod, data_rate, mode_quality_color);
+            throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
+        }
         ImGui::SameLine();
-        float throughput_bps = config_.getTheoreticalThroughput(data_mod, data_rate);
+        ImGui::TextColored(mode_quality_color, "[%s]", mode_quality);
         ImGui::TextDisabled("~%.1f kbps", throughput_bps / 1000.0f);
 
         // Row 2: Our SNR measurement

@@ -395,6 +395,7 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                       log_prefix_.c_str(), peer_cfo_hz_);
         }
         deliverFrame(result.frame_data);
+        notifyFrameParsed(result.frame_data, result.frame_type);
         return true;
     }
 
@@ -882,6 +883,7 @@ void ModemEngine::processRxBuffer_DPSK() {
             LOG_MODEM(INFO, "[%s] DPSK: Frame decoded successfully, delivering %zu bytes",
                       log_prefix_.c_str(), result.frame_data.size());
             deliverFrame(result.frame_data);
+            notifyFrameParsed(result.frame_data, result.frame_type);
             updateStats([](LoopbackStats& s) { s.frames_received++; });
         } else {
             LOG_MODEM(WARN, "[%s] DPSK: Frame decode FAILED", log_prefix_.c_str());
@@ -977,8 +979,10 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
         // === APPLY CFO CORRECTION ===
         // Set CFO on demodulator - toBaseband() will apply frequency correction
         if (std::abs(cfo_hz) > 0.5f) {
+            LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Setting CFO=%.2f Hz on demodulator", log_prefix_.c_str(), cfo_hz);
             ofdm_demodulator_->setFrequencyOffset(cfo_hz);
         } else {
+            LOG_MODEM(DEBUG, "[%s] OFDM_CHIRP: CFO=%.2f Hz too small, not applying", log_prefix_.c_str(), cfo_hz);
             ofdm_demodulator_->setFrequencyOffset(0.0f);
         }
     }

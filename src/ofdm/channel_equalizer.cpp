@@ -22,6 +22,12 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
     // Phase increment per sample for frequency correction
     float phase_increment = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
 
+    // Log CFO correction on first symbol (when phase is near zero)
+    if (std::abs(freq_correction_phase) < 0.01f && std::abs(freq_offset_hz) > 0.01f) {
+        LOG_DEMOD(INFO, "toBaseband: CFO=%.2f Hz, phase_inc=%.6f rad/sample, samples=%zu",
+                  freq_offset_hz, phase_increment, samples.size());
+    }
+
     for (size_t i = 0; i < samples.size(); ++i) {
         Complex osc = mixer.next();
         Complex mixed = samples[i] * std::conj(osc);

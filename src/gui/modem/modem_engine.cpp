@@ -312,7 +312,8 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // Channel interleaver spreads bits across OFDM symbols for time diversity
         // IMPORTANT: Determine actual waveform for this TX (not just waveform_mode_)
         // When not connected, waveform_mode_ may still be OFDM_NVIS but we're actually using MC-DPSK
-        protocol::WaveformMode tx_waveform = use_connected_waveform_once_ ? waveform_mode_ :
+        // For disconnect ACK (use_connected_waveform_once_), use disconnect_waveform_ (saved negotiated mode)
+        protocol::WaveformMode tx_waveform = use_connected_waveform_once_ ? disconnect_waveform_ :
                                              (!connected_ ? connect_waveform_ :
                                               (!handshake_complete_ ? last_rx_waveform_ : waveform_mode_));
         bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
@@ -379,9 +380,11 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 
     protocol::WaveformMode active_waveform;
     if (use_connected_waveform_once_) {
-        active_waveform = waveform_mode_;
+        // For disconnect ACK, use disconnect_waveform_ (saved when setConnected(false) was called)
+        // This is the negotiated waveform that was in use during the connection
+        active_waveform = disconnect_waveform_;
         use_connected_waveform_once_ = false;
-        LOG_MODEM(INFO, "[%s] TX: use_connected_waveform_once_ -> using waveform_mode_=%d",
+        LOG_MODEM(INFO, "[%s] TX: use_connected_waveform_once_ -> using disconnect_waveform_=%d",
                   log_prefix_.c_str(), static_cast<int>(active_waveform));
     } else if (!connected_) {
         active_waveform = connect_waveform_;

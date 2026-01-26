@@ -765,6 +765,7 @@ float OFDMDemodulator::getFrequencyOffset() const {
 }
 
 void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
+    LOG_DEMOD(INFO, "setFrequencyOffset: CFO=%.2f Hz (was %.2f Hz)", cfo_hz, impl_->freq_offset_hz);
     impl_->freq_offset_hz = cfo_hz;
     impl_->freq_offset_filtered = cfo_hz;
     // Reset correction phase so it starts from 0 with the new offset
@@ -831,6 +832,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     // impl_->freq_offset_hz = 0.0f;  // KEEP the pre-set value!
     // impl_->freq_offset_filtered = 0.0f;  // KEEP the pre-set value!
     impl_->freq_correction_phase = 0.0f;
+    LOG_SYNC(INFO, "processPresynced: pre-set CFO=%.2f Hz, phase reset to 0", impl_->freq_offset_hz);
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
     impl_->pilot_phase_correction = Complex(1, 0);

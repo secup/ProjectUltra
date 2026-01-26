@@ -171,9 +171,11 @@ void ModemEngine::setConnected(bool connected) {
         dpsk_demodulator_->reset();
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)
-        // This handles the case where the ACK is queued before setConnected(false) is called
+        // Save the current negotiated waveform BEFORE it might be reset
+        disconnect_waveform_ = waveform_mode_;
         use_connected_waveform_once_ = true;
-        LOG_MODEM(INFO, "Switched to disconnected mode (RX: DQPSK R1/4, next TX uses connected waveform)");
+        LOG_MODEM(INFO, "Switched to disconnected mode (RX: DQPSK R1/4, next TX uses disconnect_waveform_=%d)",
+                  static_cast<int>(disconnect_waveform_));
         handshake_complete_ = false;  // Reset for next connection
     }
 }

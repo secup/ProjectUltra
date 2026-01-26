@@ -460,6 +460,13 @@ public:
         result.up_chirp_start = static_cast<int>(std::round(up_pos + up_correction));
         result.down_chirp_start = static_cast<int>(std::round(down_pos - up_correction));
 
+        printf("[CHIRP-RX] Dual chirp: up_pos=%d, down_pos=%d, gap=%d (expected=%d), gap_error=%.1f\n",
+               up_pos, down_pos, actual_gap, expected_gap, gap_error);
+        printf("[CHIRP-RX] CFO estimate: %.2f Hz (cfo_to_samples=%.1f, correction=%.1f samples)\n",
+               result.cfo_hz, cfo_to_samples, up_correction);
+        printf("[CHIRP-RX] Corrected positions: up=%d, down=%d\n",
+               result.up_chirp_start, result.down_chirp_start);
+
         result.success = true;
         return result;
     }

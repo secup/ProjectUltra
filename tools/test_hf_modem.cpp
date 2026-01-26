@@ -650,8 +650,9 @@ int main(int argc, char* argv[]) {
 
         // Wait for RX threads to process
         // With real-time playback, RX processes during feed, but still need time to finish decode
-        // DPSK needs longer wait because chirp detection scans large buffer (takes ~6s)
-        int max_wait_iters = (waveform_mode == WaveformMode::MC_DPSK) ? 1000 : 100;
+        // Chirp-based modes (MC-DPSK, OFDM_CHIRP) need longer wait because chirp detection scans large buffer
+        bool uses_chirp = (waveform_mode == WaveformMode::MC_DPSK || waveform_mode == WaveformMode::OFDM_CHIRP);
+        int max_wait_iters = uses_chirp ? 1000 : 100;
         for (int wait = 0; wait < max_wait_iters && !got_frame; wait++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
