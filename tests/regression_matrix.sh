@@ -83,9 +83,12 @@ run_test() {
     fi
 
     # Extract decode rate from output
-    # Look for "Decode rate: X%" or "X/Y frames decoded" patterns
+    # Look for various output patterns from test tools
     local rate
-    if [[ "$output" =~ Decode\ rate:\ ([0-9]+)% ]]; then
+    if [[ "$output" =~ Decoded:\ ([0-9]+)/([0-9]+)\ \(([0-9]+)%\) ]]; then
+        # Matches "Decoded: 2/3 (67%)"
+        rate="${BASH_REMATCH[3]}"
+    elif [[ "$output" =~ Decode\ rate:\ ([0-9]+)% ]]; then
         rate="${BASH_REMATCH[1]}"
     elif [[ "$output" =~ ([0-9]+)/([0-9]+)\ frames ]]; then
         local decoded="${BASH_REMATCH[1]}"
@@ -96,6 +99,9 @@ run_test() {
             rate=0
         fi
     elif [[ "$output" =~ Success:\ ([0-9]+)% ]]; then
+        rate="${BASH_REMATCH[1]}"
+    elif [[ "$output" =~ \(([0-9]+)%\) ]]; then
+        # Fallback: any percentage in parentheses
         rate="${BASH_REMATCH[1]}"
     else
         # If no rate found, check for general success/failure

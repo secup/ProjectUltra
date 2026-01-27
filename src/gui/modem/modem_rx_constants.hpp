@@ -12,7 +12,12 @@ namespace rx_constants {
 // Buffer thresholds
 constexpr size_t MIN_SAMPLES_FOR_OFDM_SYNC = 8000;   // ~167ms @ 48kHz
 constexpr size_t MIN_SAMPLES_FOR_DPSK = 4000;        // ~83ms @ 48kHz
-constexpr size_t MIN_SAMPLES_FOR_ACQUISITION = 10000; // ~208ms @ 48kHz
+// MIN_SAMPLES_FOR_ACQUISITION must account for:
+// - Position margin: chirp may start up to ~20000 samples into buffer
+// - Full dual chirp: 57600 samples
+// - Training + ref + margin after chirp: ~6000 samples
+// Total: ~84000 minimum, use 90000 for safety
+constexpr size_t MIN_SAMPLES_FOR_ACQUISITION = 90000; // ~1.875s @ 48kHz
 constexpr size_t MAX_BUFFER_BEFORE_TRIM = 48000;     // 1 second @ 48kHz
 constexpr size_t BUFFER_TRIM_TARGET = 24000;         // Keep 500ms after trim
 
