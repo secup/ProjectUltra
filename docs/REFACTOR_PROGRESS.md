@@ -237,6 +237,29 @@ Phase 6: Bug Fixes           [####------] 40%
 
 ---
 
+## Documentation Status
+
+| Document | Status | Purpose |
+|----------|--------|---------|
+| `INVARIANTS.md` | ✅ COMPLETE | Critical rules |
+| `KNOWN_BUGS.md` | ✅ COMPLETE | Bug tracking |
+| `CHANGELOG.md` | ✅ COMPLETE | Change history |
+| `REFACTOR_PROGRESS.md` | ✅ COMPLETE | This file |
+| `MODEM_ENGINE_ARCHITECTURE.md` | ✅ COMPLETE | ModemEngine internals |
+| `DUAL_CHIRP_CFO_ANALYSIS.md` | ✅ COMPLETE | CFO handling |
+| `TESTING_METHODOLOGY.md` | ✅ COMPLETE | Test approach |
+| `CFO_CORRECTION_FLOW.md` | ✅ COMPLETE | CFO code paths |
+| `PROTOCOL_V2.md` | ✅ COMPLETE | Protocol spec |
+| `GUI_ARCHITECTURE.md` | ✅ COMPLETE | GUI structure |
+| `AUDIO_SYSTEM.md` | ✅ COMPLETE | Audio I/O |
+| `CONFIGURATION_SYSTEM.md` | ✅ COMPLETE | Settings/config |
+| `BUILD_SYSTEM.md` | ✅ COMPLETE | CMake/deps |
+| `ADDING_NEW_WAVEFORM.md` | ✅ COMPLETE | How-to guide |
+
+**All documentation complete!** Ready for any future development.
+
+---
+
 ## Blocking Issues
 
 These must be fixed before continuing refactor:
