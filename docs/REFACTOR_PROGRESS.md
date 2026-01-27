@@ -255,8 +255,9 @@ Phase 6: Bug Fixes           [####------] 40%
 | `CONFIGURATION_SYSTEM.md` | ✅ COMPLETE | Settings/config |
 | `BUILD_SYSTEM.md` | ✅ COMPLETE | CMake/deps |
 | `ADDING_NEW_WAVEFORM.md` | ✅ COMPLETE | How-to guide |
+| `GIT_WORKFLOW.md` | ✅ COMPLETE | Commit/branch strategy |
 
-**All documentation complete!** Ready for any future development.
+**All 15 documentation files complete!** Ready for any future development.
 
 ---
 
