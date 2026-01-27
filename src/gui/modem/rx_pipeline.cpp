@@ -282,15 +282,17 @@ RxFrameResult RxPipeline::processFrame(const DetectedFrame& frame,
         return result;
     }
 
-    // Configure waveform with CFO from detection
+    // Process samples through waveform demodulator
+    // Reset FIRST, then set CFO (reset clears CFO state)
+    waveform->reset();
+
+    // ALWAYS set CFO from detection to reset any accumulated CFO from previous frames
+    // Trust chirp CFO estimate, threshold only for logging
+    waveform->setFrequencyOffset(frame.cfo_hz);
     if (std::abs(frame.cfo_hz) > 0.1f) {
-        waveform->setFrequencyOffset(frame.cfo_hz);
         LOG_MODEM(INFO, "[%s] RxPipeline: Applying CFO=%.1f Hz from detection",
                   log_prefix_.c_str(), frame.cfo_hz);
     }
-
-    // Process samples through waveform demodulator
-    waveform->reset();
     if (!waveform->process(samples)) {
         LOG_MODEM(DEBUG, "[%s] RxPipeline: waveform->process() returned false",
                   log_prefix_.c_str());

@@ -275,7 +275,7 @@ float OFDMDemodulator::Impl::estimateCoarseCFO(size_t sync_offset) {
 // Phase difference = 2π × CFO × T_symbol
 // where T_symbol = (fft_size + cp_len) / sample_rate
 //
-float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_t num_symbols) {
+float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_t num_symbols, float coarse_cfo_hz) {
     if (num_symbols < 2) {
         LOG_SYNC(DEBUG, "CFO estimation needs at least 2 training symbols, got %zu", num_symbols);
         return 0.0f;
@@ -298,11 +298,24 @@ float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_
 
     NCO local_mixer(config.center_freq, config.sample_rate);
 
-    // Downconvert both symbols to baseband
+    // Phase increment for coarse CFO correction (if provided)
+    float cfo_phase_inc = -2.0f * M_PI * coarse_cfo_hz / config.sample_rate;
+    float cfo_phase = 0.0f;
+
+    // Downconvert both symbols to baseband, applying coarse CFO correction
     std::vector<Complex> baseband(total_samples);
     for (size_t i = 0; i < total_samples; ++i) {
         Complex osc = local_mixer.next();
-        baseband[i] = samples[i] * std::conj(osc);
+        Complex mixed = samples[i] * std::conj(osc);
+
+        // Apply coarse CFO correction if provided (two-stage CFO)
+        if (std::abs(coarse_cfo_hz) > 0.01f) {
+            Complex cfo_corr(std::cos(cfo_phase), std::sin(cfo_phase));
+            mixed *= cfo_corr;
+            cfo_phase += cfo_phase_inc;
+        }
+
+        baseband[i] = mixed;
     }
 
     // Symbol-to-symbol correlation at BASEBAND:
@@ -352,8 +365,13 @@ float OFDMDemodulator::Impl::estimateCFOFromTraining(const float* samples, size_
     // For sym_len=1184 at 48kHz: max_cfo = 48000/(2×1184) = 20.3 Hz
     float max_cfo = config.sample_rate / (2.0f * sym_len);
 
-    LOG_SYNC(INFO, "CFO from training symbols: phase=%.3f rad (%.1f°), corr=%.3f, CFO=%.1f Hz (max ±%.1f Hz)",
-             phase, phase * 180.0f / M_PI, corr_mag, cfo_hz, max_cfo);
+    if (std::abs(coarse_cfo_hz) > 0.01f) {
+        LOG_SYNC(INFO, "Residual CFO from training: phase=%.3f rad (%.1f°), corr=%.3f, residual=%.1f Hz (coarse=%.1f Hz)",
+                 phase, phase * 180.0f / M_PI, corr_mag, cfo_hz, coarse_cfo_hz);
+    } else {
+        LOG_SYNC(INFO, "CFO from training symbols: phase=%.3f rad (%.1f°), corr=%.3f, CFO=%.1f Hz (max ±%.1f Hz)",
+                 phase, phase * 180.0f / M_PI, corr_mag, cfo_hz, max_cfo);
+    }
 
     // Clamp to unambiguous range
     cfo_hz = std::max(-max_cfo, std::min(max_cfo, cfo_hz));

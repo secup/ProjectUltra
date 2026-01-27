@@ -381,16 +381,16 @@ struct DataFrame {
                                uint16_t seq, const Bytes& data);
     static DataFrame makeData(const std::string& src, const std::string& dst,
                                uint16_t seq, const std::string& text);
-    // Factory with explicit code rate for CW1+ (CW0 always R1/4)
+    // Factory with explicit code rate (all codewords use same rate)
     static DataFrame makeData(const std::string& src, const std::string& dst,
-                               uint16_t seq, const Bytes& data, CodeRate cw1_rate);
+                               uint16_t seq, const Bytes& data, CodeRate rate);
     static DataFrame makeData(const std::string& src, const std::string& dst,
-                               uint16_t seq, const std::string& text, CodeRate cw1_rate);
+                               uint16_t seq, const std::string& text, CodeRate rate);
 
     // Calculate number of codewords needed (assumes R1/4 for all)
     static uint8_t calculateCodewords(size_t payload_size);
-    // Calculate with explicit rate for CW1+ (CW0 always R1/4 = 20 bytes)
-    static uint8_t calculateCodewords(size_t payload_size, CodeRate cw1_rate);
+    // Calculate with explicit rate (all codewords use same rate)
+    static uint8_t calculateCodewords(size_t payload_size, CodeRate rate);
 
     // Serialize to bytes (will be split into codewords by encoder)
     // Returns: header + payload + frame_crc

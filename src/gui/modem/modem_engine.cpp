@@ -262,83 +262,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         // === V2 Frame Path ===
         // Encoding strategy:
         // - Control frames: All CWs use R1/4 for reliability
-        // - DATA frames: CW0 uses R1/4 (header), CW1+ use negotiated rate for throughput
-
-        // Make mutable copy for possible header modification
-        Bytes frame_data = data;
+        // Protocol rate selection:
+        // - CONNECT/CONNECT_ACK (pre-negotiation): R1/4 for robustness
+        // - DATA frames (post-negotiation): ALL codewords at negotiated rate
 
         std::vector<Bytes> encoded_cws;
+        CodeRate tx_rate = (is_data_frame && connected_) ? data_code_rate_ : CodeRate::R1_4;
 
-        if (is_data_frame && data_code_rate_ != CodeRate::R1_4) {
-            // DATA frame with adaptive rate: CW0 at R1/4, CW1+ at data_code_rate_
-            size_t bytes_per_cw_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);  // 20
-            size_t bytes_per_cw_data = v2::getBytesPerCodeword(data_code_rate_);
-            size_t cw1_payload_size = bytes_per_cw_data - v2::DATA_CW_HEADER_SIZE;
-
-            // Calculate correct total_cw for this rate and update the serialized frame
-            if (frame_data.size() >= v2::DataFrame::HEADER_SIZE) {
-                uint16_t payload_len = (static_cast<uint16_t>(frame_data[13]) << 8) | frame_data[14];
-                uint8_t correct_total_cw = v2::DataFrame::calculateCodewords(payload_len, data_code_rate_);
-                uint8_t old_total_cw = frame_data[12];
-
-                if (correct_total_cw != old_total_cw) {
-                    // Update total_cw in the serialized frame
-                    frame_data[12] = correct_total_cw;
-
-                    // Recalculate header CRC (CRC of bytes 0-14)
-                    uint16_t new_hcrc = v2::ControlFrame::calculateCRC(frame_data.data(), 15);
-                    frame_data[15] = (new_hcrc >> 8) & 0xFF;
-                    frame_data[16] = new_hcrc & 0xFF;
-
-                    LOG_MODEM(DEBUG, "TX v2: Fixed total_cw %d -> %d for rate %s",
-                              old_total_cw, correct_total_cw, codeRateToString(data_code_rate_));
-                }
-            }
-
-            // Encode CW0 (header) at R1/4
-            LDPCEncoder encoder_r14(CodeRate::R1_4);
-            {
-                Bytes cw0(bytes_per_cw_r14, 0);
-                size_t cw0_bytes = std::min(bytes_per_cw_r14, frame_data.size());
-                std::memcpy(cw0.data(), frame_data.data(), cw0_bytes);
-                LOG_MODEM(INFO, "[%s] TX CW0 input (first 8): %02x %02x %02x %02x %02x %02x %02x %02x",
-                          log_prefix_.c_str(),
-                          cw0[0], cw0[1], cw0[2], cw0[3], cw0[4], cw0[5], cw0[6], cw0[7]);
-                auto encoded = encoder_r14.encode(cw0);
-                LOG_MODEM(INFO, "[%s] TX CW0 LDPC output (first 8): %02x %02x %02x %02x %02x %02x %02x %02x",
-                          log_prefix_.c_str(),
-                          encoded[0], encoded[1], encoded[2], encoded[3],
-                          encoded[4], encoded[5], encoded[6], encoded[7]);
-                encoded_cws.push_back(encoded);
-            }
-
-            // Encode CW1+ at adaptive rate
-            LDPCEncoder encoder_data(data_code_rate_);
-            size_t offset = bytes_per_cw_r14;  // Start after CW0's data
-            uint8_t cw_index = 1;
-
-            while (offset < frame_data.size()) {
-                Bytes cw(bytes_per_cw_data, 0);
-                cw[0] = v2::DATA_CW_MARKER;
-                cw[1] = cw_index;
-
-                size_t remaining = frame_data.size() - offset;
-                size_t chunk_size = std::min(cw1_payload_size, remaining);
-                std::memcpy(cw.data() + v2::DATA_CW_HEADER_SIZE, frame_data.data() + offset, chunk_size);
-
-                encoded_cws.push_back(encoder_data.encode(cw));
-                offset += cw1_payload_size;
-                cw_index++;
-            }
-
-            LOG_MODEM(INFO, "TX v2: DATA frame %zu bytes -> %zu codewords (CW0: R1/4, CW1+: %s)",
-                      frame_data.size(), encoded_cws.size(), codeRateToString(data_code_rate_));
-        } else {
-            // Control frame or R1/4 data: use R1/4 for all codewords
-            encoded_cws = v2::encodeFrameWithLDPC(frame_data, CodeRate::R1_4);
-            LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords (all R1/4)",
-                      frame_data.size(), encoded_cws.size());
-        }
+        encoded_cws = v2::encodeFrameWithLDPC(data, tx_rate);
+        LOG_MODEM(INFO, "TX v2: %zu bytes -> %zu codewords (all %s)",
+                  data.size(), encoded_cws.size(), codeRateToString(tx_rate));
 
         // Concatenate all encoded codewords (with optional interleaving per-codeword)
         // Channel interleaver spreads bits across OFDM symbols for time diversity

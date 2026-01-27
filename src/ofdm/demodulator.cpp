@@ -233,9 +233,50 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     float llr_sign = llr_sign_flip ? -1.0f : 1.0f;
 
     // Initialize DQPSK/D8PSK reference
+    // TX initializes dbpsk_prev_symbols to (1,0) in generateTrainingSymbols(), so first data
+    // symbol is encoded relative to (1,0), NOT relative to the training symbol (sync_sequence).
+    //
+    // With CFO and timing errors, each carrier has a different phase offset in its H estimate.
+    // Using sync_sequence directly as reference causes decoding errors because:
+    //   equalized_data = sync_seq × DQPSK_sym × e^{-jφ}  (has phase error)
+    //   diff = eq_data × conj(sync_seq) = DQPSK_sym × e^{-jφ}  (error remains!)
+    //
+    // The fix: use the ACTUAL EQUALIZED training symbol as reference:
+    //   eq_train = sync_seq × e^{-jφ}  (same phase error as data)
+    //   diff = eq_data × conj(eq_train) = DQPSK_sym  (errors cancel!)
+    //
+    // The lts_carrier_phases array is computed in estimateChannelFromLTS() and contains
+    // the equalized training symbol: sync_seq × conj(H)/|H| = sync_seq × e^{-j×arg(H)}
     if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
-        dbpsk_prev_equalized.assign(equalized.size(), Complex(1, 0));
-        LOG_DEMOD(DEBUG, "DQPSK: Initialized reference with (1,0)");
+        dbpsk_prev_equalized.resize(equalized.size());
+
+        if (!lts_carrier_phases.empty() && lts_carrier_phases.size() == equalized.size()) {
+            // Use the actual equalized training symbol (captures all phase errors)
+            // This is the correct approach that cancels phase errors in differential decoding
+            for (size_t i = 0; i < equalized.size(); ++i) {
+                dbpsk_prev_equalized[i] = lts_carrier_phases[i];
+            }
+            LOG_DEMOD(DEBUG, "DQPSK: Using eq_train reference (first 3: %.0f° %.0f° %.0f°)",
+                      std::arg(dbpsk_prev_equalized[0]) * 180.0f / M_PI,
+                      equalized.size() > 1 ? std::arg(dbpsk_prev_equalized[1]) * 180.0f / M_PI : 0.0f,
+                      equalized.size() > 2 ? std::arg(dbpsk_prev_equalized[2]) * 180.0f / M_PI : 0.0f);
+        } else if (!sync_sequence.empty() && sync_sequence.size() >= equalized.size()) {
+            // Fallback: use sync_sequence if lts_carrier_phases not available
+            // This works when there's no timing error (CFO=0)
+            for (size_t i = 0; i < equalized.size(); ++i) {
+                dbpsk_prev_equalized[i] = sync_sequence[i];
+            }
+            LOG_DEMOD(DEBUG, "DQPSK: Fallback to sync_sequence (first 3: %.0f° %.0f° %.0f°)",
+                      std::arg(dbpsk_prev_equalized[0]) * 180.0f / M_PI,
+                      equalized.size() > 1 ? std::arg(dbpsk_prev_equalized[1]) * 180.0f / M_PI : 0.0f,
+                      equalized.size() > 2 ? std::arg(dbpsk_prev_equalized[2]) * 180.0f / M_PI : 0.0f);
+        } else {
+            // Fallback to single phase offset for all carriers
+            Complex ref = lts_phase_offset;
+            dbpsk_prev_equalized.assign(equalized.size(), ref);
+            LOG_DEMOD(DEBUG, "DQPSK: Initialized reference with (%.3f,%.3f) = %.1f° (common offset)",
+                      ref.real(), ref.imag(), std::arg(ref) * 180.0f / M_PI);
+        }
     }
 
     for (size_t i = 0; i < equalized.size(); ++i) {
@@ -848,6 +889,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->dbpsk_prev_equalized.clear();
     impl_->carrier_phase_initialized = false;
     impl_->carrier_phase_correction = Complex(1, 0);
+    impl_->lts_phase_offset = Complex(1, 0);  // Will be updated by estimateChannelFromLTS
 
     // Set state to SYNCED
     impl_->state.store(Impl::State::SYNCED);
@@ -855,27 +897,24 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     const float* ptr = samples.data();
     size_t remaining = samples.size();
 
-    // === PHASE 1a: CFO estimation from training symbols ===
-    // Uses symbol-to-symbol correlation (robust to multipath).
-    // Training symbols are identical, so phase difference = 2π × CFO × T_symbol
+    // === PHASE 1a: CFO handling ===
+    // If chirp-based CFO was provided, TRUST it completely.
+    // The training symbol correlation doesn't work well because:
+    // 1. Training symbols are identical in freq domain but not time domain
+    // 2. Mixer phase advancement between symbols causes spurious phase
     //
-    // IMPORTANT: If chirp-based CFO estimation was performed (any value, including 0),
-    // we TRUST that value because chirp detection is more robust at low SNR.
-    // Training symbol CFO estimation requires baseband downconversion to work correctly,
-    // which needs a CFO estimate in the first place (chicken-and-egg problem).
-    //
-    // The chirp_cfo_estimated flag is set via setFrequencyOffset() when chirp provides CFO.
-    // For now, we SKIP training CFO estimation when chirp sync was used.
-    // TODO: The training CFO estimation has a bug where it measures carrier phase advance
-    // instead of actual CFO. Need to investigate createOFDMSymbol/complexToReal phase coherence.
-    if (training_symbols >= 2 && !impl_->chirp_cfo_estimated && std::abs(impl_->freq_offset_hz) < 0.1f) {
-        float cfo = impl_->estimateCFOFromTraining(ptr, training_symbols);
+    // TODO: Implement proper two-stage CFO using cyclic prefix correlation
+    // or frequency-domain phase estimation after initial CFO correction.
+    if (impl_->chirp_cfo_estimated) {
+        LOG_SYNC(INFO, "Using chirp CFO: %.1f Hz (trusted)", impl_->freq_offset_hz);
+    } else if (training_symbols >= 2 && std::abs(impl_->freq_offset_hz) < 0.1f) {
+        // No chirp CFO available - try training estimation (may be inaccurate)
+        float cfo = impl_->estimateCFOFromTraining(ptr, training_symbols, 0.0f);
         impl_->freq_offset_hz = cfo;
         impl_->freq_offset_filtered = cfo;
-        LOG_SYNC(INFO, "CFO from training: %.1f Hz", cfo);
+        LOG_SYNC(INFO, "CFO from training: %.1f Hz (no chirp available)", cfo);
     } else {
-        LOG_SYNC(INFO, "Using pre-set CFO: %.1f Hz (chirp=%s)", impl_->freq_offset_hz,
-                 impl_->chirp_cfo_estimated ? "yes" : "no");
+        LOG_SYNC(INFO, "Using pre-set CFO: %.1f Hz", impl_->freq_offset_hz);
     }
 
     // === PHASE 1b: Process training symbols for channel estimation ===
@@ -954,6 +993,13 @@ void OFDMDemodulator::reset() {
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
     impl_->pilot_phase_correction = Complex(1, 0);
+    impl_->lts_phase_offset = Complex(1, 0);
+
+    // Reset mixer phase - critical for OFDM_CHIRP which calls reset() between frames
+    impl_->mixer.reset();
+    impl_->dbpsk_prev_equalized.clear();
+    impl_->carrier_phase_initialized = false;
+    impl_->carrier_phase_correction = Complex(1, 0);
 
     std::fill(impl_->lms_weights.begin(), impl_->lms_weights.end(), Complex(1, 0));
     std::fill(impl_->last_decisions.begin(), impl_->last_decisions.end(), Complex(0, 0));

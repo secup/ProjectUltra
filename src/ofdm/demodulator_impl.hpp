@@ -106,6 +106,10 @@ struct OFDMDemodulator::Impl {
     bool dbpsk_first_symbol = true;
     bool dqpsk_skip_first_symbol = false;
 
+    // Phase offset from LTS for DQPSK initialization
+    // This captures any residual phase between training and data
+    Complex lts_phase_offset = Complex(1, 0);
+
     // Adaptive equalizer state
     std::vector<Complex> lms_weights;
     std::vector<Complex> last_decisions;
@@ -137,7 +141,7 @@ struct OFDMDemodulator::Impl {
     float measureCorrelation(size_t offset, float* out_energy = nullptr);
     bool detectSync(size_t offset);
     float estimateCoarseCFO(size_t sync_offset);
-    float estimateCFOFromTraining(const float* samples, size_t num_symbols);
+    float estimateCFOFromTraining(const float* samples, size_t num_symbols, float coarse_cfo_hz = 0.0f);
     size_t refineLTSTiming(size_t coarse_sts_start);
     std::vector<float> trialDemodulate(size_t data_start_offset, size_t num_symbols);
     std::pair<bool, int> huntForCodeword(size_t candidate_sync_pos);

@@ -44,12 +44,15 @@ static bool decodeSingleCodeword(
     return true;
 }
 
-// Decode multiple codewords with proper rate handling (CW0 = R1/4, CW1+ = adaptive)
+// Decode multiple codewords - ALL codewords use the same rate
+// Protocol rate selection:
+// - CONNECT/CONNECT_ACK (pre-negotiation): R1/4 for ALL codewords
+// - DATA frames (post-negotiation): negotiated rate for ALL codewords
 static FrameDecodeResult decodeCodewords(
     const std::vector<float>& soft_bits,
     size_t num_codewords,
-    CodeRate data_rate,
-    bool use_adaptive_rate,
+    CodeRate data_rate,      // Rate for DATA frames (ignored if !use_adaptive)
+    bool use_adaptive,       // true = DATA frame (use data_rate), false = R1/4
     const char* log_prefix
 ) {
     FrameDecodeResult result;
@@ -65,10 +68,9 @@ static FrameDecodeResult decodeCodewords(
     cw_status.decoded.resize(num_codewords, false);
     cw_status.data.resize(num_codewords);
 
-    // Determine rates and sizes
-    CodeRate cw1_rate = use_adaptive_rate ? data_rate : CodeRate::R1_4;
-    size_t cw0_bytes = v2::BYTES_PER_CODEWORD;
-    size_t cw1_bytes = v2::getBytesPerCodeword(cw1_rate);
+    // ALL codewords use the same rate
+    CodeRate rate = use_adaptive ? data_rate : CodeRate::R1_4;
+    size_t bytes_per_cw = v2::getBytesPerCodeword(rate);
 
     for (size_t i = 0; i < num_codewords; i++) {
         std::vector<float> cw_bits(
@@ -76,11 +78,8 @@ static FrameDecodeResult decodeCodewords(
             soft_bits.begin() + (i + 1) * LDPC_BLOCK
         );
 
-        CodeRate rate = (i == 0) ? CodeRate::R1_4 : cw1_rate;
-        size_t expected_bytes = (i == 0) ? cw0_bytes : cw1_bytes;
-
         Bytes cw_data;
-        if (decodeSingleCodeword(cw_bits, rate, expected_bytes, cw_data)) {
+        if (decodeSingleCodeword(cw_bits, rate, bytes_per_cw, cw_data)) {
             cw_status.decoded[i] = true;
             cw_status.data[i] = cw_data;
             result.codewords_ok++;
@@ -351,12 +350,15 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
         std::vector<float> cw0_bits(cw0_soft.begin(), cw0_soft.begin() + v2::LDPC_CODEWORD_BITS);
         // No interleaving for DPSK
 
+        // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
+        CodeRate probe_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+        size_t probe_bytes = v2::getBytesPerCodeword(probe_rate);
 
-        LOG_MODEM(DEBUG, "[%s] DPSK CW0: calling LDPC with %zu bits",
-                  log_prefix_.c_str(), cw0_bits.size());
+        LOG_MODEM(DEBUG, "[%s] DPSK CW0: calling LDPC with %zu bits (rate=%d)",
+                  log_prefix_.c_str(), cw0_bits.size(), static_cast<int>(probe_rate));
 
         Bytes cw0_data;
-        if (!decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (!decodeSingleCodeword(cw0_bits, probe_rate, probe_bytes, cw0_data)) {
             LOG_MODEM(INFO, "[%s] DPSK: CW0 LDPC failed", log_prefix_.c_str());
             consumeSamples(frame.data_start + samples_per_codeword);
             mc_dpsk_demodulator_->reset();
@@ -427,7 +429,8 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     // Note: DPSK mode does NOT use interleaving (TX only interleaves for OFDM)
 
     // Decode all codewords
-    bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
+    // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
+    bool use_adaptive = connected_;
     auto result = decodeCodewords(soft_bits, expected_codewords, data_code_rate_,
                                    use_adaptive, log_prefix_.c_str());
 
@@ -516,12 +519,16 @@ void ModemEngine::processRxBuffer_OFDM() {
     if (num_codewords == 0) return;
 
     // Probe CW0 to get expected count
+    // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
     if (ofdm_expected_codewords_ == 0 && num_codewords >= 1) {
         std::vector<float> cw0_bits(ofdm_accumulated_soft_bits_.begin(),
                                      ofdm_accumulated_soft_bits_.begin() + LDPC_BLOCK);
 
+        CodeRate probe_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+        size_t probe_bytes = v2::getBytesPerCodeword(probe_rate);
+
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, probe_rate, probe_bytes, cw0_data)) {
             auto cw_info = v2::identifyCodeword(cw0_data);
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw0_data);
@@ -554,12 +561,19 @@ void ModemEngine::processRxBuffer_OFDM() {
         num_codewords = expected;
     }
 
-    // First decode CW0 to get frame type for rate selection
+    // Determine rate based on connection state
+    // Connected: expect DATA frames at negotiated rate
+    // Not connected: expect CONNECT frames at R1/4
+    bool use_adaptive = connected_;
+    CodeRate decode_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+    size_t decode_bytes = v2::getBytesPerCodeword(decode_rate);
+
+    // Decode CW0 to get frame type (for logging/notification)
     v2::FrameType frame_type = v2::FrameType::PROBE;
     {
         std::vector<float> cw0_bits(accumulated.begin(), accumulated.begin() + LDPC_BLOCK);
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, decode_rate, decode_bytes, cw0_data)) {
             auto cw_info = v2::identifyCodeword(cw0_data);
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw0_data);
@@ -568,7 +582,6 @@ void ModemEngine::processRxBuffer_OFDM() {
         }
     }
 
-    bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
     auto result = decodeCodewords(accumulated, num_codewords, data_code_rate_,
                                    use_adaptive, log_prefix_.c_str());
 
@@ -673,11 +686,15 @@ void ModemEngine::processRxBuffer_OTFS() {
                   log_prefix_.c_str(), accumulated_cw, mean, min_val, max_val);
 
         // After first frame, probe CW0 to learn expected count
+        // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
         if (otfs_expected_codewords_ == 0 && accumulated_cw == 1) {
             std::vector<float> cw0_bits(otfs_accumulated_soft_bits_.begin(),
                                          otfs_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+            CodeRate probe_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+            size_t probe_bytes = v2::getBytesPerCodeword(probe_rate);
+
             Bytes cw0_data;
-            if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+            if (decodeSingleCodeword(cw0_bits, probe_rate, probe_bytes, cw0_data)) {
                 auto cw_info = v2::identifyCodeword(cw0_data);
                 if (cw_info.type == v2::CodewordType::HEADER) {
                     auto header = v2::parseHeader(cw0_data);
@@ -708,12 +725,16 @@ void ModemEngine::processRxBuffer_OTFS() {
     }
 
     // Probe CW0 to get expected codeword count (if not already known)
+    // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
     if (otfs_expected_codewords_ == 0 && num_codewords >= 1) {
         std::vector<float> cw0_bits(otfs_accumulated_soft_bits_.begin(),
                                      otfs_accumulated_soft_bits_.begin() + LDPC_BLOCK);
 
+        CodeRate probe_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+        size_t probe_bytes = v2::getBytesPerCodeword(probe_rate);
+
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, probe_rate, probe_bytes, cw0_data)) {
             auto cw_info = v2::identifyCodeword(cw0_data);
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw0_data);
@@ -752,12 +773,19 @@ void ModemEngine::processRxBuffer_OTFS() {
         num_codewords = expected;
     }
 
-    // Determine frame type from CW0 for rate selection
+    // Determine rate based on connection state
+    // Connected: expect DATA frames at negotiated rate
+    // Not connected: expect CONNECT frames at R1/4
+    bool use_adaptive = connected_;
+    CodeRate decode_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+    size_t decode_bytes = v2::getBytesPerCodeword(decode_rate);
+
+    // Decode CW0 to get frame type (for logging/notification)
     v2::FrameType frame_type = v2::FrameType::PROBE;
     {
         std::vector<float> cw0_bits(accumulated.begin(), accumulated.begin() + LDPC_BLOCK);
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, decode_rate, decode_bytes, cw0_data)) {
             auto cw_info = v2::identifyCodeword(cw0_data);
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw0_data);
@@ -766,7 +794,6 @@ void ModemEngine::processRxBuffer_OTFS() {
         }
     }
 
-    bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
     auto result = decodeCodewords(accumulated, num_codewords, data_code_rate_,
                                    use_adaptive, log_prefix_.c_str());
 
@@ -867,12 +894,16 @@ void ModemEngine::processRxBuffer_DPSK() {
     if (num_codewords == 0) return;
 
     // Decode first codeword to get frame header
+    // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
     if (dpsk_expected_codewords_ == 0 && num_codewords >= 1) {
         std::vector<float> cw0_bits(dpsk_accumulated_soft_bits_.begin(),
                                     dpsk_accumulated_soft_bits_.begin() + LDPC_BLOCK);
 
+        CodeRate probe_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+        size_t probe_bytes = v2::getBytesPerCodeword(probe_rate);
+
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, probe_rate, probe_bytes, cw0_data)) {
             auto cw_info = v2::identifyCodeword(cw0_data);
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw0_data);
@@ -914,8 +945,10 @@ void ModemEngine::processRxBuffer_DPSK() {
             dpsk_accumulated_soft_bits_.begin() + dpsk_expected_codewords_ * LDPC_BLOCK);
 
         // Decode all codewords
-        auto result = decodeCodewords(frame_soft_bits, dpsk_expected_codewords_, CodeRate::R1_4,
-                                      false, log_prefix_.c_str());
+        // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
+        bool use_adaptive = connected_;
+        auto result = decodeCodewords(frame_soft_bits, dpsk_expected_codewords_, data_code_rate_,
+                                      use_adaptive, log_prefix_.c_str());
 
         LOG_MODEM(INFO, "[%s] DPSK: decode result: success=%d, ok=%d, failed=%d, data_size=%zu",
                   log_prefix_.c_str(), result.success, result.codewords_ok, result.codewords_failed,
@@ -1034,13 +1067,13 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
         }
 
         // === APPLY CFO CORRECTION ===
-        // Set CFO on demodulator - toBaseband() will apply frequency correction
+        // ALWAYS set CFO from chirp estimate to reset any accumulated CFO from previous frames
+        // This matches MC-DPSK pattern: trust chirp CFO, threshold only for logging
+        ofdm_demodulator_->setFrequencyOffset(cfo_hz);
         if (std::abs(cfo_hz) > 0.5f) {
-            LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Setting CFO=%.2f Hz on demodulator", log_prefix_.c_str(), cfo_hz);
-            ofdm_demodulator_->setFrequencyOffset(cfo_hz);
+            LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Using chirp CFO=%.2f Hz for correction", log_prefix_.c_str(), cfo_hz);
         } else {
-            LOG_MODEM(DEBUG, "[%s] OFDM_CHIRP: CFO=%.2f Hz too small, not applying", log_prefix_.c_str(), cfo_hz);
-            ofdm_demodulator_->setFrequencyOffset(0.0f);
+            LOG_MODEM(DEBUG, "[%s] OFDM_CHIRP: Chirp CFO=%.2f Hz (small but applied)", log_prefix_.c_str(), cfo_hz);
         }
     }
 
@@ -1125,6 +1158,16 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
         // Reset for next frame
         ofdm_chirp_found_ = false;
         ofdm_demodulator_->reset();
+
+        // Save remaining samples for next frame detection
+        // process_samples was consumed for this frame, keep the rest
+        if (samples.size() > process_samples) {
+            std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
+            rx_sample_buffer_.insert(rx_sample_buffer_.begin(),
+                                    samples.begin() + process_samples, samples.end());
+            LOG_MODEM(DEBUG, "[%s] OFDM_CHIRP: Saved %zu samples for next frame",
+                      log_prefix_.c_str(), samples.size() - process_samples);
+        }
     }
 
     size_t num_codewords = ofdm_accumulated_soft_bits_.size() / LDPC_BLOCK;
@@ -1133,9 +1176,13 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
     if (num_codewords == 0) return;
 
     // Probe CW0 to get expected count
+    // Use negotiated rate if connected (DATA frames), else R1/4 (CONNECT frames)
     if (ofdm_expected_codewords_ == 0 && num_codewords >= 1) {
         std::vector<float> cw0_bits(ofdm_accumulated_soft_bits_.begin(),
                                      ofdm_accumulated_soft_bits_.begin() + LDPC_BLOCK);
+
+        CodeRate probe_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+        size_t probe_bytes = v2::getBytesPerCodeword(probe_rate);
 
         LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Probing CW0 (first 5 soft bits: %.2f %.2f %.2f %.2f %.2f)",
                   log_prefix_.c_str(),
@@ -1146,7 +1193,7 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
                   cw0_bits.size() > 4 ? cw0_bits[4] : 0);
 
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, probe_rate, probe_bytes, cw0_data)) {
             LOG_MODEM(INFO, "[%s] OFDM_CHIRP: CW0 LDPC OK, first bytes: %02x %02x %02x %02x",
                       log_prefix_.c_str(),
                       cw0_data.size() > 0 ? cw0_data[0] : 0,
@@ -1187,12 +1234,19 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
         num_codewords = expected;
     }
 
-    // First decode CW0 to get frame type for rate selection
+    // Determine rate based on connection state
+    // Connected: expect DATA frames at negotiated rate
+    // Not connected: expect CONNECT frames at R1/4
+    bool use_adaptive = connected_;
+    CodeRate decode_rate = connected_ ? data_code_rate_ : CodeRate::R1_4;
+    size_t decode_bytes = v2::getBytesPerCodeword(decode_rate);
+
+    // Decode CW0 to get frame type (for logging/notification)
     v2::FrameType frame_type = v2::FrameType::PROBE;
     {
         std::vector<float> cw0_bits(accumulated.begin(), accumulated.begin() + LDPC_BLOCK);
         Bytes cw0_data;
-        if (decodeSingleCodeword(cw0_bits, CodeRate::R1_4, v2::BYTES_PER_CODEWORD, cw0_data)) {
+        if (decodeSingleCodeword(cw0_bits, decode_rate, decode_bytes, cw0_data)) {
             auto cw_info = v2::identifyCodeword(cw0_data);
             if (cw_info.type == v2::CodewordType::HEADER) {
                 auto header = v2::parseHeader(cw0_data);
@@ -1201,7 +1255,6 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
         }
     }
 
-    bool use_adaptive = connected_ && v2::isDataFrame(frame_type);
     auto result = decodeCodewords(accumulated, num_codewords, data_code_rate_,
                                    use_adaptive, log_prefix_.c_str());
 

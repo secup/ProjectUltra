@@ -143,14 +143,21 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         last_cfo_ = chirp_result.cfo_hz;
 
         // Calculate where TRAINING starts (process() needs training for channel estimation)
-        // Layout: [CHIRP][GAP][DOWN-CHIRP][GAP][TRAINING_SYMBOLS][DATA...]
-        //                                      ^-- start_sample points here
-        // process() calls processPresynced() which expects training symbols first
+        // Layout: [UP-CHIRP][GAP][DOWN-CHIRP][GAP][TRAINING_SYMBOLS][DATA...]
+        //                                         ^-- start_sample points here
+        //
+        // IMPORTANT: Use down_chirp position for training_start calculation!
+        // With CFO, up_chirp and down_chirp positions shift in OPPOSITE directions:
+        //   up_chirp: shifts by -CFO × cfo_to_samples
+        //   down_chirp: shifts by +CFO × cfo_to_samples
+        // Using up_chirp_start + fixed_offset gives growing error with CFO.
+        // Using down_chirp_start gives more accurate training position.
         size_t chirp_samples = chirp_sync_->getChirpSamples();
         size_t gap_samples = static_cast<size_t>(config_.sample_rate * 100.0f / 1000.0f);
 
-        result.start_sample = chirp_result.up_chirp_start +
-                              2 * chirp_samples + 2 * gap_samples;
+        // Training starts after down chirp + gap
+        result.start_sample = chirp_result.down_chirp_start +
+                              chirp_samples + gap_samples;
         // NOTE: Do NOT add training_samples - process() needs them for channel estimation
 
         LOG_MODEM(INFO, "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",

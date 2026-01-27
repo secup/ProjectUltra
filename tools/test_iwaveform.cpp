@@ -18,6 +18,7 @@
 #include "ultra/logging.hpp"
 #include "ultra/dsp.hpp"
 #include <iostream>
+#include <fstream>
 #include <random>
 #include <cmath>
 #include <vector>
@@ -60,38 +61,57 @@ void addNoise(std::vector<float>& samples, float snr_db, std::mt19937& rng) {
     }
 }
 
-// Apply CFO using Hilbert transform (simulates real radio frequency offset)
+// Apply CFO using FFT-based Hilbert transform (NO GROUP DELAY)
 // This shifts the ENTIRE signal uniformly, like a real radio with tuning error
+// Uses FFT->zero negative frequencies->IFFT for perfect analytic signal
 void applyCFO(std::vector<float>& samples, float cfo_hz, float sample_rate = 48000.0f) {
     if (samples.size() < 128 || std::abs(cfo_hz) < 0.001f) return;
 
     size_t N = samples.size();
-    printf("[CFO] Applying %.1f Hz offset to %zu samples (%.1f sec)\n", cfo_hz, N, N/sample_rate);
+    printf("[CFO] Applying %.1f Hz offset to %zu samples (FFT Hilbert, no delay)\n", cfo_hz, N);
 
-    // Use FIR Hilbert transform for accurate analytic signal
-    HilbertTransform hilbert(127);  // 127-tap filter
+    // Pad to power of 2 for efficient FFT
+    size_t fft_size = 1;
+    while (fft_size < N) fft_size *= 2;
 
+    // FFT the real signal
+    std::vector<Complex> freq(fft_size);
+    FFT fft(fft_size);
+
+    std::vector<Complex> time_in(fft_size, Complex(0, 0));
+    for (size_t i = 0; i < N; i++) {
+        time_in[i] = Complex(samples[i], 0);
+    }
+
+    fft.forward(time_in.data(), freq.data());
+
+    // Create analytic signal: zero negative frequencies, double positive
+    // freq[0] = DC (keep as is)
+    // freq[1..N/2-1] = positive frequencies (double)
+    // freq[N/2] = Nyquist (keep as is)
+    // freq[N/2+1..N-1] = negative frequencies (zero)
+    for (size_t i = 1; i < fft_size / 2; i++) {
+        freq[i] *= 2.0f;  // Double positive frequencies
+    }
+    for (size_t i = fft_size / 2 + 1; i < fft_size; i++) {
+        freq[i] = Complex(0, 0);  // Zero negative frequencies
+    }
+
+    // IFFT to get analytic signal
+    std::vector<Complex> analytic(fft_size);
+    fft.inverse(freq.data(), analytic.data());
+
+    // Apply frequency shift and take real part
     float phase = 0.0f;
     float phase_inc = 2.0f * static_cast<float>(M_PI) * cfo_hz / sample_rate;
 
-    // Process in chunks to avoid memory issues
-    constexpr size_t chunk_size = 32768;
-
-    for (size_t offset = 0; offset < N; offset += chunk_size) {
-        size_t len = std::min(chunk_size, N - offset);
-
-        SampleSpan span(samples.data() + offset, len);
-        auto analytic = hilbert.process(span);
-
-        // Frequency shift by multiplying analytic signal with complex exponential
-        for (size_t i = 0; i < len; i++) {
-            Complex rot(std::cos(phase), std::sin(phase));
-            samples[offset + i] = std::real(analytic[i] * rot);
-            phase += phase_inc;
-            // Keep phase bounded
-            if (phase > M_PI) phase -= 2.0f * M_PI;
-            else if (phase < -M_PI) phase += 2.0f * M_PI;
-        }
+    for (size_t i = 0; i < N; i++) {
+        Complex rot(std::cos(phase), std::sin(phase));
+        samples[i] = std::real(analytic[i] * rot);
+        phase += phase_inc;
+        // Keep phase bounded
+        if (phase > M_PI) phase -= 2.0f * M_PI;
+        else if (phase < -M_PI) phase += 2.0f * M_PI;
     }
 
     printf("[CFO] Done\n");
@@ -225,6 +245,8 @@ int main(int argc, char** argv) {
     bool verbose = false;
     uint32_t seed = 42;
     int num_carriers = 8;
+    bool save_signals = false;
+    std::string save_prefix = "/tmp/iwaveform";
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--snr") == 0 && i + 1 < argc) {
@@ -243,6 +265,10 @@ int main(int argc, char** argv) {
             seed = std::stoul(argv[++i]);
         } else if (strcmp(argv[i], "--carriers") == 0 && i + 1 < argc) {
             num_carriers = std::stoi(argv[++i]);
+        } else if (strcmp(argv[i], "--save-signals") == 0) {
+            save_signals = true;
+        } else if (strcmp(argv[i], "--save-prefix") == 0 && i + 1 < argc) {
+            save_prefix = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [options]\n", argv[0]);
             printf("  --snr N       SNR in dB (default: 15)\n");
@@ -252,6 +278,8 @@ int main(int argc, char** argv) {
             printf("  -w TYPE       Waveform: mc_dpsk, ofdm_chirp (default: mc_dpsk)\n");
             printf("  --carriers N  Number of carriers for MC-DPSK (default: 8)\n");
             printf("  --seed N      Random seed (default: 42)\n");
+            printf("  --save-signals  Save signals to files for analysis\n");
+            printf("  --save-prefix P Prefix for saved signal files (default: /tmp/iwaveform)\n");
             printf("  -v            Verbose output\n");
             return 0;
         }
@@ -311,6 +339,14 @@ int main(int argc, char** argv) {
     // - Frames separated by silence periods (simulating PTT gaps)
     // - This creates a realistic continuous audio stream
 
+    // Determine if this is an OFDM mode (needs DATA frames in connected state)
+    // vs MC-DPSK (uses CONNECT frames in disconnected state)
+    bool is_ofdm_mode = (waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
+                         waveform_mode == protocol::WaveformMode::OFDM_COX);
+
+    // Code rate for OFDM modes
+    CodeRate ofdm_code_rate = CodeRate::R1_2;  // R1/2 is good balance for testing
+
     {   // TX scope
         ModemEngine tx_modem;
         tx_modem.setLogPrefix("TX");
@@ -321,6 +357,16 @@ int main(int argc, char** argv) {
 
         if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
             tx_modem.setMCDPSKCarriers(num_carriers);
+        }
+
+        // For OFDM modes, set connected state so TX uses OFDM modulation
+        // Real protocol: CONNECT uses MC-DPSK, then DATA uses negotiated OFDM
+        if (is_ofdm_mode) {
+            tx_modem.setConnected(true);
+            tx_modem.setHandshakeComplete(true);
+            tx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
+            printf("OFDM mode: Using DATA frames with %s modulation, code rate R1/2\n",
+                   waveform_mode == protocol::WaveformMode::OFDM_CHIRP ? "DQPSK" : "configured");
         }
 
         // Build continuous audio stream: [silence][frame1][silence][frame2]...
@@ -336,15 +382,30 @@ int main(int argc, char** argv) {
         full_audio.resize(initial_silence, 0.0f);
 
         for (int i = 0; i < num_frames; i++) {
-            v2::ConnectFrame frame = v2::ConnectFrame::makeConnect(
-                "TEST" + std::to_string(i), "DEST",
-                protocol::ModeCapabilities::ALL,
-                static_cast<uint8_t>(waveform_mode));
-            frame.seq = static_cast<uint16_t>(i + 1);
+            Bytes frame_data;
+            uint16_t seq = static_cast<uint16_t>(i + 1);
+            std::string src_call = "TEST" + std::to_string(i);
 
-            frames[i].seq = frame.seq;
-            frames[i].src = frame.getSrcCallsign();
-            frames[i].data = frame.serialize();
+            if (is_ofdm_mode) {
+                // OFDM: Use DATA frames (as in real connected state)
+                std::string payload = "Test message " + std::to_string(i + 1);
+                v2::DataFrame frame = v2::DataFrame::makeData(
+                    src_call, "DEST", seq, payload, ofdm_code_rate);
+                frame_data = frame.serialize();
+                frames[i].src = src_call;
+            } else {
+                // MC-DPSK: Use CONNECT frames (disconnected mode)
+                v2::ConnectFrame frame = v2::ConnectFrame::makeConnect(
+                    src_call, "DEST",
+                    protocol::ModeCapabilities::ALL,
+                    static_cast<uint8_t>(waveform_mode));
+                frame.seq = seq;
+                frame_data = frame.serialize();
+                frames[i].src = frame.getSrcCallsign();
+            }
+
+            frames[i].seq = seq;
+            frames[i].data = frame_data;
             frames[i].audio_start = full_audio.size();  // Current position in stream
 
             // Generate frame using the SAME TX modem (continuous operation)
@@ -362,7 +423,7 @@ int main(int argc, char** argv) {
 
             printf("  Frame %2d at %.3fs (sample %zu): seq=%d, len=%zu\n",
                    i + 1, frames[i].audio_start / 48000.0f, frames[i].audio_start,
-                   frame.seq, tx_audio.size());
+                   seq, tx_audio.size());
 
             // Add gap after frame (except after last frame)
             if (i < num_frames - 1) {
@@ -391,10 +452,43 @@ int main(int argc, char** argv) {
     }
 
     // ========================================
+    // Save original signal (before CFO)
+    // ========================================
+    if (save_signals) {
+        std::string fname = save_prefix + "_original.f32";
+        std::ofstream f(fname, std::ios::binary);
+        f.write(reinterpret_cast<char*>(full_audio.data()), full_audio.size() * sizeof(float));
+        printf("[SAVE] Original signal: %s (%zu samples)\n", fname.c_str(), full_audio.size());
+
+        // Also save frame info
+        std::string info_fname = save_prefix + "_info.txt";
+        std::ofstream info(info_fname);
+        info << "sample_rate: 48000\n";
+        info << "cfo_hz: " << cfo_hz << "\n";
+        info << "snr_db: " << snr_db << "\n";
+        info << "num_frames: " << num_frames << "\n";
+        for (int i = 0; i < num_frames; i++) {
+            info << "frame_" << i << "_start: " << frames[i].audio_start << "\n";
+            info << "frame_" << i << "_len: " << frames[i].audio_len << "\n";
+        }
+        printf("[SAVE] Frame info: %s\n", info_fname.c_str());
+    }
+
+    // ========================================
     // Apply CFO (simulates radio tuning error - shifts entire signal)
     // ========================================
     if (std::abs(cfo_hz) > 0.001f) {
         applyCFO(full_audio, cfo_hz);
+    }
+
+    // ========================================
+    // Save signal after CFO (before noise)
+    // ========================================
+    if (save_signals) {
+        std::string fname = save_prefix + "_after_cfo.f32";
+        std::ofstream f(fname, std::ios::binary);
+        f.write(reinterpret_cast<char*>(full_audio.data()), full_audio.size() * sizeof(float));
+        printf("[SAVE] After CFO: %s\n", fname.c_str());
     }
 
     // ========================================
@@ -440,6 +534,16 @@ int main(int argc, char** argv) {
     }
 
     // ========================================
+    // Save signal after channel (final RX signal)
+    // ========================================
+    if (save_signals) {
+        std::string fname = save_prefix + "_final.f32";
+        std::ofstream f(fname, std::ios::binary);
+        f.write(reinterpret_cast<char*>(full_audio.data()), full_audio.size() * sizeof(float));
+        printf("[SAVE] Final signal (after channel): %s\n", fname.c_str());
+    }
+
+    // ========================================
     // RX - Single receiver for entire audio stream (like real HF rig)
     // ========================================
     // Per TESTING_METHODOLOGY.md:
@@ -473,8 +577,11 @@ int main(int argc, char** argv) {
         size_t min_gap = 48000;  // 1 second minimum between frames
 
         while (search_pos + 90000 < full_audio.size()) {
-            SampleSpan search_span(full_audio.data() + search_pos,
-                                   full_audio.size() - search_pos);
+            // Limit search span to ~2 frame durations to find closest chirp first
+            // (chirp detector finds strongest peak, not first - need to limit search)
+            size_t max_search_samples = 200000;  // ~4 seconds at 48kHz
+            size_t search_span_size = std::min(full_audio.size() - search_pos, max_search_samples);
+            SampleSpan search_span(full_audio.data() + search_pos, search_span_size);
 
             // Reset waveform state for new search (but same instance)
             waveform.reset();
@@ -489,49 +596,83 @@ int main(int argc, char** argv) {
 
                 size_t data_start = sync_result.start_sample;
                 if (data_start < search_span.size()) {
-                    SampleSpan data_span(search_span.data() + data_start,
-                                         search_span.size() - data_start);
+                    // Limit data span to approximately one frame's worth of samples
+                    // OFDM_CHIRP frame data is about 11 OFDM symbols (648 bits / 60 bits per symbol)
+                    // Each symbol is ~564 samples, so ~6200 samples of data
+                    // Add some margin for training (2 symbols = 1128 samples) and safety
+                    size_t max_frame_samples = 15000;  // ~312ms at 48kHz, plenty for one frame
+                    size_t span_size = std::min(search_span.size() - data_start, max_frame_samples);
+                    SampleSpan data_span(search_span.data() + data_start, span_size);
                     waveform.process(data_span);
 
                     auto soft_bits = waveform.getSoftBits();
+                    printf("  [DEBUG] Got %zu soft bits (need %d)\n", soft_bits.size(), v2::LDPC_CODEWORD_BITS);
                     if (soft_bits.size() >= v2::LDPC_CODEWORD_BITS) {
-                        // Decode CW0
+                        // Decode CW0 (header) - DATA frames use ofdm_code_rate for ALL codewords
                         std::vector<float> cw0_bits(soft_bits.begin(),
                                                     soft_bits.begin() + v2::LDPC_CODEWORD_BITS);
-                        LDPCDecoder decoder(CodeRate::R1_4);
+                        printf("  [DEBUG] First 5 LLRs: %.2f %.2f %.2f %.2f %.2f\n",
+                               cw0_bits[0], cw0_bits[1], cw0_bits[2], cw0_bits[3], cw0_bits[4]);
+                        LDPCDecoder decoder(ofdm_code_rate);
                         Bytes cw0_data = decoder.decodeSoft(cw0_bits);
+                        printf("  [DEBUG] CW0 LDPC decode: success=%d, size=%zu\n",
+                               decoder.lastDecodeSuccess(), cw0_data.size());
+
+                        if (decoder.lastDecodeSuccess() && cw0_data.size() >= 2) {
+                            printf("  [DEBUG] First bytes: %02x %02x (expect 55 4c)\n",
+                                   cw0_data[0], cw0_data[1]);
+                        }
 
                         if (decoder.lastDecodeSuccess() && cw0_data.size() >= 2 &&
                             cw0_data[0] == 0x55 && cw0_data[1] == 0x4C) {
                             // Valid frame - decode all codewords
                             auto header = v2::parseHeader(cw0_data);
+                            printf("  [DEBUG] Header valid=%d, total_cw=%d, type=%d\n",
+                                   header.valid, header.total_cw, static_cast<int>(header.type));
                             if (header.valid) {
                                 Bytes full_data;
                                 bool all_ok = true;
+                                // ALL codewords use the same rate (ofdm_code_rate)
+                                // Protocol: CONNECT/CONNECT_ACK = R1/4, DATA frames = negotiated rate
                                 for (int cw = 0; cw < header.total_cw && all_ok; cw++) {
                                     size_t offset = cw * v2::LDPC_CODEWORD_BITS;
                                     if (offset + v2::LDPC_CODEWORD_BITS > soft_bits.size()) {
+                                        printf("  [DEBUG] CW%d: not enough bits (offset=%zu, have=%zu)\n",
+                                               cw, offset, soft_bits.size());
                                         all_ok = false;
                                         break;
                                     }
                                     std::vector<float> cw_bits(soft_bits.begin() + offset,
                                                                soft_bits.begin() + offset + v2::LDPC_CODEWORD_BITS);
-                                    decoder.setRate(CodeRate::R1_4);
+                                    // ALL codewords use the same rate for DATA frames
+                                    decoder.setRate(ofdm_code_rate);
                                     Bytes cw_data = decoder.decodeSoft(cw_bits);
+                                    size_t bytes_per_cw = v2::getBytesPerCodeword(ofdm_code_rate);
+                                    printf("  [DEBUG] CW%d: LDPC(%s) success=%d, size=%zu (expect %zu)\n",
+                                           cw, "R1/2",
+                                           decoder.lastDecodeSuccess(), cw_data.size(), bytes_per_cw);
                                     if (!decoder.lastDecodeSuccess()) {
                                         all_ok = false;
                                         break;
                                     }
-                                    cw_data.resize(v2::BYTES_PER_CODEWORD);
+                                    cw_data.resize(bytes_per_cw);
                                     full_data.insert(full_data.end(), cw_data.begin(), cw_data.end());
                                 }
 
+                                printf("  [DEBUG] All CW ok=%d, full_data size=%zu\n", all_ok, full_data.size());
                                 if (all_ok) {
-                                    auto parsed = v2::ConnectFrame::deserialize(full_data);
+                                    // OFDM uses DATA frames, not CONNECT frames
+                                    printf("  [DEBUG] full_data first 20 bytes: ");
+                                    for (size_t b = 0; b < std::min(size_t(20), full_data.size()); b++) {
+                                        printf("%02x ", full_data[b]);
+                                    }
+                                    printf("\n");
+                                    auto parsed = v2::DataFrame::deserialize(full_data);
+                                    printf("  [DEBUG] DataFrame deserialize: parsed=%d\n", parsed.has_value());
                                     if (parsed) {
                                         decoded_seqs.insert(parsed->seq);
-                                        printf("  [OFDM_CHIRP] Decoded seq=%d src=%s\n",
-                                               parsed->seq, parsed->getSrcCallsign().c_str());
+                                        printf("  [OFDM_CHIRP] Decoded seq=%d payload='%s'\n",
+                                               parsed->seq, parsed->payloadAsText().c_str());
                                     }
                                 }
                             }

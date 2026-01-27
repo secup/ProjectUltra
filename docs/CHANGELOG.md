@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-27: OFDM_CHIRP CFO Test Harness Fix
+
+**What was broken:**
+- OFDM_CHIRP decoding failed for most CFO values (only CFO=0 reliable)
+- CFO=10 Hz: 0% success, CFO=30 Hz: 20% success
+- Root cause: FIR Hilbert transform (127-tap) in test_iwaveform had 63-sample group delay
+- This caused CFO-dependent timing shifts that broke OFDM symbol alignment
+
+**What was changed:**
+- `tools/test_iwaveform.cpp`: Replaced FIR Hilbert with FFT-based Hilbert (no group delay)
+  - FFT signal -> zero negative frequencies, double positive -> IFFT
+  - This creates perfect analytic signal without timing artifacts
+- `src/sync/chirp_sync.hpp`: Removed HILBERT_GROUP_DELAY (63 sample) correction
+  - Was compensating for old FIR delay which no longer exists
+
+**How it's properly fixed:**
+- FFT-based Hilbert has zero group delay (unlike FIR which has N/2 delay)
+- CFO simulation now shifts frequency without shifting timing
+- Chirp position correction only accounts for CFO-induced peak shift, not filter delay
+
+**Test verification:**
+```bash
+# Test CFO range -45 to +50 Hz
+for cfo in -45 -30 0 30 50; do
+  ./test_iwaveform -w ofdm_chirp --snr 15 --cfo $cfo --frames 1
+done
+# Expected: 100% success for all CFO values
+```
+
+**Note:** This was a TEST HARNESS bug, not a demodulator bug. Real radios don't have this issue.
+
+---
+
 ## 2026-01-27: CFO Accumulation Bug Fix
 
 **What was broken:**

@@ -436,24 +436,25 @@ uint8_t DataFrame::calculateCodewords(size_t payload_size) {
     return static_cast<uint8_t>(1 + additional_cws);
 }
 
-uint8_t DataFrame::calculateCodewords(size_t payload_size, CodeRate cw1_rate) {
+uint8_t DataFrame::calculateCodewords(size_t payload_size, CodeRate rate) {
     // Total frame size = header (17) + payload + frame_CRC (2)
     size_t total = HEADER_SIZE + payload_size + CRC_SIZE;
 
-    // CW0 always uses R1/4 = 20 bytes
-    if (total <= BYTES_PER_CODEWORD) {
+    // All codewords use the same rate
+    size_t bytes_per_cw = getBytesPerCodeword(rate);
+
+    // CW0 contains first bytes_per_cw bytes
+    if (total <= bytes_per_cw) {
         return 1;
     }
 
     // Remaining bytes after CW0
-    size_t remaining = total - BYTES_PER_CODEWORD;
+    size_t remaining = total - bytes_per_cw;
 
-    // CW1+ use the specified rate
-    // Each CW1+ has 2-byte header (marker + index), rest is payload
-    size_t cw1_total_bytes = getBytesPerCodeword(cw1_rate);  // e.g., 40 for R1/2
-    size_t cw1_payload_bytes = cw1_total_bytes - DATA_CW_HEADER_SIZE;  // e.g., 38 for R1/2
+    // CW1+ have 2-byte header (marker + index), rest is payload
+    size_t cw_payload_bytes = bytes_per_cw - DATA_CW_HEADER_SIZE;
 
-    size_t additional_cws = (remaining + cw1_payload_bytes - 1) / cw1_payload_bytes;
+    size_t additional_cws = (remaining + cw_payload_bytes - 1) / cw_payload_bytes;
 
     return static_cast<uint8_t>(1 + additional_cws);
 }

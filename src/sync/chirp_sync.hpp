@@ -416,14 +416,26 @@ public:
             return result;  // Up chirp not found
         }
 
-        // Detect DOWN chirp (search after UP chirp)
-        size_t down_search_start = up_pos + chirp_len / 2;  // Start searching after up chirp
+        // Detect DOWN chirp (search in limited window after UP chirp)
+        // Expected down chirp is at: up_pos + chirp_len + gap_samples
+        // With ±100 Hz CFO, position shifts by up to ±1000 samples (100 Hz * 10 samples/Hz)
+        // Use window: from half chirp after up_pos to 2x expected gap position
+        size_t down_search_start = up_pos + chirp_len / 2;
+        size_t expected_down_pos = up_pos + chirp_len + gap_samples;
+        // Search window covers expected position ± 2x chirp length (generous for CFO)
+        size_t search_margin = 2 * chirp_len;
+        size_t down_search_end = std::min(samples.size(), expected_down_pos + search_margin);
+
         if (down_search_start >= samples.size()) {
             return result;
         }
+        // Ensure we have enough samples to search
+        if (down_search_end <= down_search_start + chirp_len) {
+            down_search_end = std::min(samples.size(), down_search_start + 2 * chirp_len);
+        }
 
-        SampleSpan down_search(samples.data() + down_search_start,
-                               samples.size() - down_search_start);
+        size_t down_search_len = down_search_end - down_search_start;
+        SampleSpan down_search(samples.data() + down_search_start, down_search_len);
         // Detect DOWN chirp using COMPLEX correlation (CFO-tolerant!)
         auto [down_pos_rel, down_corr] = detectChirpTemplate(down_search, down_chirp_template_, down_chirp_template_cos_,
                                                               down_template_energy_, threshold);
@@ -455,17 +467,39 @@ public:
         float gap_error = static_cast<float>(actual_gap - expected_gap);
         result.cfo_hz = gap_error / (2.0f * cfo_to_samples);
 
-        // Correct positions using estimated CFO
-        float up_correction = result.cfo_hz * cfo_to_samples;
-        result.up_chirp_start = static_cast<int>(std::round(up_pos + up_correction));
-        result.down_chirp_start = static_cast<int>(std::round(down_pos - up_correction));
-
         printf("[CHIRP-RX] Dual chirp: up_pos=%d, down_pos=%d, gap=%d (expected=%d), gap_error=%.1f\n",
                up_pos, down_pos, actual_gap, expected_gap, gap_error);
         printf("[CHIRP-RX] CFO estimate: %.2f Hz (cfo_to_samples=%.1f, correction=%.1f samples)\n",
-               result.cfo_hz, cfo_to_samples, up_correction);
-        printf("[CHIRP-RX] Corrected positions: up=%d, down=%d\n",
-               result.up_chirp_start, result.down_chirp_start);
+               result.cfo_hz, cfo_to_samples, result.cfo_hz * cfo_to_samples);
+
+        // Sanity check: reject if estimated CFO is unreasonably large
+        // Real HF radios have at most ±100 Hz frequency error
+        constexpr float MAX_REASONABLE_CFO_HZ = 100.0f;
+        if (std::abs(result.cfo_hz) > MAX_REASONABLE_CFO_HZ) {
+            printf("[CHIRP-RX] Rejecting detection: CFO=%.1f Hz exceeds max reasonable (±%.0f Hz)\n",
+                   result.cfo_hz, MAX_REASONABLE_CFO_HZ);
+            return result;  // success = false
+        }
+
+        // Apply position correction for CFO-induced chirp peak shift.
+        //
+        // The complex correlation is CFO-tolerant in amplitude but the peak
+        // position shifts with CFO. The raw shift is approximately:
+        //   up_chirp: shifts by -CFO × cfo_to_samples
+        //   down_chirp: shifts by +CFO × cfo_to_samples
+        // where cfo_to_samples = sample_rate / chirp_rate ≈ 10 samples/Hz.
+        //
+        // Note: The test harness now uses FFT-based Hilbert transform which has
+        // NO group delay, so we don't need any delay correction here.
+
+        float up_correction = result.cfo_hz * cfo_to_samples;
+        float down_correction = -result.cfo_hz * cfo_to_samples;
+
+        result.up_chirp_start = static_cast<int>(std::round(up_pos + up_correction));
+        result.down_chirp_start = static_cast<int>(std::round(down_pos + down_correction));
+
+        printf("[CHIRP-RX] Position correction: up=%d (raw=%d, corr=%+.0f), down=%d\n",
+               result.up_chirp_start, up_pos, up_correction, result.down_chirp_start);
 
         result.success = true;
         return result;

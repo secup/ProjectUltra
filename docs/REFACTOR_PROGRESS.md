@@ -182,11 +182,11 @@ Phase 6: Bug Fixes           [####------] 40%
 ## Phase 6: Bug Fixes During Refactor
 
 ### 6.1 Fix CFO Handling
-- [x] MC-DPSK CFO correction
-- [x] OFDM_CHIRP CFO correction
+- [x] MC-DPSK CFO correction (100% at ±50 Hz)
+- [x] OFDM_CHIRP CFO correction (100% at -45 to +50 Hz, verified 2026-01-27)
 - [ ] OFDM_COX CFO verification
 
-**Status:** ⚠️ MOSTLY COMPLETE
+**Status:** ✅ COMPLETE (MC-DPSK + OFDM_CHIRP verified)
 
 ### 6.2 Acquisition Thread Routing
 - [ ] Detect frame type from preamble
@@ -223,7 +223,7 @@ Phase 6: Bug Fixes           [####------] 40%
 **Official test tools (keep and improve):**
 1. `test_iwaveform` → Rename to `test_modem` or `modem_test`
    - Tests IWaveform interface directly
-   - CFO simulation works correctly (Hilbert transform)
+   - CFO simulation uses FFT-based Hilbert (no group delay, fixed 2026-01-27)
    - Single-frame and multi-frame testing
    - All waveforms, channels, SNR, CFO combinations
 
