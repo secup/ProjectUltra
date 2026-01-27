@@ -441,10 +441,10 @@ int main(int argc, char* argv[]) {
         duration_sec = min_duration;
     }
 
-    printf("Frame duration: %.1f s (preamble: %d samples, data: %zu samples)\n",
+    fprintf(stderr, "Frame duration: %.1f s (preamble: %d samples, data: %zu samples)\n",
            frame_duration_sec, tx_waveform->getPreambleSamples(),
            test_audio.size() - tx_waveform->getPreambleSamples());
-    printf("Total duration: %.0f s\n\n", duration_sec);
+    fprintf(stderr, "Total duration: %.0f s\n\n", duration_sec);
 
     // ═══════════════════════════════════════════════════════════════════════════
     // GENERATE ALL FRAMES INTO AUDIO BUFFER
@@ -465,7 +465,7 @@ int main(int argc, char* argv[]) {
     std::uniform_real_distribution<float> first_delay(1.0f, 3.0f);
     float current_time = first_delay(rng);
 
-    printf("Generating %d frames via IWaveform...\n", num_frames);
+    fprintf(stderr, "Generating %d frames via IWaveform...\n", num_frames);
 
     for (int i = 0; i < num_frames; i++) {
         v2::ConnectFrame frame = v2::ConnectFrame::makeConnect(
@@ -482,10 +482,8 @@ int main(int argc, char* argv[]) {
                                          tx_interleaver.get(), frame.serialize());
         frames[i].audio_len = tx_audio.size();
 
-        if (verbose) {
-            printf("  Frame %2d at %.1fs: seq=%d src=%s (%zu samples)\n",
-                   i + 1, current_time, frame.seq, frames[i].src.c_str(), tx_audio.size());
-        }
+        fprintf(stderr, "  Frame %2d at %.1fs (pos=%zu): seq=%d src=%s (%zu samples)\n",
+               i + 1, current_time, frames[i].audio_start, frame.seq, frames[i].src.c_str(), tx_audio.size());
 
         size_t pos = frames[i].audio_start;
         for (size_t j = 0; j < tx_audio.size() && pos + j < full_audio.size(); j++) {

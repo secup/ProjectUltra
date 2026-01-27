@@ -69,8 +69,8 @@ void RxPipeline::feedAudio(const float* samples, size_t count) {
 
     // Rate-limit detection attempts: only search every SEARCH_INTERVAL samples
     // This avoids expensive searches on every 20ms feedAudio() call
-    // 9600 samples = 200ms between search attempts
-    constexpr size_t SEARCH_INTERVAL = 9600;
+    // 48000 samples = 1 second between search attempts (detection is slow!)
+    constexpr size_t SEARCH_INTERVAL = 48000;
     if (samples_since_last_search_ >= SEARCH_INTERVAL) {
         samples_since_last_search_ = 0;
         tryProcessBuffer();
@@ -116,8 +116,12 @@ bool RxPipeline::tryProcessBuffer() {
         return false;
     }
 
-    // Try to detect sync
-    SampleSpan buffer_span(rx_buffer_.data(), rx_buffer_.size());
+    // Try to detect sync - LIMIT search range to avoid slow full-buffer search!
+    // Only search the first (preamble + 2 seconds) of the buffer.
+    // If no chirp found there, we'll trim old samples and wait for more.
+    size_t max_search = preamble_samples + 96000;  // preamble + 2 seconds
+    size_t search_len = std::min(max_search, rx_buffer_.size());
+    SampleSpan buffer_span(rx_buffer_.data(), search_len);
     SyncResult sync_result;
     bool sync_found = waveform_->detectSync(buffer_span, sync_result, 0.15f);
 
@@ -159,8 +163,10 @@ bool RxPipeline::tryProcessBuffer() {
         return false;
     }
 
-    // Process from data start
-    size_t process_len = rx_buffer_.size() - data_start;
+    // Process from data start - LIMIT to min_frame_samples to avoid processing entire buffer!
+    // The demodulator would try to demodulate ALL given samples as data, causing slowdown.
+    // After decoding CW0, we'll know the actual frame size and can process more if needed.
+    size_t process_len = min_frame_samples;  // Only process enough for 1 codeword initially
     SampleSpan process_span(rx_buffer_.data() + data_start, process_len);
 
     waveform_->reset();
