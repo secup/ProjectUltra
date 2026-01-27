@@ -7,13 +7,36 @@
 
 ## Executive Summary
 
-We have **three testing tools** with different purposes:
+### Test Tool Strategy
 
-| Tool | Purpose | Audio Path | CFO Method |
-|------|---------|------------|------------|
-| `test_hf_modem` | IWaveform + RxPipeline (single stream) | Continuous stream to RxPipeline | Hilbert transform (correct) |
-| `test_iwaveform` | IWaveform via ModemEngine | Per-frame decode via ModemEngine | Hilbert transform (correct) |
-| `cli_simulator` | Full protocol (2 stations) | ModemEngine feedAudio | Modem tx_cfo_hz (limited) |
+**PRIMARY tools (keep and improve):**
+
+| Tool | Purpose | CFO Method | Status |
+|------|---------|------------|--------|
+| `test_iwaveform` | IWaveform interface testing | Hilbert transform (correct) | ✅ WORKING |
+| `cli_simulator` | Full protocol (2 stations) | tx_cfo_hz (BROKEN - BUG-001) | ⚠️ NEEDS FIX |
+
+**LEGACY tools (to be removed):**
+
+| Tool | Purpose | Notes |
+|------|---------|-------|
+| `test_hf_modem` | Old RxPipeline testing | Reference only, will be deprecated |
+
+### Future Plan
+
+1. **test_iwaveform** → Rename to `test_modem` (or similar)
+   - Will become THE official modem test tool
+   - Already has correct CFO simulation
+   - Tests all waveforms via IWaveform interface
+
+2. **cli_simulator** → Fix BUG-001, keep for protocol testing
+   - Full PING → CONNECT → DATA → DISCONNECT flow
+   - Two-station simulation
+   - Needs Hilbert-based CFO in applyChannel()
+
+3. **test_hf_modem** → Remove after refactor complete
+   - Legacy approach, kept for reference only
+   - Will be deleted once test_iwaveform covers all cases
 
 **Critical requirement:** Testing must simulate real HF rig audio - continuous streaming, proper CFO simulation, and no "cheating" by knowing frame positions.
 
