@@ -186,6 +186,9 @@ private:
     PingReceivedCallback ping_callback_;
     StatusCallback status_callback_;
 
+    // Rate limiting for sync detection
+    size_t samples_since_last_search_ = 0;
+
     // Constants
     static constexpr size_t MIN_SAMPLES_FOR_SYNC = 48000;  // 1 second minimum
     static constexpr size_t MAX_BUFFER_SIZE = 960000;      // 20 seconds max

@@ -57,6 +57,7 @@ void RxPipeline::feedAudio(const float* samples, size_t count) {
 
     // Add samples to buffer
     rx_buffer_.insert(rx_buffer_.end(), samples, samples + count);
+    samples_since_last_search_ += count;
 
     // Limit buffer size to prevent memory issues
     if (rx_buffer_.size() > MAX_BUFFER_SIZE) {
@@ -66,9 +67,14 @@ void RxPipeline::feedAudio(const float* samples, size_t count) {
                   log_prefix_.c_str(), excess);
     }
 
-    // Process one frame per feedAudio call to avoid potential loops
-    // The caller will call feedAudio() again when more data arrives
-    tryProcessBuffer();
+    // Rate-limit detection attempts: only search every SEARCH_INTERVAL samples
+    // This avoids expensive searches on every 20ms feedAudio() call
+    // 9600 samples = 200ms between search attempts
+    constexpr size_t SEARCH_INTERVAL = 9600;
+    if (samples_since_last_search_ >= SEARCH_INTERVAL) {
+        samples_since_last_search_ = 0;
+        tryProcessBuffer();
+    }
 }
 
 bool RxPipeline::hasFrame() const {
@@ -117,10 +123,14 @@ bool RxPipeline::tryProcessBuffer() {
 
     if (!sync_found) {
         // No sync - trim old samples to prevent unbounded growth
-        // Keep enough for potential sync at end of buffer
-        if (rx_buffer_.size() > min_for_sync * 2) {
-            size_t trim = rx_buffer_.size() - min_for_sync;
+        // Keep enough for a full preamble + some margin (3x min_for_sync)
+        // This ensures we don't trim away a chirp that's just arriving
+        size_t keep_samples = min_for_sync * 3;
+        if (rx_buffer_.size() > keep_samples * 2) {
+            size_t trim = rx_buffer_.size() - keep_samples;
             rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + trim);
+            LOG_MODEM(DEBUG, "[%s] RxPipeline: Trimmed %zu samples, keeping %zu",
+                      log_prefix_.c_str(), trim, rx_buffer_.size());
         }
         return false;
     }
