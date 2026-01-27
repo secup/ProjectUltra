@@ -160,6 +160,10 @@ static bool looksLikeV2Frame(const Bytes& bytes) {
 bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
     using namespace rx_constants;
 
+    // Reset demodulator state for each new frame
+    // This prevents state from previous frame affecting current decode
+    mc_dpsk_demodulator_->reset();
+
     // Use Multi-Carrier DPSK for frequency diversity
     const int symbol_samples = mc_dpsk_config_.samples_per_symbol;
     const int bits_per_sym = mc_dpsk_config_.num_carriers * mc_dpsk_config_.bits_per_symbol;
