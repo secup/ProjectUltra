@@ -174,7 +174,15 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
     bool ready = demodulator_->processPresynced(samples, 2);
 
     if (ready) {
-        soft_bits_ = demodulator_->getSoftBits();
+        // Retrieve ALL soft bits from demodulator
+        // getSoftBits() returns LDPC_BLOCK_SIZE (648) bits at a time,
+        // so we need to call it multiple times to get all available bits
+        soft_bits_.clear();
+        while (demodulator_->hasPendingData()) {
+            auto chunk = demodulator_->getSoftBits();
+            if (chunk.empty()) break;
+            soft_bits_.insert(soft_bits_.end(), chunk.begin(), chunk.end());
+        }
         last_snr_ = demodulator_->getEstimatedSNR();
     }
 
