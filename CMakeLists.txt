@@ -292,6 +292,20 @@ if(ULTRA_BUILD_TOOLS)
     add_executable(test_ofdm_chirp_cfo tools/test_ofdm_chirp_cfo.cpp)
     target_include_directories(test_ofdm_chirp_cfo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_ofdm_chirp_cfo PRIVATE ultra_core)
+
+    # IWaveform interface test (uses ModemEngine with IWaveform integration)
+    add_executable(test_iwaveform
+        tools/test_iwaveform.cpp
+        src/gui/modem/modem_engine.cpp
+        src/gui/modem/modem_rx.cpp
+        src/gui/modem/modem_rx_decode.cpp
+        src/gui/modem/modem_mode.cpp
+        src/gui/modem/modem_carrier_sense.cpp
+        src/gui/modem/rx_pipeline.cpp
+        src/gui/adaptive_mode.cpp
+    )
+    target_include_directories(test_iwaveform PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_iwaveform PRIVATE ultra_core)
 endif()
 
 # GUI Application

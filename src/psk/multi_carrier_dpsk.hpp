@@ -332,6 +332,17 @@ public:
     // Set CFO (from external estimation like dual chirp)
     void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; }
 
+    // Apply CFO correction to external samples (public wrapper for applyCFOCorrection)
+    // Call this on samples BEFORE demodulation when using direct demodulateSoft() path
+    // Note: This preserves cfo_hz_ so it can be called multiple times on different spans
+    void applyCFO(Samples& samples) {
+        if (std::abs(cfo_hz_) > 0.1f) {
+            float saved_cfo = cfo_hz_;
+            applyCFOCorrection(samples, cfo_hz_);
+            cfo_hz_ = saved_cfo;  // Restore for subsequent spans
+        }
+    }
+
     // Set chirp detected externally (bypass internal chirp detection)
     // Call this when using external detectSync() and passing training+ref+data samples
     // (not data-only - the demodulator needs training and ref for CFO refinement and reference)

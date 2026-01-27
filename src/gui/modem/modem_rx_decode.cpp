@@ -218,8 +218,18 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                           log_prefix_.c_str(), frame.cfo_hz);
             }
 
-            SampleSpan training_span(buffer.data() + training_offset, training_samples);
-            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            // IMPORTANT: Apply CFO correction to training/ref samples BEFORE processing
+            // Otherwise processTraining() sees uncorrected signal and estimates wrong residual
+            Samples training_corrected(buffer.data() + training_offset,
+                                       buffer.data() + training_offset + training_samples);
+            Samples ref_corrected(buffer.data() + ref_offset,
+                                  buffer.data() + ref_offset + symbol_samples);
+            if (std::abs(frame.cfo_hz) > 0.1f) {
+                mc_dpsk_demodulator_->applyCFO(training_corrected);
+                mc_dpsk_demodulator_->applyCFO(ref_corrected);
+            }
+            SampleSpan training_span(training_corrected.data(), training_corrected.size());
+            SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
             mc_dpsk_demodulator_->processTraining(training_span);
 
             // CFO sanity check: with dual chirp, we trust larger CFO values
@@ -246,7 +256,12 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
         LOG_MODEM(DEBUG, "[%s] MC-DPSK decode: demodulating ping span at %d, CFO=%.1f Hz",
                   log_prefix_.c_str(), frame.data_start, mc_dpsk_demodulator_->getEstimatedCFO());
-        SampleSpan ping_span(buffer.data() + frame.data_start, samples_for_ping);
+
+        // Apply CFO correction to samples before demodulation (using Hilbert transform)
+        Samples ping_samples(buffer.data() + frame.data_start,
+                            buffer.data() + frame.data_start + samples_for_ping);
+        mc_dpsk_demodulator_->applyCFO(ping_samples);
+        SampleSpan ping_span(ping_samples.data(), ping_samples.size());
         auto ping_soft = mc_dpsk_demodulator_->demodulateSoft(ping_span);
 
         if (detectPing(ping_soft)) {
@@ -294,8 +309,17 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
             if (std::abs(frame.cfo_hz) > 0.1f) {
                 mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
             }
-            SampleSpan training_span(buffer.data() + training_offset, training_samples);
-            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            // Apply CFO correction BEFORE processTraining/setReference
+            Samples training_corrected(buffer.data() + training_offset,
+                                       buffer.data() + training_offset + training_samples);
+            Samples ref_corrected(buffer.data() + ref_offset,
+                                  buffer.data() + ref_offset + symbol_samples);
+            if (std::abs(frame.cfo_hz) > 0.1f) {
+                mc_dpsk_demodulator_->applyCFO(training_corrected);
+                mc_dpsk_demodulator_->applyCFO(ref_corrected);
+            }
+            SampleSpan training_span(training_corrected.data(), training_corrected.size());
+            SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
             mc_dpsk_demodulator_->processTraining(training_span);
             mc_dpsk_demodulator_->setReference(ref_span);
         } else {
@@ -304,7 +328,11 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
             mc_dpsk_demodulator_->setReference(ref_sym);
         }
 
-        SampleSpan cw0_span(buffer.data() + frame.data_start, samples_per_codeword);
+        // Apply CFO correction before demodulation
+        Samples cw0_samples(buffer.data() + frame.data_start,
+                           buffer.data() + frame.data_start + samples_per_codeword);
+        mc_dpsk_demodulator_->applyCFO(cw0_samples);
+        SampleSpan cw0_span(cw0_samples.data(), cw0_samples.size());
         auto cw0_soft = mc_dpsk_demodulator_->demodulateSoft(cw0_span);
 
         if (cw0_soft.size() < v2::LDPC_CODEWORD_BITS) {
@@ -359,10 +387,23 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
     if (frame.has_chirp_preamble) {
         // Use training sequence for CFO estimation (essential for fading channels)
+        // Set CFO from dual chirp estimate BEFORE processing
+        if (std::abs(frame.cfo_hz) > 0.1f) {
+            mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
+        }
         int training_offset = ref_offset - training_samples;
         if (training_offset >= 0) {
-            SampleSpan training_span(buffer.data() + training_offset, training_samples);
-            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            // Apply CFO correction BEFORE processTraining/setReference
+            Samples training_corrected(buffer.data() + training_offset,
+                                       buffer.data() + training_offset + training_samples);
+            Samples ref_corrected(buffer.data() + ref_offset,
+                                  buffer.data() + ref_offset + symbol_samples);
+            if (std::abs(frame.cfo_hz) > 0.1f) {
+                mc_dpsk_demodulator_->applyCFO(training_corrected);
+                mc_dpsk_demodulator_->applyCFO(ref_corrected);
+            }
+            SampleSpan training_span(training_corrected.data(), training_corrected.size());
+            SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
             mc_dpsk_demodulator_->processTraining(training_span);
             mc_dpsk_demodulator_->setReference(ref_span);
         } else {
@@ -374,7 +415,11 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
         mc_dpsk_demodulator_->setReference(ref_sym);
     }
 
-    SampleSpan data_span(buffer.data() + frame.data_start, total_samples);
+    // Apply CFO correction before demodulation
+    Samples data_samples(buffer.data() + frame.data_start,
+                        buffer.data() + frame.data_start + total_samples);
+    mc_dpsk_demodulator_->applyCFO(data_samples);
+    SampleSpan data_span(data_samples.data(), data_samples.size());
     auto soft_bits = mc_dpsk_demodulator_->demodulateSoft(data_span);
 
     // Note: DPSK mode does NOT use interleaving (TX only interleaves for OFDM)

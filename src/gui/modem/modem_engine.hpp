@@ -154,9 +154,10 @@ public:
     DPSKModulation getDPSKModulation() const { return dpsk_config_.modulation; }
     const DPSKConfig& getDPSKConfig() const { return dpsk_config_; }
 
-    // MC-DPSK getters for status display
+    // MC-DPSK configuration
     int getMCDPSKCarriers() const { return mc_dpsk_config_.num_carriers; }
     float getMCDPSKThroughput() const { return mc_dpsk_config_.getRawBitRate() * 0.25f; } // R1/4 FEC
+    void setMCDPSKCarriers(int num_carriers) { mc_dpsk_config_.num_carriers = num_carriers; }
 
     // Interleaving control
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
