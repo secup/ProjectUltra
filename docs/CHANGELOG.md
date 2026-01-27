@@ -10,6 +10,85 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-27: CFO Accumulation Bug Fix
+
+**What was broken:**
+- MC-DPSK failed on subsequent frames when CFO ~0 Hz
+- Frame 1 decoded, Frames 2+ failed LDPC
+- Residual CFO from training accumulated via `cfo_hz_ += residual_cfo`
+
+**What was changed:**
+- `src/gui/modem/modem_rx_decode.cpp`: Always call `setCFO(frame.cfo_hz)` to reset accumulated CFO
+- Previously only called when `abs(cfo_hz) > 0.1f`
+- Fixed in 3 places: PING decode, CW0 decode, full frame decode
+
+**How it's properly fixed:**
+- `setCFO()` resets `cfo_hz_` to the chirp-detected value
+- This prevents residual CFO from training from accumulating across frames
+- Chirp CFO is then re-estimated for each frame independently
+
+**Test verification:**
+```bash
+./test_iwaveform --snr 5 --cfo 0 --channel awgn -w mc_dpsk --frames 5
+# Expected: 100% decode rate (was 20% before fix)
+```
+
+**Commit:** `a2e6bed Fix CFO accumulation bug and improve test_iwaveform continuous RX`
+
+---
+
+## 2026-01-27: Demodulator Reset Per Frame
+
+**What was broken:**
+- Continuous RX decode degraded on subsequent frames at marginal SNR
+- Demodulator state from previous frame affected current decode
+
+**What was changed:**
+- `src/gui/modem/modem_rx_decode.cpp`: Added `mc_dpsk_demodulator_->reset()` at start of `rxDecodeDPSK()`
+
+**How it's properly fixed:**
+- Reset clears carrier phases, previous symbols, and other state
+- CFO is then set from chirp detection via `setCFO()`
+- Each frame gets clean demodulator state
+
+**Test verification:**
+```bash
+./test_iwaveform --snr 5 --cfo 30 --channel awgn -w mc_dpsk --frames 5
+# Expected: 100% decode rate
+```
+
+**Commit:** `e52705b Add demodulator reset at start of each DPSK frame decode`
+
+---
+
+## 2026-01-27: test_iwaveform Continuous RX Mode
+
+**What was broken:**
+- test_iwaveform created fresh RX ModemEngine per frame ("cheating")
+- Didn't test realistic continuous audio streaming
+- Buffer overflow when feeding too much audio at once
+
+**What was changed:**
+- `tools/test_iwaveform.cpp`: Use single RX ModemEngine for entire audio stream
+- Add throttling pauses every 5 seconds to let acquisition process
+- Reduce gap between frames (1.5s) to fit under MAX_PENDING_SAMPLES (960000)
+- Track decoded frames by sequence number using std::set
+
+**How it's properly fixed:**
+- Realistic test: audio streamed continuously like from HF rig
+- Throttling prevents buffer overflow (acquisition can't keep up with instant feed)
+- Single RX instance tests state management between frames
+
+**Test verification:**
+```bash
+./test_iwaveform --snr 5 --cfo 30 --channel awgn -w mc_dpsk --frames 5
+# Expected: 100% decode rate
+```
+
+**Commit:** `a2e6bed Fix CFO accumulation bug and improve test_iwaveform continuous RX`
+
+---
+
 ## 2026-01-27: IWaveform Interface Documentation
 
 **What was done:**
