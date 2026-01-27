@@ -26,6 +26,7 @@
 #include <chrono>
 #include <atomic>
 #include <mutex>
+#include <set>
 #include <cstring>
 
 using namespace ultra;
@@ -286,35 +287,7 @@ int main(int argc, char** argv) {
     std::mt19937 rng(seed);
 
     // ========================================
-    // Create TX ModemEngine
-    // ========================================
-    ModemEngine tx_modem;
-    tx_modem.setLogPrefix("TX");
-    tx_modem.setWaveformMode(waveform_mode);
-    tx_modem.setConnectWaveform(waveform_mode);  // Set TX waveform for disconnected mode
-    tx_modem.setInterleavingEnabled(false);
-    tx_modem.setFilterEnabled(false);
-
-    // Configure TX (CFO applied as channel effect, not at modulator)
-    if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
-        tx_modem.setMCDPSKCarriers(num_carriers);
-    }
-
-    // Generate test frame to determine size
-    v2::ConnectFrame test_frame = v2::ConnectFrame::makeConnect(
-        "TEST0", "DEST", protocol::ModeCapabilities::ALL,
-        static_cast<uint8_t>(waveform_mode));
-    auto test_audio = tx_modem.transmit(test_frame.serialize());
-    float frame_duration_sec = test_audio.size() / 48000.0f;
-
-    printf("Frame duration: %.1fs (%zu samples)\n", frame_duration_sec, test_audio.size());
-
-    // Calculate total duration
-    float min_gap_sec = 2.0f;
-    float duration_sec = (frame_duration_sec + min_gap_sec) * num_frames + 5.0f;
-
-    // ========================================
-    // Generate frames
+    // Generate frames (TX modem in separate scope so it's destroyed before RX)
     // ========================================
     struct TestFrame {
         uint16_t seq;
@@ -326,43 +299,95 @@ int main(int argc, char** argv) {
     };
 
     std::vector<TestFrame> frames(num_frames);
-    size_t total_samples = static_cast<size_t>(duration_sec * 48000);
-    std::vector<float> full_audio(total_samples, 0.0f);
+    size_t total_samples;
+    std::vector<float> full_audio;
+    float frame_duration_sec;
 
-    float avg_gap = (duration_sec - frame_duration_sec * num_frames) / (num_frames + 1);
-    std::uniform_real_distribution<float> first_delay(1.0f, 3.0f);
-    float current_time = first_delay(rng);
+    // ========================================
+    // TX - Generate ONE continuous audio stream (like real radio)
+    // ========================================
+    // Per TESTING_METHODOLOGY.md:
+    // - Use ONE TX modem for entire stream
+    // - Frames separated by silence periods (simulating PTT gaps)
+    // - This creates a realistic continuous audio stream
 
-    printf("Generating %d %s frames...\n", num_frames, waveform_name);
+    {   // TX scope
+        ModemEngine tx_modem;
+        tx_modem.setLogPrefix("TX");
+        tx_modem.setWaveformMode(waveform_mode);
+        tx_modem.setConnectWaveform(waveform_mode);
+        tx_modem.setInterleavingEnabled(false);
+        tx_modem.setFilterEnabled(false);
 
+        if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
+            tx_modem.setMCDPSKCarriers(num_carriers);
+        }
+
+        // Build continuous audio stream: [silence][frame1][silence][frame2]...
+        // Gap must be short enough that total audio < MAX_PENDING_SAMPLES (960000 = 20s)
+        // With 5 frames @ 2.3s each + 4 gaps, use 1.5s gaps to stay under limit
+        float gap_sec = 1.5f;  // Gap between frames
+        size_t gap_samples = static_cast<size_t>(gap_sec * 48000);
+        size_t initial_silence = static_cast<size_t>(1.5f * 48000);  // 1.5s initial silence
+
+        printf("Generating %d %s frames as ONE continuous stream...\n", num_frames, waveform_name);
+
+        // Start with initial silence
+        full_audio.resize(initial_silence, 0.0f);
+
+        for (int i = 0; i < num_frames; i++) {
+            v2::ConnectFrame frame = v2::ConnectFrame::makeConnect(
+                "TEST" + std::to_string(i), "DEST",
+                protocol::ModeCapabilities::ALL,
+                static_cast<uint8_t>(waveform_mode));
+            frame.seq = static_cast<uint16_t>(i + 1);
+
+            frames[i].seq = frame.seq;
+            frames[i].src = frame.getSrcCallsign();
+            frames[i].data = frame.serialize();
+            frames[i].audio_start = full_audio.size();  // Current position in stream
+
+            // Generate frame using the SAME TX modem (continuous operation)
+            auto tx_audio = tx_modem.transmit(frames[i].data);
+            frames[i].audio_len = tx_audio.size();
+
+            // Set frame_duration_sec from first frame
+            if (i == 0) {
+                frame_duration_sec = tx_audio.size() / 48000.0f;
+                printf("Frame duration: %.1fs (%zu samples)\n", frame_duration_sec, tx_audio.size());
+            }
+
+            // Append frame audio to continuous stream
+            full_audio.insert(full_audio.end(), tx_audio.begin(), tx_audio.end());
+
+            printf("  Frame %2d at %.3fs (sample %zu): seq=%d, len=%zu\n",
+                   i + 1, frames[i].audio_start / 48000.0f, frames[i].audio_start,
+                   frame.seq, tx_audio.size());
+
+            // Add gap after frame (except after last frame)
+            if (i < num_frames - 1) {
+                full_audio.resize(full_audio.size() + gap_samples, 0.0f);
+            }
+        }
+
+        // Add trailing silence
+        full_audio.resize(full_audio.size() + 48000, 0.0f);  // 1s trailing
+        total_samples = full_audio.size();
+
+        printf("Total audio: %.1fs (%zu samples)\n",
+               total_samples / 48000.0f, total_samples);
+    }   // TX modem destroyed here, before RX starts
+
+    // Verify frames are in the buffer
+    // Verify frame positions
+    printf("Frame positions in full_audio:\n");
     for (int i = 0; i < num_frames; i++) {
-        v2::ConnectFrame frame = v2::ConnectFrame::makeConnect(
-            "TEST" + std::to_string(i), "DEST",
-            protocol::ModeCapabilities::ALL,
-            static_cast<uint8_t>(waveform_mode));
-        frame.seq = static_cast<uint16_t>(i + 1);
-
-        frames[i].seq = frame.seq;
-        frames[i].src = frame.getSrcCallsign();
-        frames[i].data = frame.serialize();
-        frames[i].audio_start = static_cast<size_t>(current_time * 48000);
-
-        auto tx_audio = tx_modem.transmit(frames[i].data);
-        frames[i].audio_len = tx_audio.size();
-
-        if (verbose) {
-            printf("  Frame %2d at %5.1fs: seq=%d src=%s\n",
-                   i + 1, current_time, frame.seq, frames[i].src.c_str());
-        }
-
-        // Place in audio buffer
+        float e = 0;
         size_t pos = frames[i].audio_start;
-        for (size_t j = 0; j < tx_audio.size() && pos + j < full_audio.size(); j++) {
-            full_audio[pos + j] = tx_audio[j];
+        for (size_t j = 0; j < 24000 && pos + j < full_audio.size(); j++) {
+            e += full_audio[pos+j] * full_audio[pos+j];
         }
-
-        std::uniform_real_distribution<float> gap_var(0.8f, 1.2f);
-        current_time += frame_duration_sec + avg_gap * gap_var(rng);
+        printf("  Frame %d @ %zu: RMS=%.4f\n", i+1, pos, std::sqrt(e/24000));
     }
 
     // ========================================
@@ -415,87 +440,186 @@ int main(int argc, char** argv) {
     }
 
     // ========================================
-    // RX - Decode each frame region separately
+    // RX - Single receiver for entire audio stream (like real HF rig)
     // ========================================
-    // MC-DPSK: Use ModemEngine.feedAudio() (acquisition thread handles chirp)
-    // OFDM_CHIRP: Use IWaveform directly (ModemEngine's acquisition is broken for OFDM_CHIRP)
+    // Per TESTING_METHODOLOGY.md:
+    // - Use a SINGLE receiver for entire audio stream
+    // - Feed audio in small chunks (like real audio callbacks)
+    // - Let receiver detect sync autonomously
+    // - Do NOT create new receiver per frame (that's cheating)
+
+    // OFDM_CHIRP: ModemEngine's acquisition thread routes chirp frames to MC-DPSK decoder,
+    // which is broken. Use IWaveform directly for now (still single instance).
     bool use_iwaveform_direct = (waveform_mode == protocol::WaveformMode::OFDM_CHIRP);
 
-    printf("Decoding via %s...\n\n",
+    printf("Decoding via %s (single RX instance)...\n\n",
            use_iwaveform_direct ? "IWaveform directly" : "ModemEngine.feedAudio()");
 
     constexpr size_t chunk_size = 960;  // 20ms at 48kHz
     int decoded_count = 0;
 
-    for (int i = 0; i < num_frames; i++) {
-        // Define window around expected frame position
-        size_t margin_before = 9600;   // 200ms
-        size_t margin_after = 24000;   // 500ms
-        size_t window_start = (frames[i].audio_start > margin_before) ?
-                              frames[i].audio_start - margin_before : 0;
-        size_t window_end = std::min(frames[i].audio_start + frames[i].audio_len + margin_after,
-                                     full_audio.size());
+    // Track which frames have been decoded (by sequence number)
+    std::mutex decoded_mutex;
+    std::set<uint16_t> decoded_seqs;
 
-        bool got_frame = false;
+    if (use_iwaveform_direct) {
+        // OFDM_CHIRP: Use single IWaveform instance, feed entire audio
+        // Note: OFDMChirpWaveform doesn't support continuous streaming yet,
+        // so we still need to search for frames. But we use ONE waveform instance.
+        OFDMChirpWaveform waveform;
 
-        if (use_iwaveform_direct) {
-            // OFDM_CHIRP: Use IWaveform directly
-            SampleSpan frame_audio(full_audio.data() + window_start, window_end - window_start);
-            got_frame = decodeOFDMChirpFrame(frame_audio, frames[i].data, verbose);
-        } else {
-            // MC-DPSK: Use ModemEngine
-            ModemEngine rx_modem;
-            rx_modem.setLogPrefix("RX");
-            rx_modem.setWaveformMode(waveform_mode);
-            rx_modem.setInterleavingEnabled(false);
+        // Search through audio for frames (single waveform instance)
+        size_t search_pos = 0;
+        size_t min_gap = 48000;  // 1 second minimum between frames
 
-            if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
-                rx_modem.setMCDPSKCarriers(num_carriers);
-            }
+        while (search_pos + 90000 < full_audio.size()) {
+            SampleSpan search_span(full_audio.data() + search_pos,
+                                   full_audio.size() - search_pos);
 
-            // Give RX threads time to start before feeding audio
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            // Reset waveform state for new search (but same instance)
+            waveform.reset();
 
-            // Set up callback
-            std::atomic<bool> callback_got_frame{false};
-            uint16_t received_seq = 0;
+            SyncResult sync_result;
+            if (waveform.detectSync(search_span, sync_result, 0.15f)) {
+                printf("[OFDM_CHIRP] Sync at %zu + %d, CFO=%.1f Hz\n",
+                       search_pos, sync_result.start_sample, sync_result.cfo_hz);
 
-            rx_modem.setRawDataCallback([&](const Bytes& data) {
-                if (data.size() >= 2 && data[0] == 0x55 && data[1] == 0x4C) {
-                    auto parsed = v2::ConnectFrame::deserialize(data);
-                    if (parsed) {
-                        received_seq = parsed->seq;
-                        callback_got_frame = true;
-                        if (verbose) {
-                            printf("  [RX] Decoded seq=%d src=%s\n",
-                                   parsed->seq, parsed->getSrcCallsign().c_str());
+                // Apply CFO and process
+                waveform.setFrequencyOffset(sync_result.cfo_hz);
+
+                size_t data_start = sync_result.start_sample;
+                if (data_start < search_span.size()) {
+                    SampleSpan data_span(search_span.data() + data_start,
+                                         search_span.size() - data_start);
+                    waveform.process(data_span);
+
+                    auto soft_bits = waveform.getSoftBits();
+                    if (soft_bits.size() >= v2::LDPC_CODEWORD_BITS) {
+                        // Decode CW0
+                        std::vector<float> cw0_bits(soft_bits.begin(),
+                                                    soft_bits.begin() + v2::LDPC_CODEWORD_BITS);
+                        LDPCDecoder decoder(CodeRate::R1_4);
+                        Bytes cw0_data = decoder.decodeSoft(cw0_bits);
+
+                        if (decoder.lastDecodeSuccess() && cw0_data.size() >= 2 &&
+                            cw0_data[0] == 0x55 && cw0_data[1] == 0x4C) {
+                            // Valid frame - decode all codewords
+                            auto header = v2::parseHeader(cw0_data);
+                            if (header.valid) {
+                                Bytes full_data;
+                                bool all_ok = true;
+                                for (int cw = 0; cw < header.total_cw && all_ok; cw++) {
+                                    size_t offset = cw * v2::LDPC_CODEWORD_BITS;
+                                    if (offset + v2::LDPC_CODEWORD_BITS > soft_bits.size()) {
+                                        all_ok = false;
+                                        break;
+                                    }
+                                    std::vector<float> cw_bits(soft_bits.begin() + offset,
+                                                               soft_bits.begin() + offset + v2::LDPC_CODEWORD_BITS);
+                                    decoder.setRate(CodeRate::R1_4);
+                                    Bytes cw_data = decoder.decodeSoft(cw_bits);
+                                    if (!decoder.lastDecodeSuccess()) {
+                                        all_ok = false;
+                                        break;
+                                    }
+                                    cw_data.resize(v2::BYTES_PER_CODEWORD);
+                                    full_data.insert(full_data.end(), cw_data.begin(), cw_data.end());
+                                }
+
+                                if (all_ok) {
+                                    auto parsed = v2::ConnectFrame::deserialize(full_data);
+                                    if (parsed) {
+                                        decoded_seqs.insert(parsed->seq);
+                                        printf("  [OFDM_CHIRP] Decoded seq=%d src=%s\n",
+                                               parsed->seq, parsed->getSrcCallsign().c_str());
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-            });
 
-            // Feed audio
-            for (size_t j = window_start; j < window_end; j += chunk_size) {
-                size_t len = std::min(chunk_size, window_end - j);
-                rx_modem.feedAudio(full_audio.data() + j, len);
+                // Move past this frame
+                search_pos += sync_result.start_sample + min_gap;
+            } else {
+                // No sync found, move forward
+                search_pos += min_gap;
             }
+        }
+    } else {
+        // MC-DPSK: Use SINGLE ModemEngine for entire audio stream
+        ModemEngine rx_modem;
+        rx_modem.setLogPrefix("RX");
+        rx_modem.setWaveformMode(waveform_mode);
+        rx_modem.setInterleavingEnabled(false);
 
-            // Wait for RX threads to process (chirp modes need longer)
-            int max_wait_iters = 1000;  // 20 seconds max
-            for (int wait = 0; wait < max_wait_iters && !callback_got_frame; wait++) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            }
-
-            got_frame = callback_got_frame && (received_seq == frames[i].seq);
+        if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
+            rx_modem.setMCDPSKCarriers(num_carriers);
         }
 
-        // Check result
-        if (got_frame) {
+        // Set up callback to track decoded frames
+        rx_modem.setRawDataCallback([&](const Bytes& data) {
+            if (data.size() >= 2 && data[0] == 0x55 && data[1] == 0x4C) {
+                auto parsed = v2::ConnectFrame::deserialize(data);
+                if (parsed) {
+                    std::lock_guard<std::mutex> lock(decoded_mutex);
+                    decoded_seqs.insert(parsed->seq);
+                    printf("  [RX] Decoded seq=%d src=%s\n",
+                           parsed->seq, parsed->getSrcCallsign().c_str());
+                }
+            }
+        });
+
+        // Give RX threads time to fully initialize before first frame
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // Feed ENTIRE audio stream in chunks (like real audio callback from sound card)
+        printf("Feeding %zu samples (%.1f sec) in %zu-sample chunks...\n",
+               full_audio.size(), full_audio.size() / 48000.0f, chunk_size);
+
+        // Feed audio with periodic pauses to let acquisition process
+        // This prevents buffer overflow (MAX_PENDING_SAMPLES = 960000 = 20s)
+        // Pause every ~5 seconds of audio to let acquisition catch up
+        constexpr size_t PAUSE_INTERVAL = 48000 * 5;  // 5 seconds of audio
+
+        for (size_t j = 0; j < full_audio.size(); j += chunk_size) {
+            size_t len = std::min(chunk_size, full_audio.size() - j);
+            rx_modem.feedAudio(full_audio.data() + j, len);
+
+            // Pause every 5 seconds of audio to let acquisition process
+            if (j > 0 && j % PAUSE_INTERVAL < chunk_size) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+            }
+        }
+
+        // Wait for RX threads to finish processing
+        // The audio has all been fed, now wait for decode to complete
+        printf("Audio fed, waiting for decode to complete...\n");
+
+        int expected_frames = num_frames;
+        int max_wait_ms = 30000;  // 30 seconds max
+        int wait_interval_ms = 100;
+
+        for (int waited = 0; waited < max_wait_ms; waited += wait_interval_ms) {
+            {
+                std::lock_guard<std::mutex> lock(decoded_mutex);
+                if (static_cast<int>(decoded_seqs.size()) >= expected_frames) {
+                    break;  // Got all frames
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(wait_interval_ms));
+        }
+    }
+
+    // Match decoded frames to expected frames
+    for (int i = 0; i < num_frames; i++) {
+        uint16_t expected_seq = frames[i].seq;
+        if (decoded_seqs.count(expected_seq)) {
             frames[i].decoded = true;
             decoded_count++;
-            printf("  Frame %2d: OK\n", i + 1);
+            printf("  Frame %2d (seq=%d): OK\n", i + 1, expected_seq);
         } else {
-            printf("  Frame %2d: MISSED\n", i + 1);
+            printf("  Frame %2d (seq=%d): MISSED\n", i + 1, expected_seq);
         }
     }
 

@@ -211,9 +211,10 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                       log_prefix_.c_str(), training_offset, ref_offset, frame.data_start, frame.cfo_hz);
 
             // Set CFO from dual chirp estimate BEFORE processing training
-            // This allows the demodulator to use the correct carrier frequencies
+            // ALWAYS call setCFO() to reset accumulated CFO from previous frames
+            // This prevents CFO drift when processing multiple frames
+            mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
             if (std::abs(frame.cfo_hz) > 0.1f) {
-                mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
                 LOG_MODEM(INFO, "[%s] DPSK: Using dual chirp CFO=%.1f Hz for correction",
                           log_prefix_.c_str(), frame.cfo_hz);
             }
@@ -306,9 +307,8 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
                 LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d for CW0", log_prefix_.c_str(), training_offset);
                 return false;
             }
-            if (std::abs(frame.cfo_hz) > 0.1f) {
-                mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
-            }
+            // ALWAYS reset CFO to prevent accumulation across frames
+            mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
             // Apply CFO correction BEFORE processTraining/setReference
             Samples training_corrected(buffer.data() + training_offset,
                                        buffer.data() + training_offset + training_samples);
@@ -387,10 +387,8 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
     if (frame.has_chirp_preamble) {
         // Use training sequence for CFO estimation (essential for fading channels)
-        // Set CFO from dual chirp estimate BEFORE processing
-        if (std::abs(frame.cfo_hz) > 0.1f) {
-            mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
-        }
+        // ALWAYS reset CFO to prevent accumulation across frames
+        mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
         int training_offset = ref_offset - training_samples;
         if (training_offset >= 0) {
             // Apply CFO correction BEFORE processTraining/setReference
