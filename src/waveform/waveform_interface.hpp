@@ -72,6 +72,10 @@ public:
     // Called after sync detection with estimated CFO
     virtual void setFrequencyOffset(float cfo_hz) = 0;
 
+    // Set TX frequency offset for testing (simulates radio tuning error)
+    // Must be called BEFORE generatePreamble() and modulate()
+    virtual void setTxFrequencyOffset(float cfo_hz) = 0;
+
     // Get current configuration
     virtual Modulation getModulation() const = 0;
     virtual CodeRate getCodeRate() const = 0;
@@ -145,6 +149,11 @@ public:
 
     // Get total preamble duration in samples
     virtual int getPreambleSamples() const = 0;
+
+    // Get minimum samples needed AFTER sync detection for one complete frame
+    // This includes training, reference, and data for at least one codeword
+    // Used by RxPipeline to know when enough samples are available
+    virtual int getMinSamplesForFrame() const = 0;
 };
 
 // Convenience alias

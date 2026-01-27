@@ -175,48 +175,49 @@ void ModemEngine::rxDecodeLoop() {
     LOG_MODEM(INFO, "[%s] RX decode loop starting", log_prefix_.c_str());
 
     while (rx_decode_running_) {
-        // Connected mode: process based on waveform
+        // ====================================================================
+        // Connected mode: Use RxPipeline (NEW)
+        // ====================================================================
+        // RxPipeline handles sync detection, demodulation, and LDPC decode
+        // feedAudio() routes audio to RxPipeline when connected
+        // This loop just polls for decoded frames
+        // ====================================================================
         if (connected_) {
-            size_t buf_size = getBufferSize();
-
             static int conn_iter = 0;
-            if (++conn_iter % 50 == 0) {
-                LOG_MODEM(INFO, "[%s] Connected mode: waveform=%d, buf=%zu",
-                          log_prefix_.c_str(), static_cast<int>(waveform_mode_), buf_size);
+            if (++conn_iter % 100 == 0 && rx_pipeline_) {
+                LOG_MODEM(DEBUG, "[%s] Connected mode: waveform=%d, pipeline_buf=%zu, frames=%zu",
+                          log_prefix_.c_str(), static_cast<int>(waveform_mode_),
+                          rx_pipeline_->getBufferSize(), rx_pipeline_->getFrameCount());
             }
 
-            if (waveform_mode_ == protocol::WaveformMode::OFDM_COX) {
-                bool has_pending = ofdm_demodulator_->isSynced() ||
-                                  ofdm_demodulator_->hasPendingData() ||
-                                  ofdm_expected_codewords_ > 0;
+            // Check for decoded frames from RxPipeline
+            // Note: Frame delivery is handled via callbacks set in constructor,
+            // but we can also poll here for stats and additional processing
+            if (rx_pipeline_ && rx_pipeline_->hasFrame()) {
+                auto result = rx_pipeline_->getFrame();
+                if (result.success) {
+                    LOG_MODEM(INFO, "[%s] RxPipeline: Frame decoded, %d/%d CWs, SNR=%.1f dB",
+                              log_prefix_.c_str(), result.codewords_ok,
+                              result.codewords_ok + result.codewords_failed,
+                              result.snr_estimate);
 
-                if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC || has_pending) {
-                    processRxBuffer_OFDM();
-                }
-            } else if (waveform_mode_ == protocol::WaveformMode::OTFS_EQ ||
-                       waveform_mode_ == protocol::WaveformMode::OTFS_RAW) {
-                // OTFS processing - similar to OFDM but with OTFS demodulator
-                if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC) {
-                    processRxBuffer_OTFS();
-                }
-            } else if (waveform_mode_ == protocol::WaveformMode::MC_DPSK) {
-                static int dpsk_poll_iter = 0;
-                if (++dpsk_poll_iter % 50 == 0) {
-                    LOG_MODEM(INFO, "[%s] DPSK poll: buf=%zu, min=%zu",
-                              log_prefix_.c_str(), buf_size, MIN_SAMPLES_FOR_DPSK);
-                }
-                if (buf_size > MIN_SAMPLES_FOR_DPSK) {
-                    processRxBuffer_DPSK();
-                }
-            } else if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
-                // OFDM_CHIRP: chirp preamble + OFDM DQPSK (differential)
-                bool has_pending = ofdm_demodulator_->isSynced() ||
-                                  ofdm_demodulator_->hasPendingData() ||
-                                  ofdm_expected_codewords_ > 0 ||
-                                  ofdm_chirp_found_;
+                    // Update stats
+                    updateStats([&](LoopbackStats& s) {
+                        s.snr_db = result.snr_estimate;
+                        s.synced = true;
+                    });
 
-                if (buf_size > MIN_SAMPLES_FOR_OFDM_SYNC || has_pending) {
-                    processRxBuffer_OFDM_CHIRP();
+                    // Save peer CFO for future frames
+                    if (std::abs(result.cfo_estimate) > 0.1f) {
+                        peer_cfo_hz_ = result.cfo_estimate;
+                    }
+
+                    last_rx_complete_time_ = std::chrono::steady_clock::now();
+                } else if (result.codewords_failed > 0) {
+                    LOG_MODEM(INFO, "[%s] RxPipeline: Frame failed, %d/%d CWs OK",
+                              log_prefix_.c_str(), result.codewords_ok,
+                              result.codewords_ok + result.codewords_failed);
+                    updateStats([](LoopbackStats& s) { s.frames_failed++; });
                 }
             }
 
@@ -260,14 +261,28 @@ void ModemEngine::rxDecodeLoop() {
 void ModemEngine::feedAudio(const float* samples, size_t count) {
     if (count == 0 || samples == nullptr) return;
 
+    // ========================================================================
+    // NEW: Route audio based on connection state
+    // ========================================================================
+    // Connected mode: RxPipeline handles sync, demod, decode internally
+    // Disconnected mode: Buffer for acquisition thread to search for chirp
+    // ========================================================================
+
+    if (connected_ && rx_pipeline_ && active_rx_waveform_) {
+        // Connected: feed directly to RxPipeline
+        rx_pipeline_->feedAudio(samples, count);
+
+        // Also update carrier sense
+        if (count >= ENERGY_WINDOW_SAMPLES) {
+            std::vector<float> window(samples, samples + std::min(count, ENERGY_WINDOW_SAMPLES));
+            updateChannelEnergy(window);
+        }
+        return;
+    }
+
+    // Disconnected: use traditional buffer for acquisition
     {
         std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
-
-        // Log when connected to see if samples are being fed after connection
-        if (connected_) {
-            LOG_MODEM(INFO, "[%s] feedAudio CONNECTED: +%zu, buf_before=%zu",
-                      log_prefix_.c_str(), count, rx_sample_buffer_.size());
-        }
 
         // Cap buffer to prevent unbounded growth
         if (rx_sample_buffer_.size() + count > MAX_PENDING_SAMPLES) {

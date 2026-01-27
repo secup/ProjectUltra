@@ -42,6 +42,7 @@ public:
 
     void configure(Modulation mod, CodeRate rate) override;
     void setFrequencyOffset(float cfo_hz) override;
+    void setTxFrequencyOffset(float cfo_hz) override;
     Modulation getModulation() const override { return config_.modulation; }
     CodeRate getCodeRate() const override { return config_.code_rate; }
     float getFrequencyOffset() const override { return cfo_hz_; }
@@ -81,6 +82,7 @@ public:
     float getThroughput(CodeRate rate) const override;
     int getSamplesPerSymbol() const override;
     int getPreambleSamples() const override;
+    int getMinSamplesForFrame() const override;
 
     // ========================================================================
     // OFDM-Chirp Specific

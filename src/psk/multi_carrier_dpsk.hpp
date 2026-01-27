@@ -47,6 +47,9 @@ struct MultiCarrierDPSKConfig {
     bool use_dual_chirp = true;        // Up+down chirp for CFO estimation
     float chirp_threshold = 0.15f;     // Detection threshold (lower for dual chirp)
 
+    // TX CFO for simulation (simulates radio tuning error)
+    float tx_cfo_hz = 0.0f;
+
     // Get carrier frequencies (evenly spaced)
     std::vector<float> getCarrierFreqs() const {
         std::vector<float> freqs(num_carriers);
@@ -80,6 +83,7 @@ struct MultiCarrierDPSKConfig {
         cfg.duration_ms = chirp_duration_ms;
         cfg.gap_ms = 100.0f;  // Gap between up and down chirps
         cfg.use_dual_chirp = use_dual_chirp;  // Use configured value
+        cfg.tx_cfo_hz = tx_cfo_hz;  // Pass TX CFO for simulation
         return cfg;
     }
 };
@@ -328,6 +332,16 @@ public:
     // Set CFO (from external estimation like dual chirp)
     void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; }
 
+    // Set chirp detected externally (bypass internal chirp detection)
+    // Call this when using external detectSync() and passing training+ref+data samples
+    // (not data-only - the demodulator needs training and ref for CFO refinement and reference)
+    void setChirpDetected(float cfo_hz = 0.0f) {
+        cfo_hz_ = cfo_hz;
+        state_ = State::GOT_CHIRP;
+        external_chirp_detected_ = true;  // Flag to adjust offsets in processGotChirp
+        sample_buffer_.clear();  // Clear any stale samples
+    }
+
     // Get last chirp correlation value
     float getLastChirpCorrelation() const { return last_chirp_corr_; }
 
@@ -343,6 +357,7 @@ public:
         soft_bits_.clear();
         prev_symbols_.assign(config_.num_carriers, Complex(1.0f, 0.0f));
         cfo_hz_ = 0.0f;
+        external_chirp_detected_ = false;
         chirp_position_ = -1;
         last_chirp_corr_ = 0.0f;
         expected_data_bytes_ = 0;
@@ -497,6 +512,12 @@ private:
 
     // Process in GOT_CHIRP state - wait for complete frame
     bool processGotChirp() {
+        // When external chirp detection is used, buffer contains training+ref+data
+        // (chirp is NOT in buffer). Otherwise buffer contains chirp+training+ref+data.
+        size_t chirp_offset = external_chirp_detected_ ? 0 : chirp_samples_;
+        size_t local_preamble = training_samples_ + ref_samples_;  // Training + ref (no chirp)
+        size_t full_preamble = chirp_offset + local_preamble;
+
         // Calculate how many samples we need
         size_t data_samples = 0;
         if (expected_data_bytes_ > 0) {
@@ -506,8 +527,8 @@ private:
         } else {
             // Default: demodulate all remaining samples after preamble
             // The header decoder will determine how many codewords are present
-            if (sample_buffer_.size() > preamble_samples_) {
-                data_samples = sample_buffer_.size() - preamble_samples_;
+            if (sample_buffer_.size() > full_preamble) {
+                data_samples = sample_buffer_.size() - full_preamble;
             } else {
                 // Need at least 1 LDPC codeword (648 bits) minimum
                 int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
@@ -516,37 +537,64 @@ private:
             }
         }
 
-        size_t total_needed = preamble_samples_ + data_samples;
+        size_t total_needed = full_preamble + data_samples;
 
         if (sample_buffer_.size() < total_needed) {
             return false;  // Wait for more samples
         }
 
+        // Apply CFO correction to samples BEFORE demodulation (like OFDM does)
+        if (std::abs(cfo_hz_) > 0.1f) {
+            applyCFOCorrection(sample_buffer_, cfo_hz_);
+            fprintf(stderr, "[MC-DPSK-DEMOD] Applied CFO correction: %.1f Hz to %zu samples\n",
+                    cfo_hz_, sample_buffer_.size());
+        }
+
         // Save dual chirp CFO estimate before training processing
         float dual_chirp_cfo = cfo_hz_;
+        fprintf(stderr, "[MC-DPSK-DEMOD] processGotChirp: external=%d, cfo_before=%.1f\n",
+                external_chirp_detected_, cfo_hz_);
 
         // Process training sequence to refine CFO estimate
-        size_t training_start = chirp_samples_;
-        SampleSpan train_span(sample_buffer_.data() + training_start, training_samples_);
-        processTraining(train_span);
+        // Always run processTraining for now - it may help with timing/phase alignment
+        // even when we have good CFO from chirp detection
+        {
+            size_t training_start = chirp_offset;  // 0 if external chirp, chirp_samples_ otherwise
+            SampleSpan train_span(sample_buffer_.data() + training_start, training_samples_);
 
-        // CFO sanity check: only reject if NO dual chirp CFO but high training CFO
-        // If we have dual chirp CFO, trust it (works up to ±35 Hz)
-        if (std::abs(dual_chirp_cfo) < 0.1f && std::abs(cfo_hz_) > 5.0f) {
-            // False positive - reset and keep searching
-            sample_buffer_.erase(sample_buffer_.begin(),
-                                sample_buffer_.begin() + chirp_samples_);
-            state_ = State::IDLE;
-            return false;
+            // If we have good CFO from chirp, save it and restore after training
+            // (processTraining adds residual, which can be wrong)
+            float saved_cfo = cfo_hz_;
+            bool has_chirp_cfo = external_chirp_detected_ && std::abs(dual_chirp_cfo) > 0.1f;
+
+            processTraining(train_span);
+            fprintf(stderr, "[MC-DPSK-DEMOD] after processTraining: cfo=%.1f (was %.1f)\n", cfo_hz_, saved_cfo);
+
+            if (has_chirp_cfo) {
+                // Restore chirp CFO - it's more accurate than training estimate
+                cfo_hz_ = saved_cfo;
+                fprintf(stderr, "[MC-DPSK-DEMOD] restored chirp CFO=%.1f\n", cfo_hz_);
+            }
+
+            // CFO sanity check: only reject if NO dual chirp CFO but high training CFO
+            if (std::abs(dual_chirp_cfo) < 0.1f && std::abs(cfo_hz_) > 5.0f) {
+                // False positive - reset and keep searching
+                size_t consume = external_chirp_detected_ ? training_samples_ : chirp_samples_;
+                sample_buffer_.erase(sample_buffer_.begin(),
+                                    sample_buffer_.begin() + consume);
+                state_ = State::IDLE;
+                external_chirp_detected_ = false;
+                return false;
+            }
         }
 
         // Process reference symbol
-        size_t ref_start = chirp_samples_ + training_samples_;
+        size_t ref_start = chirp_offset + training_samples_;
         SampleSpan ref_span(sample_buffer_.data() + ref_start, ref_samples_);
         setReference(ref_span);
 
         // Demodulate data
-        size_t data_start = preamble_samples_;
+        size_t data_start = full_preamble;
         SampleSpan data_span(sample_buffer_.data() + data_start, data_samples);
         soft_bits_ = demodulateSoft(data_span);
 
@@ -555,12 +603,46 @@ private:
                             sample_buffer_.begin() + total_needed);
 
         state_ = State::FRAME_READY;
+        external_chirp_detected_ = false;  // Reset for next frame
         return true;
     }
 
+    // Apply CFO correction to samples using Hilbert transform (proper SSB frequency shift)
+    // 1. Convert real signal to analytic (complex) via Hilbert transform
+    // 2. Multiply by e^{-j*2*pi*cfo*t} to shift frequency
+    // 3. Take real part
+    void applyCFOCorrection(Samples& samples, float cfo_hz) {
+        if (std::abs(cfo_hz) < 0.01f || samples.size() < 128) return;
+
+        // Use Hilbert transform to get analytic signal
+        HilbertTransform hilbert(127);  // 127 taps for good accuracy
+        SampleSpan span(samples.data(), samples.size());
+        auto analytic = hilbert.process(span);
+
+        // Apply frequency shift: multiply by e^{-j*2*pi*cfo*t}
+        float phase_inc = -2.0f * M_PI * cfo_hz / config_.sample_rate;
+        float phase = 0.0f;
+
+        for (size_t i = 0; i < samples.size() && i < analytic.size(); i++) {
+            Complex rotation(std::cos(phase), std::sin(phase));
+            Complex shifted = analytic[i] * rotation;
+            samples[i] = shifted.real();  // Take real part
+
+            phase += phase_inc;
+            if (phase > M_PI) phase -= 2.0f * M_PI;
+            if (phase < -M_PI) phase += 2.0f * M_PI;
+        }
+
+        // Reset CFO since it's now been applied to samples
+        cfo_hz_ = 0.0f;
+    }
+
     // Demodulate one symbol period for one carrier
+    // CFO correction: mix at carrier frequency, but the samples have already been
+    // frequency-corrected if cfo_hz_ != 0 (done in applyCFOCorrection)
     Complex demodulateOneSymbol(const float* samples, int carrier_idx) {
-        float freq = carrier_freqs_[carrier_idx] + cfo_hz_;
+        // Mix at carrier frequency only - CFO already corrected in samples
+        float freq = carrier_freqs_[carrier_idx];
         float phase_inc = 2.0f * M_PI * freq / config_.sample_rate;
 
         Complex sum(0.0f, 0.0f);
@@ -588,6 +670,7 @@ private:
     int chirp_position_;
     float last_chirp_corr_;
     size_t expected_data_bytes_ = 0;
+    bool external_chirp_detected_ = false;  // True when chirp detected via external detectSync()
 
     // Precomputed sizes
     size_t chirp_samples_;

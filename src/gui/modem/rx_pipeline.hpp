@@ -1,25 +1,36 @@
 #pragma once
 
-// RxPipeline - Template method pattern for RX frame decoding
+// RxPipeline - Streaming RX pipeline for frame decoding
 //
-// Extracts the common decode flow from processRxBuffer_* methods:
-// 1. Detect preamble/sync
-// 2. Demodulate symbols → soft bits
-// 3. Decode CW0 to get frame info
-// 4. Accumulate remaining codewords
-// 5. Decode complete frame
-// 6. Deliver frame data
+// Provides feedAudio() interface for continuous audio streaming:
+// 1. Accumulate audio samples in buffer
+// 2. Periodically detect sync using IWaveform
+// 3. When sync found, demodulate and decode
+// 4. Queue decoded frames for retrieval
 //
-// Each waveform provides its specific sync detection and demodulation,
-// but the overall flow and LDPC decoding is shared.
+// This replaces the manual buffer management in ModemEngine's
+// processRxBuffer_* methods with a clean streaming interface.
+//
+// Usage:
+//   RxPipeline rx("RX");
+//   rx.setWaveform(waveform.get());
+//   rx.feedAudio(samples, count);  // Call repeatedly
+//   while (rx.hasFrame()) {
+//       auto result = rx.getFrame();
+//       // Process result
+//   }
 
 #include "waveform/waveform_interface.hpp"
 #include "fec/codec_interface.hpp"
 #include "modem_types.hpp"
 #include "protocol/frame_v2.hpp"
+#include "ultra/fec.hpp"  // ChannelInterleaver
 #include <functional>
 #include <vector>
 #include <string>
+#include <queue>
+#include <mutex>
+#include <memory>
 
 namespace ultra {
 namespace gui {
@@ -51,7 +62,12 @@ public:
     // CONFIGURATION
     // ========================================================================
 
-    // Set callbacks for frame delivery
+    // Set the waveform to use for sync detection and demodulation
+    // The waveform must remain valid for the lifetime of the pipeline
+    void setWaveform(IWaveform* waveform) { waveform_ = waveform; }
+    IWaveform* getWaveform() const { return waveform_; }
+
+    // Set callbacks for frame delivery (alternative to polling with hasFrame/getFrame)
     void setFrameCallback(FrameDeliveryCallback callback) { frame_callback_ = callback; }
     void setPingCallback(PingReceivedCallback callback) { ping_callback_ = callback; }
     void setStatusCallback(StatusCallback callback) { status_callback_ = callback; }
@@ -62,8 +78,34 @@ public:
     // Enable/disable interleaving
     void setInterleavingEnabled(bool enabled) { interleaving_enabled_ = enabled; }
 
+    // Set interleaver parameters (must match TX)
+    void setInterleaverConfig(size_t bits_per_symbol);
+
     // ========================================================================
-    // PROCESSING
+    // STREAMING INTERFACE (NEW - replaces ModemEngine's feedAudio)
+    // ========================================================================
+
+    // Feed audio samples into the pipeline
+    // Samples are buffered and processed automatically
+    // Call this continuously with incoming audio data
+    void feedAudio(const float* samples, size_t count);
+    void feedAudio(const std::vector<float>& samples) { feedAudio(samples.data(), samples.size()); }
+
+    // Check if any decoded frames are available
+    bool hasFrame() const;
+
+    // Get the next decoded frame (removes it from queue)
+    // Returns empty result if no frames available
+    RxFrameResult getFrame();
+
+    // Get number of frames in queue
+    size_t getFrameCount() const;
+
+    // Get current buffer size (for monitoring)
+    size_t getBufferSize() const;
+
+    // ========================================================================
+    // LEGACY INTERFACE (for compatibility with existing code)
     // ========================================================================
 
     // Process a detected frame using the given waveform
@@ -78,6 +120,9 @@ public:
     // Reset internal state (between frames)
     void reset();
 
+    // Clear the audio buffer (call when switching modes)
+    void clearBuffer();
+
     // ========================================================================
     // STATE
     // ========================================================================
@@ -89,6 +134,10 @@ public:
 
 private:
     // Internal helpers
+
+    // Try to detect and process a frame from the buffer
+    // Returns true if a frame was found and processed
+    bool tryProcessBuffer();
 
     // Decode soft bits to frame data
     RxFrameResult decodeFrame(const std::vector<float>& soft_bits, int num_codewords);
@@ -117,6 +166,16 @@ private:
     std::vector<float> accumulated_soft_bits_;
     int expected_codewords_ = 0;
 
+    // Streaming state
+    IWaveform* waveform_ = nullptr;
+    std::vector<float> rx_buffer_;
+    std::queue<RxFrameResult> frame_queue_;
+    mutable std::mutex queue_mutex_;
+
+    // Interleaver
+    std::unique_ptr<ChannelInterleaver> interleaver_;
+    size_t interleaver_bits_per_symbol_ = 60;  // Default for OFDM (30 carriers × 2 bits)
+
     // Configuration
     CodeRate data_code_rate_ = CodeRate::R1_4;
     bool connected_ = false;
@@ -126,6 +185,10 @@ private:
     FrameDeliveryCallback frame_callback_;
     PingReceivedCallback ping_callback_;
     StatusCallback status_callback_;
+
+    // Constants
+    static constexpr size_t MIN_SAMPLES_FOR_SYNC = 48000;  // 1 second minimum
+    static constexpr size_t MAX_BUFFER_SIZE = 960000;      // 20 seconds max
 };
 
 } // namespace gui

@@ -54,6 +54,13 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         rx_sample_buffer_.clear();
     }
 
+    // ========================================================================
+    // NEW: Switch RxPipeline to use the new waveform
+    // ========================================================================
+    if (connected_) {
+        switchRxWaveform(mode);
+    }
+
     switch (mode) {
         case protocol::WaveformMode::MC_DPSK:
             dpsk_demodulator_->reset();
@@ -149,6 +156,14 @@ void ModemEngine::setConnected(bool connected) {
         decoder_->setRate(data_code_rate_);
         ofdm_demodulator_ = std::make_unique<OFDMDemodulator>(config_);
 
+        // ========================================================================
+        // NEW: Initialize RxPipeline for connected mode
+        // ========================================================================
+        switchRxWaveform(waveform_mode_);
+        if (rx_pipeline_) {
+            rx_pipeline_->setDataMode(data_code_rate_, true);
+        }
+
         LOG_MODEM(INFO, "Entered connected state, configured for %s %s (pilots=%d)",
                   modulationToString(data_modulation_), codeRateToString(data_code_rate_),
                   config_.use_pilots ? 1 : 0);
@@ -169,6 +184,15 @@ void ModemEngine::setConnected(bool connected) {
             rx_sample_buffer_.clear();
         }
         dpsk_demodulator_->reset();
+
+        // ========================================================================
+        // NEW: Clear RxPipeline when disconnecting
+        // ========================================================================
+        if (rx_pipeline_) {
+            rx_pipeline_->clearBuffer();
+            rx_pipeline_->setDataMode(CodeRate::R1_4, false);
+        }
+        active_rx_waveform_ = nullptr;
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)
         // Save the current negotiated waveform BEFORE it might be reset

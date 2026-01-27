@@ -43,6 +43,7 @@ sync::ChirpConfig OFDMChirpWaveform::getChirpConfig() const {
     cfg.duration_ms = 500.0f;
     cfg.gap_ms = 100.0f;
     cfg.use_dual_chirp = true;  // For CFO estimation
+    cfg.tx_cfo_hz = config_.tx_cfo_hz;  // Pass TX CFO for simulation
     return cfg;
 }
 
@@ -89,6 +90,16 @@ void OFDMChirpWaveform::setFrequencyOffset(float cfo_hz) {
     }
 }
 
+void OFDMChirpWaveform::setTxFrequencyOffset(float cfo_hz) {
+    // Set TX CFO on chirp sync and modulator for simulation
+    config_.tx_cfo_hz = cfo_hz;
+
+    // Reinitialize with new config to apply TX CFO
+    initComponents();
+
+    LOG_MODEM(INFO, "OFDMChirpWaveform: TX CFO set to %.1f Hz", cfo_hz);
+}
+
 Samples OFDMChirpWaveform::generatePreamble() {
     if (!chirp_sync_ || !modulator_) {
         return Samples();
@@ -131,17 +142,18 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
         synced_ = true;
         last_cfo_ = chirp_result.cfo_hz;
 
-        // Calculate where OFDM data starts
+        // Calculate where TRAINING starts (process() needs training for channel estimation)
         // Layout: [CHIRP][GAP][DOWN-CHIRP][GAP][TRAINING_SYMBOLS][DATA...]
+        //                                      ^-- start_sample points here
+        // process() calls processPresynced() which expects training symbols first
         size_t chirp_samples = chirp_sync_->getChirpSamples();
         size_t gap_samples = static_cast<size_t>(config_.sample_rate * 100.0f / 1000.0f);
-        size_t training_samples = 2 * getSamplesPerSymbol();  // 2 training OFDM symbols
 
         result.start_sample = chirp_result.up_chirp_start +
-                              2 * chirp_samples + 2 * gap_samples +
-                              training_samples;
+                              2 * chirp_samples + 2 * gap_samples;
+        // NOTE: Do NOT add training_samples - process() needs them for channel estimation
 
-        LOG_MODEM(INFO, "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, OFDM_start=%d",
+        LOG_MODEM(INFO, "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",
                   chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample);
     }
 
@@ -153,10 +165,10 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
         return false;
     }
 
-    // Apply CFO correction if we have an estimate
-    if (std::abs(cfo_hz_) > 0.1f) {
-        demodulator_->setFrequencyOffset(cfo_hz_);
-    }
+    // ALWAYS apply CFO from chirp detection - even 0 Hz is a valid estimate!
+    // The setFrequencyOffset() sets chirp_cfo_estimated=true which tells
+    // processPresynced() to trust this value instead of re-estimating.
+    demodulator_->setFrequencyOffset(cfo_hz_);
 
     // Use pre-synced processing (chirp provides timing)
     bool ready = demodulator_->processPresynced(samples, 2);
@@ -179,6 +191,9 @@ void OFDMChirpWaveform::reset() {
     }
     soft_bits_.clear();
     synced_ = false;
+    // NOTE: CFO is intentionally preserved across reset() for continuous tracking
+    // Use setFrequencyOffset(0) to explicitly clear if needed
+    // TX CFO in config_ is also preserved for simulation
 }
 
 bool OFDMChirpWaveform::isSynced() const {
@@ -276,6 +291,27 @@ int OFDMChirpWaveform::getPreambleSamples() const {
                                   : static_cast<int>(config_.sample_rate * 1.2f);  // ~1.2 sec default
     int training = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
     return chirp_total + training;
+}
+
+int OFDMChirpWaveform::getMinSamplesForFrame() const {
+    // Training symbols + minimum data for 1 codeword (648 bits)
+    int training_samples = 2 * getSamplesPerSymbol();  // 2 OFDM training symbols
+
+    // Data samples for 1 LDPC codeword (648 bits)
+    // For DQPSK: 2 bits per carrier
+    int bits_per_carrier = 2;  // DQPSK
+    switch (config_.modulation) {
+        case Modulation::DBPSK: bits_per_carrier = 1; break;
+        case Modulation::DQPSK: bits_per_carrier = 2; break;
+        case Modulation::D8PSK: bits_per_carrier = 3; break;
+        default: bits_per_carrier = 2; break;
+    }
+
+    int bits_per_symbol = static_cast<int>(config_.num_carriers) * bits_per_carrier;
+    int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+    int data_samples = data_symbols * getSamplesPerSymbol();
+
+    return training_samples + data_samples;
 }
 
 } // namespace ultra

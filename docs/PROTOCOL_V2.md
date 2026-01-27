@@ -177,24 +177,61 @@ Station A                          Station B
     │    (proceed to CONNECT if needed) │
 ```
 
-### Waveform Negotiation
+### Waveform & Code Rate Negotiation
 
-1. **CONNECT** always uses DPSK (reliable at low SNR)
-2. **CONNECT** frame includes MODE_CAPS bitmap of supported waveforms
-3. Responder selects best mutual waveform based on measured SNR
-4. **CONNECT_ACK** includes NEGOTIATED waveform mode
-5. Subsequent DATA frames use negotiated waveform
+#### Connection Establishment (Always MC-DPSK R1/4)
+
+**CONNECT and CONNECT_ACK frames MUST use MC-DPSK with code rate R1/4.**
+
+This ensures reliable initial contact even in poor channel conditions. The robust
+baseline allows stations to establish a connection before switching to faster modes.
+
+```
+CONNECT     → MC-DPSK, R1/4 (robust baseline for initial contact)
+CONNECT_ACK → MC-DPSK, R1/4 (contains negotiated mode for subsequent frames)
+```
+
+#### After Negotiation (All Codewords Use Negotiated Rate)
+
+Once CONNECT_ACK is received, **ALL subsequent frames use the negotiated configuration**:
+- Waveform: As specified in CONNECT_ACK `negotiated_mode`
+- Modulation: As specified in CONNECT_ACK `initial_modulation`
+- Code Rate: As specified in CONNECT_ACK `initial_code_rate`
+
+**Important:** The negotiated code rate applies to ALL codewords in a frame,
+including CW0 (the header codeword). There is no separate rate for headers
+after connection is established.
+
+#### Negotiation Flow
+
+1. **CONNECT** always uses MC-DPSK R1/4 (reliable at low SNR)
+2. **CONNECT** frame includes:
+   - MODE_CAPS bitmap of supported waveforms
+   - Optional forced mode (or 0xFF for AUTO)
+   - Optional forced modulation/rate (or 0xFF for AUTO)
+3. Responder measures channel SNR and selects best configuration from:
+   - Intersection of both stations' capabilities
+   - Channel conditions (SNR, fading)
+4. **CONNECT_ACK** includes negotiated (waveform, modulation, rate)
+5. All subsequent frames use the negotiated configuration
+
+#### Mid-Session Mode Changes
+
+If channel conditions change, either station can send a **MODE_CHANGE** frame
+to request a new configuration. MODE_CHANGE uses the current negotiated mode
+(not MC-DPSK R1/4) since the connection is already established.
 
 **MODE_CAPS Bitmap:**
 ```
-Bit 0 (0x01): OFDM supported
+Bit 0 (0x01): OFDM_COX supported
 Bit 1 (0x02): OTFS_EQ supported
 Bit 2 (0x04): OTFS_RAW supported
 Bit 3 (0x08): MFSK supported (reserved)
-Bit 4 (0x10): DPSK supported
-Bits 5-7: Reserved
+Bit 4 (0x10): MC-DPSK supported
+Bit 5 (0x20): OFDM_CHIRP supported
+Bits 6-7: Reserved
 
-ALL = 0x1F (all modes supported)
+ALL = 0x3F (all modes supported)
 ```
 
 ---
@@ -727,6 +764,10 @@ Start with R1/4 (most robust). If PROBE_ACK indicates SNR > 10dB, can negotiate 
 ---
 
 ## Version
+
+**v2.2 (2026-01-26)** - Clarified code rate negotiation rules:
+- CONNECT/CONNECT_ACK always use MC-DPSK R1/4 (robust baseline)
+- After negotiation, ALL codewords (including CW0) use negotiated rate
 
 **v2.1 (2026-01-24)** - Added Physical Layer section with OFDM/DPSK/OTFS specs, PING/PONG probe, waveform negotiation
 

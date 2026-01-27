@@ -45,6 +45,7 @@ public:
 
     void configure(Modulation mod, CodeRate rate) override;
     void setFrequencyOffset(float cfo_hz) override;
+    void setTxFrequencyOffset(float cfo_hz) override;
     Modulation getModulation() const override { return modulation_; }
     CodeRate getCodeRate() const override { return code_rate_; }
     float getFrequencyOffset() const override { return cfo_hz_; }
@@ -84,6 +85,7 @@ public:
     float getThroughput(CodeRate rate) const override;
     int getSamplesPerSymbol() const override { return config_.samples_per_symbol; }
     int getPreambleSamples() const override;
+    int getMinSamplesForFrame() const override;
 
     // ========================================================================
     // MC-DPSK Specific

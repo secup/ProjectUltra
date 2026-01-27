@@ -15,6 +15,7 @@
 #include "../adaptive_mode.hpp"
 #include "protocol/frame_v2.hpp"  // v2::FrameType
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
+#include "rx_pipeline.hpp"  // RxPipeline for streaming RX
 #include <memory>
 #include <vector>
 #include <queue>
@@ -209,6 +210,24 @@ private:
     // IWaveform abstraction for TX (gradually transitioning from direct modulators)
     // This will eventually replace the individual modulator pointers
     std::unique_ptr<IWaveform> active_tx_waveform_;
+
+    // ========================================================================
+    // NEW: IWaveform + RxPipeline for Connected Mode RX
+    // ========================================================================
+    // These replace the per-waveform processRxBuffer_* methods
+    // Each waveform type has its own IWaveform instance
+    std::unique_ptr<IWaveform> rx_waveform_ofdm_;      // OFDM_COX (Schmidl-Cox)
+    std::unique_ptr<IWaveform> rx_waveform_ofdm_chirp_;// OFDM_CHIRP (Chirp + OFDM)
+    std::unique_ptr<IWaveform> rx_waveform_mc_dpsk_;   // MC-DPSK (Chirp + DPSK)
+
+    // RxPipeline handles streaming decode (buffer, sync, demod, LDPC)
+    std::unique_ptr<RxPipeline> rx_pipeline_;
+
+    // Current active waveform for connected mode RX
+    IWaveform* active_rx_waveform_ = nullptr;
+
+    // Helper to switch waveform when mode changes
+    void switchRxWaveform(protocol::WaveformMode mode);
 
     // ========================================================================
     // RX ARCHITECTURE

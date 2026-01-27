@@ -75,6 +75,14 @@ void MCDPSKWaveform::setFrequencyOffset(float cfo_hz) {
     }
 }
 
+void MCDPSKWaveform::setTxFrequencyOffset(float cfo_hz) {
+    // Set TX CFO in config and reinitialize
+    config_.tx_cfo_hz = cfo_hz;
+    initComponents();
+
+    LOG_MODEM(INFO, "MCDPSKWaveform: TX CFO set to %.1f Hz", cfo_hz);
+}
+
 Samples MCDPSKWaveform::generatePreamble() {
     if (!modulator_) {
         return Samples();
@@ -107,26 +115,25 @@ bool MCDPSKWaveform::detectSync(SampleSpan samples, SyncResult& result, float th
         synced_ = true;
         last_cfo_ = chirp_result.cfo_hz;
 
-        // Calculate data start position
+        // Calculate where TRAINING starts (process() needs training+ref+data)
         // Layout: [CHIRP][GAP][DOWN-CHIRP][GAP][TRAINING][REF][DATA...]
+        //                                      ^-- start_sample points here
+        // processGotChirp() expects preamble (training+ref) followed by data
         size_t chirp_samples = chirp_sync_->getChirpSamples();
         size_t gap_samples = static_cast<size_t>(config_.sample_rate * config_.getChirpConfig().gap_ms / 1000.0f);
-        size_t training_samples = config_.training_symbols * config_.samples_per_symbol;
-        size_t ref_samples = config_.samples_per_symbol;
 
         if (config_.use_dual_chirp) {
             // After dual chirp: training starts after second gap
             result.start_sample = chirp_result.up_chirp_start +
-                                  2 * chirp_samples + 2 * gap_samples +
-                                  training_samples + ref_samples;
+                                  2 * chirp_samples + 2 * gap_samples;
         } else {
             // Single chirp
             result.start_sample = chirp_result.up_chirp_start +
-                                  chirp_samples + gap_samples +
-                                  training_samples + ref_samples;
+                                  chirp_samples + gap_samples;
         }
+        // NOTE: Do NOT add training_samples + ref_samples - process() needs them
 
-        LOG_MODEM(INFO, "MCDPSKWaveform: Chirp detected at %d, CFO=%.1f Hz, data_start=%d",
+        LOG_MODEM(INFO, "MCDPSKWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",
                   chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample);
     }
 
@@ -138,16 +145,22 @@ bool MCDPSKWaveform::process(SampleSpan samples) {
         return false;
     }
 
-    // Apply CFO correction if set
-    if (std::abs(cfo_hz_) > 0.1f) {
-        demodulator_->setCFO(cfo_hz_);
-    }
+    // Tell demodulator that chirp was already detected externally via detectSync()
+    // This puts it in GOT_CHIRP state so it processes data directly without
+    // looking for chirp in the samples
+    fprintf(stderr, "[MC-DPSK] process: setting CFO=%.1f Hz in demodulator\n", cfo_hz_);
+    demodulator_->setChirpDetected(cfo_hz_);
 
     // Process samples through demodulator
     bool ready = demodulator_->process(samples);
 
+    fprintf(stderr, "[MC-DPSK] process: input_samples=%zu, ready=%d, demod_cfo=%.1f\n",
+            samples.size(), ready, demodulator_->getEstimatedCFO());
+
     if (ready) {
-        soft_bits_ = demodulator_->demodulateSoft(samples);
+        // Get soft bits from demodulator's internal state (computed in processGotChirp)
+        soft_bits_ = demodulator_->getSoftBits();
+        fprintf(stderr, "[MC-DPSK] got %zu soft bits\n", soft_bits_.size());
         synced_ = true;
     }
 
@@ -164,6 +177,8 @@ void MCDPSKWaveform::reset() {
     }
     soft_bits_.clear();
     synced_ = false;
+    // NOTE: CFO is intentionally preserved across reset() for continuous tracking
+    // Use setFrequencyOffset(0) to explicitly clear if needed
 }
 
 bool MCDPSKWaveform::isSynced() const {
@@ -234,6 +249,19 @@ int MCDPSKWaveform::getPreambleSamples() const {
 void MCDPSKWaveform::setCarrierCount(int carriers) {
     config_.num_carriers = std::max(3, std::min(20, carriers));
     initComponents();
+}
+
+int MCDPSKWaveform::getMinSamplesForFrame() const {
+    // Training symbols + reference symbol + minimum data for 1 codeword (648 bits)
+    int training_samples = config_.training_symbols * config_.samples_per_symbol;
+    int ref_samples = config_.samples_per_symbol;
+
+    // Data samples for 1 LDPC codeword (648 bits)
+    int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+    int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+    int data_samples = data_symbols * config_.samples_per_symbol;
+
+    return training_samples + ref_samples + data_samples;
 }
 
 } // namespace ultra

@@ -72,6 +72,14 @@ void OFDMNvisWaveform::setFrequencyOffset(float cfo_hz) {
     }
 }
 
+void OFDMNvisWaveform::setTxFrequencyOffset(float cfo_hz) {
+    // Set TX CFO in config and reinitialize
+    config_.tx_cfo_hz = cfo_hz;
+    initComponents();
+
+    LOG_MODEM(INFO, "OFDMNvisWaveform: TX CFO set to %.1f Hz", cfo_hz);
+}
+
 Samples OFDMNvisWaveform::generatePreamble() {
     if (!modulator_) {
         return Samples();
@@ -134,6 +142,8 @@ void OFDMNvisWaveform::reset() {
         demodulator_->reset();
     }
     soft_bits_.clear();
+    // NOTE: CFO is intentionally preserved across reset() for continuous tracking
+    // Use setFrequencyOffset(0) to explicitly clear if needed
 }
 
 bool OFDMNvisWaveform::isSynced() const {
@@ -235,6 +245,37 @@ int OFDMNvisWaveform::getSamplesPerSymbol() const {
 int OFDMNvisWaveform::getPreambleSamples() const {
     // Schmidl-Cox preamble: 2 OFDM symbols (STS repeated, LTS for fine sync)
     return 2 * getSamplesPerSymbol();
+}
+
+int OFDMNvisWaveform::getMinSamplesForFrame() const {
+    // Training symbols + minimum data for 1 codeword (648 bits)
+    int training_samples = 2 * getSamplesPerSymbol();  // 2 training symbols
+
+    // Bits per carrier based on modulation
+    int bits_per_carrier = 2;  // Default QPSK
+    switch (config_.modulation) {
+        case Modulation::BPSK:
+        case Modulation::DBPSK: bits_per_carrier = 1; break;
+        case Modulation::QPSK:
+        case Modulation::DQPSK: bits_per_carrier = 2; break;
+        case Modulation::D8PSK: bits_per_carrier = 3; break;
+        case Modulation::QAM16: bits_per_carrier = 4; break;
+        case Modulation::QAM32: bits_per_carrier = 5; break;
+        case Modulation::QAM64: bits_per_carrier = 6; break;
+        default: bits_per_carrier = 2; break;
+    }
+
+    // Number of data carriers
+    int data_carriers = static_cast<int>(config_.num_carriers);
+    if (config_.use_pilots && config_.pilot_spacing > 0) {
+        data_carriers = config_.num_carriers - config_.num_carriers / config_.pilot_spacing;
+    }
+
+    int bits_per_symbol = data_carriers * bits_per_carrier;
+    int data_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
+    int data_samples = data_symbols * getSamplesPerSymbol();
+
+    return training_samples + data_samples;
 }
 
 void OFDMNvisWaveform::setUsePilots(bool use_pilots) {
