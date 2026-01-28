@@ -22,10 +22,13 @@ std::vector<Complex> OFDMDemodulator::Impl::toBaseband(SampleSpan samples) {
     // Phase increment per sample for frequency correction
     float phase_increment = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
 
-    // Log CFO correction on first symbol (when phase is near zero)
-    if (std::abs(freq_correction_phase) < 0.01f && std::abs(freq_offset_hz) > 0.01f) {
-        LOG_DEMOD(INFO, "toBaseband: CFO=%.2f Hz, phase_inc=%.6f rad/sample, samples=%zu",
-                  freq_offset_hz, phase_increment, samples.size());
+    // Log CFO correction
+    static int tb_call_count = 0;
+    if (std::abs(freq_offset_hz) > 0.01f && tb_call_count < 5) {
+        fprintf(stderr, "[toBaseband #%d] CFO=%.2f Hz, phase_inc=%.6f, start_phase=%.2f rad (%.1f deg), samples=%zu\n",
+                tb_call_count, freq_offset_hz, phase_increment, freq_correction_phase,
+                freq_correction_phase * 180.0f / M_PI, samples.size());
+        tb_call_count++;
     }
 
     for (size_t i = 0; i < samples.size(); ++i) {
@@ -170,14 +173,14 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
 
     if (valid_symbols == 0) return;
 
-    // For data carriers: use first symbol's H estimate instead of averaging
-    // Averaging causes magnitude reduction when CFO/timing causes phase rotation between symbols
-    // Using just the first symbol avoids this magnitude cancellation problem
+    // For data carriers: use LAST symbol's H estimate
+    // This is closest in time to the first data symbol, minimizing CFO-induced phase mismatch
+    // Using the first symbol caused decode failures at CFO=30 Hz due to 2-symbol phase drift
     if (valid_symbols > 0) {
         for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
             int idx = data_carrier_indices[i];
-            // Use first symbol's H estimate (avoid magnitude cancellation from averaging)
-            channel_estimate[idx] = h_per_symbol[0][i];
+            // Use last symbol's H estimate (minimize phase mismatch with first data symbol)
+            channel_estimate[idx] = h_per_symbol[num_symbols - 1][i];
         }
     }
 
@@ -224,67 +227,77 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     LOG_DEMOD(INFO, "LTS channel estimate: %zu symbols, |H|_avg=%.3f, phase_avg=%.1f°",
               valid_symbols, h_mag_avg, std::arg(h_avg) * 180.0f / M_PI);
 
-    // DEBUG: Print first few channel estimates
-    fprintf(stderr, "[LTS-DBG] First 5 H estimates: ");
+    // DEBUG: Print first few channel estimates from first and last training symbols
+    fprintf(stderr, "[LTS-DBG] H from sym0 (first 5): ");
     for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
-        int idx = data_carrier_indices[i];
-        fprintf(stderr, "(%.3f,%.3f) ", channel_estimate[idx].real(), channel_estimate[idx].imag());
+        fprintf(stderr, "%.0f° ", std::arg(h_per_symbol[0][i]) * 180.0f / M_PI);
+    }
+    fprintf(stderr, "\n");
+    fprintf(stderr, "[LTS-DBG] H from sym%zu (last, first 5): ", num_symbols - 1);
+    for (size_t i = 0; i < std::min(size_t(5), data_carrier_indices.size()); ++i) {
+        fprintf(stderr, "%.0f° ", std::arg(h_per_symbol[num_symbols - 1][i]) * 180.0f / M_PI);
     }
     fprintf(stderr, "\n");
 
     // === DQPSK PER-CARRIER PHASE REFERENCES ===
-    // With CFO and timing errors, different carriers have different phase offsets in the
-    // H estimates. The key insight is that the EQUALIZED training symbol captures all these
-    // phase errors, and using it as the DQPSK reference will cancel them in differential decoding.
+    // TX sends LTS with sync_sequence (Zadoff-Chu), BUT initializes dbpsk_prev_symbols to (1,0).
+    // So the first data symbol is encoded as: TX_data = (1,0) × DQPSK_phase, NOT sync_seq × DQPSK.
+    //
+    // With CFO and timing errors, different carriers have different phase offsets (φ) in H_est.
+    // RX needs a reference that has the SAME phase error as the equalized data symbol.
     //
     // Derivation:
-    //   1. Training: RX_train = sync_seq × H
-    //   2. H_est = RX_train / sync_seq = H (but with timing error, H_est = H × e^{jφ})
-    //   3. Equalized training: eq_train = RX_train / H_est = sync_seq × e^{-jφ}
-    //   4. First data: TX_data = sync_seq × DQPSK_sym, RX_data = TX_data × H
-    //   5. Equalized data: eq_data = RX_data / H_est = sync_seq × DQPSK_sym × e^{-jφ}
-    //   6. Differential: diff = eq_data × conj(eq_train)
-    //      = sync_seq × DQPSK_sym × e^{-jφ} × conj(sync_seq × e^{-jφ})
-    //      = DQPSK_sym  ✓  (phase errors cancel!)
+    //   1. TX first data: (1,0) × DQPSK_phase
+    //   2. RX received: (1,0) × DQPSK_phase × H
+    //   3. RX equalized: (1,0) × DQPSK_phase × H / H_est = (1,0) × DQPSK_phase × e^{-jφ}
+    //   4. RX reference: (1,0) × e^{-jφ} = conj(H) / |H| = conj(h_unit)
+    //   5. Differential: diff = eq_data × conj(eq_ref)
+    //      = (1,0) × DQPSK_phase × e^{-jφ} × conj((1,0) × e^{-jφ})
+    //      = DQPSK_phase  ✓  (phase errors cancel!)
     //
-    // If we use sync_sequence directly (without phase error):
-    //      diff = sync_seq × DQPSK_sym × e^{-jφ} × conj(sync_seq)
-    //      = DQPSK_sym × e^{-jφ}  ✗  (phase error remains!)
-    //
-    // Therefore, we store the ACTUAL equalized training symbol, not sync_sequence.
+    // CRITICAL: The RX reference must be (1,0) × e^{-jφ} = conj(h_unit), NOT sync_seq × e^{-jφ}.
+    // This was a bug that caused first symbol decode errors when interleaving was enabled.
 
     lts_carrier_phases.resize(data_carrier_indices.size());
 
-    // Reprocess the LAST training symbol to get the equalized values
-    // (This is what we want as the DQPSK reference for the first data symbol)
-    // Note: The mixer has already advanced through all training symbols, so we need
-    // to use the freq values from the last symbol that we processed in the loop above.
-    // We already have h_per_symbol which contains the raw freq values for each symbol.
-    // To get equalized: eq[i] = RX[i] / H_est[i] = RX[i] × conj(H) / |H|²
+    // Compute the DQPSK reference for each carrier.
+    //
+    // Key insight: channel_estimate now uses LAST training symbol's H for consistency.
+    // The first DATA symbol is 1 symbol after the last training symbol.
+    // With CFO correction, there's a phase advance of 1 symbol between them.
+    //
+    // The equalized first data symbol has:
+    //   eq_data = FFT(corrected_data0) / H_last
+    //   = TX_data × H × e^{j×φ_data0} / (H × e^{j×φ_last})
+    //   = TX_data × e^{j×(φ_data0 - φ_last)}
+    //   = TX_data × e^{j×phase_per_symbol}  (1 symbol of phase advance)
+    //
+    // For DQPSK to work, the reference must have the same phase:
+    //   eq_ref = (1,0) × e^{j×phase_per_symbol}
 
-    // Actually, we can compute it directly from the last training symbol's freq values
-    // and the channel estimate. But h_per_symbol stores H estimates (RX/TX), not raw RX.
-    // So: RX = H_est × TX = h_per_symbol × sync_sequence
-    // And: eq = RX / H_est = sync_seq (ideally)
-    // But with phase errors in H_est: eq = sync_seq × e^{-jφ}
-    // This is exactly: eq = sync_seq × conj(H)/|H| when H has phase φ
+    float phase_inc = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
+    float phase_per_symbol = phase_inc * symbol_samples;
+
+    // Phase advance from last training to first data: 1 symbol
+    Complex phase_advance(std::cos(phase_per_symbol), std::sin(phase_per_symbol));
+
+    fprintf(stderr, "[LTS-DBG] CFO=%.1f Hz, phase_per_sym=%.0f°, phase_advance=(%.3f,%.3f)\n",
+            freq_offset_hz, phase_per_symbol * 180.0f / M_PI,
+            phase_advance.real(), phase_advance.imag());
 
     for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-        int idx = data_carrier_indices[i];
-        Complex h = channel_estimate[idx];
-        Complex tx = sync_sequence[i % sync_sequence.size()];
-
-        // The equalized training symbol is: eq = RX / H = (TX × H) / H
-        // With timing error: H_est has phase error φ, so:
-        //   eq = (TX × H_true) / H_est = TX × H_true / (H_true × e^{jφ}) = TX × e^{-jφ}
-        //   eq = sync_seq[i] × e^{-jφ} = sync_seq[i] × conj(H) / |H|  (since H has phase φ)
-        if (std::abs(h) > 1e-6f) {
-            Complex h_unit = h / std::abs(h);
-            // eq_train = sync_seq × e^{-j×arg(H)} = sync_seq × conj(h_unit)
-            lts_carrier_phases[i] = tx * std::conj(h_unit);
-        } else {
-            lts_carrier_phases[i] = tx;  // Fallback to sync_sequence
-        }
+        // With correct initial CFO phase (set in setFrequencyOffsetWithPhase), the CFO
+        // is FULLY compensated:
+        //   - Signal has phase: +2π × CFO × (training_start + n) / sr
+        //   - Correction has phase: -2π × CFO × (training_start + n) / sr
+        //   - These cancel exactly, so corrected signal = TX signal
+        //
+        // This means equalized symbols equal TX symbols with NO extra phase.
+        // TX initializes dbpsk_prev_symbols to (1,0), so reference = (1,0).
+        //
+        // NOTE: phase_advance was needed when CFO correction started at 0 instead of
+        // the accumulated phase. With correct initial phase, no compensation needed.
+        lts_carrier_phases[i] = Complex(1.0f, 0.0f);
     }
 
     // Also compute a single phase offset for backwards compatibility
@@ -297,7 +310,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     avg_h /= static_cast<float>(data_carrier_indices.size());
     lts_phase_offset = avg_h / std::abs(avg_h + Complex(1e-10f, 0));
 
-    fprintf(stderr, "[LTS-DBG] DQPSK eq_train phases (first 5): ");
+    fprintf(stderr, "[LTS-DBG] DQPSK ref phases (first 5): ");
     for (size_t i = 0; i < std::min(size_t(5), lts_carrier_phases.size()); ++i) {
         fprintf(stderr, "%.0f° ", std::arg(lts_carrier_phases[i]) * 180.0f / M_PI);
     }

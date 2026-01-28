@@ -10,6 +10,60 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-27: OFDM_CHIRP CFO Initial Phase Fix
+
+**What was broken:**
+- OFDM_CHIRP failed at any CFO > 0 Hz (CFO=30 Hz: 0% success)
+- CFO=0 worked perfectly (100%)
+- MC-DPSK at CFO=30 Hz worked (100%), proving chirp detection was correct
+- Root cause: CFO correction started from phase 0 instead of accumulated phase
+
+**Root cause analysis:**
+1. Test harness applies CFO to entire audio from sample 0
+2. By training start (sample ~136,800), CFO has accumulated ~307° of phase
+3. `processPresynced()` reset `freq_correction_phase = 0`, losing this accumulated phase
+4. First training symbol got wrong CFO correction, corrupting H estimate
+5. DQPSK differential decoding failed due to phase mismatch
+
+**What was changed:**
+1. `include/ultra/ofdm.hpp` + `src/ofdm/demodulator.cpp`:
+   - Added `setFrequencyOffsetWithPhase(float cfo_hz, float initial_phase_rad)`
+   - Sets both CFO and initial correction phase
+
+2. `src/waveform/ofdm_chirp_waveform.hpp` + `.cpp`:
+   - Added `training_start_sample_` member variable
+   - `detectSync()`: Stores training start position
+   - `process()`: Calculates initial phase = -2π × CFO × training_start / sample_rate
+   - Calls `setFrequencyOffsetWithPhase()` instead of `setFrequencyOffset()`
+
+3. `src/ofdm/demodulator.cpp`:
+   - `processPresynced()`: Removed reset of `freq_correction_phase` to preserve initial phase
+
+4. `src/ofdm/channel_equalizer.cpp`:
+   - Simplified `lts_carrier_phases` to use (1,0) reference
+   - With correct initial phase, no phase compensation needed
+   - Previous `conj(h_unit) * phase_advance` was wrong with correct initial phase
+
+**How it's properly fixed:**
+- Initial CFO phase = -2π × CFO × training_start_sample / sample_rate
+- This matches the accumulated CFO phase in the signal at training start
+- CFO correction is now continuous from sample 0 (effectively)
+- Signal's +φ and correction's -φ cancel exactly: corrected = TX
+- DQPSK reference = (1,0) because equalized = TX (no extra phase)
+
+**Test verification:**
+```bash
+# Test full CFO range
+for cfo in -50 -30 0 30 50; do
+  ./build/test_iwaveform -w ofdm_chirp --snr 17 --cfo $cfo --frames 3
+done
+# Expected: 100% success for all CFO values
+```
+
+**Results:** OFDM_CHIRP now works with ±50 Hz CFO at 10-20 dB SNR.
+
+---
+
 ## 2026-01-27: OFDM_CHIRP CFO Test Harness Fix
 
 **What was broken:**

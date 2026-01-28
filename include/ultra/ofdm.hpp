@@ -82,6 +82,12 @@ public:
     // Use when CFO is estimated externally (e.g., from chirp preamble)
     void setFrequencyOffset(float cfo_hz);
 
+    // Set frequency offset with initial phase (for continuous CFO tracking)
+    // initial_phase_rad: the accumulated CFO phase at the start of samples
+    // This is needed when processing starts at a known position in the audio stream
+    // where CFO has already accumulated phase = 2π × CFO × elapsed_samples / sample_rate
+    void setFrequencyOffsetWithPhase(float cfo_hz, float initial_phase_rad);
+
     // Get equalized symbols for constellation display
     Symbol getConstellationSymbols() const;
 

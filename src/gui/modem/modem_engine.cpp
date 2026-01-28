@@ -284,15 +284,39 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         bool use_interleaving = interleaving_enabled_ && channel_interleaver_ &&
                                 (tx_waveform == protocol::WaveformMode::OFDM_COX ||
                                  tx_waveform == protocol::WaveformMode::OFDM_CHIRP);
-        for (const auto& cw : encoded_cws) {
+        LOG_MODEM(INFO, "TX v2: interleaving=%d (enabled=%d, interleaver=%p, waveform=%d)",
+                  use_interleaving, interleaving_enabled_, (void*)channel_interleaver_.get(),
+                  static_cast<int>(tx_waveform));
+        for (size_t cw_idx = 0; cw_idx < encoded_cws.size(); cw_idx++) {
+            const auto& cw = encoded_cws[cw_idx];
             if (use_interleaving) {
+                // Debug: show first 10 bytes BEFORE interleaving
+                if (cw_idx == 0 && cw.size() >= 10) {
+                    LOG_MODEM(INFO, "TX v2 CW0: BEFORE interleave bytes 0-9: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                              cw[0], cw[1], cw[2], cw[3], cw[4], cw[5], cw[6], cw[7], cw[8], cw[9]);
+                }
                 Bytes interleaved = channel_interleaver_->interleave(cw);
+                // Debug: show first 10 bytes AFTER interleaving
+                if (cw_idx == 0 && interleaved.size() >= 10) {
+                    LOG_MODEM(INFO, "TX v2 CW0: AFTER interleave bytes 0-9: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                              interleaved[0], interleaved[1], interleaved[2], interleaved[3], interleaved[4],
+                              interleaved[5], interleaved[6], interleaved[7], interleaved[8], interleaved[9]);
+                }
                 to_modulate.insert(to_modulate.end(), interleaved.begin(), interleaved.end());
             } else {
                 to_modulate.insert(to_modulate.end(), cw.begin(), cw.end());
             }
         }
 
+        // Print as bits for easier comparison with RX soft bits
+        if (to_modulate.size() > 0) {
+            LOG_MODEM(INFO, "TX v2: First byte 0x%02x as bits: %d%d%d%d%d%d%d%d",
+                      to_modulate[0],
+                      (to_modulate[0] >> 7) & 1, (to_modulate[0] >> 6) & 1,
+                      (to_modulate[0] >> 5) & 1, (to_modulate[0] >> 4) & 1,
+                      (to_modulate[0] >> 3) & 1, (to_modulate[0] >> 2) & 1,
+                      (to_modulate[0] >> 1) & 1, (to_modulate[0] >> 0) & 1);
+        }
         LOG_MODEM(INFO, "TX v2: Total encoded %zu bytes, first 8: %02x %02x %02x %02x %02x %02x %02x %02x",
                   to_modulate.size(),
                   to_modulate.size() > 0 ? to_modulate[0] : 0,

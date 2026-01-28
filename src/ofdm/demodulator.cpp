@@ -236,37 +236,34 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
     // TX initializes dbpsk_prev_symbols to (1,0) in generateTrainingSymbols(), so first data
     // symbol is encoded relative to (1,0), NOT relative to the training symbol (sync_sequence).
     //
-    // With CFO and timing errors, each carrier has a different phase offset in its H estimate.
-    // Using sync_sequence directly as reference causes decoding errors because:
-    //   equalized_data = sync_seq × DQPSK_sym × e^{-jφ}  (has phase error)
-    //   diff = eq_data × conj(sync_seq) = DQPSK_sym × e^{-jφ}  (error remains!)
-    //
-    // The fix: use the ACTUAL EQUALIZED training symbol as reference:
-    //   eq_train = sync_seq × e^{-jφ}  (same phase error as data)
-    //   diff = eq_data × conj(eq_train) = DQPSK_sym  (errors cancel!)
+    // With CFO and timing errors, each carrier has a different phase offset (φ) in its H estimate.
+    // The RX reference must be (1,0) × e^{-jφ} = conj(h_unit) to match TX:
+    //   TX first data: (1,0) × DQPSK_phase
+    //   RX equalized: (1,0) × DQPSK_phase × e^{-jφ}
+    //   RX reference: (1,0) × e^{-jφ} = conj(h_unit)
+    //   diff = eq × conj(ref) = DQPSK_phase  ✓  (phase errors cancel!)
     //
     // The lts_carrier_phases array is computed in estimateChannelFromLTS() and contains
-    // the equalized training symbol: sync_seq × conj(H)/|H| = sync_seq × e^{-j×arg(H)}
+    // the DQPSK reference: (1,0) × e^{-j×arg(H)} = conj(H)/|H|
     if ((mod == Modulation::DQPSK || mod == Modulation::D8PSK) && dbpsk_prev_equalized.empty()) {
         dbpsk_prev_equalized.resize(equalized.size());
 
         if (!lts_carrier_phases.empty() && lts_carrier_phases.size() == equalized.size()) {
-            // Use the actual equalized training symbol (captures all phase errors)
-            // This is the correct approach that cancels phase errors in differential decoding
+            // Use the computed DQPSK reference (captures all phase errors)
             for (size_t i = 0; i < equalized.size(); ++i) {
                 dbpsk_prev_equalized[i] = lts_carrier_phases[i];
             }
-            LOG_DEMOD(DEBUG, "DQPSK: Using eq_train reference (first 3: %.0f° %.0f° %.0f°)",
+            LOG_DEMOD(DEBUG, "DQPSK: Using (1,0)×e^{-jφ} reference (first 3: %.0f° %.0f° %.0f°)",
                       std::arg(dbpsk_prev_equalized[0]) * 180.0f / M_PI,
                       equalized.size() > 1 ? std::arg(dbpsk_prev_equalized[1]) * 180.0f / M_PI : 0.0f,
                       equalized.size() > 2 ? std::arg(dbpsk_prev_equalized[2]) * 180.0f / M_PI : 0.0f);
         } else if (!sync_sequence.empty() && sync_sequence.size() >= equalized.size()) {
-            // Fallback: use sync_sequence if lts_carrier_phases not available
-            // This works when there's no timing error (CFO=0)
+            // Fallback: use (1,0) if lts_carrier_phases not available (CFO=0 case)
+            // Note: this fallback is WRONG if sync_sequence is not (1,0)
             for (size_t i = 0; i < equalized.size(); ++i) {
-                dbpsk_prev_equalized[i] = sync_sequence[i];
+                dbpsk_prev_equalized[i] = Complex(1, 0);  // Use (1,0), NOT sync_sequence
             }
-            LOG_DEMOD(DEBUG, "DQPSK: Fallback to sync_sequence (first 3: %.0f° %.0f° %.0f°)",
+            LOG_DEMOD(DEBUG, "DQPSK: Fallback to (1,0) (first 3: %.0f° %.0f° %.0f°)",
                       std::arg(dbpsk_prev_equalized[0]) * 180.0f / M_PI,
                       equalized.size() > 1 ? std::arg(dbpsk_prev_equalized[1]) * 180.0f / M_PI : 0.0f,
                       equalized.size() > 2 ? std::arg(dbpsk_prev_equalized[2]) * 180.0f / M_PI : 0.0f);
@@ -816,6 +813,17 @@ void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
     impl_->chirp_cfo_estimated = true;
 }
 
+void OFDMDemodulator::setFrequencyOffsetWithPhase(float cfo_hz, float initial_phase_rad) {
+    LOG_DEMOD(INFO, "setFrequencyOffsetWithPhase: CFO=%.2f Hz, initial_phase=%.1f° (was CFO=%.2f Hz)",
+              cfo_hz, initial_phase_rad * 180.0f / M_PI, impl_->freq_offset_hz);
+    impl_->freq_offset_hz = cfo_hz;
+    impl_->freq_offset_filtered = cfo_hz;
+    // Set initial correction phase to match accumulated CFO phase at this point
+    impl_->freq_correction_phase = initial_phase_rad;
+    // Mark that CFO was explicitly provided
+    impl_->chirp_cfo_estimated = true;
+}
+
 Symbol OFDMDemodulator::getConstellationSymbols() const {
     std::lock_guard<std::mutex> lock(impl_->constellation_mutex);
     return impl_->constellation_symbols;
@@ -871,12 +879,14 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
     impl_->estimated_snr_linear = 1.0f;
     impl_->noise_variance = 0.1f;
 
-    // Preserve pre-set CFO (e.g., from chirp-based estimation)
-    // Only reset the correction phase so it starts fresh
+    // Preserve pre-set CFO and phase (e.g., from chirp-based estimation)
+    // If CFO was explicitly set via setFrequencyOffsetWithPhase(), the phase
+    // contains the accumulated CFO phase at processing start - DON'T reset it!
     // impl_->freq_offset_hz = 0.0f;  // KEEP the pre-set value!
     // impl_->freq_offset_filtered = 0.0f;  // KEEP the pre-set value!
-    impl_->freq_correction_phase = 0.0f;
-    LOG_SYNC(INFO, "processPresynced: pre-set CFO=%.2f Hz, phase reset to 0", impl_->freq_offset_hz);
+    // impl_->freq_correction_phase = 0.0f;  // KEEP the pre-set value if explicitly set!
+    LOG_SYNC(INFO, "processPresynced: pre-set CFO=%.2f Hz, initial_phase=%.1f°",
+             impl_->freq_offset_hz, impl_->freq_correction_phase * 180.0f / M_PI);
     impl_->symbols_since_sync = 0;
     impl_->prev_pilot_phases.clear();
     impl_->pilot_phase_correction = Complex(1, 0);

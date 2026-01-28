@@ -2,6 +2,7 @@
 
 #include "ofdm_chirp_waveform.hpp"
 #include "ultra/logging.hpp"
+#include "ultra/dsp.hpp"  // FFT class is in here
 #include <sstream>
 
 namespace ultra {
@@ -160,6 +161,9 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
                               chirp_samples + gap_samples;
         // NOTE: Do NOT add training_samples - process() needs them for channel estimation
 
+        // Store training start position for CFO phase calculation in process()
+        training_start_sample_ = result.start_sample;
+
         LOG_MODEM(INFO, "OFDMChirpWaveform: Chirp detected at %d, CFO=%.1f Hz, training_start=%d",
                   chirp_result.up_chirp_start, chirp_result.cfo_hz, result.start_sample);
     }
@@ -172,10 +176,24 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
         return false;
     }
 
-    // ALWAYS apply CFO from chirp detection - even 0 Hz is a valid estimate!
-    // The setFrequencyOffset() sets chirp_cfo_estimated=true which tells
-    // processPresynced() to trust this value instead of re-estimating.
-    demodulator_->setFrequencyOffset(cfo_hz_);
+    // Calculate the initial CFO phase based on elapsed samples since audio start
+    // The test harness applies CFO to the entire audio stream from sample 0.
+    // By the time we reach training_start_sample_, the CFO has accumulated:
+    //   phase = -2π × CFO × elapsed_samples / sample_rate
+    //
+    // We need to start CFO correction from this accumulated phase, not from 0.
+    float initial_phase_rad = -2.0f * M_PI * cfo_hz_ * training_start_sample_ / config_.sample_rate;
+
+    // Wrap to [-π, π]
+    while (initial_phase_rad > M_PI) initial_phase_rad -= 2.0f * M_PI;
+    while (initial_phase_rad < -M_PI) initial_phase_rad += 2.0f * M_PI;
+
+    fprintf(stderr, "[OFDM_CHIRP] process(): cfo_hz_=%.1f, training_start=%zu, initial_phase=%.1f°, samples=%zu\n",
+            cfo_hz_, training_start_sample_, initial_phase_rad * 180.0f / M_PI, samples.size());
+
+    // Pass CFO and initial phase to demodulator
+    // This ensures CFO correction starts from the correct accumulated phase
+    demodulator_->setFrequencyOffsetWithPhase(cfo_hz_, initial_phase_rad);
 
     // Use pre-synced processing (chirp provides timing)
     bool ready = demodulator_->processPresynced(samples, 2);

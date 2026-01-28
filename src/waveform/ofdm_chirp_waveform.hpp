@@ -109,6 +109,10 @@ private:
     float last_cfo_ = 0.0f;
     bool synced_ = false;
     std::vector<float> soft_bits_;
+
+    // Sample position where training starts (from detectSync)
+    // Used to calculate initial CFO phase for correct phase tracking
+    size_t training_start_sample_ = 0;
 };
 
 } // namespace ultra

@@ -352,7 +352,11 @@ int main(int argc, char** argv) {
         tx_modem.setLogPrefix("TX");
         tx_modem.setWaveformMode(waveform_mode);
         tx_modem.setConnectWaveform(waveform_mode);
-        tx_modem.setInterleavingEnabled(false);
+        // Enable interleaving for OFDM modes (spreads burst errors from fading)
+        // MC-DPSK doesn't use interleaving
+        tx_modem.setInterleavingEnabled(is_ofdm_mode);
+        fprintf(stderr, "[DEBUG] TX interleaving set to: %d (is_ofdm_mode=%d)\n", is_ofdm_mode, is_ofdm_mode);
+        fflush(stderr);
         tx_modem.setFilterEnabled(false);
 
         if (waveform_mode == protocol::WaveformMode::MC_DPSK) {
@@ -365,7 +369,7 @@ int main(int argc, char** argv) {
             tx_modem.setConnected(true);
             tx_modem.setHandshakeComplete(true);
             tx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
-            printf("OFDM mode: Using DATA frames with %s modulation, code rate R1/2\n",
+            printf("OFDM mode: Using DATA frames with %s modulation, code rate R1/2, interleaving=ON\n",
                    waveform_mode == protocol::WaveformMode::OFDM_CHIRP ? "DQPSK" : "configured");
         }
 
@@ -572,6 +576,56 @@ int main(int argc, char** argv) {
         // so we still need to search for frames. But we use ONE waveform instance.
         OFDMChirpWaveform waveform;
 
+        // Channel deinterleaver - MUST match TX interleaver config
+        // OFDM_CHIRP uses 30 data carriers × 2 bits (DQPSK) = 60 bits/symbol
+        ChannelInterleaver deinterleaver(60, v2::LDPC_CODEWORD_BITS);
+
+        // Test interleaver roundtrip - using BYTES interleave (like TX) + soft deinterleave (like RX)
+        // IMPORTANT: Use correct LLR convention: positive=bit0, negative=bit1
+        {
+            // Create test bytes (81 bytes = 648 bits for one codeword)
+            Bytes test_bytes(81);
+            for (size_t i = 0; i < test_bytes.size(); i++) {
+                test_bytes[i] = static_cast<uint8_t>(i);  // Known pattern
+            }
+
+            // Interleave using BYTES method (like TX does)
+            Bytes interleaved_bytes = deinterleaver.interleave(test_bytes);
+
+            // Convert interleaved bytes to soft bits (like RX receives)
+            // CORRECT LLR convention: bit=0 → +10.0, bit=1 → -10.0
+            std::vector<float> soft_bits(v2::LDPC_CODEWORD_BITS);
+            for (size_t i = 0; i < interleaved_bytes.size(); i++) {
+                for (int b = 0; b < 8 && i * 8 + b < v2::LDPC_CODEWORD_BITS; b++) {
+                    int bit = (interleaved_bytes[i] >> (7 - b)) & 1;
+                    soft_bits[i * 8 + b] = bit ? -10.0f : 10.0f;  // CORRECTED convention
+                }
+            }
+
+            // Deinterleave soft bits (like RX does)
+            auto deinterleaved = deinterleaver.deinterleave(soft_bits);
+
+            // Convert original bytes to soft bits for comparison (same convention)
+            std::vector<float> original_soft(v2::LDPC_CODEWORD_BITS);
+            for (size_t i = 0; i < test_bytes.size(); i++) {
+                for (int b = 0; b < 8 && i * 8 + b < v2::LDPC_CODEWORD_BITS; b++) {
+                    int bit = (test_bytes[i] >> (7 - b)) & 1;
+                    original_soft[i * 8 + b] = bit ? -10.0f : 10.0f;  // CORRECTED convention
+                }
+            }
+
+            // Compare
+            bool match = true;
+            for (size_t i = 0; i < original_soft.size() && match; i++) {
+                if (std::abs(original_soft[i] - deinterleaved[i]) > 0.01f) {
+                    printf("  [INTERLEAVER TEST] Mismatch at %zu: %.2f vs %.2f\n",
+                           i, original_soft[i], deinterleaved[i]);
+                    match = false;
+                }
+            }
+            printf("  [INTERLEAVER TEST] Bytes->Soft roundtrip %s\n", match ? "PASSED" : "FAILED");
+        }
+
         // Search through audio for frames (single waveform instance)
         size_t search_pos = 0;
         size_t min_gap = 48000;  // 1 second minimum between frames
@@ -599,8 +653,9 @@ int main(int argc, char** argv) {
                     // Limit data span to approximately one frame's worth of samples
                     // OFDM_CHIRP frame data is about 11 OFDM symbols (648 bits / 60 bits per symbol)
                     // Each symbol is ~564 samples, so ~6200 samples of data
-                    // Add some margin for training (2 symbols = 1128 samples) and safety
-                    size_t max_frame_samples = 15000;  // ~312ms at 48kHz, plenty for one frame
+                    // Add training (2 symbols = 1128 samples) = ~7400 samples total
+                    // Use 8000 samples to avoid processing noise/next frame as data
+                    size_t max_frame_samples = 8000;  // ~166ms at 48kHz, one frame worth
                     size_t span_size = std::min(search_span.size() - data_start, max_frame_samples);
                     SampleSpan data_span(search_span.data() + data_start, span_size);
                     waveform.process(data_span);
@@ -611,8 +666,33 @@ int main(int argc, char** argv) {
                         // Decode CW0 (header) - DATA frames use ofdm_code_rate for ALL codewords
                         std::vector<float> cw0_bits(soft_bits.begin(),
                                                     soft_bits.begin() + v2::LDPC_CODEWORD_BITS);
-                        printf("  [DEBUG] First 5 LLRs: %.2f %.2f %.2f %.2f %.2f\n",
-                               cw0_bits[0], cw0_bits[1], cw0_bits[2], cw0_bits[3], cw0_bits[4]);
+                        // Print RX soft bits BEFORE deinterleaving
+                        printf("  [DEBUG] RX BEFORE deinterleave, first 24 LLRs (3 bytes):\n");
+                        for (int i = 0; i < 24; i++) {
+                            printf("    bit[%2d] = %+6.1f\n", i, cw0_bits[i]);
+                        }
+                        printf("  [DEBUG] RX BEFORE deinterleave, bytes 0-9:\n");
+                        for (int bi = 0; bi < 10; bi++) {
+                            int byte_val = 0;
+                            for (int b = 0; b < 8; b++) {
+                                if (cw0_bits[bi * 8 + b] < 0) byte_val |= (1 << (7 - b));
+                            }
+                            printf("    byte[%d] = 0x%02x\n", bi, byte_val);
+                        }
+
+                        // Now deinterleave
+                        cw0_bits = deinterleaver.deinterleave(cw0_bits);
+
+                        // Print AFTER deinterleaving (should match original TX LDPC-encoded bytes)
+                        // Show first 10 bytes for comparison
+                        printf("  [DEBUG] RX AFTER deinterleave, bytes 0-9:\n");
+                        for (int bi = 0; bi < 10; bi++) {
+                            int byte_val = 0;
+                            for (int b = 0; b < 8; b++) {
+                                if (cw0_bits[bi * 8 + b] < 0) byte_val |= (1 << (7 - b));
+                            }
+                            printf("    byte[%d] = 0x%02x\n", bi, byte_val);
+                        }
                         LDPCDecoder decoder(ofdm_code_rate);
                         Bytes cw0_data = decoder.decodeSoft(cw0_bits);
                         printf("  [DEBUG] CW0 LDPC decode: success=%d, size=%zu\n",
@@ -644,6 +724,8 @@ int main(int argc, char** argv) {
                                     }
                                     std::vector<float> cw_bits(soft_bits.begin() + offset,
                                                                soft_bits.begin() + offset + v2::LDPC_CODEWORD_BITS);
+                                    // Deinterleave before LDPC decode
+                                    cw_bits = deinterleaver.deinterleave(cw_bits);
                                     // ALL codewords use the same rate for DATA frames
                                     decoder.setRate(ofdm_code_rate);
                                     Bytes cw_data = decoder.decodeSoft(cw_bits);
