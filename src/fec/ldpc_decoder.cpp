@@ -542,24 +542,33 @@ std::vector<float> Interleaver::deinterleave(std::span<const float> soft_bits) {
 // ============ ChannelInterleaver ============
 // 2D time-frequency interleaver for OFDM on fading channels
 
-// Find a prime number >= n that's coprime with total_bits
+// Find a number coprime with total that gives good symbol separation
+// For fading channels, we want consecutive bits spread across many symbols
 static size_t findCoprimeStep(size_t n, size_t total) {
-    // Start with a number slightly larger than n
-    size_t step = n + 1;
-
-    // Find next number coprime with total
-    while (step < total) {
-        // Check if coprime using GCD
-        size_t a = step, b = total;
+    auto gcd = [](size_t a, size_t b) {
         while (b != 0) {
             size_t t = b;
             b = a % b;
             a = t;
         }
-        if (a == 1) return step;  // GCD is 1, coprime
-        step++;
+        return a;
+    };
+
+    // Target: spread across at least 3 symbols (step >= 3 * bits_per_symbol)
+    // This gives consecutive bits landing in symbols that are 3+ apart
+    size_t target_step = n * 3;
+    if (target_step >= total) target_step = total / 2;  // Fallback for small totals
+
+    // Find coprime step starting near target
+    for (size_t step = target_step; step < total; step++) {
+        if (gcd(step, total) == 1) return step;
     }
-    return n + 1;  // Fallback
+
+    // Fallback: search from n+1 (original behavior)
+    for (size_t step = n + 1; step < total; step++) {
+        if (gcd(step, total) == 1) return step;
+    }
+    return n + 1;
 }
 
 ChannelInterleaver::ChannelInterleaver(size_t bits_per_symbol, size_t total_bits)
