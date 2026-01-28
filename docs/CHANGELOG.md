@@ -10,6 +10,34 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-27: Improved Channel Interleaver Symbol Separation
+
+**What was broken:**
+- OFDM_CHIRP fading performance was lower than expected (~60% on good HF)
+- Interleaver only separated consecutive bits by 1 symbol (step=61, separation=1)
+- Burst errors from fading affected adjacent bits, making LDPC correction harder
+
+**What was changed:**
+- `src/fec/ldpc_decoder.cpp`: Modified `findCoprimeStep()` to target step = 3 × bits_per_symbol
+- For 60 bits/symbol: step changed from 61 to 181, separation from 1 to 3
+
+**How it's properly fixed:**
+- Consecutive input bits now land in OFDM symbols 3 apart instead of adjacent
+- When fading causes a burst error in one symbol, the affected bits are spread
+  across the codeword after deinterleaving
+- LDPC can correct scattered errors better than clustered errors
+
+**Test verification:**
+```bash
+# Good HF channel at 20 dB
+for seed in 1 2 3 4 5; do
+  ./build/test_iwaveform --snr 20 -w ofdm_chirp --channel good --frames 5 --seed $seed
+done
+# Expected: 80-100% (was 60-100%)
+```
+
+---
+
 ## 2026-01-27: OFDM_CHIRP CFO Initial Phase Fix
 
 **What was broken:**
