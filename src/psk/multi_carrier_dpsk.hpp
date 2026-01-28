@@ -330,7 +330,14 @@ public:
     float getEstimatedCFO() const { return cfo_hz_; }
 
     // Set CFO (from external estimation like dual chirp)
-    void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; }
+    void setCFO(float cfo_hz) { cfo_hz_ = cfo_hz; cfo_initial_phase_ = 0.0f; }
+
+    // Set CFO with initial phase (for continuous audio streams where CFO has accumulated)
+    // initial_phase_rad: the accumulated CFO phase at the start of samples
+    void setCFOWithPhase(float cfo_hz, float initial_phase_rad) {
+        cfo_hz_ = cfo_hz;
+        cfo_initial_phase_ = initial_phase_rad;
+    }
 
     // Apply CFO correction to external samples (public wrapper for applyCFOCorrection)
     // Call this on samples BEFORE demodulation when using direct demodulateSoft() path
@@ -368,6 +375,7 @@ public:
         soft_bits_.clear();
         prev_symbols_.assign(config_.num_carriers, Complex(1.0f, 0.0f));
         cfo_hz_ = 0.0f;
+        cfo_initial_phase_ = 0.0f;
         external_chirp_detected_ = false;
         chirp_position_ = -1;
         last_chirp_corr_ = 0.0f;
@@ -631,8 +639,9 @@ private:
         auto analytic = hilbert.process(span);
 
         // Apply frequency shift: multiply by e^{-j*2*pi*cfo*t}
+        // Start from accumulated initial phase (not 0) for continuous audio streams
         float phase_inc = -2.0f * M_PI * cfo_hz / config_.sample_rate;
-        float phase = 0.0f;
+        float phase = cfo_initial_phase_;
 
         for (size_t i = 0; i < samples.size() && i < analytic.size(); i++) {
             Complex rotation(std::cos(phase), std::sin(phase));
@@ -678,6 +687,7 @@ private:
     Samples sample_buffer_;
     std::vector<float> soft_bits_;
     float cfo_hz_;
+    float cfo_initial_phase_ = 0.0f;  // Initial phase for CFO correction (accumulated at frame start)
     int chirp_position_;
     float last_chirp_corr_;
     size_t expected_data_bytes_ = 0;

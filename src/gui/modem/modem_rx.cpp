@@ -115,6 +115,7 @@ void ModemEngine::acquisitionLoop() {
 
                 DetectedFrame frame;
                 frame.data_start = static_cast<int>(data_start);
+                frame.absolute_sample_pos = samples_consumed_ + data_start;  // For CFO phase calc
                 frame.waveform = protocol::WaveformMode::MC_DPSK;
                 frame.timestamp = std::chrono::steady_clock::now();
                 frame.has_chirp_preamble = true;  // Use training + ref for CFO estimation
@@ -288,13 +289,16 @@ void ModemEngine::feedAudio(const float* samples, size_t count) {
         if (rx_sample_buffer_.size() + count > MAX_PENDING_SAMPLES) {
             size_t to_remove = rx_sample_buffer_.size() + count - MAX_PENDING_SAMPLES;
             if (to_remove >= rx_sample_buffer_.size()) {
+                samples_consumed_ += rx_sample_buffer_.size();
                 rx_sample_buffer_.clear();
             } else {
+                samples_consumed_ += to_remove;
                 rx_sample_buffer_.erase(rx_sample_buffer_.begin(),
                                         rx_sample_buffer_.begin() + to_remove);
             }
         }
         rx_sample_buffer_.insert(rx_sample_buffer_.end(), samples, samples + count);
+        total_samples_fed_ += count;
     }
 
     // Update carrier sense

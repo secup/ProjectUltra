@@ -247,6 +247,7 @@ int main(int argc, char** argv) {
     int num_carriers = 8;
     bool save_signals = false;
     std::string save_prefix = "/tmp/iwaveform";
+    std::string rate_str = "r1_2";  // Default code rate
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--snr") == 0 && i + 1 < argc) {
@@ -269,6 +270,8 @@ int main(int argc, char** argv) {
             save_signals = true;
         } else if (strcmp(argv[i], "--save-prefix") == 0 && i + 1 < argc) {
             save_prefix = argv[++i];
+        } else if (strcmp(argv[i], "--rate") == 0 && i + 1 < argc) {
+            rate_str = argv[++i];
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             printf("Usage: %s [options]\n", argv[0]);
             printf("  --snr N       SNR in dB (default: 15)\n");
@@ -277,6 +280,8 @@ int main(int argc, char** argv) {
             printf("  --frames N    Number of frames (default: 10)\n");
             printf("  -w TYPE       Waveform: mc_dpsk, ofdm_chirp (default: mc_dpsk)\n");
             printf("  --carriers N  Number of carriers for MC-DPSK (default: 8)\n");
+            printf("  --rate R      Code rate for OFDM: r1_4, r1_3, r1_2, r2_3, r3_4 (default: r1_2)\n");
+            printf("                (MC-DPSK always uses R1/4 per protocol)\n");
             printf("  --seed N      Random seed (default: 42)\n");
             printf("  --save-signals  Save signals to files for analysis\n");
             printf("  --save-prefix P Prefix for saved signal files (default: /tmp/iwaveform)\n");
@@ -344,8 +349,22 @@ int main(int argc, char** argv) {
     bool is_ofdm_mode = (waveform_mode == protocol::WaveformMode::OFDM_CHIRP ||
                          waveform_mode == protocol::WaveformMode::OFDM_COX);
 
-    // Code rate for OFDM modes
-    CodeRate ofdm_code_rate = CodeRate::R1_2;  // R1/2 is good balance for testing
+    // Code rate for OFDM modes (MC-DPSK always uses R1/4 per protocol)
+    CodeRate ofdm_code_rate = CodeRate::R1_2;
+    if (rate_str == "r1_4" || rate_str == "R1_4") {
+        ofdm_code_rate = CodeRate::R1_4;
+    } else if (rate_str == "r1_3" || rate_str == "R1_3") {
+        ofdm_code_rate = CodeRate::R1_3;
+    } else if (rate_str == "r1_2" || rate_str == "R1_2") {
+        ofdm_code_rate = CodeRate::R1_2;
+    } else if (rate_str == "r2_3" || rate_str == "R2_3") {
+        ofdm_code_rate = CodeRate::R2_3;
+    } else if (rate_str == "r3_4" || rate_str == "R3_4") {
+        ofdm_code_rate = CodeRate::R3_4;
+    } else {
+        fprintf(stderr, "Unknown code rate: %s (use r1_4, r1_3, r1_2, r2_3, r3_4)\n", rate_str.c_str());
+        return 1;
+    }
 
     {   // TX scope
         ModemEngine tx_modem;
@@ -369,8 +388,9 @@ int main(int argc, char** argv) {
             tx_modem.setConnected(true);
             tx_modem.setHandshakeComplete(true);
             tx_modem.setDataMode(Modulation::DQPSK, ofdm_code_rate);
-            printf("OFDM mode: Using DATA frames with %s modulation, code rate R1/2, interleaving=ON\n",
-                   waveform_mode == protocol::WaveformMode::OFDM_CHIRP ? "DQPSK" : "configured");
+            printf("OFDM mode: Using DATA frames with %s modulation, code rate %s, interleaving=ON\n",
+                   waveform_mode == protocol::WaveformMode::OFDM_CHIRP ? "DQPSK" : "configured",
+                   rate_str.c_str());
         }
 
         // Build continuous audio stream: [silence][frame1][silence][frame2]...
@@ -651,11 +671,11 @@ int main(int argc, char** argv) {
                 size_t data_start = sync_result.start_sample;
                 if (data_start < search_span.size()) {
                     // Limit data span to approximately one frame's worth of samples
-                    // OFDM_CHIRP frame data is about 11 OFDM symbols (648 bits / 60 bits per symbol)
-                    // Each symbol is ~564 samples, so ~6200 samples of data
-                    // Add training (2 symbols = 1128 samples) = ~7400 samples total
-                    // Use 8000 samples to avoid processing noise/next frame as data
-                    size_t max_frame_samples = 8000;  // ~166ms at 48kHz, one frame worth
+                    // R1/4 frames need more codewords (2-4) than R1/2 (1-2)
+                    // Max 4 codewords: 4 × 648 bits = 2592 bits
+                    // 2592 / 60 bits per symbol = 44 OFDM symbols
+                    // 44 × 564 samples = ~25,000 + training (1128) ≈ 26,000
+                    size_t max_frame_samples = 30000;  // ~625ms at 48kHz, enough for R1/4
                     size_t span_size = std::min(search_span.size() - data_start, max_frame_samples);
                     SampleSpan data_span(search_span.data() + data_start, span_size);
                     waveform.process(data_span);
@@ -731,24 +751,39 @@ int main(int argc, char** argv) {
                                     Bytes cw_data = decoder.decodeSoft(cw_bits);
                                     size_t bytes_per_cw = v2::getBytesPerCodeword(ofdm_code_rate);
                                     printf("  [DEBUG] CW%d: LDPC(%s) success=%d, size=%zu (expect %zu)\n",
-                                           cw, "R1/2",
+                                           cw, rate_str.c_str(),
                                            decoder.lastDecodeSuccess(), cw_data.size(), bytes_per_cw);
                                     if (!decoder.lastDecodeSuccess()) {
                                         all_ok = false;
                                         break;
                                     }
                                     cw_data.resize(bytes_per_cw);
-                                    full_data.insert(full_data.end(), cw_data.begin(), cw_data.end());
+                                    if (cw == 0) {
+                                        // CW0: contains frame header, use all bytes
+                                        full_data.insert(full_data.end(), cw_data.begin(), cw_data.end());
+                                    } else {
+                                        // CW1+: skip 2-byte marker+index header (0xD5, index)
+                                        // Only add payload portion (bytes 2 onwards)
+                                        if (cw_data.size() > 2 && cw_data[0] == 0xD5) {
+                                            full_data.insert(full_data.end(), cw_data.begin() + 2, cw_data.end());
+                                        } else {
+                                            printf("  [DEBUG] CW%d: unexpected marker 0x%02x (expected 0xD5)\n",
+                                                   cw, cw_data.size() > 0 ? cw_data[0] : 0);
+                                            all_ok = false;
+                                            break;
+                                        }
+                                    }
                                 }
 
                                 printf("  [DEBUG] All CW ok=%d, full_data size=%zu\n", all_ok, full_data.size());
                                 if (all_ok) {
                                     // OFDM uses DATA frames, not CONNECT frames
-                                    printf("  [DEBUG] full_data first 20 bytes: ");
-                                    for (size_t b = 0; b < std::min(size_t(20), full_data.size()); b++) {
+                                    printf("  [DEBUG] full_data ALL %zu bytes:\n", full_data.size());
+                                    for (size_t b = 0; b < full_data.size(); b++) {
                                         printf("%02x ", full_data[b]);
+                                        if ((b + 1) % 20 == 0) printf("\n");
                                     }
-                                    printf("\n");
+                                    if (full_data.size() % 20 != 0) printf("\n");
                                     auto parsed = v2::DataFrame::deserialize(full_data);
                                     printf("  [DEBUG] DataFrame deserialize: parsed=%d\n", parsed.has_value());
                                     if (parsed) {

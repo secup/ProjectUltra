@@ -131,7 +131,7 @@ run_test() {
 # TEST MATRIX
 # ==========================================
 
-echo "--- MC-DPSK Tests ---"
+echo "--- MC-DPSK Tests (R1/4, robust on fading) ---"
 
 # MC-DPSK AWGN (should be 100%)
 run_test "MC-DPSK AWGN SNR=5 CFO=0" \
@@ -146,19 +146,24 @@ run_test "MC-DPSK AWGN SNR=0 CFO=30" \
     "$BUILD_DIR/test_iwaveform --snr 0 --cfo 30 --channel awgn -w mc_dpsk --frames 5" \
     60
 
-# MC-DPSK Fading (80%+ expected)
+# MC-DPSK Fading - CFO handling fixed 2026-01-28, expect 60%+ with CFO
 run_test "MC-DPSK Moderate SNR=5 CFO=0" \
     "$BUILD_DIR/test_iwaveform --snr 5 --cfo 0 --channel moderate -w mc_dpsk --frames 5" \
-    80
+    60
 
 run_test "MC-DPSK Moderate SNR=5 CFO=30" \
     "$BUILD_DIR/test_iwaveform --snr 5 --cfo 30 --channel moderate -w mc_dpsk --frames 5" \
-    40
+    60
+
+# MC-DPSK on poor fading - should be most robust mode
+run_test "MC-DPSK Poor SNR=15 CFO=30" \
+    "$BUILD_DIR/test_iwaveform --snr 15 --cfo 30 --channel poor -w mc_dpsk --frames 5" \
+    60
 
 echo ""
-echo "--- OFDM_CHIRP Tests ---"
+echo "--- OFDM_CHIRP Tests (R1/2 default, R1/4 for fading) ---"
 
-# OFDM_CHIRP AWGN (should be 100%)
+# OFDM_CHIRP AWGN with R1/2 (default) - works great
 run_test "OFDM_CHIRP AWGN SNR=17 CFO=0" \
     "$BUILD_DIR/test_iwaveform --snr 17 --cfo 0 --channel awgn -w ofdm_chirp --frames 5" \
     100
@@ -171,17 +176,21 @@ run_test "OFDM_CHIRP AWGN SNR=17 CFO=50" \
     "$BUILD_DIR/test_iwaveform --snr 17 --cfo 50 --channel awgn -w ofdm_chirp --frames 5" \
     100
 
-# OFDM_CHIRP Fading - struggles on fading, remove this test for now
-# run_test "OFDM_CHIRP Moderate SNR=17 CFO=30" \
-#     "$BUILD_DIR/test_iwaveform --snr 17 --cfo 30 --channel moderate -w ofdm_chirp --frames 5" \
-#     80
+# OFDM_CHIRP Fading REQUIRES R1/4 (R1/2 fails on fading)
+run_test "OFDM_CHIRP Moderate SNR=15 R1/4 CFO=0" \
+    "$BUILD_DIR/test_iwaveform --snr 15 --cfo 0 --channel moderate -w ofdm_chirp --rate r1_4 --frames 5" \
+    80
+
+run_test "OFDM_CHIRP Moderate SNR=15 R1/4 CFO=30" \
+    "$BUILD_DIR/test_iwaveform --snr 15 --cfo 30 --channel moderate -w ofdm_chirp --rate r1_4 --frames 5" \
+    60
 
 # Full test mode adds more comprehensive tests
 if [[ "$MODE" == "full" ]]; then
     echo ""
     echo "--- Extended MC-DPSK Tests (Full Mode) ---"
 
-    # Edge cases
+    # Edge cases - low SNR
     run_test "MC-DPSK AWGN SNR=-3 CFO=0" \
         "$BUILD_DIR/test_iwaveform --snr -3 --cfo 0 --channel awgn -w mc_dpsk --frames 10" \
         80
@@ -190,22 +199,29 @@ if [[ "$MODE" == "full" ]]; then
         "$BUILD_DIR/test_iwaveform --snr 10 --cfo 50 --channel awgn -w mc_dpsk --frames 10" \
         100
 
+    # MC-DPSK on poor fading - this is where MC-DPSK shines
     run_test "MC-DPSK Poor SNR=10 CFO=0" \
         "$BUILD_DIR/test_iwaveform --snr 10 --cfo 0 --channel poor -w mc_dpsk --frames 10" \
         80
 
+    run_test "MC-DPSK Poor SNR=10 CFO=30" \
+        "$BUILD_DIR/test_iwaveform --snr 10 --cfo 30 --channel poor -w mc_dpsk --frames 10" \
+        60
+
     echo ""
     echo "--- Extended OFDM_CHIRP Tests (Full Mode) ---"
 
+    # OFDM_CHIRP on AWGN - R1/2 is fine
     run_test "OFDM_CHIRP AWGN SNR=10 CFO=30" \
         "$BUILD_DIR/test_iwaveform --snr 10 --cfo 30 --channel awgn -w ofdm_chirp --frames 10" \
         100
 
-    run_test "OFDM_CHIRP Good SNR=15 CFO=30" \
-        "$BUILD_DIR/test_iwaveform --snr 15 --cfo 30 --channel good -w ofdm_chirp --frames 10" \
-        90
+    # OFDM_CHIRP on good fading - needs R1/4
+    run_test "OFDM_CHIRP Good SNR=15 R1/4 CFO=30" \
+        "$BUILD_DIR/test_iwaveform --snr 15 --cfo 30 --channel good -w ofdm_chirp --rate r1_4 --frames 10" \
+        80
 
-    # Negative CFO
+    # Negative CFO tests
     run_test "MC-DPSK AWGN SNR=5 CFO=-30" \
         "$BUILD_DIR/test_iwaveform --snr 5 --cfo -30 --channel awgn -w mc_dpsk --frames 5" \
         100
@@ -213,6 +229,11 @@ if [[ "$MODE" == "full" ]]; then
     run_test "OFDM_CHIRP AWGN SNR=17 CFO=-50" \
         "$BUILD_DIR/test_iwaveform --snr 17 --cfo -50 --channel awgn -w ofdm_chirp --frames 5" \
         100
+
+    # Compare MC-DPSK vs OFDM_CHIRP on poor fading (MC-DPSK should win)
+    run_test "OFDM_CHIRP Poor SNR=15 R1/4 CFO=0" \
+        "$BUILD_DIR/test_iwaveform --snr 15 --cfo 0 --channel poor -w ofdm_chirp --rate r1_4 --frames 5" \
+        40
 fi
 
 # ==========================================

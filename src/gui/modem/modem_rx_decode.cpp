@@ -213,55 +213,72 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
             LOG_MODEM(DEBUG, "[%s] DPSK decode: training=%d, ref=%d, data=%d, dual_chirp_cfo=%.1f Hz",
                       log_prefix_.c_str(), training_offset, ref_offset, frame.data_start, frame.cfo_hz);
 
-            // Set CFO from dual chirp estimate BEFORE processing training
-            // ALWAYS call setCFO() to reset accumulated CFO from previous frames
-            // This prevents CFO drift when processing multiple frames
-            mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
-            if (std::abs(frame.cfo_hz) > 0.1f) {
-                LOG_MODEM(INFO, "[%s] DPSK: Using dual chirp CFO=%.1f Hz for correction",
-                          log_prefix_.c_str(), frame.cfo_hz);
-            }
+            // Helper lambda to calculate wrapped initial phase for any absolute position
+            auto calcInitialPhase = [&](size_t abs_pos) -> float {
+                float phase = -2.0f * M_PI * frame.cfo_hz * abs_pos / 48000.0f;
+                while (phase > M_PI) phase -= 2.0f * M_PI;
+                while (phase < -M_PI) phase += 2.0f * M_PI;
+                return phase;
+            };
 
-            // IMPORTANT: Apply CFO correction to training/ref samples BEFORE processing
-            // Otherwise processTraining() sees uncorrected signal and estimates wrong residual
-            Samples training_corrected(buffer.data() + training_offset,
-                                       buffer.data() + training_offset + training_samples);
-            Samples ref_corrected(buffer.data() + ref_offset,
-                                  buffer.data() + ref_offset + symbol_samples);
+            // Calculate absolute positions for each segment
+            size_t training_start_abs = frame.absolute_sample_pos - symbol_samples - training_samples;
+            size_t ref_start_abs = training_start_abs + training_samples;
+            size_t ping_start_abs = frame.absolute_sample_pos;
+
             if (std::abs(frame.cfo_hz) > 0.1f) {
+                LOG_MODEM(INFO, "[%s] DPSK: Using dual chirp CFO=%.1f Hz (abs_pos=%zu)",
+                          log_prefix_.c_str(), frame.cfo_hz, training_start_abs);
+
+                // Apply CFO correction to training with its initial phase
+                Samples training_corrected(buffer.data() + training_offset,
+                                           buffer.data() + training_offset + training_samples);
+                mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(training_start_abs));
                 mc_dpsk_demodulator_->applyCFO(training_corrected);
+
+                // Apply CFO correction to ref with its initial phase
+                Samples ref_corrected(buffer.data() + ref_offset,
+                                      buffer.data() + ref_offset + symbol_samples);
+                mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(ref_start_abs));
                 mc_dpsk_demodulator_->applyCFO(ref_corrected);
-            }
-            SampleSpan training_span(training_corrected.data(), training_corrected.size());
-            SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
-            mc_dpsk_demodulator_->processTraining(training_span);
 
-            // CFO sanity check: with dual chirp, we trust larger CFO values
-            // Training-based CFO should confirm the dual chirp estimate
-            float training_cfo = mc_dpsk_demodulator_->getEstimatedCFO();
-            float cfo_diff = std::abs(training_cfo - frame.cfo_hz);
-            if (std::abs(frame.cfo_hz) < 0.1f && std::abs(training_cfo) > 5.0f) {
-                // No dual chirp CFO but high training CFO - likely false positive
-                LOG_MODEM(INFO, "[%s] DPSK: Rejecting frame - training CFO %.1f Hz too high (no dual chirp)",
-                          log_prefix_.c_str(), training_cfo);
-                mc_dpsk_demodulator_->reset();
-                return false;
-            }
-            // If we have dual chirp CFO, use it (already set above)
-            // The demodulator will correct for it during demodulation
+                SampleSpan training_span(training_corrected.data(), training_corrected.size());
+                SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
+                mc_dpsk_demodulator_->processTraining(training_span);
 
-            mc_dpsk_demodulator_->setReference(ref_span);
+                // CFO sanity check: with dual chirp, we trust larger CFO values
+                float training_cfo = mc_dpsk_demodulator_->getEstimatedCFO();
+                if (std::abs(frame.cfo_hz) < 0.1f && std::abs(training_cfo) > 5.0f) {
+                    LOG_MODEM(INFO, "[%s] DPSK: Rejecting frame - training CFO %.1f Hz too high (no dual chirp)",
+                              log_prefix_.c_str(), training_cfo);
+                    mc_dpsk_demodulator_->reset();
+                    return false;
+                }
+
+                mc_dpsk_demodulator_->setReference(ref_span);
+
+                // Set up initial phase for ping/data segment
+                mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(ping_start_abs));
+            } else {
+                // No CFO correction needed
+                SampleSpan training_span(buffer.data() + training_offset, training_samples);
+                SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+                mc_dpsk_demodulator_->processTraining(training_span);
+                mc_dpsk_demodulator_->setReference(ref_span);
+                mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
+            }
         } else {
             // Legacy Barker-13 frame: just use reference symbol
             LOG_MODEM(DEBUG, "[%s] DPSK decode: barker frame, ref_offset=%d", log_prefix_.c_str(), ref_offset);
             SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
             mc_dpsk_demodulator_->setReference(ref_sym);
+            mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
         }
 
         LOG_MODEM(DEBUG, "[%s] MC-DPSK decode: demodulating ping span at %d, CFO=%.1f Hz",
                   log_prefix_.c_str(), frame.data_start, mc_dpsk_demodulator_->getEstimatedCFO());
 
-        // Apply CFO correction to samples before demodulation (using Hilbert transform)
+        // Apply CFO correction to samples (using initial phase set above for ping_start_abs)
         Samples ping_samples(buffer.data() + frame.data_start,
                             buffer.data() + frame.data_start + samples_for_ping);
         mc_dpsk_demodulator_->applyCFO(ping_samples);
@@ -304,34 +321,61 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
         if (frame.has_chirp_preamble) {
             // Chirp frame: use training + ref for CFO estimation
-            // Set dual chirp CFO before processing training
             int training_offset = ref_offset - training_samples;
             if (training_offset < 0) {
                 LOG_MODEM(WARN, "[%s] DPSK: Invalid training_offset %d for CW0", log_prefix_.c_str(), training_offset);
                 return false;
             }
-            // ALWAYS reset CFO to prevent accumulation across frames
-            mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
-            // Apply CFO correction BEFORE processTraining/setReference
-            Samples training_corrected(buffer.data() + training_offset,
-                                       buffer.data() + training_offset + training_samples);
-            Samples ref_corrected(buffer.data() + ref_offset,
-                                  buffer.data() + ref_offset + symbol_samples);
+
+            // Helper lambda to calculate wrapped initial phase for any absolute position
+            auto calcInitialPhase = [&](size_t abs_pos) -> float {
+                float phase = -2.0f * M_PI * frame.cfo_hz * abs_pos / 48000.0f;
+                while (phase > M_PI) phase -= 2.0f * M_PI;
+                while (phase < -M_PI) phase += 2.0f * M_PI;
+                return phase;
+            };
+
+            // Calculate absolute positions for each segment
+            size_t training_start_abs = frame.absolute_sample_pos - symbol_samples - training_samples;
+            size_t ref_start_abs = training_start_abs + training_samples;
+            size_t cw0_start_abs = frame.absolute_sample_pos;
+
             if (std::abs(frame.cfo_hz) > 0.1f) {
+                // Apply CFO correction to training with its initial phase
+                Samples training_corrected(buffer.data() + training_offset,
+                                           buffer.data() + training_offset + training_samples);
+                mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(training_start_abs));
                 mc_dpsk_demodulator_->applyCFO(training_corrected);
+
+                // Apply CFO correction to ref with its initial phase
+                Samples ref_corrected(buffer.data() + ref_offset,
+                                      buffer.data() + ref_offset + symbol_samples);
+                mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(ref_start_abs));
                 mc_dpsk_demodulator_->applyCFO(ref_corrected);
+
+                SampleSpan training_span(training_corrected.data(), training_corrected.size());
+                SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
+                mc_dpsk_demodulator_->processTraining(training_span);
+                mc_dpsk_demodulator_->setReference(ref_span);
+
+                // Set up initial phase for CW0 data segment
+                mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(cw0_start_abs));
+            } else {
+                // No CFO correction needed
+                SampleSpan training_span(buffer.data() + training_offset, training_samples);
+                SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+                mc_dpsk_demodulator_->processTraining(training_span);
+                mc_dpsk_demodulator_->setReference(ref_span);
+                mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
             }
-            SampleSpan training_span(training_corrected.data(), training_corrected.size());
-            SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
-            mc_dpsk_demodulator_->processTraining(training_span);
-            mc_dpsk_demodulator_->setReference(ref_span);
         } else {
             // Legacy Barker-13 frame
             SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
             mc_dpsk_demodulator_->setReference(ref_sym);
+            mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
         }
 
-        // Apply CFO correction before demodulation
+        // Apply CFO correction before demodulation (using initial phase set above)
         Samples cw0_samples(buffer.data() + frame.data_start,
                            buffer.data() + frame.data_start + samples_per_codeword);
         mc_dpsk_demodulator_->applyCFO(cw0_samples);
@@ -393,33 +437,61 @@ bool ModemEngine::rxDecodeDPSK(const DetectedFrame& frame) {
 
     if (frame.has_chirp_preamble) {
         // Use training sequence for CFO estimation (essential for fading channels)
-        // ALWAYS reset CFO to prevent accumulation across frames
-        mc_dpsk_demodulator_->setCFO(frame.cfo_hz);
+        // Each segment (training, ref, data) needs its OWN initial phase based on position
         int training_offset = ref_offset - training_samples;
-        if (training_offset >= 0) {
-            // Apply CFO correction BEFORE processTraining/setReference
+
+        // Helper lambda to calculate wrapped initial phase for any absolute position
+        auto calcInitialPhase = [&](size_t abs_pos) -> float {
+            float phase = -2.0f * M_PI * frame.cfo_hz * abs_pos / 48000.0f;
+            while (phase > M_PI) phase -= 2.0f * M_PI;
+            while (phase < -M_PI) phase += 2.0f * M_PI;
+            return phase;
+        };
+
+        if (training_offset >= 0 && std::abs(frame.cfo_hz) > 0.1f) {
+            // Calculate absolute positions for each segment
+            size_t training_start_abs = frame.absolute_sample_pos - symbol_samples - training_samples;
+            size_t ref_start_abs = training_start_abs + training_samples;
+            size_t data_start_abs = frame.absolute_sample_pos;
+
+            // Apply CFO correction to training with its initial phase
             Samples training_corrected(buffer.data() + training_offset,
                                        buffer.data() + training_offset + training_samples);
+            mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(training_start_abs));
+            mc_dpsk_demodulator_->applyCFO(training_corrected);
+
+            // Apply CFO correction to ref with its initial phase
             Samples ref_corrected(buffer.data() + ref_offset,
                                   buffer.data() + ref_offset + symbol_samples);
-            if (std::abs(frame.cfo_hz) > 0.1f) {
-                mc_dpsk_demodulator_->applyCFO(training_corrected);
-                mc_dpsk_demodulator_->applyCFO(ref_corrected);
-            }
+            mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(ref_start_abs));
+            mc_dpsk_demodulator_->applyCFO(ref_corrected);
+
             SampleSpan training_span(training_corrected.data(), training_corrected.size());
             SampleSpan ref_span(ref_corrected.data(), ref_corrected.size());
             mc_dpsk_demodulator_->processTraining(training_span);
             mc_dpsk_demodulator_->setReference(ref_span);
+
+            // Set up initial phase for data segment
+            mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, calcInitialPhase(data_start_abs));
+        } else if (training_offset >= 0) {
+            // No CFO correction needed, just process training and ref
+            SampleSpan training_span(buffer.data() + training_offset, training_samples);
+            SampleSpan ref_span(buffer.data() + ref_offset, symbol_samples);
+            mc_dpsk_demodulator_->processTraining(training_span);
+            mc_dpsk_demodulator_->setReference(ref_span);
+            mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
         } else {
             SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
             mc_dpsk_demodulator_->setReference(ref_sym);
+            mc_dpsk_demodulator_->setCFOWithPhase(frame.cfo_hz, 0.0f);
         }
     } else {
         SampleSpan ref_sym(buffer.data() + ref_offset, symbol_samples);
         mc_dpsk_demodulator_->setReference(ref_sym);
+        mc_dpsk_demodulator_->setCFOWithPhase(0.0f, 0.0f);
     }
 
-    // Apply CFO correction before demodulation
+    // Apply CFO correction before demodulation (using initial phase set above)
     Samples data_samples(buffer.data() + frame.data_start,
                         buffer.data() + frame.data_start + total_samples);
     mc_dpsk_demodulator_->applyCFO(data_samples);
@@ -984,8 +1056,9 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
     // Calculate symbol duration from config
     const size_t symbol_samples = config_.getSymbolDuration();  // CP + FFT
 
-    // Get samples
+    // Get samples and track absolute position for CFO phase calculation
     std::vector<float> samples;
+    size_t buffer_start_abs = 0;  // Absolute position of samples[0]
     {
         std::lock_guard<std::mutex> lock(rx_buffer_mutex_);
         bool has_pending = ofdm_demodulator_->isSynced() ||
@@ -996,6 +1069,7 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
         if (!has_pending && rx_sample_buffer_.size() < MIN_SAMPLES_FOR_OFDM_SYNC) {
             return;
         }
+        buffer_start_abs = samples_consumed_;
         samples = std::move(rx_sample_buffer_);
         rx_sample_buffer_.clear();
     }
@@ -1066,12 +1140,18 @@ void ModemEngine::processRxBuffer_OFDM_CHIRP() {
             fprintf(stderr, "[OFDM_CHIRP-DBG] After erase: samples_after=%zu (for OFDM)\n", samples.size());
         }
 
-        // === APPLY CFO CORRECTION ===
-        // ALWAYS set CFO from chirp estimate to reset any accumulated CFO from previous frames
-        // This matches MC-DPSK pattern: trust chirp CFO, threshold only for logging
-        ofdm_demodulator_->setFrequencyOffset(cfo_hz);
+        // === APPLY CFO CORRECTION WITH PROPER INITIAL PHASE ===
+        // Calculate initial phase based on absolute position where training starts (chirp_end)
+        // By this point, CFO has accumulated phase = -2π × CFO × position / sample_rate
+        size_t training_start_abs = buffer_start_abs + chirp_end_offset;
+        float initial_phase = -2.0f * M_PI * cfo_hz * training_start_abs / 48000.0f;
+        // Wrap to [-π, π] for numerical stability
+        while (initial_phase > M_PI) initial_phase -= 2.0f * M_PI;
+        while (initial_phase < -M_PI) initial_phase += 2.0f * M_PI;
+        ofdm_demodulator_->setFrequencyOffsetWithPhase(cfo_hz, initial_phase);
         if (std::abs(cfo_hz) > 0.5f) {
-            LOG_MODEM(INFO, "[%s] OFDM_CHIRP: Using chirp CFO=%.2f Hz for correction", log_prefix_.c_str(), cfo_hz);
+            LOG_MODEM(INFO, "[%s] OFDM_CHIRP: CFO=%.2f Hz, initial_phase=%.1f° at abs_pos=%zu",
+                      log_prefix_.c_str(), cfo_hz, initial_phase * 180.0f / M_PI, training_start_abs);
         } else {
             LOG_MODEM(DEBUG, "[%s] OFDM_CHIRP: Chirp CFO=%.2f Hz (small but applied)", log_prefix_.c_str(), cfo_hz);
         }

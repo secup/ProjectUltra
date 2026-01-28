@@ -10,6 +10,110 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-01-28: MC-DPSK CFO Per-Segment Initial Phase Fix
+
+**What was broken:**
+- MC-DPSK degraded massively with CFO on fading channels
+- Poor fading + CFO=30: 20% success (should be ~80%)
+- Moderate fading + CFO=30: 40% success (should be ~80%)
+- CFO=0 worked fine (80-100%), proving the issue was CFO handling
+
+**Root cause analysis:**
+- Each segment (training, ref, data) starts at a different sample position
+- Each segment needs its OWN initial phase for CFO correction
+- Bug: We set initial phase once for training_start, then used it for ALL segments
+- Result: ref and data segments got wrong CFO correction, causing phase errors
+
+**What was changed:**
+- `src/gui/modem/modem_rx_decode.cpp` (3 locations in rxDecodeDPSK):
+  - Added `calcInitialPhase` lambda to compute wrapped phase for any absolute position
+  - Calculate separate initial phases: training_start_abs, ref_start_abs, data_start_abs
+  - Call `setCFOWithPhase()` before each `applyCFO()` with the correct phase for that segment
+  - Set final phase for data segment after processing training/ref
+
+**How it's properly fixed:**
+- Training at position T gets phase: -2π × CFO × T / sr
+- Ref at position T+training_len gets phase: -2π × CFO × (T+training_len) / sr
+- Data at position T+training_len+ref_len gets its own phase
+- Each segment's CFO correction now starts at the correct accumulated phase
+- Signal and correction cancel exactly for each segment independently
+
+**Test verification:**
+```bash
+# MC-DPSK on poor fading with CFO
+./build/test_iwaveform --snr 15 -w mc_dpsk --channel poor --cfo 30 --frames 5
+# Expected: 80% (was 20% before fix)
+
+# MC-DPSK on moderate fading with CFO
+./build/test_iwaveform --snr 15 -w mc_dpsk --channel moderate --cfo 30 --frames 5
+# Expected: 80% (was 40% before fix)
+```
+
+**Results after fix:**
+| Channel | CFO=0 | CFO=30 |
+|---------|-------|--------|
+| Poor | 80% | 80% |
+| Moderate | 80% | 80% |
+
+---
+
+## 2026-01-28: OFDM_CHIRP CFO Initial Phase in modem_rx_decode.cpp
+
+**What was broken:**
+- OFDM_CHIRP in modem_rx_decode.cpp used `setFrequencyOffset()` which resets phase to 0
+- The IWaveform path (`ofdm_chirp_waveform.cpp`) already used `setFrequencyOffsetWithPhase()`
+- modem_rx_decode.cpp path wasn't updated, causing CFO failures
+
+**What was changed:**
+- `src/gui/modem/modem_rx_decode.cpp` in `processRxBuffer_OFDM_CHIRP()`:
+  - Track `buffer_start_abs` when taking samples from buffer
+  - Calculate `training_start_abs = buffer_start_abs + chirp_end_offset`
+  - Compute initial phase: -2π × CFO × training_start_abs / sr
+  - Call `setFrequencyOffsetWithPhase(cfo_hz, initial_phase)` instead of `setFrequencyOffset(cfo_hz)`
+
+**Test verification:**
+```bash
+./build/test_iwaveform --snr 15 -w ofdm_chirp --channel awgn --cfo 30 --rate r1_4 --frames 5
+# Expected: 100%
+```
+
+---
+
+## 2026-01-28: R1/4 Code Rate Required for Fading Channels
+
+**What was broken:**
+- OFDM_CHIRP with R1/2 (default): 0% on moderate fading
+- R1/2 doesn't have enough redundancy for fading channels
+- This was misdiagnosed as CFO or channel equalization issues
+
+**What was changed:**
+- No code changes - this is a configuration/usage discovery
+- Added `--rate` flag to test_iwaveform.cpp for testing different rates
+
+**How it's properly fixed:**
+- Use R1/4 for fading channels (4x redundancy)
+- R1/2 is only suitable for AWGN or very good channels
+- MC-DPSK already uses R1/4 by default (protocol-defined)
+
+**Test verification:**
+```bash
+# R1/2 on moderate fading - FAILS
+./build/test_iwaveform --snr 15 -w ofdm_chirp --channel moderate --rate r1_2 --frames 5
+# Expected: 0-20%
+
+# R1/4 on moderate fading - WORKS
+./build/test_iwaveform --snr 15 -w ofdm_chirp --channel moderate --rate r1_4 --frames 5
+# Expected: 100%
+```
+
+**Performance comparison at 15dB:**
+| Waveform | AWGN | Moderate (R1/2) | Moderate (R1/4) |
+|----------|------|-----------------|-----------------|
+| OFDM_CHIRP | 100% | 0% | 100% |
+| MC-DPSK | 100% | 80% | 80% |
+
+---
+
 ## 2026-01-27: Improved Channel Interleaver Symbol Separation
 
 **What was broken:**

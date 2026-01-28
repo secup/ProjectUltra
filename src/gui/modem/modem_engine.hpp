@@ -236,6 +236,8 @@ private:
 
     // Sample buffer (feedAudio writes directly here, threads read from here)
     std::vector<float> rx_sample_buffer_;
+    size_t total_samples_fed_ = 0;          // Absolute count for CFO phase calculation
+    size_t samples_consumed_ = 0;           // Samples removed from buffer (for absolute position)
     mutable std::mutex rx_buffer_mutex_;
 
     // Frame queue (acquisition -> RX)

@@ -36,7 +36,8 @@ struct LoopbackStats {
 
 // Output from acquisition thread - minimal info, just "where" and "what type"
 struct DetectedFrame {
-    int data_start = -1;                    // Sample position where data starts
+    int data_start = -1;                    // Sample position where data starts (buffer-relative)
+    size_t absolute_sample_pos = 0;         // Absolute position in audio stream (for CFO phase)
     protocol::WaveformMode waveform = protocol::WaveformMode::OFDM_COX;
     std::chrono::steady_clock::time_point timestamp;  // When detected
     bool has_chirp_preamble = false;        // True if chirp-based (has training sequence)
