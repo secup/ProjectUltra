@@ -108,6 +108,12 @@ smaller units with direct tests around their real invariants.
 - Keep CTest, sanitizer, and coverage gates mandatory.
 - Add static analysis only after current warnings are triaged.
 - Add full seeded alpha gate as scheduled/nightly, not per-PR.
+- `scripts/run_bench_matrix.sh` is a maintained, evidence-only `cli_simulator`
+  sweep. Quick mode runs an AWGN + Good baseline; default mode adds Moderate
+  fading and a small file transfer. It writes a CSV (commit, channel, SNR,
+  rate, retransmissions, timeouts, frame success, elapsed, data-phase bps,
+  log path) under `${TMPDIR:-/tmp}/ultra_bench_<ts>` and exits non-zero on any
+  failed delivery so it can run in CI without becoming a coverage gate.
 
 ## Hardening Added In This Pass
 
