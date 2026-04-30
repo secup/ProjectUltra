@@ -63,7 +63,7 @@ is_allowed_hw_log_path_file() {
   local path="$1"
 
   case "$path" in
-    CLAUDE.md|tools/run_hw_test.sh)
+    CLAUDE.md|tools/run_hw_test.sh|.github/ISSUE_TEMPLATE/agent_followup.yml|.github/ISSUE_TEMPLATE/hardware_followup.yml)
       return 0
       ;;
   esac

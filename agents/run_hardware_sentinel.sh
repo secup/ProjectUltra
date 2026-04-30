@@ -19,6 +19,9 @@ MAX_RETX_QUICK=${AGENT_HW_SENTINEL_MAX_RETX_QUICK:-2}
 MAX_RETX_LONG=${AGENT_HW_SENTINEL_MAX_RETX_LONG:-20}
 MAX_TIMEOUTS_QUICK=${AGENT_HW_SENTINEL_MAX_TIMEOUTS_QUICK:-1}
 MAX_TIMEOUTS_LONG=${AGENT_HW_SENTINEL_MAX_TIMEOUTS_LONG:-10}
+AWGN_QUICK_REPEATS=${AGENT_HW_SENTINEL_AWGN_QUICK_REPEATS:-3}
+MAX_RETX_AWGN_QUICK=${AGENT_HW_SENTINEL_MAX_RETX_AWGN_QUICK:-0}
+MAX_TIMEOUTS_AWGN_QUICK=${AGENT_HW_SENTINEL_MAX_TIMEOUTS_AWGN_QUICK:-0}
 
 if [[ -n "${AGENT_HW_SENTINEL_AUDIO_CHECK:-}" ]]; then
   RUN_AUDIO_CHECK=$AGENT_HW_SENTINEL_AUDIO_CHECK
@@ -181,16 +184,21 @@ run_hw_case() {
     echo "PASS $name"
   fi
 
-  local hw_log_dir warnings retx timeouts max_retx max_timeouts
+  local hw_log_dir warnings retx timeouts max_retx max_timeouts strict_metrics
   hw_log_dir=$(first_hw_log_dir "$log")
   retx=""
   timeouts=""
+  strict_metrics=0
   if [[ -n "$hw_log_dir" ]]; then
     retx=$(extract_metric "$hw_log_dir/A.log" "retransmissions")
     timeouts=$(extract_metric "$hw_log_dir/A.log" "timeouts")
   fi
 
-  if (( bytes >= 20000 )); then
+  if [[ "$channel" == "awgn" ]] && (( bytes < 20000 )); then
+    max_retx=$MAX_RETX_AWGN_QUICK
+    max_timeouts=$MAX_TIMEOUTS_AWGN_QUICK
+    strict_metrics=1
+  elif (( bytes >= 20000 )); then
     max_retx=$MAX_RETX_LONG
     max_timeouts=$MAX_TIMEOUTS_LONG
   else
@@ -201,8 +209,17 @@ run_hw_case() {
   warnings="$(maybe_warn_numeric_gt "${retx:-}" "$max_retx" "retx")"
   warnings+="$(maybe_warn_numeric_gt "${timeouts:-}" "$max_timeouts" "timeouts")"
   if [[ -n "$warnings" ]]; then
-    warn_count=$((warn_count + 1))
-    [[ "$status" == "pass" ]] && status="warn"
+    if [[ "$strict_metrics" == "1" ]]; then
+      if [[ "$status" != "fail" ]]; then
+        fail_count=$((fail_count + 1))
+      fi
+      status="fail"
+      echo "FAIL $name strict metrics: $warnings(log: $log)" >&2
+      [[ "$STOP_ON_FAIL" == "1" ]] && exit 1
+    else
+      warn_count=$((warn_count + 1))
+      [[ "$status" == "pass" ]] && status="warn"
+    fi
   fi
 
   record_row "$name" "$status" "$rc" "$channel" "$snr" "$rate" "$bytes" \
@@ -221,7 +238,15 @@ else
   echo "Skipping audio_path check (AGENT_HW_SENTINEL_AUDIO_CHECK=$RUN_AUDIO_CHECK)"
 fi
 
+if (( AWGN_QUICK_REPEATS < 1 )); then
+  AWGN_QUICK_REPEATS=1
+fi
+
 run_hw_case awgn_1k_r12_snr15 1024 awgn 15 r1_2
+for ((rep = 2; rep <= AWGN_QUICK_REPEATS; rep++)); do
+  run_hw_case "awgn_1k_r12_snr15_rep${rep}" 1024 awgn 15 r1_2
+done
+
 run_hw_case good_1k_r12_snr15 1024 good 15 r1_2
 
 if [[ "$INCLUDE_MODERATE" == "1" || "$MODE" == "full" ]]; then
@@ -255,6 +280,9 @@ head=$head_sha
 inject_gain=$INJECT_GAIN
 audio_check=$RUN_AUDIO_CHECK
 dry_run=$DRY_RUN
+awgn_quick_repeats=$AWGN_QUICK_REPEATS
+max_retx_awgn_quick=$MAX_RETX_AWGN_QUICK
+max_timeouts_awgn_quick=$MAX_TIMEOUTS_AWGN_QUICK
 cases=$case_count
 failures=$fail_count
 warnings=$warn_count

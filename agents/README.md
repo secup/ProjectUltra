@@ -121,6 +121,10 @@ AGENT_PROMPT_MODE=file AGENT_CMD='your-agent --prompt-file' ./agents/run_next_ta
 - `AGENT_ALLOW_DIRTY`: set `1` to allow starting from a dirty worktree.
 - `AGENT_SLEEP_SECONDS`: watchdog sleep between attempts, default `300`.
 - `AGENT_HW_SENTINEL_MODE`: hardware sentinel mode, `quick`, `nightly`, or `full`.
+- `AGENT_HW_SENTINEL_AWGN_QUICK_REPEATS`: AWGN quick repetitions, default `3`.
+- `AGENT_HW_SENTINEL_MAX_RETX_AWGN_QUICK` /
+  `AGENT_HW_SENTINEL_MAX_TIMEOUTS_AWGN_QUICK`: strict AWGN quick limits,
+  both default `0`.
 - `AGENT_PLANNER_SLEEP_SECONDS`: planner watchdog sleep interval.
 - `AGENT_PLANNER_PUBLISH_ISSUES`: set `1` to publish planner proposals as GitHub Issues after each planner run.
 - `AGENT_PLANNER_LOCK_DIR`: planner singleton lock directory, default
