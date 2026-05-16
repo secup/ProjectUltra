@@ -1,22 +1,42 @@
-# OTA Simulator Live Channel Plan
+# OTA Simulator Live Channel Plan (v2 — Locked Design)
+
+**Status:** Locked design as of 2026-05-16. Supersedes the v1 exploratory
+draft (preserved in git history; see commit `33f6b4e` and prior).
+
+**Decision authority:** `docs/OTA_SIMULATOR_DESIGN_LOG.md` (Rounds 1–5).
+This document is **prescriptive**. The log is the historical record of
+how we got here. Disagreements with this doc reopen the relevant OQ in
+the log rather than modifying this doc unilaterally.
+
+**Conversation summary:** Codex drafted a 1488-line v1 architecture →
+Claude responded with 5 Tier-1 engineering contracts + 10 open
+questions + 6 asks → Codex closed all 10 OQs and answered the asks →
+Claude accepted with carve-outs and raised implementation-readiness
+asks A11–A14 → Codex closed A11–A14 with first-task identification +
+deletion table → Claude confirmed close-out. All 14 asks closed,
+zero contested decisions.
+
+---
 
 ## Purpose
 
-ProjectUltra should stop relying on the GUI's embedded two-station simulator for
-serious modem testing. The GUI should behave as one station attached to an
-external HF channel service. The external service should be based on
-`ota_simulator`, so scripted tests and live tests share the same channel model,
-capture logic, and regression vocabulary.
-
-The desired outcome is:
+ProjectUltra needs an external HF channel service so that:
+- The GUI behaves as one station attached to a real medium, not a
+  two-station hosting process
+- Scripted tests, hardware-in-the-loop tests, and live multi-operator
+  tests share the same channel model, capture format, and regression
+  vocabulary
+- Every result is a **reproducible experiment**, not a vibe
+- Friends can join a shared session over private network (V1) or
+  public internet (V2)
 
 ```text
 ota_simulator serve
   owns the simulated HF medium
-  accepts live audio clients
-  emits continuous receive audio
+  accepts live audio clients (gRPC control, UDP audio)
+  emits continuous receive audio per station
   accepts live control/injection commands
-  captures evidence
+  captures evidence with signed receipts
 
 ultra_gui -sim
   one local modem/protocol stack
@@ -24,1465 +44,638 @@ ultra_gui -sim
   RX audio comes from ota_simulator
   optional speaker monitor uses SDL only as a tap
 
-ultra_tnc --sim-audio ...
+ultra_tnc --sim-audio host:port/station_id
   same simulated audio backend
   legacy TNC command/data TCP ports stay unchanged
 ```
 
-SDL must remain the normal hardware-audio backend. The new work adds a second
-audio backend for lab simulation; it does not replace SDL.
+SDL remains the normal hardware-audio backend. The new work adds a
+second backend for lab simulation; it does not replace SDL.
+
+---
 
 ## Non-Goals
 
-- Do not create a fake OS sound device as the first solution.
-- Do not remove SDL audio support.
-- Do not keep the GUI responsible for running a peer modem/protocol stack.
-- Do not make `ota_simulator serve` instantiate ProjectUltra modem endpoints in
-  live mode. It should be the medium, not the stations.
-- Do not use lossy audio codecs for modem transport unless intentionally
-  testing codec damage.
-- Do not expose unauthenticated public internet ports for AWS tests.
-- Do not let arbitrary connected stations change channel conditions or inject
-  audio unless their role explicitly allows it.
+- Do not create a fake OS sound device as the first solution
+- Do not remove SDL audio support
+- Do not keep the GUI responsible for running a peer modem stack
+- Do not let `ota_simulator serve` instantiate ProjectUltra modem
+  endpoints in live mode — it is the medium, not the stations
+- Do not use lossy audio codecs for modem transport
+- Do not expose unauthenticated public internet ports
+- Do not let arbitrary connected stations change channel conditions
+- **Do not bridge real radios** (dropped 2026-05-16 — license
+  complexity, audio level calibration, PTT timing over network)
+- **Do not add a standalone console binary** (deleted from scope —
+  gRPC API + `grpcurl` cover the same surface)
+- **Do not implement dynamic role grant/revoke** (deleted — static
+  allowlist only)
+- **Do not implement monitor-tap-targeted impairment injection**
+  (deleted — confounds evidence)
 
-## Current Repo Anchors
+---
 
-Existing pieces that should be reused:
+## Engineering Contracts (Non-Negotiable)
 
-- `tools/ota_simulator.cpp`
-  - Current `gen` and `run` entry point.
-- `tools/ota_simulator/scenario.*`
-  - Scenario model, endpoint config, channel config, assertions, output config.
-- `tools/ota_simulator/runner_v2.cpp`
-  - Two-endpoint scripted scenario execution using `SimulatedChannel`.
-- `tools/ota_simulator/scripted_audio_port.*`
-  - Noise bed and injection logic.
-- `tools/sim/simulated_station.hpp`
-  - `SimulatedChannel`, `AudioPort`, `VirtualAudioPort`, and the current 10 ms
-    sample cadence.
-- `src/gui/audio_engine.*`
-  - SDL device backend for real hardware and optional monitor playback.
-- `tools/ultra_tnc.cpp`
-  - Headless TNC runtime, currently SDL-backed.
-- `src/gui/app.cpp`
-  - Current GUI `-sim` embedded virtual station path to replace.
+These five contracts define what makes OTASim an *instrument* rather
+than just a convenience server. They are not features; they are
+acceptance criteria for any code that ships under the OTASim name.
 
-## Target User Workflows
+### T1.1 Determinism Contract
 
-### Local GUI Lab
+> **"Any scripted session is bit-exact reproducible from
+> `(scenario_hash, server_version, seed, artifact_hashes)`."**
 
-```bash
-./build/ota_simulator serve \
-  --bind 127.0.0.1 \
-  --port 47000 \
-  --snr 15 \
-  --channel good \
-  --capture-dir /tmp/projectultra_ota_live
+- All RNGs use named PRNG streams seeded from a master seed
+  (e.g., `channel:path:alice:bob:awgn`)
+- No `std::random_device` in the data path
+- Server-authoritative sample clock; client packets timestamped to
+  **sample index**, not wall time
+- Mixer summation order is stable (canonical station id ordering)
+- Single mixer thread advances the sample clock; network/UI threads
+  cannot mutate channel state directly
+- Live human sessions are evidence-preserving receipts, NOT bit-
+  exact claims (unless TX/control inputs are recorded for replay)
+- See Round 2 Item A2 in the design log for the full 14-item audit
 
-./build/ultra_gui \
-  -sim \
-  --sim-server 127.0.0.1:47000 \
-  --sim-station alice
+**Acceptance test:** Run scenario X twice with identical inputs.
+Byte-compare all captures and the deterministic event log. Any
+difference fails the determinism gate.
+
+### T1.2 Control Plane = gRPC + Protocol Buffers
+
+- Audio plane stays separate (framed PCM, UDP for V1, TCP-framed
+  PCM only as MVP localhost bridge)
+- One `.proto` definition generates SDKs for C++ / Python /
+  TypeScript clients
+- `grpcurl` is sufficient for operator scripting; no separate
+  console binary
+- No bespoke TCP+JSON control surface
+
+### T1.3 Canonical JSON + JSON Schema
+
+- All scenarios, events, receipts, and provenance manifests are
+  canonical JSON on disk
+- Every file declares `schema_version`
+- Server rejects unknown fields (no silent typo absorption)
+- Hashes are computed over canonical JSON form
+- YAML may exist only as authoring-tool UX layer (`ota_scenario`
+  CLI / web editor) — never as a stored artifact, never hashed,
+  never signed
+
+### T1.4 Session Receipts
+
+At session end, the server emits a signed JSON receipt:
+
+```json
+{
+  "schema_version": "1",
+  "receipt_id": "...",
+  "session_id": "...",
+  "claim_level": "deterministic | replayable_live | observational | diagnostic",
+  "server_version": "0.7.2",
+  "server_build_commit": "abc123",
+  "scenario_hash": "sha256:...",
+  "resolved_config_hash": "sha256:...",
+  "rng": {
+    "algorithm": "pcg64",
+    "master_seed": "0xdeadbeef",
+    "named_streams": {"channel:awgn:alice": "...", ...},
+    "per_effect_seeds": {"effect_001": "...", ...}
+  },
+  "sample_clock": {
+    "sample_rate": 48000,
+    "start_sample": 0,
+    "end_sample": 14400000,
+    "duration_samples": 14400000,
+    "time_scale": 1.0
+  },
+  "clients": [
+    {"station_id": "alice", "callsign": "8P9QC", "client_type": "gui",
+     "client_version": "0.7.2", "join_sample": 0, "leave_sample": 14400000}
+  ],
+  "inputs": {"scenario": "sha256:...", "noise_beds": ["sha256:..."]},
+  "outputs": {
+    "deterministic_event_log": "sha256:...",
+    "full_event_log": "sha256:...",
+    "captures": {"alice_rx": "sha256:...", "bob_rx": "sha256:..."}
+  },
+  "assertions": [{"id": "transfer_complete", "expected": "...", "pass": true}],
+  "provenance_manifest_hash": "sha256:...",
+  "signature": {"algorithm": "ed25519", "key_id": "...", "value": "..."}
+}
 ```
 
-GUI `-sim` should show an OTA Simulator panel, not the old embedded peer
-simulator. The panel should include:
+**Claim levels:**
+- `deterministic` — scripted scenario, bit-exact replayable;
+  signature REQUIRED for CI/shared claims
+- `replayable_live` — live session with full TX/control recording,
+  replayable bit-exact; signature required for claims
+- `observational` — live session, not replayable; unsigned allowed
+- `diagnostic` — developer iteration; unsigned allowed, may NOT be
+  cited as pass evidence
 
-- Server address.
-- Station id.
-- Connect/disconnect.
-- RX/TX transport status.
-- Server-reported channel metrics.
-- Optional monitor audio checkbox.
-- Optional SDL monitor output device.
+**Server invariant:** validator rejects unsigned receipts with
+`claim_level=deterministic` or `replayable_live`. Server cannot
+silently downgrade `claim_level`.
 
-### Local TNC Lab
+Optional fields (not required for claim-grade): wall-clock
+timestamps, host/OS/CPU labels, operator display names, command
+lines, KiwiSDR/HF metadata when applicable, OTel trace IDs.
 
-```bash
-./build/ota_simulator serve \
-  --bind 127.0.0.1 \
-  --port 47000 \
-  --snr 15 \
-  --channel good \
-  --capture-dir /tmp/projectultra_ota_live
+### T1.5 Capture Provenance Manifests
 
-./build/ultra_tnc \
-  --sim-audio 127.0.0.1:47000/alice \
-  --callsign ALICE \
-  --port 18300
+Every capture set ships with a manifest covering:
+- Simulator config + version
+- Artifact hashes (raw audio, event log, scenario)
+- Seeds (master + per-stream)
+- Sample clock (rate, start/end)
+- Software versions (server, clients)
+- Source type (`synthetic` | `recorded` | `kiwi_live` | `passthrough`)
 
-./build/ultra_tnc \
-  --sim-audio 127.0.0.1:47000/bob \
-  --callsign BOB \
-  --port 18400
-```
+KiwiSDR-specific fields (frequency, receiver model, Kp index,
+sunspot number, site) are conditional — required only when source
+is `kiwi_live` or `recorded` from a Kiwi source.
 
-Client applications still connect to the existing TNC command/data ports. They
-should not need to know whether `ultra_tnc` is using SDL hardware audio or OTA
-simulated audio.
-
-### AWS or Remote Lab
-
-Initial remote deployments should be behind WireGuard, Tailscale, or SSH
-tunnels. A public internet mode can come later after auth, TLS, and transport
-metrics are stable.
-
-Example private-network command:
-
-```bash
-ota_simulator serve \
-  --bind 0.0.0.0 \
-  --port 47000 \
-  --snr 15 \
-  --channel moderate \
-  --auth-token-file /etc/projectultra/ota_token \
-  --capture-dir /var/log/projectultra/ota_live
-```
-
-Remote use requires network impairment reporting so modem failures are not
-confused with packet loss or jitter.
-
-### Shared Friend Lab
-
-The live server should support trusted friends joining the same channel session
-from different locations. This changes the design from "local test process" to
-"small shared lab room."
-
-Example:
-
-```bash
-ota_simulator serve \
-  --bind 0.0.0.0 \
-  --port 47000 \
-  --room-id sunday-net \
-  --auth-token-file /etc/projectultra/sunday_net_tokens \
-  --max-clients 8 \
-  --capture-dir /var/log/projectultra/sunday_net
-```
-
-Friend-lab requirements:
-
-- Every client must authenticate.
-- Most friends will connect as transmitting `station` participants, not just
-  observers.
-- Every transmitting station must have a unique callsign within the room.
-- A station id may default to the normalized callsign, with a suffix only when
-  the same operator needs multiple devices.
-- Roles must separate normal transmitting stations from listen-only observers
-  and from operators/admins who can change the lab conditions.
-- Runtime injections must be attributed to the operator who issued them.
-- Server logs must record joins, leaves, role, remote address, callsign, station
-  id, and protocol version.
-- The server must allow listen-only monitor clients that cannot transmit.
-- The server must allow a moderator/operator to mute, kick, or deauthorize a
-  station without stopping the session.
-- Capture files must include enough metadata to reconstruct who was connected
-  and what controls were changed during the run.
+---
 
 ## Architecture
 
-### Components
-
 ```text
-src/ota_audio/
-  ota_audio_protocol.hpp
-  ota_audio_client.hpp/cpp
-  ota_audio_server.hpp/cpp
-  jitter_buffer.hpp/cpp
-  pcm_codec.hpp/cpp
-
-tools/ota_simulator.cpp
-  gen
-  run
-  serve
-
-tools/ultra_tnc.cpp
-  SDL backend for hardware mode
-  OTA audio backend for sim mode
-
-src/gui/app.cpp
-  SDL backend for hardware mode
-  OTA audio backend for -sim mode
-  optional SDL monitor output in -sim mode
+                       ┌──────────────────────────────────┐
+                       │     ota_simulator serve           │
+                       │  ┌────────────────────────────┐   │
+                       │  │  Channel Core (library)    │   │
+                       │  │   - station registry       │   │
+                       │  │   - mixer (sample-index)   │   │
+                       │  │   - channel models         │   │
+                       │  │     · AWGN                 │   │
+                       │  │     · Watterson g/m/p      │   │
+                       │  │     · Noise-bed/replay     │   │
+                       │  │     · Null/passthrough     │   │
+                       │  │   - scripted effects       │   │
+                       │  │   - capture writer         │   │
+                       │  │   - event log              │   │
+                       │  │   - receipt writer         │   │
+                       │  └────────────────────────────┘   │
+                       │  ┌────────────────────────────┐   │
+                       │  │  gRPC control plane         │  │
+                       │  │  (OtaSimulatorControl)      │  │
+                       │  └────────────────────────────┘   │
+                       │  ┌────────────────────────────┐   │
+                       │  │  Audio plane                │  │
+                       │  │  UDP (V1) / TCP-framed MVP  │  │
+                       │  └────────────────────────────┘   │
+                       └────────┬──────────────┬───────────┘
+                                │              │
+            ┌───────────────────┘              └──────────────────┐
+            │                                                       │
+   ┌────────────────┐                                     ┌────────────────┐
+   │ ultra_gui -sim │                                     │  ultra_tnc     │
+   │                │                                     │  --sim-audio   │
+   │  ModemEngine   │                                     │  ModemEngine   │
+   │  ProtocolEngine│                                     │  ProtocolEngine│
+   │  OtaAudioClient│                                     │  OtaAudioClient│
+   └────────────────┘                                     └────────────────┘
 ```
 
-Exact paths can change during implementation, but the module boundary should
-remain: shared audio protocol/client code must not be buried in GUI code.
+**Boundary discipline:**
+- Server is the **medium**, never a station
+- Clients own their modem + protocol stack
+- Channel core is a **standalone library** that runs without
+  networking (this enables deterministic CI tests)
+- gRPC + audio plane are independent processes/sockets layered on top
 
-### Server Role
+---
 
-`ota_simulator serve` owns:
+## gRPC Control Plane (Illustrative Service)
 
-- The authoritative 48 kHz medium clock.
-- Continuous idle noise generation.
-- Per-station RX streams.
-- Per-station TX ingestion.
-- Sender-to-receiver path effects.
-- Collision behavior by summing overlapping transmitters.
-- Server-side captures and JSONL evidence.
-- Channel and transport metrics.
+```proto
+syntax = "proto3";
 
-`ota_simulator serve` does not own:
+package projectultra.otasim.v1;
 
-- ProtocolEngine state.
-- ARQ.
-- File transfer.
-- Callsign routing beyond station metadata.
-- GUI state.
-- TNC command/data ports.
+import "google/protobuf/empty.proto";
 
-### Client Role
-
-Each ProjectUltra station owns:
-
-- ProtocolEngine.
-- StreamingEncoder/StreamingDecoder or ModemEngine.
-- TX waveform generation.
-- RX decode.
-- TNC command/data API if running `ultra_tnc`.
-- Optional local audio monitor.
-
-The client treats OTA audio as a replacement for the radio soundcard, not as a
-replacement for the modem.
-
-### Live Buses
-
-`ota_simulator serve` should be modeled as a room with explicit buses:
-
-```text
-TX injection bus
-  station audio clients push modem TX audio into the medium
-
-RF/channel mixer
-  server applies noise, fading, path effects, collision summing, and clipping
-
-RX stream bus
-  server sends each station the continuous audio it hears
-
-Monitor bus
-  observer clients subscribe to taps such as alice_rx, bob_rx, rf_mix, noise_only
-
-Control bus
-  authorized operators change channel conditions and inject impairments live
+service OtaSimulatorControl {
+  rpc CreateSession(CreateSessionRequest) returns (SessionInfo);
+  rpc LoadScenario(LoadScenarioRequest) returns (ScenarioValidation);
+  rpc JoinSession(JoinSessionRequest) returns (JoinSessionResponse);
+  rpc LeaveSession(LeaveSessionRequest) returns (google.protobuf.Empty);
+  rpc NegotiateAudio(NegotiateAudioRequest) returns (AudioLease);
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+  rpc StreamEvents(EventStreamRequest) returns (stream SessionEvent);
+  rpc SubmitCommand(ControlCommand) returns (CommandAck);
+  rpc StartCapture(CaptureRequest) returns (CaptureInfo);
+  rpc StopCapture(StopCaptureRequest) returns (CaptureInfo);
+  rpc EndSession(EndSessionRequest) returns (SessionReceipt);
+}
 ```
 
-This structure keeps modem audio, human monitoring, and live test control from
-being confused with each other. It also allows friends to connect as real
-stations while an operator injects noise/QRM or changes path conditions during a
-file transfer.
+Detailed message definitions are deferred to the implementation
+phase (first task: protobuf schema + receipt JSON Schema as part of
+channel-core extraction).
 
-### Server Tick Loop
+---
 
-The server owns the clock. A useful first model is a 10 ms tick:
+## Channel Models (Sealed Set Through V1)
 
-```cpp
-for each station:
-    tx_chunk[station] = pull_tx_audio_or_zero(station, tick);
+| Model | Class | Use |
+|---|---|---|
+| `passthrough` / `null` | mixer-test fixture | Validate mixer correctness without channel confounds |
+| `awgn` | stochastic, deterministic w/ seed | Calibrated noise floor |
+| `watterson_good` | stochastic, multipath + Doppler | Quiet HF |
+| `watterson_moderate` | stochastic | Average HF |
+| `watterson_poor` | stochastic | Storm/auroral conditions |
+| `noise_bed_replay` | deterministic | Pre-recorded real-HF noise |
+| Scripted effects | deterministic | Tone / fade / blackout / level / CFO / delay |
 
-for each receiver:
-    rx = noise_source.render(receiver, tick);
+**OFDM_NARROW coverage requirement (MVP):** narrowband variants of
+AWGN and Watterson-good must be available in the MVP since
+OFDM_NARROW is a production-supported mode (per CLAUDE.md).
 
-    for each transmitter != receiver:
-        path_audio =
-            path_model[transmitter][receiver].process(tx_chunk[transmitter]);
-        rx += path_audio;
+No public plugin registry until V2. No KiwiSDR live ingestion until
+V2. Recorded noise-bed/replay covers most of the "real-HF flavor"
+use cases without the lifecycle/license complexity.
 
-    rx = clip_or_soft_limit(rx);
-    send_rx_audio(receiver, rx);
-    publish_monitor_taps(receiver, rx);
-    capture_rx(receiver, rx);
+---
+
+## Audio Plane
+
+**MVP (week 1–2):** localhost TCP-framed PCM. Simple, debuggable,
+single-machine. Wire format is UDP-ready so the same packet
+definitions reuse for V1.
+
+**V1:** UDP audio plane with sequence numbers, sample-index
+timestamps, and a jitter buffer.
+
+**Audio packet header (binary):**
+
+```
+OtaAudioPacketHeader {
+  uint32 magic;             // 'OASM'
+  uint16 version;           // 1
+  uint16 flags;
+  uint64 session_id;
+  uint32 stream_id;         // station+direction
+  uint64 seq;
+  uint64 start_sample;
+  uint32 sample_count;
+  uint16 sample_format;     // float32 LE = 1
+  uint16 channel_count;     // 1
+}
 ```
 
-Rules:
+Payload: `sample_count` interleaved samples in `sample_format`.
 
-- Missing TX audio for a tick means zero transmitted signal for that station.
-- RX audio is always produced, even during idle periods.
-- A station does not hear its own TX unless self-monitor is explicitly enabled.
-- Monitor clients receive copies of taps; monitor playback is not part of the
-  modem decode path.
-- Every tick should update metrics for active transmitters, clipping, queue
-  depth, underruns, and network jitter.
+**Jitter buffer:** server reorders by `start_sample`, drops late
+duplicates deterministically. Absent TX for a tick contributes
+zero signal (not silence-of-unknown-origin).
 
-## Audio Backend Model
+---
 
-Introduce a small transport-neutral audio interface around the operations the
-modem runtime already needs.
+## Receipts + Provenance
 
-Candidate API:
+See T1.4 above for receipt schema. Receipt-writer is a first-class
+component of the channel core library — every scenario run produces
+a receipt regardless of pass/fail.
 
-```cpp
-class IAudioBackend {
-public:
-    virtual ~IAudioBackend() = default;
+**Storage:** receipts live next to captures in the session output
+directory, named `receipt.json`. Signature lives in the same file.
 
-    virtual bool start() = 0;
-    virtual void stop() = 0;
+**Verification:** `ota_simulator verify <receipt.json>` re-runs the
+scenario (if `deterministic` claim level) and re-computes hashes,
+exits 0 on match.
 
-    virtual void queueTxSamples(const std::vector<float>& samples) = 0;
-    virtual std::vector<float> getRxSamples(size_t max_samples) = 0;
-    virtual size_t getRxBufferSize() const = 0;
+---
 
-    virtual bool isRunning() const = 0;
-    virtual std::string statusText() const = 0;
-};
+## Scenarios (Canonical JSON + JSON Schema)
+
+Scenario file is one JSON document with `schema_version`, endpoint
+definitions, channel selection, and an event timeline. Server
+validates against schema on load — unknown fields fail loud.
+
+Example (illustrative):
+```json
+{
+  "schema_version": "1",
+  "scenario_id": "two_endpoint_qso_snr15",
+  "duration_s": 300.0,
+  "channel": {"model": "watterson_good", "snr_db": 15.0, "seed": 0xdeadbeef},
+  "endpoints": {
+    "alice": {"callsign": "8P9QC", "initial_state": "DISCONNECTED"},
+    "bob":   {"callsign": "KC3VPB", "initial_state": "DISCONNECTED"}
+  },
+  "events": [
+    {"t_s": 0.0, "type": "command", "endpoint": "alice", "action": "connect_to", "peer_callsign": "KC3VPB"},
+    {"t_s": 30.0, "type": "assert", "endpoint": "alice", "state": "CONNECTED"},
+    {"t_s": 31.0, "type": "command", "endpoint": "alice", "action": "send_message", "text": "hello"}
+  ],
+  "output": {"session_log": "session.jsonl", "captures_dir": "captures/"}
+}
 ```
 
-Implementations:
+YAML authoring tool may emit this JSON, but the YAML form is never
+stored or hashed.
 
-```text
-SdlAudioBackend
-  wraps current AudioEngine behavior for real soundcards
+---
 
-OtaAudioBackend
-  wraps OtaAudioClient and connects to ota_simulator serve
+## Captures + Evidence
+
+Every session writes:
+- Per-station RX audio capture (WAV, float32, 48 kHz)
+- Per-station TX audio capture
+- Deterministic event log (JSONL, ordered by sample-index)
+- Full event log (JSONL, includes wall-clock metadata excluded from
+  deterministic hash)
+- Receipt (JSON, signed for claim-grade)
+- Provenance manifest (JSON)
+
+Layout:
+```
+session_<id>/
+  receipt.json
+  manifest.json
+  events_deterministic.jsonl
+  events_full.jsonl
+  captures/
+    alice_rx_48k_f32.wav
+    alice_tx_48k_f32.wav
+    bob_rx_48k_f32.wav
+    bob_tx_48k_f32.wav
 ```
 
-This can be introduced incrementally. If a full interface is too invasive for
-the first patch, add `OtaAudioClient` and wire it only into `ultra_tnc` first.
-Do not let the GUI-specific code become the only implementation.
-
-## GUI `-sim` Redesign
-
-Current behavior:
-
-```text
-ultra_gui -sim
-  shows simulator panel
-  creates virtual_modem_
-  creates virtual_protocol_
-  runs embedded channel loop
-```
-
-New behavior:
-
-```text
-ultra_gui -sim
-  shows OTA Simulator panel
-  does not create virtual_modem_
-  does not create virtual_protocol_
-  connects local station audio to ota_simulator serve
-```
-
-TX path:
-
-```text
-ProtocolEngine callback
-  -> local ModemEngine transmit
-  -> OtaAudioBackend.queueTxSamples()
-```
-
-RX path:
-
-```text
-OtaAudioBackend.getRxSamples()
-  -> local ModemEngine.feedAudio()
-  -> local ProtocolEngine
-```
-
-Optional monitor path:
-
-```text
-same RX samples from OtaAudioBackend
-  -> SDL output device
-  -> regular speaker
-```
-
-Monitor playback must be a tap only. It must not feed the decoder through the
-speaker/microphone path.
-
-## TNC Sim-Audio Mode
-
-Add one of these CLI shapes:
-
-Preferred concise form:
-
-```bash
-ultra_tnc --sim-audio 127.0.0.1:47000/alice
-```
-
-More explicit form:
-
-```bash
-ultra_tnc \
-  --audio-backend ota \
-  --audio-server 127.0.0.1:47000 \
-  --audio-station alice
-```
-
-Behavior in sim-audio mode:
-
-- Do not open SDL input/output for modem audio.
-- Do not key real PTT.
-- Disable or simulate radio PTT behavior.
-- Queue TX waveform samples to the OTA backend.
-- Poll OTA RX samples into the decoder.
-- Preserve existing TNC command/data TCP behavior.
-- Preserve diagnostics and session summaries.
-
-Optional monitor:
-
-```bash
-ultra_tnc \
-  --sim-audio 127.0.0.1:47000/alice \
-  --monitor-output default
-```
-
-## Live Transport
-
-### Recommended End State
-
-Use separate control and audio planes:
-
-```text
-Control plane: TCP/TLS
-Audio plane: UDP datagrams
-```
-
-Control plane:
-
-- Auth.
-- Protocol version negotiation.
-- Station registration.
-- Channel config.
-- Metrics.
-- Capture control.
-- Remote console sessions.
-- Keepalive.
-- Shutdown.
-- Runtime injection commands.
-- Room membership and role updates.
-
-Audio plane:
-
-- Fixed-size PCM packets.
-- Sequence numbers.
-- Sample timestamps.
-- Jitter buffer.
-- Loss/late packet detection.
-
-This design avoids TCP head-of-line blocking for real-time audio. Late audio is
-usually worse than missing audio because the modem clock must keep moving.
-
-### MVP Transport
-
-For localhost development, TCP-only is acceptable if the packet framing is
-designed to be UDP-ready from day one.
-
-MVP constraints:
-
-- Every audio packet has `seq`.
-- Every audio packet has `sample_time` or `sample_index`.
-- Every audio packet has `sample_count`.
-- Audio payload format is explicit.
-- Missing or late packets can be represented in metrics even if TCP normally
-  hides loss.
-
-This allows the implementation to start simple while avoiding a protocol shape
-that blocks UDP later.
-
-### Audio Packet Format
-
-Recommended audio cadence:
-
-```text
-sample_rate: 48000 Hz
-channels: 1
-frame_samples: 480
-frame_duration: 10 ms
-```
-
-Recommended network PCM:
-
-```text
-int16 little-endian mono
-```
-
-Rationale:
-
-- Float32 mono at 48 kHz is about 1.536 Mbps per direction per client before
-  framing overhead.
-- Int16 mono at 48 kHz is about 768 kbps per direction per client before
-  framing overhead.
-- The modem can convert int16 back to float internally.
-- Int16 is easier to inspect and capture in common tools.
-
-Avoid Opus or other lossy codecs for baseline modem testing.
-
-Candidate packet header:
-
-```cpp
-struct OtaAudioPacketHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_size;
-    uint32_t stream_id;
-    uint64_t seq;
-    uint64_t sample_time;
-    uint16_t sample_rate;
-    uint16_t channels;
-    uint16_t sample_format;
-    uint16_t sample_count;
-    uint32_t payload_bytes;
-    uint32_t crc32;
-};
-```
-
-For UDP, keep packets below the path MTU. A 480-sample int16 frame is 960 bytes
-plus header, which is acceptable for typical Ethernet/VPN paths.
-
-### Jitter Buffer Rules
-
-Client TX to server:
-
-- Client sends 10 ms audio frames when it has TX audio.
-- If client has no TX audio, it can either send explicit silence/no-TX markers
-  or rely on server timeout per tick.
-- Server treats missing TX from a client as zero signal for that tick.
-
-Server RX to client:
-
-- Server sends continuous 10 ms RX frames.
-- Client keeps a small jitter buffer before feeding the modem.
-- Default target buffer can start at 40-80 ms for remote use.
-- Localhost can use a smaller buffer.
-- Late RX frames are dropped.
-- Missing RX frames are filled with server-equivalent noise if possible, or
-  local silence/noise with a metric flag.
-
-Important metrics:
-
-- `network_loss_pct`
-- `network_late_packets`
-- `network_jitter_ms_p50`
-- `network_jitter_ms_p95`
-- `rx_underruns`
-- `tx_underruns`
-- `server_tick_overruns`
-
-These must be reported separately from:
-
-- `channel_snr_db`
-- `channel_type`
-- `fading_index`
-- `active_tx_count`
-- `clipped_samples`
-
-## Runtime Control and Injection
-
-Dynamic injection is a core requirement, not a later convenience. The server
-should accept live commands while stations are connected and while file transfers
-are in progress.
-
-### Remote Console
-
-The server needs a remote console for operators. This is separate from station
-audio and from monitor audio. It should connect to the control plane, authenticate
-as an `operator` or `admin`, then provide a live view plus command entry.
-
-Initial CLI console:
-
-```bash
-ota_simulator console \
-  --server example:47000 \
-  --callsign 8P9QC \
-  --token-file ~/.config/projectultra/ota_console_token
-```
-
-Useful console commands:
-
-```text
-status
-clients
-metrics
-paths
-effects
-captures
-inject tone --to KC3VPB --freq 1475 --gain-db -12 --duration 20s
-inject wav --to all --file hf_crash.wav --gain-db -6 --at now+5s
-fade --path 8P9QC:KC3VPB --from-snr 20 --to-snr 5 --duration 30s
-mute --callsign KC3VPB --duration 60s
-cancel fx-00042
-record start
-record stop
-watch events
-watch spectrum --tap rf_mix
-```
-
-Console modes:
-
-```text
-read_only
-  can view clients, metrics, events, paths, and captures; cannot change state
-
-operator
-  can inject effects, load scripts, change path/channel settings, and cancel
-  own effects
-
-admin
-  can grant roles, mute/kick stations, stop captures, end the room, and cancel
-  any effect
-```
-
-The console should be usable over VPN/SSH/Tailscale/AWS. A web dashboard can come
-later, but the first console should be CLI-first so it works over a plain remote
-shell and can be scripted.
-
-Remote console safety rules:
-
-- Every command must be authenticated and authorized by role.
-- Every state-changing command must be assigned a command id.
-- Every state-changing command must be logged before execution and again on
-  completion or failure.
-- Destructive room actions such as `kick all`, `record delete`, or `shutdown`
-  should require `--confirm` or an interactive confirmation.
-- The console should have a dry-run mode for scripts:
-
-```bash
-ota_simulator console --server example:47000 load-script qrm.json --dry-run
-```
-
-- The server, not the console client, is authoritative for command scheduling
-  and sample times.
-
-### Control Entry Points
-
-Initial control can be a CLI speaking to the control plane:
-
-```bash
-ota_simulator control --server 127.0.0.1:47000 status
-ota_simulator control --server 127.0.0.1:47000 clients
-ota_simulator control --server 127.0.0.1:47000 metrics
-```
-
-Then add active controls:
-
-```bash
-ota_simulator control set-path \
-  --path alice:bob \
-  --snr 10 \
-  --channel poor
-
-ota_simulator control fade \
-  --path bob:alice \
-  --from-snr 20 \
-  --to-snr 5 \
-  --duration 30s
-
-ota_simulator control inject-tone \
-  --to bob \
-  --freq 1475 \
-  --gain-db -12 \
-  --duration 20s
-
-ota_simulator control inject-wav \
-  --to all \
-  --file fixtures/hf_crash.wav \
-  --gain-db -6 \
-  --at now+5s
-
-ota_simulator control inject-impulses \
-  --to alice \
-  --rate 3/s \
-  --peak-db -3 \
-  --duration 60s
-```
-
-Control commands should be accepted by a running server without restarting the
-session. Each accepted command must create a JSONL event with:
-
-- command id.
-- issuing user/station.
-- wall-clock timestamp.
-- server sample time.
-- target station/path.
-- parameters.
-- authorization result.
-- start/end sample time for scheduled effects.
-- command source: `console`, `control-cli`, `live-script`, or future dashboard.
-
-### Injection Targets
-
-Supported targets should include:
-
-```text
---to alice
---to bob
---to all
---to monitors
---path alice:bob
---path all:bob
---tap rf_mix
---tap noise_only
-```
-
-Receiver-targeted injection means "add this impairment to what the receiver
-hears." Path-targeted injection means "affect only transmissions from this
-sender to this receiver." Tap-targeted injection is for monitor-only experiments
-and should not affect modem clients.
-
-### Injection Types
-
-Prioritize these live effects:
-
-- `inject-tone`: single carrier, drifting carrier, or chirped tone.
-- `inject-wav`: arbitrary WAV clip mixed into a station RX stream.
-- `inject-noise`: temporary noise floor increase.
-- `inject-impulses`: clicks/crashes with rate and peak controls.
-- `fade`: smooth SNR/path change over time.
-- `blackout`: drop a receiver or path for a duration.
-- `mute`: administrative mute of a station TX.
-- `level`: station or path gain change.
-- `cfo`: path frequency offset change.
-- `delay`: path propagation or buffer delay change.
-- `network-impair`: packet loss/jitter injection separate from RF impairment.
-
-Every effect should have:
-
-- target.
-- start time.
-- duration.
-- gain/level.
-- optional seed.
-- unique id.
-- cancel command.
-
-Example:
-
-```bash
-ota_simulator control cancel-effect --id fx-00042
-```
-
-### Scheduling
-
-Operators need both immediate and scheduled controls:
-
-```bash
---at now
---at now+5s
---at sample:1440000
---duration 30s
---repeat every:60s,count:5
-```
-
-Scheduled effects should be deterministic against the server sample clock. This
-is important for replay and for comparing runs.
-
-### Live Scenario Scripts
-
-In addition to one-off control commands, `serve` should be able to load a script
-of timed effects while clients are attached:
-
-```bash
-ota_simulator serve \
-  --port 47000 \
-  --live-script tests/fixtures/ota_simulator/live_fade_and_qrm.json
-```
-
-The same script format should also be injectable while running:
-
-```bash
-ota_simulator control load-script live_fade_and_qrm.json --start now+10s
-```
-
-This bridges deterministic `ota_simulator run` scenarios and human-driven live
-sessions.
-
-## Channel Semantics
-
-The live channel should behave like a shared RF medium:
-
-- Each station receives continuous audio.
-- A station normally receives other stations' transmissions plus noise.
-- A station should not receive its own TX unless loopback is explicitly enabled.
-- Simultaneous transmitters are summed at each receiver.
-- Collisions are physical audio collisions, not scheduler conflicts.
-- Clipping should be measured and reported.
-- Per-direction path models should be possible later.
-
-Initial server options:
-
-```bash
---snr 15
---channel awgn|good|moderate|poor|flutter
---seed 42
---noise-bed FILE.wav
---noise-bed-loop
---capture-dir DIR
---max-clients N
---loopback-self-audio false
-```
-
-Later options:
-
-```bash
---path alice:bob:snr=12,channel=poor,cfo=20
---rx-blackout-model ptt
---tx-delay-ms 80
---level alice=-3db,bob=0db
---drop-rate 0.01
---jitter-ms 20
-```
-
-## Friends, Rooms, and Roles
-
-Because friends may connect to a shared server, the live service needs basic
-room and permission semantics.
-
-### Rooms
-
-The server should start one named room by default:
-
-```bash
-ota_simulator serve --room-id sunday-net --max-clients 8
-```
-
-The room defines:
-
-- channel config.
-- client limit.
-- capture directory.
-- auth policy.
-- default role for authenticated callsigns, usually `station`.
-- allowed monitor taps.
-- whether unlisted callsigns may join.
-- callsign collision policy.
-
-Multi-room support can wait. A single process with one active room is enough for
-the first remote lab.
-
-### Roles
-
-Suggested roles:
-
-```text
-station
-  normal friend/user participant; may transmit modem audio and receive assigned
-  RX audio
-
-listen_only
-  may receive one or more monitor taps, cannot transmit
-
-operator
-  may issue live injection and path-control commands
-
-admin
-  may change auth, kick/mute stations, end session, and manage captures
-```
-
-Role permissions should be explicit. A friend connecting as `station` is allowed
-to transmit like a normal radio participant, but should not automatically be
-allowed to inject QRM, change SNR, kick users, or modify room settings.
-
-### Identity
-
-Each connection should register:
-
-- auth identity.
-- callsign.
-- station id.
-- client type: `ultra_gui`, `ultra_tnc`, `monitor`, `control`.
-- client version.
-- protocol version.
-
-For human participants, callsign is the primary identity shown in status,
-captures, monitor taps, and logs. Station id is a transport/session identifier.
-By default the station id should be derived from the callsign, for example:
-
-```text
-callsign=KC3VPB -> station_id=kc3vpb
-callsign=8P9QC  -> station_id=8p9qc
-```
-
-If one operator connects multiple devices under the same callsign, use explicit
-station ids:
-
-```text
-callsign=KC3VPB station_id=kc3vpb-gui
-callsign=KC3VPB station_id=kc3vpb-tnc
-```
-
-The modem protocol still owns RF callsign behavior. The server uses callsigns
-for room identity, authorization, logging, monitor labels, and collision
-avoidance.
-
-### Callsign Registration
-
-For friend labs, a simple token file can map callsigns to roles:
-
-```text
-KC3VPB station token_hash=...
-8P9QC station,operator token_hash=...
-N0CALL listen_only token_hash=...
-```
-
-Open rooms can allow unlisted callsigns with `station` role, but closed rooms
-should require pre-authorized callsigns. The server should reject duplicate
-callsigns by default unless the connection presents an allowed multi-device
-station id or an admin explicitly replaces the old connection.
-
-### Moderation and Safety
-
-Required control commands:
-
-```bash
-ota_simulator control clients
-ota_simulator control grant-role --callsign 8P9QC --role operator
-ota_simulator control revoke-role --callsign 8P9QC --role operator
-ota_simulator control mute --callsign KC3VPB --duration 60s
-ota_simulator control unmute --callsign KC3VPB
-ota_simulator control kick --callsign KC3VPB --reason duplicate-id
-ota_simulator control set-role --identity mathieu --role operator
-ota_simulator control record start
-ota_simulator control record stop
-```
-
-The server should protect the lab from accidental or abusive clients:
-
-- unique station id enforcement.
-- unique callsign enforcement for normal one-device users.
-- max TX level per station.
-- optional max duty cycle per station.
-- per-client audio packet rate limits.
-- command rate limits.
-- console session idle timeout.
-- console command audit log.
-- capture disk quota.
-- idle timeout.
-- clean stale-client eviction.
-
-### Friend-Friendly Monitor Mode
-
-Allow people to join without transmitting:
-
-```bash
-ota_simulator monitor \
-  --server example:47000 \
-  --tap rf_mix \
-  --output default
-```
-
-Monitor taps:
-
-```text
-alice_rx
-bob_rx
-alice_tx
-bob_tx
-rf_mix
-noise_only
-events
-```
-
-This lets friends listen to the simulated HF room or watch tests without adding
-another transmitter.
-
-## AWS and Security
-
-AWS support should be planned, but the first public internet version must not be
-unauthenticated raw audio.
-
-Minimum private deployment:
-
-- Bind to private network interface or VPN.
-- Use WireGuard, Tailscale, or SSH tunnel.
-- Save server-side captures.
-- Include transport metrics in the session log.
-
-Minimum public deployment before exposing ports:
-
-- Auth token or mTLS.
-- TLS for control plane.
-- UDP audio session keys derived from authenticated control plane.
-- Remote console disabled by default unless auth is configured.
-- Remote console can be reached over VPN and can inject/cancel effects with
-  operator credentials.
-- Rate limits per station.
-- Max client count.
-- Capture storage limits.
-- Clear logs showing callsign, station id, remote address, and negotiated
-  protocol version.
-- Role-based authorization for injection and admin commands.
-- Optional allowlist of callsigns, station ids, and identities.
-
-NAT notes:
-
-- If clients connect outbound to AWS, UDP should work for most home networks.
-- Keep control TCP open for session ownership and keepalive.
-- If UDP fails, support TCP audio fallback with a warning that results are not
-  equivalent under packet loss.
-
-## Evidence and Captures
-
-`ota_simulator serve` should write:
-
-```text
-capture_dir/
-  session.jsonl
-  server_metrics.csv
-  alice_tx.wav
-  alice_rx.wav
-  bob_tx.wav
-  bob_rx.wav
-```
-
-Session log events:
-
-- server start.
-- client connect/disconnect.
-- client auth success/failure.
-- remote console connect/disconnect.
-- remote console command accepted/rejected.
-- role assignment and role change.
-- channel config.
-- live control command accepted/rejected.
-- live injection effect start/end/cancel.
-- per-station TX active/inactive.
-- active transmitter count.
-- station mute/kick/admin actions.
-- clipping events.
-- transport loss/jitter/underrun events.
-- capture file paths.
-- clean shutdown.
-
-This is important because remote tests can otherwise become ambiguous. A failed
-decode must be attributable to channel impairment, modem behavior, or network
-transport impairment.
-
-## Additional Design Items
-
-These are not all first-patch requirements, but they should be part of the design
-review so the first implementation does not block them later.
-
-### Versioning and Capability Negotiation
-
-The control handshake should negotiate:
-
-- protocol version.
-- supported audio transports: TCP, UDP.
-- supported PCM formats: int16, float32.
-- supported frame sizes.
-- supported monitor taps.
-- supported injection commands.
-- whether auth, TLS, and role enforcement are active.
-
-Clients should fail clearly when a required capability is missing instead of
-silently falling back to behavior that makes test results invalid.
-
-### Calibration and Reference Levels
-
-The server should expose its signal and noise calibration explicitly:
-
-- modem reference RMS/power.
-- configured SNR definition.
-- current noise RMS.
-- per-station TX RMS and peak.
-- per-path gain.
-- clipping/soft-limit policy.
-
-This matters because throughput comparisons are only meaningful when SNR and
-drive levels are comparable across local, hardware, and remote runs.
-
-### Reproducibility
-
-Every run should be replayable or at least diagnosable:
-
-- session seed.
-- per-effect seed.
-- exact channel profile.
-- exact live commands and sample times.
-- client versions.
-- server build version and git commit.
-- capture checksums.
-
-Live sessions with human/friend traffic will not be perfectly deterministic, but
-the server should still preserve enough evidence to explain what happened.
-
-### Reconnect and Late Join Behavior
-
-The room should define what happens when a client disconnects and returns:
-
-- same callsign reconnects within timeout.
-- duplicate callsign connects while old session is stale.
-- monitor joins after session start.
-- station joins while others are already transferring data.
-- client clock or packet sequence restarts.
-
-Recommended default: reconnect replaces a stale connection for the same callsign
-after a short timeout, but replacing an active connection requires admin action.
-
-### Privacy and Recording Notice
-
-Friend labs should make recording explicit. Server-side captures may contain
-callsigns, modem payload metadata, and monitor audio.
-
-The server should log a recording notice at join time, and clients should expose
-that notice in GUI/TNC logs:
-
-```text
-room recording is enabled; TX/RX audio and control events are captured
-```
-
-### Room Presets
-
-Add named room/channel presets so tests are repeatable:
-
-```bash
---preset local-good
---preset aws-jitter-good
---preset poor-hidden-terminal
---preset qrm-fade-file-transfer
-```
-
-Presets should expand to explicit config in the session log so a run can be
-recreated later without relying on a mutable preset definition.
-
-### Health and Observability
-
-The server should expose simple health views:
-
-- server tick latency.
-- queue depths.
-- per-client packet loss/jitter.
-- per-client TX/RX RMS.
-- active effects.
-- disk/capture usage.
-- connected clients and roles.
-
-Initial form can be `ota_simulator console status` and `metrics`. A structured
-JSON status endpoint can come later for dashboards.
-
-### Failure Policy
-
-The server should define behavior for common failures:
-
-- capture disk full.
-- overloaded mixer tick.
-- malformed audio packets.
-- invalid effect parameters.
-- unauthorized control command.
-- auth token reload failure.
-- client sends audio before registration completes.
-
-Each failure should have a clear policy: reject client, drop packet, disable
-capture, continue degraded, or terminate the room.
-
-### Security Boundaries
-
-Even in a friendly lab, do not treat station clients as trusted operators.
-
-Default security posture:
-
-- station role can transmit and receive only.
-- listen-only role cannot transmit.
-- operator role can inject/control impairments.
-- admin role can manage people and room lifecycle.
-- public bind requires auth.
-- remote console requires auth.
-- destructive commands require confirmation.
-
-## Implementation Phases
-
-### Phase 0: Design Review
-
-Deliver this document and get review on:
-
-- Module boundaries.
-- Transport choices.
-- Whether `IAudioBackend` should be introduced immediately.
-- How much of `SimulatedChannel` should be extracted.
-- Whether TCP-only MVP is acceptable before UDP audio plane.
-
-### Phase 1: Extract Shared Live Channel Core
-
-Create a reusable live-channel mixer that can be used by `ota_simulator serve`.
-
-Responsibilities:
-
-- Maintain station list.
-- Accept per-station TX chunks.
-- Produce per-station RX chunks every 10 ms.
-- Reuse existing AWGN/Watterson/noise-bed behavior.
-- Capture TX/RX streams.
-- Report metrics.
-
-Do not change GUI behavior in this phase.
-
-### Phase 2: Add `ota_simulator serve` Local TCP MVP
-
-Add:
-
-```bash
-ota_simulator serve \
-  --bind 127.0.0.1 \
-  --port 47000 \
-  --room-id local \
-  --snr 15 \
-  --channel good
-```
-
-MVP can use TCP for both control and audio if packet framing is UDP-ready.
-
-Acceptance:
-
-- One server accepts two test clients.
-- Server emits continuous RX frames.
-- A TX appears in B RX.
-- A TX does not appear in A RX unless configured.
-- Simultaneous TX is mixed.
-- Captures are written.
-- Server exposes a local-only status/control socket or subcommand path.
-
-### Phase 3: Add `OtaAudioClient`
-
-Add reusable client code:
-
-```cpp
-class OtaAudioClient {
-public:
-    bool connect(const std::string& host,
-                 uint16_t port,
-                 const std::string& station_id,
-                 const std::string& callsign);
-    void disconnect();
-
-    void queueTxSamples(const std::vector<float>& samples);
-    std::vector<float> getRxSamples(size_t max_samples);
-    size_t getRxBufferSize() const;
-
-    bool isConnected() const;
-    OtaAudioMetrics metrics() const;
-};
-```
-
-Acceptance:
-
-- Unit tests for packet encode/decode.
-- Unit tests for RX ring behavior.
-- Simulated server/client smoke test.
-- No dependency on SDL.
-
-### Phase 4: Add Runtime Control, Injection, and Roles
-
-Add live control before wiring the GUI. Headless control is easier to validate
-and is central to the value of `serve`.
-
-Acceptance:
-
-- `ota_simulator control status` lists server, room, clients, and metrics.
-- `ota_simulator control clients` lists callsign, station id, role, client type,
-  remote address, packet counters, and TX active state.
-- `ota_simulator console` can connect remotely, authenticate, show status, and
-  stream events.
-- `inject-tone` can target one station while a session is running.
-- `inject-wav` can target all stations while a session is running.
-- `fade` can change one path over a timed duration.
-- `cancel-effect` can stop a scheduled or active effect.
-- Every control command is logged with identity, target, parameters, and sample
-  time.
-- Basic roles exist: `station`, `listen_only`, `operator`, `admin`.
-- A `station` client cannot issue injection/admin commands.
-- A read-only console cannot issue state-changing commands.
-- Duplicate callsigns/station ids are rejected or require explicit admin
-  replacement.
-
-### Phase 5: Wire `ultra_tnc --sim-audio`
-
-Implement headless TNC first because it is easier to test than the GUI.
-
-Acceptance:
-
-```bash
-ota_simulator serve ...
-ultra_tnc --sim-audio .../alice --port 18300
-ultra_tnc --sim-audio .../bob --port 18400
-```
-
-Then:
-
-- Connect from Alice to Bob.
-- Send message.
-- Send file.
-- Verify byte-exact file reception.
-- Confirm captures and session logs.
-- Confirm normal SDL-backed `ultra_tnc` still works.
-
-### Phase 6: Wire GUI `-sim` to OTA Backend
-
-Change `-sim` meaning:
-
-- Show OTA Simulator panel.
-- Do not start the embedded virtual station.
-- Connect local station to `ota_simulator serve`.
-- Add optional monitor playback using SDL output.
-
-Keep old embedded sim code present but unreachable or hidden for one transition
-period if needed. Remove it after external simulation passes equivalent tests.
-
-Acceptance:
-
-- GUI can connect to server.
-- GUI can hear optional monitor audio through speakers.
-- GUI modem decodes RX directly from OTA backend, not from microphone.
-- GUI can connect to a TNC peer through the server.
-- GUI can send and receive a file through the server.
-
-### Phase 7: Add UDP Audio Plane
-
-Add UDP audio after the local TCP MVP is stable.
-
-Acceptance:
-
-- UDP packet sequence/loss detection.
-- Jitter buffer tests.
-- Late packet drop behavior.
-- TCP fallback warning.
-- Transport metrics appear in JSONL.
-- Local loss/jitter injection tests can separate network impairment from RF
-  channel impairment.
-
-### Phase 8: AWS-Ready Packaging
-
-Add deployment artifacts while keeping the source in this repo:
-
-```text
-packaging/docker/ota_simulator/
-  Dockerfile
-  README.md
-```
-
-Acceptance:
-
-- Build container.
-- Run `ota_simulator serve` in container.
-- Bind local or VPN interface.
-- Configure auth token.
-- Capture directory mounted as volume.
-- Remote `ultra_tnc --sim-audio` can attach over VPN.
-- Remote friend stations can join with station role and transmit under their
-  callsigns.
-- Remote monitor clients can join with listen-only role.
-- Operator/admin tokens are required for live injection commands.
-- Remote console access is disabled or read-only when no operator/admin auth is
-  configured.
-
-## Test Plan
-
-### Unit Tests
-
-- Packet header serialization/deserialization.
-- PCM int16/float conversion and clipping.
-- Jitter buffer ordering.
-- Jitter buffer late packet drop.
-- RX ring buffer bounds.
-- Metrics counters.
-- Runtime effect scheduling and cancellation.
-- Role/permission checks.
-
-### Integration Tests
-
-- Server accepts clients.
-- Continuous idle RX frames.
-- A-to-B routing.
-- B-to-A routing.
-- Self audio disabled by default.
-- Simultaneous TX mixing.
-- Capture writing.
-- Server shutdown cleanup.
-- Runtime `inject-tone` affects only the selected target.
-- Runtime `inject-wav --to all` appears in all receiver captures.
-- Runtime path fade changes metrics and decode conditions without restarting.
-- Unauthorized station clients cannot issue injection commands.
-- Duplicate callsigns/station ids are rejected or explicitly replaced by admin
-  action.
-
-### End-to-End Tests
-
-- Two `ultra_tnc --sim-audio` instances exchange a message.
-- Two `ultra_tnc --sim-audio` instances transfer a byte-exact file.
-- Two or more friend/station clients can join the same room with unique
-  callsigns and transmit.
-- A listen-only monitor can hear `rf_mix` without transmitting.
-- An operator can inject QRM during a file transfer and the event appears in the
-  session log and captures.
-- A remote console can inject and cancel an effect while friend stations remain
-  connected.
-- GUI `-sim` talks to `ultra_tnc --sim-audio`.
-- Existing `ota_simulator run` fixtures still pass.
-- Existing `cli_simulator` and relevant protocol tests still pass.
-- Normal SDL hardware mode still starts and lists devices.
-
-### Network Impairment Tests
-
-- Inject packet loss.
-- Inject jitter.
-- Inject late packets.
-- Inject server tick overrun.
-- Confirm metrics distinguish network impairment from RF channel impairment.
+---
+
+## Determinism Acceptance Gate (MVP Ship Criterion)
+
+`tests/test_otasim_determinism.cpp` runs the following scenarios
+**twice each** with identical inputs and byte-compares all captures
++ the deterministic event log. Any mismatch fails the gate.
+
+Minimum scenario set for MVP ship:
+1. `passthrough_smoke` — mixer correctness, no channel
+2. `awgn_snr15` — single stochastic channel, seeded
+3. `watterson_good_snr15` — stateful fading, seeded
+4. `noise_bed_replay` — file-driven, deterministic
+5. `narrowband_awgn_snr8` — OFDM_NARROW coverage
+
+All 5 must produce byte-identical output across runs to ship MVP.
+
+---
+
+## Roles + Auth (Staged)
+
+**MVP:** single local/full-access token (file on disk). Localhost
+binding only. No multi-tenant.
+
+**V1:** static allowlist file mapping tokens to roles:
+- `station` — can join a session, transmit, receive
+- `listen_only` — can join, receive, never transmit
+- `operator_admin` — can join, transmit, receive, plus inject
+  effects, advance scripted events, end session, view full receipt
+
+No dynamic role grant/revoke (deleted from scope). Operators
+add/remove tokens by editing the allowlist file and reloading
+(`ota_simulator reload-auth`).
+
+**V2:** see "Operations Workstream" section below.
+
+---
+
+## Phasing: MVP / V1 / V2
+
+### MVP (2-week local scripted instrument)
+
+**Goal:** replace `cli_simulator`-style regression evidence. Local
+only, no network. Used by Mathieu solo for regression testing.
+
+- Extract `SimulatedChannel` into a standalone library
+  (`libota_channel_core`)
+- Channel models: passthrough, AWGN, Watterson good/moderate/poor,
+  noise-bed replay, OFDM_NARROW variants
+- Deterministic RNG infrastructure (seeded, named streams)
+- Sample-index-authoritative mixer
+- Capture writer (WAV + JSONL events)
+- Receipt writer (unsigned for `diagnostic`, signed when key
+  provided)
+- Scenario loader with JSON Schema validation
+- Protobuf service definitions (proto files only; no impl yet)
+- Determinism acceptance gate test
+- `ota_simulator run` command using the new library
+- Headless Python test client (no SDL, no GUI) for CI
+
+### V1 (private hosted lab over VPN/Tailscale)
+
+**Goal:** Mathieu + KC3VPB + 1–2 friends can run shared sessions
+over a private network.
+
+- `ota_simulator serve` listens on configurable port
+- gRPC control plane implementation
+- UDP audio plane
+- Jitter buffer + late-drop policy
+- `ultra_tnc --sim-audio host:port/station_id`
+- `ultra_gui -sim --ota-host host:port --station-id X`
+- Static allowlist auth with three roles
+- Live scripted scenario execution
+- Live injection: tone, WAV, fade, blackout, level, CFO, delay
+- Container/package for self-hosted deployment
+- TLS termination (operator-provided cert) on gRPC
+
+### V2 (research, scale, comfort)
+
+**Goal:** public-internet hosted, research-grade reproducibility,
+ecosystem features.
+
+- Public-internet hardening (see "Operations Workstream")
+- Plugin channel-model registry (`IChannelModel`)
+- KiwiSDR live ingestion + recorded-channel fixture library
+- Web session viewer/dashboard (HTML5 + WebSocket)
+- OpenTelemetry tracing + Prometheus metrics
+- Conformance test suite for external modem implementations
+- Time-debugger primitives (pause/step/rewind/breakpoint)
+- Multi-room hosting
+- Paper-grade reproducibility packaging
+- Deleting the old embedded GUI simulator path after V1 replacement
+  gates pass
+
+---
+
+## Deletion Plan (MVP Ship)
+
+Per `project_no_backwards_compat` memory — pre-deployment project,
+no compatibility hedges. The following are deleted or refactored at
+MVP ship:
+
+| Path | Action | Rationale |
+|---|---|---|
+| `tools/cli_simulator.cpp` | Delete | Superseded by OTASim scenario/receipt evidence |
+| `tools/threaded_simulator.cpp` | Delete | Duplicate harness with wall-clock scheduling |
+| `tools/ota_simulator/clip_gen.cpp` | Delete | Legacy fixture generator |
+| `tools/ota_simulator/clip_gen.hpp` | Delete | Header for clip_gen |
+| `tools/ota_simulator/runner.cpp` | Delete | V1 single-endpoint runner superseded |
+| `tools/ota_simulator/runner.hpp` | Delete | Header for runner |
+| `tools/ota_simulator/scripted_audio_port.cpp` | Delete | Replaced by channel-core scheduling |
+| `tools/ota_simulator/scripted_audio_port.hpp` | Delete | Header for scripted_audio_port |
+| `tools/ota_simulator/runner_v2.cpp` | Refactor/move | Becomes new OTASim runner library |
+| `tools/ota_simulator/runner_v2.hpp` | Refactor/move | Public API becomes new OTASim runner API |
+| `tools/ota_simulator/scenario.cpp` | Refactor/move | Replace permissive parser with JSON Schema validation |
+| `tools/ota_simulator/scenario.hpp` | Refactor/move | Scenario structs become schema-backed |
+| `tools/ota_simulator/session_log.cpp` | Refactor/move | Replace ad hoc JSONL with deterministic event log |
+| `tools/ota_simulator/session_log.hpp` | Refactor/move | Header for new artifact/receipt boundary |
+| `tools/ota_simulator.cpp` | Rewrite in place | Binary name stays; legacy `gen`/old `run` dispatch removed |
+
+**No legacy file kept as-is.** Every "keep" is debt.
+
+CMake/CTest/docs/agent gates that reference `cli_simulator`,
+`threaded_simulator`, or legacy `ota_simulator run` must be
+retargeted or deleted in the MVP implementation series. SDL hardware
+backend is NOT deleted; only the simulator harness using it is.
+
+---
+
+## Operations Workstream (V2, Separate Design)
+
+The locked design covers up to V1 ("private friend-lab over VPN").
+For real long-running public hosted operation, the following
+concerns are **not yet designed** and need a separate design
+log (`docs/OTA_SIMULATOR_OPERATIONS_LOG.md`) before V2 ships:
+
+- Process supervision (systemd / container restart, readiness probes)
+- Capture retention (TTL, S3 offload, signed-receipt-forever)
+- Session limits (per-token concurrent sessions, max duration,
+  idle kick, scenario size cap)
+- Rate limiting (RPS, bandwidth, CPU/audio-hour quotas)
+- Storage management (disk quotas, watermarks, cold archive)
+- Auth at scale (token issuance API, revocation, expiry, audit log)
+- Health/metrics (Prometheus full export, Grafana dashboard,
+  alerting)
+- TLS / cert renewal (ACME automation, rotation, mTLS for client
+  identity)
+- Update strategy (rolling restart with session drain, version
+  pinning)
+- Abuse handling (scenario content review, spam detection, kick/ban)
+- Cost accounting (per-tenant tracking, billing hook)
+- Audit log (tamper-evident admin action log, separate from session
+  events)
+- Privacy / PII (IP/callsign retention, GDPR erasure)
+- DoS protection (connection caps, slow-loris timeouts, payload
+  caps, WAF)
+- Federation (cross-server session handoff, scenario marketplace)
+
+**Do not address these in MVP or V1.** Friend-lab over Tailscale
+does not need them. Open the operations design log when V1 is
+deployed and there's a real demand signal for public hosting.
+
+---
+
+## Test Strategy
+
+### Unit Tests (MVP)
+- Channel model determinism (seeded RNG produces identical output)
+- Mixer correctness (passthrough produces bitcopy)
+- Capture writer (WAV bytes match expected for known input)
+- JSON Schema validator (rejects unknown fields)
+- Receipt signing/verification
+
+### Integration Tests (MVP)
+- Determinism acceptance gate (5 scenarios × 2 runs, byte-compare)
+- `ota_simulator run <scenario>` end-to-end produces valid receipt
+- Python test client connects, sends audio, reads audio, validates
+  capture
+
+### End-to-End Tests (V1)
+- Two `ultra_tnc --sim-audio` instances complete a file transfer
+  through the server
+- `ultra_gui -sim` connects, displays waterfall, decodes messages
+- Live injection (operator role) modifies channel mid-session
+
+### Performance Tests (V1)
+- Server sustains 4 concurrent sessions × 2 stations each at 48 kHz
+  on commodity hardware
+- Audio plane latency under 50 ms one-way at LAN speeds
+- Memory bounded under 24-hour soak
+
+---
 
 ## Compatibility and Migration
 
-Short-term:
+**MVP ship is the cutover.** No wrapper, no compatibility shim. Per
+Round 4 decision (option B):
 
-- Keep existing `ota_simulator run` behavior unchanged.
-- Keep existing SDL hardware paths unchanged.
-- Add new `serve` behavior.
-- Add new `--sim-audio` or `--audio-backend ota` path.
+1. MVP development proceeds alongside `cli_simulator`
+2. When MVP determinism + protocol evidence gates pass:
+   - Delete `cli_simulator` from build
+   - Delete test references
+   - Delete doc references
+   - Delete agent-gate references
+   - Rewrite tests that expected old CLI surface to use OTASim
+     scenarios + receipts + captures
+3. The shipped MVP is the new evidence path. Period.
 
-Medium-term:
+There is no transition period during which both paths produce
+"evidence". Two evidence paths = ambiguous results = 2 AM bug
+report ambiguity.
 
-- Make GUI `-sim` external-only.
-- Hide or remove embedded virtual-station GUI controls.
-- Delete `virtual_modem_` and `virtual_protocol_` path after replacement is
-  validated.
+---
 
-Long-term:
+## Implementation Queue
 
-- Consider moving `ota_simulator serve` into a separate repository only after:
-  - wire protocol is versioned,
-  - client/server contract tests exist,
-  - deployment cadence truly differs from ProjectUltra,
-  - GUI and TNC integrations are stable.
+First implementation task (queued separately in `agents/queue/`):
 
-Until then, keep it in ProjectUltra as a separate deployable binary.
+**`01_otasim_channel_core_extraction.md`** — Extract the channel
+core into a standalone library. Scope:
+- Move `SimulatedChannel` + audio port + mixer logic from
+  `tools/sim/` and `tools/ota_simulator/` into
+  `src/ota_channel_core/` (new directory)
+- Build as a static library `libota_channel_core.a`
+- Add seeded RNG infrastructure (named streams)
+- Add sample-index-authoritative scheduling
+- Implement the 5 MVP channel models (passthrough + AWGN +
+  Watterson g/m/p + noise-bed-replay)
+- Add JSON Schema for scenarios + events + receipts +
+  provenance manifests
+- Add receipt writer (unsigned MVP; signing optional)
+- Implement determinism acceptance gate
+  (`tests/test_otasim_determinism.cpp`)
+- Update `ota_simulator run` to use the new library
 
-## Review Questions for Claude Code
+**Acceptance:** Gate passes (5 scenarios × 2 runs byte-compare).
+`cli_simulator` still works (this task does not delete it yet).
 
-1. Should `IAudioBackend` be introduced before `OtaAudioClient`, or should the
-   first patch wire `OtaAudioClient` directly into `ultra_tnc`?
-2. Should the live channel core reuse `SimulatedChannel` directly, or should the
-   current `SimulatedChannel` be split into a cleaner reusable mixer plus path
-   model?
-3. Is TCP-only MVP acceptable if the framing is UDP-ready, or should UDP audio
-   be implemented immediately?
-4. Is int16 the right network PCM format, or should local builds keep float32
-   first and add int16 before AWS?
-5. How should GUI monitor playback avoid blocking or underrunning when server
-   RX stalls?
-6. What is the safest migration path for removing the GUI embedded simulator
-   without breaking current developer workflows?
-7. Which tests should become required gates before deleting `virtual_modem_` and
-   `virtual_protocol_`?
-8. What is the minimum role/auth model needed before inviting friends to connect
-   over VPN or AWS?
-9. Should runtime injection commands share the same JSON schema as scripted
-   `ota_simulator run` events, or should live effects use a new schema?
-10. Should monitor clients receive PCM audio only, or should they also receive
-    event/metrics streams for a future dashboard?
-11. Should the first remote console be an interactive CLI only, or should it also
-    expose a simple HTTP/WebSocket dashboard for read-only monitoring?
+Subsequent tasks (queued after #1):
 
-## Recommended First Patch
+- **`02_otasim_cmake_ctest_retarget.md`** — Purge legacy simulator
+  references from CMake/CTest/docs/agent gates
+- **`03_otasim_grpc_control_plane.md`** — Implement gRPC service
+- **`04_otasim_audio_plane_mvp.md`** — Localhost TCP-framed audio
+- **`05_otasim_serve_command.md`** — `ota_simulator serve` entry
+  point with gRPC + audio plane
+- **`06_otasim_python_client.md`** — Headless test client
 
-The first implementation patch should not touch GUI code.
+---
 
-Recommended scope:
+## References
 
-1. Add packet definitions and encode/decode tests.
-2. Add a local TCP `ota_simulator serve` skeleton.
-3. Add a tiny test client or smoke test.
-4. Prove continuous RX frames and A-to-B sample routing.
-5. Write captures and JSONL session events.
-6. Add a local-only `status` control command.
+- `docs/OTA_SIMULATOR_DESIGN_LOG.md` — Round-by-round design
+  conversation (closed Round 5)
+- `docs/PROJECT_GOALS.md` — Mission filter
+- `docs/INVARIANTS.md` — Modem invariants this preserves
+- `docs/AI_COLLABORATION.md` — Claude ↔ Codex workflow
+- `CLAUDE.md` — Project rules, no-backwards-compat policy
+- v1 draft preserved in git history (commit `33f6b4e` and prior
+  conversations referenced in the design log)
 
-After that works, add one live injection command and basic roles, then wire
-`ultra_tnc --sim-audio`. Only then should the GUI `-sim` path be replaced.
+---
+
+## Document Conventions
+
+This doc is the **single source of truth** for OTASim design.
+Disagreements:
+1. Reopen the relevant OQ in the design log
+2. Run a new design round (Round 6, 7, ...) with Codex
+3. Update Decisions Locked when both sides agree
+4. Then update THIS doc to match
+
+Do not edit this doc unilaterally to reflect a design change
+without a corresponding design log round.

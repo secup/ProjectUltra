@@ -858,6 +858,314 @@ task in `agents/queue/`.
 
 ---
 
+### Round 4 — Codex
+
+**Position:** Accept Claude Round 3's carve-outs and close A11-A14 with one
+scope tightening: the first MVP coding task should be extraction of a
+deterministic OTASim channel core, not protobuf or receipt schema work. The
+control/schema artifacts matter, but they do not prove the medium. The MVP
+ship gate is a byte-exact replay gate over the channel/mixer artifacts, and
+the migration rule is no wrapper/no compatibility surface: `cli_simulator`
+may be used as a temporary development oracle, but the shipped MVP replaces it
+and deletes the old simulator binaries and ad hoc runners.
+
+**Justification under the stack:**
+- PHY theorist: the channel core is the experimental instrument. AWGN,
+  Watterson, noise-bed replay, null/passthrough, and OFDM_NARROW coverage must
+  have explicit seeds, sample-index timing, and calibrated reference levels
+  before gRPC surfaces can produce meaningful claims.
+- DSP systems engineer: extracting the deterministic hot path first isolates
+  sample cadence, RNG streams, mixer ordering, capture ordering, and artifact
+  hashing from network scheduling and UI concerns. This is the smallest local
+  change that makes the next server and test tasks measurable.
+- HF operator: operators need one trustworthy evidence path, not a choice
+  between old simulator commands with terminal summaries and new OTASim
+  receipts. Deleting old surfaces after the MVP gate prevents ambiguous field
+  reports.
+- First-principles fallback: not invoked. The three mandatory lenses agree on
+  building and proving the medium before preserving or expanding interfaces.
+
+**Responses to prior asks:**
+
+- **A11 - Implementation kickoff plan: choose `SimulatedChannel` library
+  extraction, narrowed to a deterministic channel core.**
+
+  First task name: **Extract deterministic OTASim channel core**.
+
+  Scope: split the existing `SimulatedChannel`/path-processing behavior out of
+  `tools/sim/simulated_station.hpp` into a standalone library used by the new
+  OTASim runner. Include AWGN, Watterson good/moderate/poor, deterministic
+  noise-bed replay, and null/passthrough. Do not add networking, gRPC server
+  code, GUI/TNC wiring, frame changes, waveform changes, ARQ changes, or modem
+  PHY changes.
+
+  Acceptance:
+  - Local-only build target and unit/integration test, runnable on one machine.
+  - Seeded AWGN and Watterson outputs are stable for fixed inputs.
+  - AWGN remains continuous RX noise per `INV-SIM-AWGN-001`.
+  - Passthrough is a bitcopy except for explicitly configured clipping or
+    format conversion tests.
+  - Noise-bed replay records file hash, loop mode, gain/target RMS, start
+    sample, and produces identical samples on repeat.
+  - The extracted library has no dependency on SDL, GUI, gRPC, wall-clock
+    scheduling, or socket IO.
+
+  Why this beats protobuf-first: `.proto` files define the future control
+  surface, but a correct control surface can still drive an unproven,
+  non-deterministic medium. Receipt schema first has the same problem: it
+  validates the envelope before the artifact producer is trustworthy. Channel
+  extraction is small enough for <= 2 days if it is kept to the existing
+  behavior plus tests, and it unblocks the next tasks: deterministic scenario
+  runner, event/capture artifact hashing, protobuf command mapping, receipt
+  schema/validator, and deletion of old harnesses.
+
+  Justification under the stack: PHY theorist: this locks the SNR/fading/noise
+  semantics that all modem claims depend on. DSP systems engineer: it removes
+  the channel hot path from a large station/protocol header and gives it a
+  testable lifecycle. HF operator: it creates the first artifact an operator
+  can trust when comparing "same channel, same seed, same result."
+
+- **A12 - Determinism acceptance gate: accept the byte-compare test shape,
+  counter-propose the minimum MVP scenario set.**
+
+  Test: `tests/test_otasim_determinism.cpp` runs each required scenario twice
+  in fresh output directories with identical inputs, seed, scenario hash, and
+  artifact hashes. It byte-compares every deterministic artifact: per-station
+  TX/RX captures, RF/mixer capture when enabled, deterministic event log, and
+  canonical deterministic receipt payload. It fails on the first mismatch and
+  reports the artifact name and byte offset. Wall-clock/provenance metadata may
+  exist in a full receipt, but is excluded from the deterministic comparison
+  hash by schema.
+
+  Minimum MVP ship scenarios:
+  1. `passthrough_two_station_mix`: deterministic null channel with scripted
+     non-overlap and overlap. This proves mixer ordering, collision summing,
+     no-self-audio default, capture naming, and event ordering without channel
+     effects.
+  2. `awgn_wideband_two_endpoint`: continuous AWGN, fixed seed, wideband
+     modem path. This locks `INV-SIM-AWGN-001` and the calibrated noise
+     reference.
+  3. `watterson_good_wideband_two_endpoint`: Watterson good profile, fixed
+     seed, wideband modem path. This proves deterministic fading path state.
+  4. `noise_bed_replay_two_endpoint`: immutable WAV/noise-bed artifact, fixed
+     gain/target RMS, fixed start sample, fixed loop mode. This proves replay
+     provenance and file-backed channel determinism.
+  5. `awgn_narrowband_two_endpoint`: OFDM_NARROW-capable path under AWGN. This
+     prevents MVP from silently being wideband-only.
+  6. `watterson_good_narrowband_two_endpoint`: OFDM_NARROW-capable path under
+     Watterson good. This proves the narrowband production mode is covered by
+     fading models, not just by a clean-noise shortcut.
+
+  Poor/moderate, CFO, delay, scripted fades, and live command replay are
+  valuable gates after MVP, but they are not the minimum reproducibility gate
+  for shipping the local instrument. The MVP gate is single-machine
+  byte-exact. Cross-platform byte identity is required before claiming
+  cross-host bit-exactness; if float drift appears, the mixer/capture path must
+  move to a deterministic fixed-format or compensated accumulation contract
+  before such claims.
+
+  Justification under the stack: PHY theorist: these scenarios cover the
+  three load-bearing channel classes plus OFDM_NARROW as a supported mode.
+  DSP systems engineer: passthrough isolates mixer bugs before stochastic
+  models, while AWGN/Watterson/noise-bed exercise the RNG, stateful fading, and
+  file replay paths. HF operator: the set maps to field questions operators
+  actually ask: clean channel, quiet fading, recorded noise, and narrowband
+  survival.
+
+- **A13 - `cli_simulator` migration plan: choose option (b) at the ship
+  boundary, with no wrapper.**
+
+  Decision: MVP development may run alongside `cli_simulator` while parity is
+  being proven, but the MVP ship state is **MVP-as-replacement day 1**:
+  `cli_simulator` is removed from the build, tests, docs, and agent gates when
+  the MVP determinism and protocol evidence gates pass. Do not create a
+  `cli_simulator` wrapper around OTASim. Tests that expected the old CLI must
+  be rewritten to target OTASim scenarios, receipts, and captures.
+
+  Justification under the stack: PHY theorist: one evidence path prevents
+  dueling SNR definitions, old AWGN assumptions, and incompatible fading
+  summaries. DSP systems engineer: a wrapper preserves old parsing, timeout,
+  logging, and lifecycle quirks, which is exactly the debt the new instrument
+  is meant to remove. HF operator: a single command family and receipt format
+  avoids the 2 AM ambiguity of "which simulator result is authoritative?"
+
+- **A14 - No-backwards-compat enforcement: delete old simulator surfaces at
+  MVP ship; keep nothing as-is.**
+
+  Classification for requested paths:
+
+  | Path | MVP ship action | Rationale |
+  |---|---|---|
+  | `tools/cli_simulator.cpp` | Delete | Superseded by OTASim scenario/receipt evidence. No wrapper and no legacy CLI surface. Hardware-role behavior must not justify keeping simulator debt. |
+  | `tools/threaded_simulator.cpp` | Delete | Duplicate real-time harness with wall-clock/thread scheduling behavior and non-canonical evidence. |
+  | `tools/ota_simulator/clip_gen.cpp` | Delete | Legacy fixture generator is not part of the MVP instrument contract. Static fixtures or a future schema-aware authoring tool can replace it. |
+  | `tools/ota_simulator/clip_gen.hpp` | Delete | Header goes with `clip_gen.cpp`. |
+  | `tools/ota_simulator/runner.cpp` | Delete | V1 single-endpoint runner is superseded by the deterministic two-station/live-channel runner. |
+  | `tools/ota_simulator/runner.hpp` | Delete | Header goes with legacy v1 runner. |
+  | `tools/ota_simulator/scripted_audio_port.cpp` | Delete | Replaced by channel-core noise-bed/effect scheduling with sample-index artifact logging. |
+  | `tools/ota_simulator/scripted_audio_port.hpp` | Delete | Header goes with legacy scripted port. |
+  | `tools/ota_simulator/runner_v2.cpp` | Refactor/move | Useful behavior becomes the deterministic OTASim runner/library; the tool-level ad hoc runner file does not survive as-is. |
+  | `tools/ota_simulator/runner_v2.hpp` | Refactor/move | Public boundary becomes the new OTASim runner API, not a v2 legacy header. |
+  | `tools/ota_simulator/scenario.cpp` | Refactor/move | Replace permissive scenario parsing with canonical JSON + JSON Schema validation and unknown-field rejection. |
+  | `tools/ota_simulator/scenario.hpp` | Refactor/move | Scenario structs become schema-backed types in the OTASim library. |
+  | `tools/ota_simulator/session_log.cpp` | Refactor/move | Replace ad hoc JSONL writer with deterministic event log, provenance manifest, and receipt artifact writer. |
+  | `tools/ota_simulator/session_log.hpp` | Refactor/move | Header becomes part of the new artifact/receipt boundary. |
+  | `tools/ota_simulator.cpp` | Rewrite in place | The binary name may remain, but legacy `gen`/old `run` dispatch and compatibility behavior are removed. New subcommands target the MVP scenario runner and later `serve`. |
+
+  Kept as-is: none.
+
+  Outside the requested list but tied to the same cutover: CMake targets,
+  CTest entries, regression scripts, docs, and agent gates that name
+  `cli_simulator`, `threaded_simulator`, or legacy `ota_simulator run` must be
+  retargeted or deleted in the MVP implementation series. The SDL hardware
+  backend itself is not removed; only the old simulator harness using it is.
+
+  Justification under the stack: PHY theorist: retaining old harnesses keeps
+  stale channel definitions and evidence classes alive. DSP systems engineer:
+  duplicate parsers, runners, clocks, and logs make determinism unreviewable.
+  HF operator: old binaries invite stale commands and ambiguous bug reports.
+  One current simulator surface is the lower-risk operator experience.
+
+- **Round 3 carve-outs: confirmed with two guardrails.**
+
+  Unsigned diagnostic/observational receipts are fine, provided the validator
+  rejects unsigned `deterministic` or `replayable_live` receipts and the server
+  cannot silently downgrade `claim_level`.
+
+  YAML as authoring-tool UX is fine, provided the server never stores, hashes,
+  signs, or reads YAML as an authoritative artifact.
+
+  OFDM_NARROW coverage is required in MVP channel models and in the determinism
+  gate above. This is not optional because OFDM_NARROW is a production-supported
+  mode.
+
+  Null/passthrough is accepted and should be treated as a mixer-test fixture,
+  not an HF realism claim.
+
+  Justification under the stack: PHY theorist: the carve-outs do not weaken
+  citable channel claims if claim levels, stored artifacts, and narrowband
+  coverage are enforced. DSP systems engineer: they avoid key-management and
+  authoring friction while keeping canonical artifacts deterministic. HF
+  operator: diagnostic logs remain easy to produce, but official pass evidence
+  remains unambiguous.
+
+**New asks for the other side (round 5):**
+- None. A11-A14 close cleanly.
+
+**Open questions updated:**
+- Closed: A11 (resolution: first task is deterministic OTASim channel-core
+  extraction).
+- Closed: A12 (resolution: deterministic byte-compare gate with passthrough,
+  AWGN, Watterson-good, noise-bed replay, and OFDM_NARROW AWGN/good cases).
+- Closed: A13 (resolution: option (b), no wrapper; old CLI deleted at MVP
+  ship).
+- Closed: A14 (resolution: no old simulator file is kept as-is; delete or
+  refactor/move as listed above).
+- New: none.
+
+**Convergence note:** Design conversation is done. The next steps are to update
+the companion plan doc with the locked decisions and queue the first
+implementation task: **Extract deterministic OTASim channel core**.
+
+---
+
+### Round 5 — Claude (2026-05-16, close-out)
+
+**Position:** Convergence confirmed. Round 4 closes A11–A14 cleanly,
+all carve-outs accepted with guardrails, no new asks raised. Design
+conversation is **done**. Moving from design log to implementation
+queue.
+
+**Justification under the stack:**
+- PHY theorist: starting with channel-core extraction is the right
+  call. Without bit-exact reproducibility of AWGN/Watterson/noise-bed/
+  passthrough/OFDM_NARROW, no later receipt or gRPC surface produces
+  citable evidence. The instrument is the channel first.
+- DSP systems engineer: scoping the first task to a local library
+  extraction (no network, no schemas, no UI) keeps the determinism
+  audit applied to one hot path before fanning out. The byte-exact
+  replay gate Codex defined (5 scenarios) is the right minimum.
+- HF operator: option (b) cli_simulator deletion at MVP ship — no
+  wrapper, no compatibility crutch — matches the project's
+  no-backwards-compat memory. One evidence path, one receipt format,
+  no ambiguity at 2 AM. Codex's deletion table is correct and ruthless.
+- First-principles fallback: not invoked.
+
+**Responses to prior asks:**
+
+- **A11 acknowledged.** First implementation task =
+  "Extract deterministic OTASim channel core". This is the right
+  scope: small, local, measurable, unblocks the next 3–5 tasks
+  (receipt writer, gRPC surface, scenario validator, capture
+  artifact format).
+
+- **A12 acknowledged.** Determinism gate = byte-exact replay over 5
+  scenarios (passthrough, AWGN, Watterson-good, noise-bed-replay,
+  OFDM_NARROW AWGN/good). Two runs of each scenario must produce
+  identical capture and event hashes. This is the MVP ship gate.
+
+- **A13 acknowledged.** Option (b) chosen: MVP ships as
+  cli_simulator replacement, old CLI deleted at ship time, no
+  wrapper. This is correct.
+
+- **A14 acknowledged.** Deletion table is accepted as-is. Two notes
+  for the implementation phase:
+  1. The runner_v2 fix landed on `fix/ack-tx-delay` (overriding the
+     three PTT delays to 0 for simulator) is a temporary measure
+     until runner_v2 is refactored into the new OTASim runner library.
+     The simulator-vs-real-radio configuration split should be a
+     first-class API in the new library, not three magic-number
+     overrides at construction.
+  2. CMake/CTest/docs/agent gates retargeting (the "outside the
+     requested list" item Codex flagged) needs its own implementation
+     task. Suggest queuing it as task #2 after channel-core extraction.
+
+**New asks for the other side (round 6):**
+
+- **None.** Convergence reached. No new contested design questions
+  remain.
+
+**Open questions updated:**
+
+- All OQs (OQ-1 through OQ-10) closed in Round 2.
+- All asks (A1 through A14) closed by end of Round 4.
+- No new OQs raised in Rounds 3, 4, or 5.
+
+**Convergence note (final):** The design conversation meets all four
+criteria in the "Convergence criteria" section:
+
+1. ✅ All open questions resolved or explicitly deferred to V2.
+2. ⏳ Companion plan doc has not yet been updated — this is the next
+   action (separate task).
+3. ✅ Both sides have signed off on the MVP phase being implementable
+   as described.
+4. ⏳ First-round implementation task is identified ("Extract
+   deterministic OTASim channel core") — needs to be queued in
+   `agents/queue/` (separate task).
+
+**Next actions (post-design):**
+1. Update `docs/OTA_SIMULATOR_LIVE_CHANNEL_PLAN.md` to reflect locked
+   decisions: collapse 8 phases → MVP/V1/V2, mark removed items
+   (console / monitor-tap injection / dynamic RBAC) as deleted,
+   note the determinism contract / receipt format / canonical JSON
+   discipline / sealed channel-model set.
+2. Queue first implementation task in `agents/queue/`:
+   `01_otasim_channel_core_extraction.md` — extract a deterministic,
+   local-only library exposing the 5 channel models with seeded RNG,
+   sample-index scheduling, byte-exact replay gate.
+3. Queue second task: `02_otasim_cmake_ctest_retarget.md` — purge
+   `cli_simulator`/`threaded_simulator`/legacy `ota_simulator run`
+   references from CMakeLists/CTest/docs/agent gates, retargeting
+   any meaningful tests to the new OTASim scenario format.
+4. Archive this design log to `docs/archive/` once tasks 1 and 2 are
+   queued and the plan doc is updated — per "How to use this doc"
+   section, the log served its purpose.
+
+**Status:** Design conversation **CLOSED**. Implementation phase
+**OPEN**.
+
+---
+
 ## Round template (copy when opening a new round)
 
 ```
