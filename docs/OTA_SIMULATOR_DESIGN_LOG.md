@@ -2406,6 +2406,118 @@ ctest-green gates between each.
 The log can now be archived to `docs/archive/` once tasks above
 are queued and the plan doc is rewritten.
 
+---
+
+### Round 10 — Claude (2026-05-16, FINAL scope landing)
+
+**Position:** Round 9 close-out was theoretically clean but user
+gut-checked the scope and pushed back: not a SaaS product, just
+"something solid that supports 4-5 operators jumping in for
+tests." User then made a sharper observation: **if the server is
+just an HF medium, the heavy testing/scenario/receipt machinery
+belongs CLIENT-SIDE, not in the server.** This dissolves the
+need for a separate `ota_test_runner` binary — `cli_simulator`
+already plays that role, just needs refactoring to use the server
+as infrastructure instead of embedding the channel. Final scope is
+significantly smaller than MVP-B as designed in Rounds 6-9.
+
+**Justification under the stack:**
+- PHY theorist: server-internal unit tests verify the channel
+  models, mixer, and session lifecycle (small surface, ~5 test
+  files). All modem/protocol regression coverage stays where it
+  always lived: in cli_simulator, where it can assert on PHY
+  outcomes, SNR sweeps, fading matrices.
+- DSP systems engineer: keeping the server small (just medium +
+  sessions + auth + audio + capture) means the long-lived daemon's
+  attack surface and lifecycle complexity stay manageable.
+  cli_simulator becomes a network client of the server instead of
+  embedding SimulatedChannel directly.
+- HF operator: 4-5 friends on Tailscale, no public-internet
+  hygiene needed. Tokens in a config file. Edit + restart. The
+  server is small enough to debug in an afternoon when something
+  goes wrong at 2 AM.
+- First-principles fallback: not invoked.
+
+**What got cut from MVP-B (Rounds 6-9):**
+
+| Cut | Why |
+|---|---|
+| Separate `ota_test_runner` binary | cli_simulator already plays this role — refactor it to use server as fixture, don't write a new binary |
+| TLS-required-for-public-bind | Host on Tailscale/VPN; private network; no public-internet exposure |
+| Token CLI + hashed allowlist + SIGHUP reload | Plain config file with N tokens; edit + restart |
+| Rate limiting / per-token RPS / connection caps | 4-5 known friends |
+| Abuse handling / live kick / token revoke as live admin ops | Restart server |
+| Lobby rotation engine (4-hour schedule) | Default channel + operator override; no scheduler |
+| Signed receipts with claim levels | Captures + JSONL events per session; no signing |
+| Per-token quotas, idle leases, max duration, soft/hard caps | One memory cap, one disk cap |
+| 14-item determinism audit as gating concern | Channel math is unit-tested; modem regressions live in cli_simulator |
+| Public-internet hygiene set | N/A on private network |
+
+**What stays:**
+
+- Daemon (long-running)
+- Multi-session (3-4 concurrent sessions for 4-5 operators)
+- Tokens (bearer string in gRPC metadata, validated against config file)
+- gRPC control plane + UDP audio plane
+- Per-session captures (WAV + JSONL events)
+- Channel models: AWGN, Watterson good/moderate/poor, null/passthrough
+- Lobby (always-on default session; channel set by config + operator override)
+- SessionContext isolation (non-negotiable; cheap now, impossible later)
+- GUI as real gRPC + UDP client (load-bearing — without this, friends can't join)
+- Basic daemon hygiene (SIGTERM drain, /healthz)
+- Server-internal unit tests (channel math, mixer, session lifecycle, auth, audio plane reordering, one integration smoke)
+- cli_simulator refactored to be a gRPC client of the server (same scenarios, same assertions, audio just goes through the server)
+
+**Phasing (final):**
+
+| Week | Work |
+|---|---|
+| 1 | Channel core library extraction + unit tests + SessionContext + session manager |
+| 2 | gRPC service + UDP audio plane + token auth + per-session captures |
+| 3 | GUI + TNC refactored as real clients + lobby spawn-on-startup |
+| 4 | cli_simulator refactored to use server + integration smoke + first 4-5-operator live session |
+
+~3-4 weeks. No SaaS infrastructure.
+
+**Responses to prior asks consolidated:**
+
+All A1-A29 close-outs from Rounds 1-9 are now SUBSUMED by this
+scope. The previous MVP-B definition (TLS, rate limits, token CLI,
+rotation engine, separate runner binary, signed receipts, etc.)
+is OUT. The architectural commitments (gRPC + UDP audio,
+SessionContext ownership, canonical JSON for events, sample-index
+ordering) STAY because they're cheap-to-do-right-now and expensive-
+to-retrofit.
+
+**Open questions:** none. This is the landing scope.
+
+**Convergence note (truly final):** Design conversation CLOSED.
+Plan doc rewrite #3 is the only design-adjacent work remaining.
+Implementation queue (~6 tasks, down from 13) follows the 4-week
+phasing above.
+
+**Implementation tasks (final, ~6 not 13):**
+
+1. `01_otasim_channel_core_lib.md` — Extract SimulatedChannel +
+   mixer + channel models into `src/ota_channel_core/` static lib;
+   unit tests (~5 files).
+2. `02_otasim_session_manager.md` — SessionContext, session pool,
+   lobby always-on; in-process tests.
+3. `03_otasim_grpc_audio_auth.md` — gRPC service + UDP audio with
+   sample-index ordering + token validation against config file +
+   per-session capture writer.
+4. `04_otasim_serve_binary.md` — `ota_simulator serve` daemon
+   entry point; SIGTERM drain; /healthz; integration smoke.
+5. `05_ultra_gui_ota_client.md` + `06_ultra_tnc_ota_client.md` —
+   Refactor GUI and TNC as real gRPC + UDP clients; delete
+   embedded simulator paths.
+6. `07_cli_simulator_otasim_backend.md` — Refactor cli_simulator
+   to drive scenarios through the server's gRPC API; preserve
+   existing scenario JSON and assertion semantics.
+
+**Status: design CLOSED for real (third time). Plan doc rewrite +
+6-task implementation queue are the next concrete steps.**
+
 ```
 ### Round N — <Author>
 
