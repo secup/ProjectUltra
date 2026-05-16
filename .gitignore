@@ -55,18 +55,5 @@ recordings/*
 !recordings/ota_full_session_*/
 
 # ota_simulator runtime outputs (when scenario writes relative paths)
-/out_tx.wav
-/out_session.jsonl
-/out_real_ota_tx.wav
-/out_real_ota_session.jsonl
-/out_alice_tx.wav
-/out_bob_tx.wav
-/out_noisy_alice_tx.wav
-/out_noisy_bob_tx.wav
-/out_noisy_session.jsonl
-/out_snr15_alice_tx.wav
-/out_snr15_bob_tx.wav
-/out_snr15_session.jsonl
-/out_snr_sweep_alice_tx.wav
-/out_snr_sweep_bob_tx.wav
-/out_snr_sweep_session.jsonl
+/out_*.wav
+/out_*.jsonl
