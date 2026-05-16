@@ -1166,7 +1166,1245 @@ criteria in the "Convergence criteria" section:
 
 ---
 
-## Round template (copy when opening a new round)
+### Round 6 — Claude (2026-05-16, REOPENING — scope correction)
+
+**Position:** Round 5 closed too early. After reviewing the rewritten
+plan doc, the user (Mathieu) correctly pushed back that we
+**overengineered the server's role**. The server should be an HF
+medium with live operator controls (like a flight simulator weather
+engine), NOT a scenario/assertion/receipt test platform. Scenarios
+and reproducibility-grade evidence belong in a **separate test
+runner** that uses the server's API, not baked into the server.
+
+The architecture splits into two layers cleanly. The server gets
+simpler. CI scenarios become a layer above. This is the right
+factoring and we should have arrived at it in Round 1.
+
+**Justification under the stack:**
+- PHY theorist: the *channel* is the experimental instrument. The
+  *scenario* is the experimental protocol. Conflating them in one
+  binary made the server carry concerns (assertion language, claim
+  levels, signing keys) that have nothing to do with the medium
+  itself. A scenario runner driving a thin server API is the
+  cleaner factoring — same as how oscilloscope automation
+  (LabVIEW / pyVISA) is separate from the scope firmware.
+- DSP systems engineer: a thin server with primitive ops
+  (`set_channel`, `inject_effect`, `start_capture`,
+  `stream_events`) is much easier to keep deterministic, audit,
+  and stress-test than a server that also parses scenarios and
+  emits signed receipts. The test runner can fail and restart
+  without taking down the server.
+- HF operator: an operator launching the GUI to a hosted server
+  wants to call CQ, see a waterfall, get faded out, hear a QRM
+  burst — they don't want to write a scenario JSON file. The
+  scenario tooling matters only at CI time, not at session time.
+- First-principles fallback: not invoked.
+
+**Reframing — two layers, hard split:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  ota_test_runner  (separate binary, optional)           │
+│   - reads scenario JSON                                  │
+│   - drives server via gRPC                               │
+│   - asserts, generates receipts, byte-compares          │
+│   - the "CI/reproducibility" layer                       │
+└──────────────────────┬──────────────────────────────────┘
+                       │ gRPC primitives
+                       ▼
+┌─────────────────────────────────────────────────────────┐
+│  ota_simulator serve  (the HF medium)                    │
+│   - station registry (auth + sessions)                   │
+│   - channel core (mixer + models)                        │
+│   - live ops API (set_channel, inject_effect, ...)       │
+│   - capture engine (always-on if requested)              │
+│   - event stream                                         │
+│   - audio plane (UDP)                                    │
+│   THAT'S IT. No scenarios. No assertions. No receipts.  │
+└──────────────────────┬──────────────────────────────────┘
+                       │
+        ┌──────────────┼──────────────┐
+        │              │              │
+   ultra_gui      ultra_tnc      ota_observer
+   (operator)    (operator)     (listen-only)
+```
+
+**What moves where:**
+
+| Concern | Was placed in | Should be placed in |
+|---|---|---|
+| Scenario JSON format + JSON Schema | server | `ota_test_runner` |
+| Scripted event timeline ("t=30s, action=X") | server | `ota_test_runner` |
+| Assertion language ("expected state=CONNECTED") | server | `ota_test_runner` |
+| Signed receipts with claim_level | server | `ota_test_runner` |
+| Determinism acceptance gate (5 scenarios byte-compare) | server | `ota_test_runner` |
+| Channel models (AWGN, Watterson, noise-bed, passthrough) | server | server (unchanged) |
+| gRPC API for station mgmt + live ops | server | server (unchanged) |
+| UDP audio plane | server | server (unchanged) |
+| Live capture (audio + event log) | server | server (unchanged) |
+| Seeded RNG primitive (`SetChannelSeed`) | server | server (for repeatability *on demand*) |
+| Live waterfall/metrics streaming | server | server (unchanged) |
+| Capture provenance manifest | server | server (always emit, helpful even outside CI) |
+
+**Multi-user from day 1 (new requirement from Mathieu):**
+
+The server must be designed so other operators can join from day 1
+— even if MVP doesn't fully implement multi-tenancy. This means:
+
+1. **Session concept exists from MVP**, not deferred to V1. A
+   session = a room containing N stations + a shared channel.
+   MVP may cap at one active session per server instance, but the
+   API surface treats session as a first-class entity.
+
+2. **Station identity is token-based from MVP**, not deferred.
+   Even if MVP ships with one token = full access, the schema is
+   `(token, station_id, role)`. Two operators connecting must be
+   distinguishable from day 1.
+
+3. **`ultra_gui -sim` is a real client of the gRPC + audio API
+   from MVP**, not an in-process simulator wrapper. This is the
+   load-bearing change: as soon as MVP ships, any operator with
+   a token can point their GUI at your server and join a session.
+
+4. **No global channel.** All channel state is per-session. This
+   is cheap to enforce architecturally now and impossible to retrofit
+   later without breaking all existing clients.
+
+What this DOES NOT require for MVP:
+- Multiple concurrent sessions (V1)
+- Multiple roles per session (V1 gets station/listen_only/operator)
+- Static allowlist with multiple tokens (V1)
+- TLS / mTLS / cert rotation (V2)
+- Rate limiting / quotas (V2)
+
+The MVP server can be "single session, single token, localhost-bound"
+AND STILL have the right API shape so day-1 multi-user works as
+soon as you add the second token to the allowlist.
+
+**Responses to prior asks:**
+
+- **A11 unchanged.** First implementation task remains channel-core
+  extraction. The channel core has no concept of scenarios — it's
+  just the mixer + models + RNG. This is unaffected by the split.
+
+- **A12 changed.** Determinism acceptance gate moves OUT of the
+  server's MVP scope. It becomes a `ota_test_runner` MVP gate
+  instead. The server's MVP gate becomes: "two stations can join a
+  session, audio flows correctly, channel ops work, captures
+  produce valid WAV + JSONL".
+
+- **A13 unchanged.** Cli_simulator deletion at MVP ship stands —
+  but the replacement is `ota_test_runner` + `ota_simulator serve`,
+  not just `ota_simulator`. Two binaries replace one.
+
+- **A14 changed.** The deletion table is mostly the same, but the
+  refactor targets split:
+  - Channel core → server library
+  - Scenario parsing → `ota_test_runner` library
+  - Assertion logic → `ota_test_runner` library
+  - Session log writer → both (server emits event stream; test
+    runner consumes + adds assertion outcomes)
+
+**Round 3 carve-outs (still confirmed):**
+- Unsigned diagnostic receipts: still relevant (in `ota_test_runner`
+  only)
+- YAML as authoring-tool UX: still relevant
+- OFDM_NARROW MVP coverage: still relevant (channel models)
+- Null/passthrough channel: still relevant
+
+**New asks for the other side (round 7):**
+
+- **A15:** Accept or counter-propose the two-layer split (server
+  + separate `ota_test_runner`). If reject, name the concrete cost
+  of separation that outweighs the simplification benefit.
+
+- **A16:** Confirm the multi-user-from-day-1 requirements (session
+  concept in MVP, token-based station identity in MVP, GUI as real
+  client in MVP, no global channel) are accepted. If any of these
+  is too heavy for a 2-week MVP, propose a smaller alternative that
+  preserves the architectural option.
+
+- **A17:** Identify the server's MVP gate (the concrete acceptance
+  test) under the new framing. Suggestion: "two simulated stations
+  in one session over localhost gRPC + UDP audio successfully
+  exchange a PING/PONG via the OTASim server, captures produced".
+  Accept or counter-propose.
+
+- **A18:** Map the gRPC service definition from Round 2 onto the
+  new framing. Specifically: which RPCs (`LoadScenario`,
+  `SubmitCommand`, `EndSession returns SessionReceipt`) move to
+  `ota_test_runner` API vs server API. Update the proto sketch.
+
+- **A19:** Revisit the deletion table from Round 4 with the
+  split in mind. Some items (`scenario.cpp`, `session_log.cpp`)
+  might now belong to `ota_test_runner` instead of being refactored
+  into the server. Update the table.
+
+**Open questions updated:**
+
+- All A1-A14 close-out from Round 4/5 reaffirmed where unaffected.
+- A12 partially reopened (acceptance gate scope changes — was
+  server, now test runner).
+- A14 partially reopened (deletion table refactor targets shift).
+- A18 (gRPC scope) is a clean-up of the Round 2 proto sketch under
+  the new framing.
+
+**Convergence note:** Design conversation **REOPENED** at Round 6.
+This is a scope correction, not a contested decision — the
+underlying technical commitments (determinism, receipts, JSON
+Schema, no-backwards-compat, channel models) all stay; they just
+get placed in the correct layer. If Codex Round 7 accepts A15–A19
+cleanly, this should close again at Round 7 with a tighter plan.
+
+**For the user:** the plan doc rewrite from Round 5 is now
+SUPERSEDED by this round's framing. The plan doc will need
+*another* rewrite (smaller this time) after Round 7 lands.
+
+---
+
+### Round 6 — Codex
+
+*Codex round was killed (exit 144) before completing — Claude needed to
+add a major scope clarification from the user. Re-launching as Codex
+Round 8 after Claude Round 7 lands.*
+
+---
+
+### Round 7 — Claude (2026-05-16, scope refinement #2)
+
+**Position:** User clarified that the server must be a **long-lived
+daemon** (running on AWS for weeks), and not a one-off 300s run.
+Furthermore, they chose **(b) full multi-concurrent sessions from
+MVP** plus a **"global lobby"** concept where any valid-token
+operator can join a shared persistent room — for impromptu QSOs,
+cross-implementation testing, field-day-style chaos. This means
+MVP is meaningfully bigger than what Round 6 sketched. Recommend
+splitting MVP into MVP-A (single-session daemon) and MVP-B
+(multi-concurrent + lobby) to keep shippable increments without
+abandoning the multi-tenant target.
+
+**Justification under the stack:**
+- PHY theorist: a persistent shared room turns the platform from
+  "a test tool" into "a place". Multiple modem implementations can
+  interop in one channel — that's where standards/interop testing
+  actually happens. Multi-concurrent sessions don't touch PHY math;
+  they just isolate channel state per room.
+- DSP systems engineer: session as first-class entity is correct
+  architecture from day 1. Adding it later is a breaking change
+  every client must adopt. Channel core stays session-agnostic;
+  session manager + auth + isolation are the new infrastructure.
+- HF operator: 14.205 MHz on real HF is a place. Anyone tuned
+  there might hear traffic. The lobby is that for the simulated
+  medium. Even at small scale (2–3 operators), more useful than
+  another scenario file.
+- First-principles fallback: not invoked.
+
+**Updated architecture (revised from Round 6):**
+
+```
+ota_simulator serve  (long-lived daemon on AWS / your laptop / Tailscale)
+  ├── Channel Core library (session-agnostic; pure math + state)
+  ├── Session Manager
+  │     ├── Private sessions (created on demand via gRPC)
+  │     │     - operator opens, invites collaborators, tears down
+  │     │     - independent channel state, captures, events
+  │     └── Lobby (always-on, well-known session ID)
+  │           - spawned on server startup, never deleted
+  │           - any valid token can join
+  │           - operator/admin role can change channel params live
+  │           - capacity cap (e.g., 16 stations default)
+  │           - rolling capture (last 1 hour of audio + events
+  │             always available to download)
+  ├── Auth (token allowlist with reload-without-restart)
+  ├── gRPC control plane (session-scoped + admin-global)
+  ├── UDP audio plane (per-session muxed by session_id+station_id)
+  ├── Capture engine (per-session; rolling buffer in lobby)
+  └── Event stream (per-session, plus server-global admin stream)
+```
+
+**Lobby specifics:**
+
+- **Session ID:** well-known constant (default `"lobby"`, server
+  config can override)
+- **Persistence:** exists for the lifetime of the server process;
+  recreated fresh with default config on each server start (no
+  cross-restart state)
+- **Capacity:** configurable cap, reject `JoinSession` when full
+- **Channel:** server config defines default (e.g., Watterson-good
+  SNR=15); operator/admin tokens can change live
+- **Moderation:** admin role can kick stations; operators have
+  client-side mute (ignore specific callsigns in their own GUI)
+- **Discoverability:** `ListSessions` RPC returns all active sessions;
+  lobby is always in the list
+- **Captures:** rolling window (e.g., last 1 hour) always-on so
+  operators can grab "what just happened"; per-station per-session
+  captures still on-demand for private sessions
+
+**Proposed phasing (refined from Round 4):**
+
+- **MVP-A (2 weeks):** Daemon + ONE active session at a time
+  (returns BUSY on concurrent attempt) + channel core + auth
+  (single token) + capture + receipt + headless Python test client.
+  Replaces `cli_simulator` for local regression. Architecture
+  treats session as first-class entity, capping at one only.
+
+- **MVP-B (next 2–4 weeks):** Enable multi-concurrent sessions +
+  spawn lobby on startup + `ultra_gui` as real gRPC + audio client
+  + `ultra_tnc` as real client + static allowlist with N tokens.
+  Mathieu can host on AWS, share with KC3VPB + others.
+
+- **V1 (post-MVP-B):** Polished roles (station/listen_only/operator/
+  admin), capture retention policy, basic ops (Prometheus metrics,
+  `/healthz`, container deployment, systemd unit), Tailscale-grade
+  hosting runbook.
+
+- **V2:** Public-internet hardening — rate limits, abuse handling,
+  federation, cert rotation, etc. (See "Operations Workstream"
+  section in the plan doc.)
+
+**What MVP-A vs MVP-B trade-off looks like:**
+
+- MVP-A ships fast → Mathieu uses it locally → cli_simulator goes
+  away on schedule → the daemon shape is real, just capped at one
+  session for now.
+- MVP-B is the multi-user goal but takes longer. Doing MVP-A first
+  means the second phase doesn't require an architectural redo —
+  just enabling the existing session pool to hold more than one
+  active session and bootstrapping a lobby on startup.
+
+**What was wrong in earlier rounds:**
+
+- Round 4 framed MVP around scenario byte-compare gates (server as
+  test platform) — wrong layer per Round 6.
+- Round 6 conceded the layering but kept MVP as single-session
+  capped — wrong scope per this round.
+- Plan doc Round 5 rewrite reflects Round 4's wrong layer AND
+  Round 6's wrong scope. Will need ANOTHER rewrite after Round 8
+  lands. (Cheap; the doc is structured.)
+
+**Responses to prior asks (Round 6 unanswered, restated for Codex
+Round 8):**
+
+- A15 (two-layer split): still applies, Codex needs to accept or
+  push back. Server vs `ota_test_runner` separation unchanged.
+- A16 (multi-user-from-day-1): NOW means **multi-concurrent
+  sessions in MVP-B**, not MVP-A. Architecture still treats session
+  as first-class from day 1.
+- A17 (server MVP gate): UPDATED. MVP-A gate = "daemon accepts one
+  session, two stations exchange PING/PONG over localhost gRPC +
+  UDP, captures produced, server can accept a second session
+  after the first ends without restart." MVP-B gate adds: "two
+  concurrent sessions are fully isolated; lobby auto-spawns on
+  startup; capacity cap enforced."
+- A18 (gRPC proto): unchanged need; should now also include
+  `ListSessions`, `JoinSession(session_id)`, `KickStation` (admin),
+  rolling-capture download for lobby.
+- A19 (deletion table): unchanged; refactor targets shift between
+  server lib, test_runner, and a new session-manager component.
+
+**New asks for the other side (Codex Round 8):**
+
+- **A20:** Accept or counter-propose the MVP-A / MVP-B split. Is
+  shipping MVP-A first (single-session daemon) the right way to
+  contain scope, or should we go straight to MVP-B (multi-concurrent
+  + lobby) and accept the longer timeline?
+- **A21:** Lobby design — confirm specifics above (capacity cap,
+  default channel, operator-role channel modification, rolling
+  capture). Any concrete failure mode missed? Should the lobby
+  channel be **operator-chosen** (whoever has the admin role) or
+  **rotating** (daily auto-shuffle of conditions) or **fixed**
+  (server-config only)?
+- **A22:** Cross-session isolation — channel state in session X
+  must not leak to session Y. Identify the code boundaries where
+  this could go wrong (shared RNG? shared mixer? shared event
+  log writer?). Propose enforcement strategy (per-session
+  components vs shared components with session-keyed access).
+- **A23:** Multi-session resource accounting — what's the
+  per-session memory/CPU footprint estimate? At what point does
+  the server need session-eviction policy (idle timeout, max
+  duration, LRU)? MVP defaults?
+- **A24:** Long-running daemon hygiene that's NOT in V2 (rate
+  limits / abuse / federation) but matters even in MVP-B: graceful
+  shutdown with session drain, capture cleanup on session end,
+  log rotation, in-memory state bounds, signal handling. What's
+  the minimum hygiene set for "I want to leave it running for a
+  week on AWS"?
+
+**Open questions updated:**
+
+- A12 (determinism gate scope) — still moves from server to
+  `ota_test_runner` (Round 6 disposition holds).
+- A14 (deletion table) — needs revisit with session manager in
+  the picture (Round 6 disposition needs refinement).
+- A16 (multi-user-from-day-1) — updated above; multi-concurrent
+  is MVP-B not MVP-A.
+- A17 (server MVP gate) — updated above; A and B variants.
+- New: OQ-11 — global lobby is part of the server's responsibility
+  (not a separate "lobby service"). Closed in this round by Claude:
+  yes, the lobby is just a special always-on session in the same
+  session manager; no separate code path.
+
+**Convergence note:** Design conversation IS NOT YET CONVERGENT.
+Round 6 reopening was the right call; Round 7 adds significant
+new scope (multi-concurrent + lobby + long-lived daemon) on top
+of Round 6's layering fix. Codex Round 8 should consolidate, and
+Round 9 (Claude) should close out IF the consolidation is clean.
+
+**For the user:** before re-launching Codex with this brief,
+please confirm:
+1. (b) multi-concurrent sessions from MVP — yes/no
+2. Global lobby as always-on session in the same server — yes/no
+3. MVP-A / MVP-B split acceptable, or straight to MVP-B — your call
+4. Lobby channel: server-config default + operator/admin override?
+   Or fixed forever? Or rotating? (A21 question)
+
+---
+
+### Round 7 — Claude (continuation, user clarifications received 2026-05-16)
+
+User answered the 4 Round 7 questions:
+
+1. **MVP-A / MVP-B split — answer: skip MVP-A, go straight to MVP-B.**
+   The single-session-cap intermediate is dropped. MVP scope =
+   daemon + multi-concurrent sessions + lobby + GUI/TNC as real
+   clients. Estimated 6–8 weeks (was 2 weeks for MVP-A, +2–4 for
+   MVP-B in the split plan).
+
+2. **Lobby channel policy — answer: default (iii) rotating, with
+   (ii) operator override always available.**
+   - Default behavior: server cycles through Good / Moderate /
+     Poor (and possibly AWGN intervals) on a schedule
+     (period TBD — design suggestion: rotate every N hours, or
+     change conditions over time to simulate diurnal HF
+     variation)
+   - Operator/admin token can force a specific channel config
+     live; the force is exclusive while active
+   - When operator releases / token expires / configurable
+     timeout, rotation resumes
+   - Need an API to query "what's the current channel?" and
+     "what's coming next?"
+
+3. **Lobby capacity — answer: 16 stations default OK, but
+   architecture must scale.**
+   - 16 is fine for MVP-B
+   - "Might be bigger eventually" → no hardcoded cap; capacity is
+     server-config; design must not have O(N²) scaling problems
+     that block growing to 50–100 stations later
+
+4. **Hosting vision — answer: (y) semi-public open internet,
+   token-gated.**
+   - One server (Mathieu admins it)
+   - Open internet binding
+   - Anyone with a valid token can connect
+   - Tokens issued by admin (Mathieu) to known operators
+   - Token revocation supported
+   - This pulls several V2 concerns forward into MVP-B:
+     - **TLS from day 1** (was V1 — now MVP-B)
+     - **Public IP binding** (was V1 — now MVP-B)
+     - **Basic per-token rate limiting** (was V2 — now MVP-B)
+     - **Abuse handling: kick + token revoke** (was V2 — now MVP-B)
+     - **Connection caps + slow-loris timeouts** (was V2 — minimum
+       MVP-B for not getting DoS'd on day one)
+
+**Updated MVP-B scope (now closer to 8 weeks than 4):**
+
+- Channel core library + session manager + lobby
+- Multi-concurrent sessions with strict isolation
+- gRPC over TLS (operator-provided cert; let's encrypt automation
+  in V1)
+- UDP audio plane with sample-index ordering
+- Token-based auth with allowlist + revocation
+- Capture engine (per-session + lobby rolling window)
+- Basic ops hygiene: graceful shutdown with session drain, capture
+  GC, log rotation, signal handling, /healthz, /readyz, in-memory
+  state bounds
+- Basic public-internet hygiene: connection cap per token, simple
+  RPS rate limit, payload size limits, request timeouts
+- Lobby channel auto-rotation engine with operator override
+- `ultra_gui` and `ultra_tnc` as real gRPC + UDP audio clients
+
+**What's still V1 (post-MVP-B):**
+- Role distinctions polish (station vs listen_only vs operator)
+- Capture retention policy (TTL, S3 offload)
+- Prometheus full metric export
+- Container/systemd packaging
+- Let's encrypt automation
+- Multi-region or federation
+- Web monitor dashboard
+
+**What's still V2:**
+- Federation across multiple servers
+- Conformance test suite for external modem implementations
+- Plugin channel model registry
+- KiwiSDR live ingestion
+- Time-debugger primitives
+- Paper-grade reproducibility packaging
+
+**New asks for Codex Round 8 (additions to A20–A24 from Round 7):**
+
+- **A25 — Token issuance flow.** Admin issues tokens to operators.
+  Concretely: CLI command? gRPC RPC? File edit + reload? What's the
+  simplest workable thing for MVP-B? Token format (opaque random
+  vs structured JWT)?
+
+- **A26 — TLS strategy for MVP-B.** Operator-provided cert is
+  fine for MVP-B since let's encrypt can wait for V1. But the
+  config surface should be simple: cert path + key path on disk,
+  reload-on-SIGHUP. Confirm or counter-propose. Should the server
+  refuse to start without TLS configured, or allow `--insecure`
+  for local development?
+
+- **A27 — Minimum public-internet hygiene set for MVP-B.**
+  What's the smallest set of protections that lets you bind to
+  0.0.0.0 on AWS without being instantly compromised? Suggestion:
+  - Connection cap per source IP (e.g., 8)
+  - RPS limit per token (e.g., 100/s)
+  - Payload size limit (e.g., 1 MiB for gRPC, 64 KiB for audio
+    packets)
+  - Request timeout (e.g., 30s for unary RPCs)
+  - Reject unauth'd connections at the TLS handshake layer
+  - Per-token concurrent session cap (e.g., 4)
+  Accept, expand, or trim.
+
+- **A28 — Lobby rotation engine.** Concrete behavior:
+  - Default rotation period (e.g., every 4 hours? every 1 hour?)
+  - Rotation algorithm (round-robin? weighted random? simulate
+    diurnal HF cycle with quiet/active periods?)
+  - Override semantics: how long does an operator force last
+    (until released? max N minutes? indefinite if admin?)
+  - Concurrent operator overrides: first-wins? admin-wins?
+  Propose defaults that an operator would actually want.
+
+- **A29 — Cross-session resource accounting for semi-public hosting.**
+  When N strangers might join over the open internet, per-session
+  resource limits matter from MVP-B (was deferred to V2). Concrete:
+  - Memory cap per session
+  - CPU/audio-hour quota per token per day
+  - Disk capture cap per session (in MB or seconds)
+  - Session idle timeout (kick after N minutes of no activity)
+  - Maximum session duration (force-close after N hours)
+  Propose MVP-B defaults.
+
+**Open questions updated:**
+
+- A20 — MVP-A/MVP-B split: closed (user picked direct-to-MVP-B).
+- A21 — Lobby specifics: partially closed (rotating + override
+  confirmed); A28 expands on rotation engine specifics.
+- A22 — Cross-session isolation: still open, Codex needs to answer.
+- A23 — Multi-session resource accounting: reopened/expanded as A29
+  under the semi-public hosting context.
+- A24 — Long-running daemon hygiene: still open, Codex needs to
+  answer.
+- New: A25 (token issuance), A26 (TLS), A27 (public-internet
+  hygiene), A28 (rotation engine), A29 (resource accounting).
+
+**Convergence note:** Round 8 — Codex needs to consolidate A15–A29
+under the now-clarified scope (semi-public daemon hosting on AWS,
+multi-concurrent + lobby in MVP-B). If Codex can close all of these
+cleanly, Round 9 (Claude) closes the design conversation for the
+second time and we go rewrite the plan doc again. The plan doc
+rewrite this time will reflect the FINAL scope.
+
+---
+
+### Round 8 — Codex
+
+*Awaiting Codex response to Claude Round 7 (asks A15–A29).*
+
+**Position:** Accept the Round 6 two-layer split and the Round 7
+scope correction. The server is a long-lived, semi-public HF-medium
+daemon with sessions, lobby, live ops, capture, auth, TLS, and bounded
+resources. `ota_test_runner` is the scenario/assertion/receipt layer
+that drives the server over gRPC. User clarification closes A20:
+skip MVP-A and go straight to MVP-B. That makes MVP-B bigger, but it
+does not require modem wire-format, PHY, ARQ, waveform, or frame
+changes. It is still a single-server design, not V2 federation or SaaS
+infrastructure.
+
+**Justification under the stack:**
+- PHY theorist: the server must model the medium and expose channel
+  state with calibrated, session-scoped semantics. Scenarios,
+  assertions, and claim-grade receipts are experimental protocols
+  layered above the instrument; putting them in `ota_test_runner`
+  keeps channel physics separate from test evidence.
+- DSP systems engineer: long-lived daemon correctness depends on
+  bounded per-session state, per-session channel cores, explicit
+  lifecycle transitions, and no global mutable channel objects. The
+  split also keeps CI runner failures, JSON scenario parsing, signing,
+  and assertion evaluation out of the always-on audio/control process.
+- HF operator: an operator joining the lobby wants a stable place to
+  call, with visible channel conditions, safe overrides, predictable
+  captures, and a token that can be revoked. They do not want the live
+  server to feel like a scenario harness.
+- First-principles fallback: not invoked. The three mandatory lenses
+  agree on the layer split and on pulling minimum public-hosting
+  hygiene into MVP-B.
+
+**Responses to prior asks:**
+
+- **A15 - Two-layer split: accept.**
+
+  Server responsibilities: station registration, auth enforcement,
+  session lifecycle, lobby lifecycle, per-session channel core,
+  live channel control, capture/provenance artifacts, event stream,
+  UDP audio leases, public-hosting hygiene, and daemon health.
+
+  `ota_test_runner` responsibilities: canonical scenario loading,
+  scenario validation, scripted command timelines, assertion
+  evaluation, deterministic replay orchestration, receipt generation,
+  receipt signing/verification for claims, and CI byte-compare gates.
+
+  Cost of accepting the split: two binaries must be built and tested,
+  the gRPC API must be stable enough for the runner from MVP-B, and
+  some artifact concepts split into server provenance versus runner
+  receipts. That cost is lower than keeping signing keys, scenario
+  language, assertion code, and CI-only lifecycle inside a public
+  daemon.
+
+  Stack check: PHY theorist: separates the channel instrument from
+  experimental protocol. DSP systems engineer: reduces daemon state
+  surface and restart risk. HF operator: live sessions remain simple
+  operator workflows instead of test-runner workflows.
+
+- **A16 - Multi-user from day 1: accept with corrected scope.**
+
+  Direct-to-MVP-B means first-class sessions, token-bound station
+  identity, GUI and TNC as real network clients, no global channel,
+  multiple concurrent private sessions, and lobby from the first
+  shipped OTASim server. This is a server/client architecture change,
+  not a modem protocol change.
+
+  Stack check: PHY theorist: multiple rooms do not alter waveform or
+  frame semantics if each room owns its channel state. DSP systems
+  engineer: adding session identity later would break every client
+  API and audio lease. HF operator: callsigns/stations must be
+  distinguishable from the first friend-lab deployment.
+
+- **A17 - Server MVP-B acceptance gate: update.**
+
+  MVP-B server gate:
+  1. daemon starts with TLS enabled for public bind and spawns lobby;
+  2. two private sessions run concurrently with two stations each;
+  3. a channel change/effect in session A has no event, audio, RNG,
+     capture, or metric side effect in session B;
+  4. lobby enforces the default 16-station cap and emits rotation/
+     override events;
+  5. GUI and TNC clients join over gRPC + UDP audio leases and
+     exchange at least a PING/PONG through the server;
+  6. capture artifacts and provenance manifests flush on session
+     close and daemon shutdown;
+  7. token revocation takes effect on reload without process restart;
+  8. resource limits return explicit `RESOURCE_EXHAUSTED` or
+     `PERMISSION_DENIED`, not partial joins.
+
+  `ota_test_runner` gate remains separate: it drives the server and
+  produces deterministic receipts/claims.
+
+  Stack check: PHY theorist: proves channel isolation and clean
+  medium behavior. DSP systems engineer: tests daemon lifecycle,
+  bounded resources, and audio/control muxing. HF operator: proves
+  the hosted tool can support real operators without ambiguous
+  failures.
+
+- **A18 - Updated server-side gRPC service sketch.**
+
+  Remove from the server API: `LoadScenario`, `SubmitScriptedCommand`,
+  and `EndSession` returning `SessionReceipt`. Those belong to
+  `ota_test_runner`.
+
+  Keep the server API session-scoped and daemon-safe:
+
+  ```proto
+  syntax = "proto3";
+
+  package projectultra.otasim.v1;
+
+  import "google/protobuf/empty.proto";
+  import "google/protobuf/timestamp.proto";
+
+  service OtaSimulatorControl {
+    // Station identity and audio attachment.
+    rpc RegisterStation(RegisterStationRequest) returns (StationLease);
+    rpc NegotiateAudio(NegotiateAudioRequest) returns (AudioLease);
+    rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+    // Session lifecycle.
+    rpc CreateSession(CreateSessionRequest) returns (SessionInfo);
+    rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+    rpc GetSession(GetSessionRequest) returns (SessionInfo);
+    rpc JoinSession(JoinSessionRequest) returns (JoinSessionResponse);
+    rpc LeaveSession(LeaveSessionRequest) returns (google.protobuf.Empty);
+    rpc CloseSession(CloseSessionRequest) returns (SessionInfo);
+
+    // Session-scoped channel control.
+    rpc GetChannel(GetChannelRequest) returns (ChannelState);
+    rpc SetChannel(SetChannelRequest) returns (CommandAck);
+    rpc InjectEffect(InjectEffectRequest) returns (CommandAck);
+    rpc CancelEffect(CancelEffectRequest) returns (CommandAck);
+
+    // Lobby/admin operations.
+    rpc GetLobby(GetLobbyRequest) returns (LobbyState);
+    rpc SetLobbyOverride(SetLobbyOverrideRequest) returns (CommandAck);
+    rpc ReleaseLobbyOverride(ReleaseLobbyOverrideRequest) returns (CommandAck);
+    rpc KickStation(KickStationRequest) returns (CommandAck);
+
+    // Capture and event stream.
+    rpc StartCapture(StartCaptureRequest) returns (CaptureInfo);
+    rpc StopCapture(StopCaptureRequest) returns (CaptureInfo);
+    rpc ListCaptures(ListCapturesRequest) returns (ListCapturesResponse);
+    rpc ReadCapture(ReadCaptureRequest) returns (stream CaptureChunk);
+    rpc StreamEvents(StreamEventsRequest) returns (stream ServerEvent);
+
+    // Liveness.
+    rpc Health(HealthRequest) returns (HealthResponse);
+    rpc Ready(ReadyRequest) returns (ReadyResponse);
+  }
+
+  message SessionInfo {
+    string session_id = 1;
+    string display_name = 2;
+    bool is_lobby = 3;
+    uint32 station_count = 4;
+    uint32 station_cap = 5;
+    ChannelState channel = 6;
+    SessionState state = 7;
+    google.protobuf.Timestamp created_at = 8;
+  }
+
+  message ChannelState {
+    string session_id = 1;
+    string model = 2;
+    double snr_db = 3;
+    uint64 channel_seed = 4;
+    uint64 applied_at_sample = 5;
+    repeated ActiveEffect active_effects = 6;
+  }
+
+  message ServerEvent {
+    string event_id = 1;
+    string session_id = 2;        // empty only for daemon-global events
+    uint64 sample_index = 3;      // zero for pre-session daemon events
+    string type = 4;
+    bytes payload_json = 5;       // canonical JSON payload for logs
+  }
+  ```
+
+  Tokens are carried in gRPC metadata, not request bodies. Audio UDP
+  uses the short-lived `AudioLease` returned after authenticated
+  station/session negotiation.
+
+  Stack check: PHY theorist: channel state and effects are explicit,
+  sample-indexed, and session-scoped. DSP systems engineer: no CI-only
+  methods live in the daemon API, and streaming/capture flows have
+  bounded lifecycle. HF operator: the API exposes the actions an
+  operator needs: join, leave, inspect channel, override lobby, capture,
+  and watch events.
+
+- **A19 - Deletion/refactor table under the split.**
+
+  Updated classification:
+
+  | Path | New classification | MVP-B disposition |
+  |---|---|---|
+  | `tools/cli_simulator.cpp` | Delete | Superseded by `ota_test_runner` + server; no wrapper. |
+  | `tools/threaded_simulator.cpp` | Delete | Wall-clock/thread harness debt; not daemon or runner architecture. |
+  | `tools/ota_simulator/clip_gen.cpp` / `.hpp` | Delete or replace later in runner tooling | Not part of server; fixture authoring can reappear as schema-aware `ota_test_runner` utility if needed. |
+  | `tools/ota_simulator/runner.cpp` / `.hpp` | Delete | Legacy single-endpoint runner does not survive. |
+  | `tools/ota_simulator/scripted_audio_port.cpp` / `.hpp` | Move only useful fixture pieces to `ota_test_runner` client fixtures | Server receives authenticated live audio leases; scripted ports are runner-side test inputs. |
+  | `tools/ota_simulator/runner_v2.cpp` / `.hpp` | Refactor/move to `ota_test_runner` and shared test client library | Scenario execution and scripted modem orchestration are runner concerns. |
+  | `tools/ota_simulator/scenario.cpp` / `.hpp` | Refactor/move to `ota_test_runner` | Canonical scenario parsing, schema validation, timelines, and assertions are not server code. |
+  | `tools/ota_simulator/session_log.cpp` / `.hpp` | Split | Server gets session event writer + capture provenance manifest; `ota_test_runner` gets scenario run log, assertion outcomes, and signed receipts. |
+  | `tools/ota_simulator.cpp` | Rewrite in place | Binary keeps `serve`; old `run`/scenario behavior moves to `ota_test_runner`. |
+
+  Shared library classification:
+  - server library: channel core, mixer, channel models, effect
+    scheduler, session manager, capture writer, provenance manifest,
+    event stream types, audio lease validation;
+  - `ota_test_runner` library: scenario schema/types, scripted
+    command scheduler, assertion engine, receipt writer/verifier,
+    deterministic byte-compare harness;
+  - shared client/test utilities: generated protobuf client,
+    audio-packet codec, canonical JSON helpers, artifact hash helpers.
+
+  Stack check: PHY theorist: scenario protocol and channel medium stay
+  distinct. DSP systems engineer: avoids duplicate clocks, duplicate
+  logs, and CI-only parser state in the daemon. HF operator: the live
+  server has one clear purpose and the test runner has one clear
+  purpose.
+
+- **A20 - MVP-A/MVP-B split: closed by user.**
+
+  Accept direct-to-MVP-B. The scope estimate moves from the earlier
+  2-week local MVP to roughly 6-8 weeks, with the work closer to 8
+  weeks because TLS, public bind, rate limiting, revocation, lobby,
+  and GUI/TNC network clients are now in MVP-B. It does not look much
+  larger than that if JWT issuance APIs, ACME automation, S3 retention,
+  Prometheus/Grafana, federation, and web dashboards stay out.
+
+  Stack check: PHY theorist: the extra work is architecture and ops,
+  not modem math. DSP systems engineer: doing all session boundaries
+  now prevents a later client-breaking retrofit. HF operator: the
+  first hosted release matches the actual desired operating model.
+
+- **A21 - Lobby specifics and missed failure modes.**
+
+  Accept: lobby is a special always-on session, default station cap
+  16, cap is config not code, default channel rotates, and
+  operator/admin override is available.
+
+  Concrete failure modes to address in MVP-B:
+  - stuck override: every non-admin override needs expiry; admin
+    indefinite override must be explicit and visible;
+  - surprise channel change during QSO: rotation and override emit
+    warning events, and clients display current/next channel state;
+  - lobby capture explosion: default rolling capture is quota-bound
+    and segmented; see A29;
+  - station identity collision: duplicate active station IDs or
+    callsigns in the same session are rejected unless admin kicks the
+    old lease;
+  - slow listener backpressure: event/audio clients that do not read
+    fast enough are dropped before they stall the session;
+  - accidental destructive testing in lobby: severe scripted effects
+    are private-session/default-denied unless admin explicitly allows
+    them in lobby;
+  - scaling trap: do not implement per-pair O(N^2) path state for the
+    shared lobby default. Mix once per session and derive per-station
+    receive by subtracting/self-muting local TX unless a future model
+    explicitly needs per-path propagation.
+
+  Stack check: PHY theorist: a shared lobby should behave like one HF
+  medium, not arbitrary per-pair channels unless the model says so.
+  DSP systems engineer: quota-bound capture, backpressure, and O(N)
+  mixing keep the daemon alive. HF operator: visible upcoming channel
+  changes and expiring overrides prevent confusing QSOs.
+
+- **A22 - Cross-session isolation enforcement.**
+
+  Leak boundaries:
+  - RNG roots and child stream labels;
+  - channel model instances and fading state;
+  - mixer buffers and sample clocks;
+  - effect scheduler queues;
+  - UDP audio demux and audio leases;
+  - event log writer and capture path generation;
+  - lobby rotation engine;
+  - station registry/callsign uniqueness checks;
+  - metrics labels and event-stream fanout;
+  - shared resamplers/noise-bed caches if mutable;
+  - admin commands missing `session_id`.
+
+  Enforcement strategy:
+  - `SessionContext` owns `ChannelCore`, `SampleClock`, RNG root,
+    `EffectScheduler`, station map, mixer buffers, capture manager,
+    and event writer.
+  - Shared services are limited to immutable channel presets,
+    token registry, TLS listener, thread pool, disk quota manager,
+    and metrics sink.
+  - Every mutating RPC takes an explicit `session_id` except daemon
+    health/auth reload; no implicit "current session".
+  - Audio packets carry session lease id plus station id; leases are
+    scoped to one session and expire.
+  - File paths are rooted under `captures/<session_id>/` with a
+    sanitized server-generated session id.
+  - Cross-session tests run two sessions with identical station names
+    and different channels, then assert no event, capture, RNG, or
+    audio bleed.
+
+  Stack check: PHY theorist: independent rooms must produce independent
+  channel observations. DSP systems engineer: ownership boundaries and
+  explicit IDs prevent singleton state and demux mistakes. HF operator:
+  a private session must not be disturbed by lobby chaos or another
+  operator's test.
+
+- **A23 - Multi-session resource accounting: reopened as A29.**
+
+  Treat A23 as closed by replacement. The semi-public defaults in A29
+  are the MVP-B answer.
+
+- **A24 - Minimum week-long daemon hygiene for AWS MVP-B.**
+
+  Minimum set:
+  - SIGTERM/SIGINT graceful shutdown: stop accepting new sessions,
+    emit `SERVER_DRAINING`, notify clients, flush captures/events,
+    close private sessions after a configurable drain deadline
+    defaulting to 60 seconds; lobby closes last.
+  - SIGHUP reload: auth allowlist, revoked-token list, TLS cert/key,
+    lobby rotation config, and limit config reload atomically; bad
+    reload keeps the previous config.
+  - Capture cleanup: segmented writes, fsync/close on session end,
+    orphan cleanup on startup, and quota-based deletion of oldest
+    rolling segments.
+  - Log rotation: size and age based rotation for daemon logs and
+    event JSONL; default 100 MiB/file, 10 files for daemon logs;
+    session logs remain under session/capture quotas.
+  - In-memory bounds: max sessions, stations/session, event backlog,
+    jitter buffer depth, pending RPC streams, and capture writer queue
+    are all configured with hard limits.
+  - Health/readiness: `/healthz` or gRPC `Health` says process alive;
+    `Ready` is false during drain, failed config, disk quota failure,
+    or auth/TLS load failure.
+  - Slow consumer policy: drop event streams or audio leases that
+    exceed backlog limits; never block mixer advancement on observers.
+  - Startup recovery: detect abandoned capture temp files and either
+    finalize with an `aborted` manifest or delete if no manifest can
+    be made.
+
+  Stack check: PHY theorist: graceful flush preserves capture
+  provenance instead of corrupting evidence. DSP systems engineer:
+  signal handling, bounded queues, and cleanup are the difference
+  between a daemon and a demo. HF operator: if the server is left up
+  for a week, failures must be visible and recoverable without losing
+  the whole night.
+
+- **A25 - Token issuance flow.**
+
+  MVP-B default: opaque random tokens generated by an admin-side CLI,
+  stored as hashes in a reloadable allowlist file. No JWT and no token
+  issuance gRPC API in MVP-B.
+
+  Proposed command surface:
+
+  ```text
+  ota_simulator token create \
+    --tokens-file /etc/otasim/tokens.json \
+    --role station \
+    --label KC3VPB \
+    --expires 2026-08-01 \
+    --print-once
+
+  ota_simulator token revoke \
+    --tokens-file /etc/otasim/tokens.json \
+    --token-id tok_...
+
+  kill -HUP <otasim-pid>
+  ```
+
+  Token format: `otasim_v1_<base64url-32-random-bytes>`. The file
+  stores `token_id`, salted hash or HMAC digest, role, label/callsign,
+  expiry, per-token limits, and revoked flag. The raw token is printed
+  once and never logged.
+
+  Why not JWT in MVP-B: JWTs move complexity into signing key
+  rotation, expiry semantics, and revocation lists while still needing
+  a server-side deny list for abuse. Opaque tokens are simpler and
+  revoke cleanly.
+
+  Stack check: PHY theorist: token format does not affect channel
+  claims, but identity must attach to provenance. DSP systems engineer:
+  file+SIGHUP is auditable and avoids an admin API in the public daemon.
+  HF operator: the admin can issue and revoke a token with one command
+  during a real operating session.
+
+- **A26 - TLS strategy.**
+
+  Accept operator-provided cert/key paths on disk with SIGHUP reload.
+  MVP-B public bind must require TLS. Allow insecure mode only for
+  loopback development and CI:
+
+  - `--tls-cert=/path/fullchain.pem --tls-key=/path/privkey.pem`
+    required for `--bind 0.0.0.0`, public IPs, or non-loopback
+    addresses;
+  - `--insecure-loopback` allowed only when bind address is
+    `127.0.0.1` or `::1`;
+  - if cert reload fails, keep the old certificate active and emit an
+    admin event;
+  - ACME/Let's Encrypt automation remains V1, not MVP-B.
+
+  gRPC tokens are still bearer tokens in metadata after TLS. Without
+  client certs, "reject unauthenticated at TLS handshake" can only
+  mean rejecting invalid TLS/SNI/cipher handshakes; token rejection
+  happens immediately at the first RPC interceptor. MVP-B should not
+  require mTLS.
+
+  Audio UDP should use the authenticated `AudioLease` from gRPC with
+  a short-lived lease id and packet MAC. Full DTLS/QUIC can wait, but
+  unauthenticated audio injection must not be possible.
+
+  Stack check: PHY theorist: authenticated audio prevents forged
+  signals from contaminating channel observations. DSP systems
+  engineer: cert reload and loopback-only insecure mode keep dev fast
+  without exposing public plaintext. HF operator: public hosting has a
+  simple rule: TLS on AWS, insecure only on the local machine.
+
+- **A27 - Minimum public-internet hygiene set for MVP-B.**
+
+  Accept the suggested set with adjusted defaults and two additions
+  for audio/event abuse:
+
+  - TLS required for non-loopback public bind.
+  - Source IP unauthenticated connection cap: 8 concurrent handshakes/
+    connections; authenticated cap: 16, still bounded by token limits.
+  - TLS handshake timeout: 5 seconds; idle pre-auth connection timeout:
+    10 seconds.
+  - Per-token RPC rate: 20 unary RPC/s sustained, burst 100; event
+    streams do not count as RPS but have queue limits.
+  - Per-source-IP pre-auth RPC attempt limit: 5/s sustained, burst 20.
+  - gRPC max inbound message: 1 MiB by default; capture downloads are
+    streamed chunks, not giant unary replies.
+  - UDP audio packet max: 8 KiB nominal hard default, configurable up
+    to 64 KiB; reject bad lease, bad MAC, old sequence, or impossible
+    sample count.
+  - Unary RPC timeout: 10 seconds default; capture/list operations
+    30 seconds; streaming RPCs require keepalive and bounded backlog.
+  - Per-token concurrent joined-session cap: 4; per-token created
+    private sessions: 2; admin configurable.
+  - Kick and token revoke are MVP-B admin operations via token file
+    update + SIGHUP plus active lease invalidation.
+  - Audit log admin actions: reload, revoke, kick, lobby override,
+    limit changes.
+
+  Stack check: PHY theorist: forged or abusive traffic must not alter
+  channel evidence. DSP systems engineer: caps, timeouts, and payload
+  limits protect the hot path and memory. HF operator: a token-gated
+  public server can survive normal internet noise and known-operator
+  mistakes without elaborate infrastructure.
+
+- **A28 - Lobby rotation engine defaults.**
+
+  MVP-B default behavior:
+  - rotation period: 4-hour slots, aligned to UTC, with warning events
+    at 10 minutes and 1 minute before change;
+  - algorithm: deterministic weighted round-robin, not random:
+    `Good -> Moderate -> Good -> AWGN calibration -> Moderate -> Poor`
+    repeated. This yields 2/6 Good, 2/6 Moderate, 1/6 AWGN, 1/6 Poor.
+  - changes apply at a server sample boundary and emit `CHANNEL_CHANGE`
+    with old/new config, reason, and next scheduled change;
+  - "diurnal" profile is a named config preset for later, not MVP-B
+    default. A global internet lobby has no single local sunrise.
+
+  Override semantics:
+  - one active lobby override at a time;
+  - operator override default max duration: 60 minutes;
+  - admin override may be up to 4 hours by default, or indefinite only
+    with explicit `until_released=true`;
+  - admin wins over operator; same-role conflicts are first-wins and
+    the rejected request returns current holder and expiry;
+  - override can be released manually; when it expires/releases,
+    rotation resumes at the currently scheduled slot rather than
+    shifting the whole schedule;
+  - every override and release is an event and audit-log entry.
+
+  Stack check: PHY theorist: deterministic schedule means channel
+  conditions are knowable and citable. DSP systems engineer: one
+  state machine with expiry avoids stuck overrides and racey channel
+  flips. HF operator: four-hour blocks are long enough for QSOs and
+  testing, while warnings prevent surprise fade changes mid-contact.
+
+- **A29 - Cross-session resource accounting for semi-public hosting.**
+
+  MVP-B defaults:
+  - global active session cap: 8 private sessions plus lobby;
+  - lobby station cap: 16 transmit-capable stations default,
+    configurable; listen-only cap default 32;
+  - private session station cap: 8 default;
+  - memory cap per private session: 256 MiB soft, 512 MiB hard;
+    lobby: 512 MiB soft, 1 GiB hard;
+  - jitter buffer depth: 2 seconds default, 5 seconds hard max;
+  - event backlog: 10,000 events/session or 16 MiB, whichever comes
+    first; slow streams are dropped;
+  - CPU/audio quota per token: 24 station-audio-hours/day default;
+    one joined station for one wall-clock hour counts as one
+    station-audio-hour; admin tokens can be exempt;
+  - per-token concurrent joined sessions: 4; created private sessions:
+    2;
+  - disk capture cap per private session: 2 GiB default;
+    lobby rolling capture cap: 4 GiB default;
+  - lobby always-on rolling capture records `rf_mix` + event log by
+    default; per-station lobby captures are on-demand and quota-bound;
+  - on-demand capture max duration: 30 minutes unless admin extends;
+  - empty private session timeout: 5 minutes;
+  - idle private session timeout: 30 minutes with no TX, no channel
+    commands, and no active non-idle stations;
+  - idle station lease timeout: 15 minutes without heartbeat;
+  - max private session duration: 6 hours default;
+  - lobby has no max duration but obeys station, memory, event, and
+    disk caps.
+
+  Enforcement: refuse new joins/captures when limits would be
+  exceeded; do not degrade audio silently. Return explicit quota
+  status with reset time and current usage. Quota counters are
+  persisted at least daily so daemon restart does not erase abuse.
+
+  Stack check: PHY theorist: resource exhaustion must not masquerade
+  as HF fading or modem loss. DSP systems engineer: hard caps protect
+  RAM, disk, CPU, and queues in a week-long daemon. HF operator:
+  limits are high enough for known-operator sessions but low enough
+  that one leaked token cannot consume the server all day.
+
+**Open questions updated:**
+- Closed: A15 (resolution: hard server/`ota_test_runner` split).
+- Closed: A16 (resolution: multi-user/session identity from MVP-B).
+- Closed: A17 (resolution: direct MVP-B server acceptance gate above).
+- Closed: A18 (resolution: server API excludes scenario/script/receipt
+  methods; proto sketch above).
+- Closed: A19 (resolution: deletion table reclassified by server,
+  runner, shared client utilities, and deletion).
+- Closed: A20 (resolution: user chose direct-to-MVP-B).
+- Closed: A21 (resolution: lobby cap/rotation/override accepted with
+  failure-mode guardrails).
+- Closed: A22 (resolution: `SessionContext` ownership and explicit
+  session-scoped RPC/audio/capture boundaries).
+- Closed: A23 (resolution: superseded by A29).
+- Closed: A24 (resolution: minimum AWS week-long daemon hygiene set).
+- Closed: A25 (resolution: opaque CLI-issued tokens, hashed allowlist,
+  SIGHUP reload; no JWT/admin issuance RPC in MVP-B).
+- Closed: A26 (resolution: operator-provided TLS for public bind,
+  loopback-only insecure mode, SIGHUP reload).
+- Closed: A27 (resolution: MVP-B public-internet caps, limits,
+  timeouts, audio lease MAC, revoke/kick).
+- Closed: A28 (resolution: deterministic 4-hour lobby rotation with
+  expiring exclusive override).
+- Closed: A29 (resolution: concrete MVP-B resource defaults above).
+- New: none.
+
+**Convergence note:** Design reconverges cleanly with
+**convergence-with-correction-x2**: Round 6 corrected the layer
+boundary, and Round 7 corrected the lifecycle/scope/hosting target.
+No stop condition is triggered. Multi-concurrent sessions and lobby
+do not require modem/wire-format/PHY changes. Semi-public hosting is
+still a single-server MVP-B with basic hygiene, not federation or
+paid SaaS infrastructure.
+
+**Next concrete steps after Round 9 close-out:**
+1. Plan doc gets a THIRD rewrite reflecting daemon + multi-concurrent
+   sessions + lobby + semi-public hosting + two-layer split.
+2. Implementation queue updates in this order: channel-core
+   extraction first, then session manager, then auth/TLS, then audio
+   plane, then gRPC, then GUI/TNC client refactor.
+3. Add `ota_test_runner` task to the queue, including scenario,
+   assertion, deterministic receipt, and byte-compare gates.
+
+**For the user:** MVP-B remains plausibly 6-8 weeks if the defaults
+above are treated as the line: no ACME automation, no JWT admin API,
+no S3 retention, no web dashboard, no full Prometheus/Grafana stack,
+no federation, and no hardware radio bridge. It is closer to 8 weeks
+than 6 because public bind, TLS, revocation, quotas, lobby rotation,
+and GUI/TNC client refactors are now in the first hosted release.
+
+---
+
+### Round 9 — Claude (2026-05-16, second close-out)
+
+**Position:** Convergence-with-correction-x2 confirmed. Codex Round 8
+closed all 15 asks (A15–A29) cleanly under the new scope. Three
+small notes/flags for the plan doc rewrite, but no contested
+decisions remain. Design conversation **CLOSED again**, this time
+for real.
+
+**Justification under the stack:**
+- PHY theorist: the architecture preserves citable channel
+  observations — per-session isolation + sample-indexed channel
+  events + provenance manifests on server side, signed receipts on
+  test-runner side. Nothing about the layering or hosting model
+  changes modem physics.
+- DSP systems engineer: `SessionContext` ownership + explicit
+  session_id on every mutating RPC + bounded per-session resources +
+  audio lease MAC are the right primitives for a long-lived semi-
+  public daemon. Resource caps map to concrete AWS sizing.
+- HF operator: the operator workflow is clear — get a token, point
+  GUI at hostname:port, join the lobby or create a private session,
+  do a QSO, leave. No scripting required for the operating mode.
+  Scripting layer (`ota_test_runner`) is invisible to the operator.
+- First-principles fallback: not invoked.
+
+**Responses to prior Round 8 closures — three small notes:**
+
+- **On A25 (token issuance):** opaque tokens + CLI + SIGHUP is
+  correct for MVP-B. Flag for the implementation queue: this means
+  token admin requires SSH access to the AWS instance. That's fine
+  for the friend-lab phase, but the moment a non-technical operator
+  needs a token, this becomes friction. Capture as a V1
+  consideration: "self-service token request flow" or "admin web
+  UI" — neither is MVP-B.
+
+- **On A22 (cross-session isolation):** the `SessionContext`
+  ownership model is non-negotiable. Even a later "performance
+  optimization" that shares mutable state across sessions (e.g.,
+  shared resampler cache that ends up being writable) would break
+  isolation silently. Recommend an INVARIANT entry:
+  > *"All mutable channel state lives inside a SessionContext. No
+  > singleton or shared-mutable cross-session state. Adding shared
+  > mutable state requires a design-log round to justify."*
+  Add to `docs/INVARIANTS.md` when the first OTASim code lands.
+
+- **On A29 resource caps + AWS sizing:** 8 sessions × 256 MiB soft
+  + lobby 512 MiB ≈ 2.5 GiB minimum RAM for the daemon process.
+  Plus capture disk (8 × 2 GiB + 4 GiB rolling lobby ≈ 20 GiB
+  worst case) plus logs. AWS sizing implication: t3.medium (4 GiB)
+  is borderline; t3.large (8 GiB) safer. Document this in the
+  plan doc deployment section so the AWS reality matches the
+  resource model.
+
+**Convergence note (final, for real this time):**
+
+The design conversation meets all four criteria in the
+"Convergence criteria" section:
+
+1. ✅ All 14 asks (A1–A14) closed in Rounds 1–5
+2. ✅ All 15 reopened/new asks (A15–A29) closed in Rounds 6–9
+3. ✅ All 10 OQs closed in Round 2 + 1 new OQ-11 closed in Round 7
+4. ✅ Both sides agree the MVP-B scope is implementable under the
+   stated defaults (6–8 weeks, single-server, no V2 infrastructure)
+
+**Status: design conversation CLOSED. Plan doc rewrite is the
+only remaining design-adjacent work.**
+
+**Three concrete next actions:**
+
+1. **Third (and final) plan doc rewrite** — reflect:
+   - Long-lived daemon model (not 300s one-shot)
+   - Multi-concurrent sessions + lobby from MVP-B
+   - Semi-public hosting on AWS (TLS, public bind, rate limits)
+   - Two-layer split: server (medium + live ops) vs
+     `ota_test_runner` (scenarios + receipts + assertions)
+   - Updated MVP-B gate (Codex's 8-point list from A17)
+   - Updated proto sketch from A18
+   - Updated deletion table from A19
+   - Lobby rotation defaults from A28
+   - Resource caps from A29
+   - Daemon hygiene from A24
+   - Token issuance flow from A25
+   - TLS strategy from A26
+   - Public-internet hygiene from A27
+   - AWS sizing note (t3.large recommended)
+
+2. **Add INVARIANT** — `SessionContext` ownership rule per the note
+   above.
+
+3. **Queue implementation tasks (revised from Round 4):**
+   - `01_otasim_channel_core_extraction.md` — channel-core library
+     extraction (session-agnostic, no networking)
+   - `02_otasim_session_manager.md` — `SessionContext`, session
+     pool, lobby spawn on startup
+   - `03_otasim_auth_token_allowlist.md` — opaque token CLI,
+     hashed allowlist file, SIGHUP reload
+   - `04_otasim_tls_listener.md` — TLS for non-loopback bind,
+     insecure-loopback for dev
+   - `05_otasim_audio_plane_udp.md` — UDP audio with lease MAC,
+     sample-index demux
+   - `06_otasim_grpc_control_plane.md` — gRPC service (A18 proto)
+   - `07_otasim_capture_engine.md` — per-session captures +
+     lobby rolling buffer + provenance manifests
+   - `08_otasim_lobby_rotation_engine.md` — 4-hour schedule +
+     override semantics
+   - `09_otasim_public_hosting_hygiene.md` — rate limits,
+     connection caps, payload limits, signal handlers
+   - `10_ultra_gui_ota_client_refactor.md` — GUI as real gRPC +
+     UDP client (delete embedded simulator path)
+   - `11_ultra_tnc_ota_client_refactor.md` — TNC as real client
+   - `12_otasim_cli_simulator_deletion.md` — purge cli_simulator
+     and references from CMake/CTest/docs/agents
+   - `13_ota_test_runner_mvp.md` — separate binary: scenarios,
+     assertions, deterministic byte-compare gate, signed
+     receipts
+
+That's ~13 implementation tasks for MVP-B. Most are small (1-3
+days). Total elapsed: 6-8 weeks if done sequentially with
+ctest-green gates between each.
+
+**Status:** Design **CLOSED**. Implementation phase **OPEN**.
+The log can now be archived to `docs/archive/` once tasks above
+are queued and the plan doc is rewritten.
 
 ```
 ### Round N — <Author>
