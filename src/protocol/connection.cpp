@@ -983,6 +983,11 @@ void Connection::onFrameReceived(const Bytes& frame_data) {
     } else {
         // Data frame - pass to ARQ
         if (state_ == ConnectionState::CONNECTED) {
+            if (v2::isDataFrame(header.type) && config_.ack_tx_delay_ms > 0) {
+                ack_hold_remaining_ms_ = config_.ack_tx_delay_ms;
+                LOG_MODEM(INFO, "Connection: Received DATA, holding outbound ACK for %u ms (peer PTT-off settling)",
+                          config_.ack_tx_delay_ms);
+            }
             processArqFrame(frame_data);
         }
     }
@@ -1372,6 +1377,37 @@ void Connection::tick(uint32_t elapsed_ms) {
         }
     }
 
+    if (post_connect_data_hold_active_) {
+        if (elapsed_ms >= post_connect_data_hold_remaining_ms_) {
+            post_connect_data_hold_active_ = false;
+            post_connect_data_hold_remaining_ms_ = 0;
+            LOG_MODEM(INFO, "Connection: post-CONNECT data hold expired, releasing %zu held DATA frame(s)",
+                      held_data_frames_.size());
+            auto released = std::move(held_data_frames_);
+            held_data_frames_.clear();
+            for (auto& frame : released) {
+                transmitFrame(frame);
+            }
+        } else {
+            post_connect_data_hold_remaining_ms_ -= elapsed_ms;
+        }
+    }
+
+    if (ack_hold_remaining_ms_ > 0) {
+        if (elapsed_ms >= ack_hold_remaining_ms_) {
+            ack_hold_remaining_ms_ = 0;
+            LOG_MODEM(INFO, "Connection: ACK TX hold expired, releasing %zu held ACK frame(s)",
+                      held_ack_frames_.size());
+            auto released = std::move(held_ack_frames_);
+            held_ack_frames_.clear();
+            for (auto& frame : released) {
+                transmitFrame(frame);
+            }
+        } else {
+            ack_hold_remaining_ms_ -= elapsed_ms;
+        }
+    }
+
     switch (state_) {
         case ConnectionState::PROBING:
             // Fast presence check via PING/PONG
@@ -1558,6 +1594,28 @@ void Connection::tick(uint32_t elapsed_ms) {
 
 void Connection::transmitFrame(const Bytes& frame_data) {
     LOG_MODEM(DEBUG, "Connection: TX %zu bytes", frame_data.size());
+
+    // Post-CONNECT data hold: defer DATA-class frames so peer's PTT-off
+    // transition has time to complete. ACK/control frames are NOT held
+    // because the peer was in RX when it sent CONNECT_ACK and stays in
+    // RX while we ACK; only our outbound DATA hits their TRANSITION.
+    if (post_connect_data_hold_active_) {
+        const auto header = v2::parseHeader(frame_data);
+        if (header.valid && v2::isDataFrame(header.type)) {
+            held_data_frames_.push_back(frame_data);
+            return;
+        }
+    }
+
+    // ACK TX hold: after inbound DATA, defer ACK-class responses until the
+    // sender has completed its PTT-off transition from DATA TX.
+    if (ack_hold_remaining_ms_ > 0) {
+        const auto header = v2::parseHeader(frame_data);
+        if (header.valid && header.type == v2::FrameType::ACK) {
+            held_ack_frames_.push_back(frame_data);
+            return;
+        }
+    }
 
     // If burst mode is active, buffer instead of transmitting immediately
     if (burst_mode_active_ && on_transmit_burst_) {
@@ -1825,6 +1883,19 @@ void Connection::enterConnected() {
 
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+
+    // Hold first outbound DATA so peer's PTT-off transition after their
+    // CONNECT_ACK TX has time to complete. Without this, every rig with
+    // PTT settling >=100ms drops the first DATA frame.
+    if (config_.post_connect_data_delay_ms > 0) {
+        post_connect_data_hold_active_ = true;
+        post_connect_data_hold_remaining_ms_ = config_.post_connect_data_delay_ms;
+        LOG_MODEM(INFO, "Connection: CONNECTED, holding outbound DATA for %u ms (peer PTT-off settling)",
+                  config_.post_connect_data_delay_ms);
+    } else {
+        post_connect_data_hold_active_ = false;
+        post_connect_data_hold_remaining_ms_ = 0;
+    }
     if (is_initiator_ || handshake_confirmed_) {
         responder_handshake_wait_ms_ = 0;
     } else if (responder_handshake_wait_ms_ == 0) {
@@ -1863,6 +1934,11 @@ void Connection::enterDisconnected(const std::string& reason) {
     disconnect_ack_frame_.clear();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
+    post_connect_data_hold_active_ = false;
+    post_connect_data_hold_remaining_ms_ = 0;
+    held_data_frames_.clear();
+    ack_hold_remaining_ms_ = 0;
+    held_ack_frames_.clear();
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
     connect_ack_retransmit_ms_ = 0;

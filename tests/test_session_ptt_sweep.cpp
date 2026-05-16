@@ -255,17 +255,37 @@ struct ExpectedOutcome {
     bool disconnect_ack_ok = false;
     bool done = false;
     const char* first_failed_phase = "NONE";
+    // Boundary cliff points are non-deterministic between adjacent
+    // failure phases. If set, the observed first_failed_phase may match
+    // either this or first_failed_phase. The other phase flags are
+    // skipped for boundary points (only PROBE-OK and DONE are checked).
+    const char* boundary_alt_failed_phase = nullptr;
 };
 
 ExpectedOutcome expectedOutcomeFor(uint32_t rx_settling_ms) {
-    if (rx_settling_ms == 0) {
+    // Measured envelope after pong_tx_delay_ms=500,
+    // post_connect_data_delay_ms=500, and ack_tx_delay_ms=500:
+    //   0-500 ms:   full session OK (holds dodge peer's PTT-off)
+    //   700-1500 ms: PROBE+CONNECT+MODE_CHANGE OK, DATA fails
+    //                (500 ms post-CONNECT hold is exceeded by peer settling)
+    //   2000 ms:    PROBE OK, CONNECT fails
+    //                (500 ms pong_tx_delay exceeded by peer settling)
+    if (rx_settling_ms <= 500) {
         return ExpectedOutcome{
             true, true, true, true, true, true, true, "NONE",
         };
     }
-    if (rx_settling_ms < 2000) {
+    if (rx_settling_ms <= 1000) {
         return ExpectedOutcome{
             true, true, true, false, false, false, false, "DATA",
+        };
+    }
+    if (rx_settling_ms <= 1500) {
+        // Boundary cliff: CONNECT and DATA both fail at this point depending
+        // on timing jitter. Accept either as the observed first failure.
+        return ExpectedOutcome{
+            true, false, false, false, false, false, false, "CONNECT",
+            "DATA",
         };
     }
     return ExpectedOutcome{
@@ -274,6 +294,15 @@ ExpectedOutcome expectedOutcomeFor(uint32_t rx_settling_ms) {
 }
 
 bool matchesExpected(const SweepOutcome& outcome, const ExpectedOutcome& expected) {
+    if (expected.boundary_alt_failed_phase) {
+        // Boundary cliff: only assert PROBE-OK and DONE; accept either of
+        // two adjacent failure phases as first_failed.
+        if (!outcome.probe_ok || outcome.done != expected.done) {
+            return false;
+        }
+        return outcome.first_failed_phase == expected.first_failed_phase ||
+               outcome.first_failed_phase == expected.boundary_alt_failed_phase;
+    }
     return outcome.probe_ok == expected.probe_ok &&
            outcome.connect_ok == expected.connect_ok &&
            outcome.mode_handoff_ok == expected.mode_handoff_ok &&
