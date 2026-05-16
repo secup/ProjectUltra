@@ -655,10 +655,18 @@ int runScenarioV2(const Scenario& scenario) {
         runtime->config = cfg;
         runtime->last_state = cfg.initial_state;
         auto port = std::make_unique<VirtualAudioPort>(channel, i == 0);
+        // Simulator has no PTT-off settling (rx_settling_ms defaults to 0),
+        // so connection-level PTT-dodge holds add pure latency with no PHY
+        // benefit. Real-radio code paths keep the safe 500 ms defaults.
+        protocol::ConnectionConfig connection_config;
+        connection_config.pong_tx_delay_ms = 0;
+        connection_config.post_connect_data_delay_ms = 0;
+        connection_config.ack_tx_delay_ms = 0;
         runtime->station = std::make_unique<SimulatedStation>(
             cfg.callsign, std::move(port),
             OFDMConfigPreset::Default,
-            mcDpskConfigFor(cfg.initial_mode.modulation));
+            mcDpskConfigFor(cfg.initial_mode.modulation),
+            connection_config);
         runtime->station->setReceiveDirectory(receiveDirectoryPath(name));
         runtime->station->setAutoAccept(cfg.auto_accept);
         if (cfg.force_data_mode) {
