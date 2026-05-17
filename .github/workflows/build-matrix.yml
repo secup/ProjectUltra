@@ -41,13 +41,48 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Install Hamlib (Linux)
+      - name: Install Test Dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libhamlib-dev
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libhamlib-dev
+          libgrpc++-dev
+          libprotobuf-dev
+          protobuf-compiler
+          protobuf-compiler-grpc
+          libabsl-dev
+          libc-ares-dev
+          libre2-dev
 
-      - name: Install Hamlib (macOS)
+      - name: Install Test Dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install hamlib
+        run: brew install hamlib grpc protobuf abseil c-ares
+
+      - name: Read vcpkg Version (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-version
+        shell: pwsh
+        run: |
+          $sha = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Cache vcpkg Binaries (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-${{ hashFiles('.github/workflows/build-matrix.yml', 'CMakeLists.txt') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-
+
+      - name: Install Test Dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
+          $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
+          vcpkg install grpc:x64-windows
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Configure CMake (Linux/macOS)
         if: runner.os != 'Windows'
@@ -58,6 +93,7 @@ jobs:
           -DULTRA_BUILD_TOOLS=OFF
           -DULTRA_BUILD_GUI=OFF
           -DULTRA_USE_FFTW=OFF
+          -DULTRA_FETCH_GRPC=OFF
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
@@ -68,6 +104,9 @@ jobs:
           -DULTRA_BUILD_TOOLS=OFF
           -DULTRA_BUILD_GUI=OFF
           -DULTRA_USE_FFTW=OFF
+          -DULTRA_FETCH_GRPC=OFF
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows
 
       - name: Build Tests (Linux/macOS)
         if: runner.os != 'Windows'
@@ -96,8 +135,17 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Install Hamlib
-        run: sudo apt-get update && sudo apt-get install -y libhamlib-dev
+      - name: Install Dependencies
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libhamlib-dev
+          libgrpc++-dev
+          libprotobuf-dev
+          protobuf-compiler
+          protobuf-compiler-grpc
+          libabsl-dev
+          libc-ares-dev
+          libre2-dev
 
       - name: Configure ASAN/UBSAN
         run: >
@@ -107,6 +155,7 @@ jobs:
           -DULTRA_BUILD_TOOLS=OFF
           -DULTRA_BUILD_GUI=OFF
           -DULTRA_USE_FFTW=OFF
+          -DULTRA_FETCH_GRPC=OFF
           -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
@@ -135,7 +184,17 @@ jobs:
       - name: Install Coverage Toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libhamlib-dev
+          sudo apt-get install -y \
+            clang \
+            llvm \
+            libhamlib-dev \
+            libgrpc++-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            protobuf-compiler-grpc \
+            libabsl-dev \
+            libc-ares-dev \
+            libre2-dev
 
       - name: Run Coverage Gate
         env:
@@ -174,17 +233,46 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libgl1-mesa-dev libhamlib-dev
+          sudo apt-get install -y \
+            libsdl2-dev \
+            libgl1-mesa-dev \
+            libhamlib-dev \
+            libgrpc++-dev \
+            libprotobuf-dev \
+            protobuf-compiler \
+            protobuf-compiler-grpc \
+            libabsl-dev \
+            libc-ares-dev \
+            libre2-dev
 
       - name: Install macOS GUI Dependencies
         if: runner.os == 'macOS'
-        run: brew install sdl2 hamlib
+        run: brew install sdl2 hamlib grpc protobuf abseil c-ares
+
+      - name: Read vcpkg Version (Windows)
+        if: runner.os == 'Windows'
+        id: vcpkg-version
+        shell: pwsh
+        run: |
+          $sha = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
+          "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Cache vcpkg Binaries (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-${{ hashFiles('.github/workflows/build-matrix.yml', 'CMakeLists.txt') }}
+          restore-keys: |
+            vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-
 
       - name: Install Windows GUI Dependencies
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          vcpkg install sdl2:x64-windows
+          New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
+          $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
+          vcpkg install sdl2:x64-windows grpc:x64-windows
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Configure CMake (Linux/macOS)
@@ -195,6 +283,7 @@ jobs:
           -DULTRA_BUILD_TESTS=OFF
           -DULTRA_BUILD_GUI=ON
           -DULTRA_USE_FFTW=OFF
+          -DULTRA_FETCH_GRPC=OFF
 
       - name: Configure CMake (Windows)
         if: runner.os == 'Windows'
@@ -205,6 +294,7 @@ jobs:
           -DULTRA_BUILD_TESTS=OFF
           -DULTRA_BUILD_GUI=ON
           -DULTRA_USE_FFTW=OFF
+          -DULTRA_FETCH_GRPC=OFF
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x64-windows
 

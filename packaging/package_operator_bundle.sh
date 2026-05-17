@@ -179,18 +179,30 @@ fi
 if [[ "$TARGET" == "windows" ]]; then
   sdl_found=0
   declare -a dll_candidates=()
+  declare -a vcpkg_install_roots=()
+
+  if [[ -n "${VCPKG_INSTALLED:-}" ]]; then
+    vcpkg_installed="$VCPKG_INSTALLED"
+    if command -v cygpath >/dev/null 2>&1; then
+      vcpkg_installed=$(cygpath -u "$vcpkg_installed")
+    fi
+    vcpkg_install_roots+=("$vcpkg_installed")
+  fi
 
   if [[ -n "${VCPKG_ROOT:-}" ]]; then
     vcpkg_unix="$VCPKG_ROOT"
     if command -v cygpath >/dev/null 2>&1; then
       vcpkg_unix=$(cygpath -u "$VCPKG_ROOT")
     fi
-    dll_candidates+=("${vcpkg_unix}/installed/x64-windows/bin/SDL2.dll")
-    dll_candidates+=("${vcpkg_unix}/installed/x64-windows/bin/SDL2d.dll")
+    vcpkg_install_roots+=("${vcpkg_unix}/installed/x64-windows")
   fi
 
-  dll_candidates+=("/c/vcpkg/installed/x64-windows/bin/SDL2.dll")
-  dll_candidates+=("/c/vcpkg/installed/x64-windows/bin/SDL2d.dll")
+  vcpkg_install_roots+=("/c/vcpkg/installed/x64-windows")
+
+  for vcpkg_root in "${vcpkg_install_roots[@]}"; do
+    dll_candidates+=("${vcpkg_root}/bin/SDL2.dll")
+    dll_candidates+=("${vcpkg_root}/bin/SDL2d.dll")
+  done
   dll_candidates+=("C:/SDL2/lib/x64/SDL2.dll")
 
   for dll in "${dll_candidates[@]}"; do
@@ -205,6 +217,52 @@ if [[ "$TARGET" == "windows" ]]; then
     echo "SDL2 runtime DLL was not found. Expected from vcpkg or C:/SDL2." >&2
     exit 1
   fi
+
+  grpc_root=""
+  for vcpkg_root in "${vcpkg_install_roots[@]}"; do
+    if [[ -f "$vcpkg_root/bin/grpc++.dll" || -f "$vcpkg_root/bin/grpc.dll" ]]; then
+      grpc_root="$vcpkg_root"
+      break
+    fi
+  done
+
+  if [[ -z "$grpc_root" ]]; then
+    echo "gRPC runtime DLLs were not found. Expected from vcpkg x64-windows." >&2
+    exit 1
+  fi
+
+  grpc_dependency_dlls=(
+    grpc++.dll
+    grpc.dll
+    gpr.dll
+    address_sorting.dll
+    libprotobuf.dll
+    abseil_dll.dll
+    cares.dll
+    re2.dll
+    utf8_range.dll
+    utf8_validity.dll
+    libcrypto-3-x64.dll
+    libssl-3-x64.dll
+    zlib1.dll
+  )
+
+  for dll in "${grpc_dependency_dlls[@]}"; do
+    dll_src="$grpc_root/bin/$dll"
+    if [[ -f "$dll_src" ]]; then
+      cp "$dll_src" "$operator_root/"
+      cp "$dll_src" "$dev_root/"
+    fi
+  done
+
+  mkdir -p "$operator_root/THIRD_PARTY_LICENSES" "$dev_root/THIRD_PARTY_LICENSES"
+  for pkg in grpc protobuf abseil c-ares re2 utf8-range openssl zlib; do
+    license_src="$grpc_root/share/$pkg/copyright"
+    if [[ -f "$license_src" ]]; then
+      cp "$license_src" "$operator_root/THIRD_PARTY_LICENSES/$pkg-LICENSE.txt"
+      cp "$license_src" "$dev_root/THIRD_PARTY_LICENSES/$pkg-LICENSE.txt"
+    fi
+  done
 fi
 
 bundle_sdl2_runtime
