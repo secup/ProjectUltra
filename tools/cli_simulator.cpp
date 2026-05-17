@@ -31,6 +31,12 @@
 #include <process.h>
 #define getpid _getpid
 #else
+#include <csignal>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include "ultra/timing_profiler.hpp"
@@ -39,7 +45,16 @@
 #include <cmath>
 #include <functional>
 #include <sstream>
+#include <array>
+#include <filesystem>
+#include <optional>
+#include <stdexcept>
+#include <utility>
 
+#include <grpcpp/grpcpp.h>
+
+#include "ota_simulator.grpc.pb.h"
+#include "otasim_client/ota_audio_backend.hpp"
 #include "waveform/waveform_factory.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/ofdm_cox_waveform.hpp"
@@ -69,6 +84,8 @@ using namespace ultra::gui;
 using namespace ultra::protocol;
 using namespace ultra::sim;
 namespace cli = ultra::tools::cli;
+namespace otasim = projectultra::otasim::v1;
+namespace otasim_client = ultra::otasim_client;
 
 namespace {
 
@@ -161,6 +178,425 @@ bool parseForcedModulation(const std::string& value, bool expert_phy, Modulation
     out = *parsed_any;
     return true;
 }
+
+constexpr const char* kOtaDefaultSession = "lobby";
+constexpr const char* kOtaAlphaToken = "alpha_token";
+constexpr const char* kOtaBravoToken = "bravo_token";
+
+void addOtaToken(grpc::ClientContext& context, const std::string& token) {
+    context.AddMetadata("authorization", "Bearer " + token);
+}
+
+void setRpcDeadline(grpc::ClientContext& context, std::chrono::milliseconds duration) {
+    context.set_deadline(std::chrono::system_clock::now() + duration);
+}
+
+std::string channelModelForOta(ChannelType type) {
+    switch (type) {
+        case ChannelType::PASSTHROUGH: return "passthrough";
+        case ChannelType::AWGN:        return "awgn";
+        case ChannelType::GOOD:        return "watterson_good";
+        case ChannelType::MODERATE:    return "watterson_moderate";
+        case ChannelType::POOR:        return "watterson_poor";
+        case ChannelType::FLUTTER:     return "watterson_flutter";
+        default:                       return "awgn";
+    }
+}
+
+std::optional<ChannelType> parseFadingType(const std::string& value) {
+    const std::string v = cli::normalizedToken(value);
+    if (v == "none" || v == "awgn") {
+        return ChannelType::AWGN;
+    }
+    return cli::parseChannelType(value, cli::AllowAwgn::No);
+}
+
+std::string defaultOtaSimulatorPath(const char* argv0) {
+    std::filesystem::path exe = argv0 ? std::filesystem::absolute(argv0) : std::filesystem::path{};
+    std::filesystem::path sibling = exe.parent_path() / "ota_simulator";
+#ifdef _WIN32
+    sibling += ".exe";
+#endif
+    if (std::filesystem::exists(sibling)) {
+        return sibling.string();
+    }
+    return "ota_simulator";
+}
+
+bool setOtaChannel(const std::string& grpc_target,
+                   const std::string& token,
+                   const std::string& session_id,
+                   ChannelType channel_type,
+                   float snr_db,
+                   uint64_t seed,
+                   std::string* error) {
+    auto channel = grpc::CreateChannel(grpc_target, grpc::InsecureChannelCredentials());
+    if (!channel->WaitForConnected(std::chrono::system_clock::now() +
+                                   std::chrono::seconds(5))) {
+        if (error) *error = "gRPC channel did not connect for SetChannel";
+        return false;
+    }
+    auto stub = otasim::OtaSimulatorControl::NewStub(channel);
+    otasim::SetChannelRequest request;
+    request.set_session_id(session_id);
+    request.set_model(channelModelForOta(channel_type));
+    request.set_snr_db(snr_db);
+    request.set_seed(seed);
+    otasim::CommandAck ack;
+    grpc::ClientContext context;
+    addOtaToken(context, token);
+    setRpcDeadline(context, std::chrono::milliseconds(1500));
+    const auto status = stub->SetChannel(&context, request, &ack);
+    if (!status.ok()) {
+        if (error) *error = "SetChannel failed: " + status.error_message();
+        return false;
+    }
+    if (!ack.accepted()) {
+        if (error) *error = "SetChannel rejected: " + ack.message();
+        return false;
+    }
+    return true;
+}
+
+bool startOtaCapture(const std::string& grpc_target,
+                     const std::string& token,
+                     const std::string& session_id,
+                     std::string* capture_path,
+                     std::string* error) {
+    auto channel = grpc::CreateChannel(grpc_target, grpc::InsecureChannelCredentials());
+    if (!channel->WaitForConnected(std::chrono::system_clock::now() +
+                                   std::chrono::seconds(5))) {
+        if (error) *error = "gRPC channel did not connect for StartCapture";
+        return false;
+    }
+    auto stub = otasim::OtaSimulatorControl::NewStub(channel);
+    otasim::StartCaptureRequest request;
+    request.set_session_id(session_id);
+    request.set_start_sample(8);
+    otasim::CaptureInfo info;
+    grpc::ClientContext context;
+    addOtaToken(context, token);
+    setRpcDeadline(context, std::chrono::milliseconds(1500));
+    const auto status = stub->StartCapture(&context, request, &info);
+    if (!status.ok()) {
+        if (error) *error = "StartCapture failed: " + status.error_message();
+        return false;
+    }
+    if (capture_path) {
+        *capture_path = info.capture_path();
+    }
+    return true;
+}
+
+bool stopOtaCapture(const std::string& grpc_target,
+                    const std::string& token,
+                    const std::string& session_id,
+                    std::string* capture_path,
+                    std::string* error) {
+    auto channel = grpc::CreateChannel(grpc_target, grpc::InsecureChannelCredentials());
+    if (!channel->WaitForConnected(std::chrono::system_clock::now() +
+                                   std::chrono::seconds(5))) {
+        if (error) *error = "gRPC channel did not connect for StopCapture";
+        return false;
+    }
+    auto stub = otasim::OtaSimulatorControl::NewStub(channel);
+    otasim::StopCaptureRequest request;
+    request.set_session_id(session_id);
+    otasim::CaptureInfo info;
+    grpc::ClientContext context;
+    addOtaToken(context, token);
+    setRpcDeadline(context, std::chrono::milliseconds(1500));
+    const auto status = stub->StopCapture(&context, request, &info);
+    if (!status.ok()) {
+        if (error) *error = "StopCapture failed: " + status.error_message();
+        return false;
+    }
+    if (capture_path) {
+        *capture_path = info.capture_path();
+    }
+    return true;
+}
+
+class OtaAudioPort : public AudioPort {
+public:
+    OtaAudioPort(otasim_client::OtaAudioBackendConfig config, std::string label)
+        : config_(std::move(config)), label_(std::move(label)) {}
+
+    bool start() override {
+        std::string error;
+        if (!backend_.start(config_, &error)) {
+            std::cerr << label_ << " OTASim audio start failed: " << error << "\n";
+            return false;
+        }
+        if (!backend_.waitForConnected(std::chrono::seconds(10))) {
+            const auto status = backend_.status();
+            std::cerr << label_ << " OTASim audio connect timeout: " << status.text << "\n";
+            backend_.close();
+            return false;
+        }
+        return true;
+    }
+
+    void stop() override {
+        backend_.close();
+    }
+
+    std::vector<float> pullRx(size_t count) override {
+        return backend_.getRxSamples(count);
+    }
+
+    void queueTx(const std::vector<float>& samples) override {
+        if (samples.empty()) {
+            return;
+        }
+        std::string error;
+        if (!backend_.queueTxSamples(samples, &error)) {
+            tx_errors_++;
+            if (tx_errors_ <= 4 || (tx_errors_ % 32) == 0) {
+                LOG_MODEM(WARN, "%s OTASim TX failed: %s", label_.c_str(), error.c_str());
+            }
+        }
+    }
+
+private:
+    otasim_client::OtaAudioBackendConfig config_;
+    std::string label_;
+    otasim_client::OtaAudioBackend backend_;
+    uint64_t tx_errors_ = 0;
+};
+
+#ifndef _WIN32
+class LocalOtaServer {
+public:
+    ~LocalOtaServer() {
+        killNow();
+    }
+
+    bool start(const std::string& binary,
+               ChannelType channel_type,
+               float snr_db,
+               uint64_t seed,
+               std::string* error) {
+        if (binary.empty()) {
+            if (error) *error = "ota_simulator binary path is empty";
+            return false;
+        }
+        const std::filesystem::path bin_path(binary);
+        if (!std::filesystem::exists(bin_path)) {
+            if (error) *error = "ota_simulator binary not found: " + binary;
+            return false;
+        }
+
+        const uint16_t port = findFreeTcpPort(error);
+        if (port == 0) {
+            return false;
+        }
+
+        const auto stamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        temp_dir_ = std::filesystem::temp_directory_path() /
+                    ("cli_otasim_" + std::to_string(::getpid()) + "_" +
+                     std::to_string(stamp));
+        capture_root_ = temp_dir_ / "captures";
+        token_path_ = temp_dir_ / "tokens.conf";
+        log_path_ = temp_dir_ / "ota_simulator.log";
+
+        std::error_code ec;
+        std::filesystem::create_directories(capture_root_, ec);
+        if (ec) {
+            if (error) *error = "failed to create OTASim temp dir: " + ec.message();
+            return false;
+        }
+        {
+            std::ofstream out(token_path_);
+            if (!out) {
+                if (error) *error = "failed to write OTASim token file";
+                return false;
+            }
+            out << kOtaAlphaToken << ":ALPHA:Alpha station\n";
+            out << kOtaBravoToken << ":BRAVO:Bravo station\n";
+        }
+
+        const int log_fd = ::open(log_path_.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);
+        if (log_fd < 0) {
+            if (error) *error = "failed to open OTASim log file";
+            return false;
+        }
+
+        const std::string bind = "127.0.0.1:" + std::to_string(port);
+        const std::string snr = std::to_string(snr_db);
+        const std::string seed_arg = std::to_string(seed);
+        const std::string model = channelModelForOta(channel_type);
+
+        const pid_t pid = ::fork();
+        if (pid < 0) {
+            ::close(log_fd);
+            if (error) *error = "fork failed";
+            return false;
+        }
+        if (pid == 0) {
+            ::dup2(log_fd, STDOUT_FILENO);
+            ::dup2(log_fd, STDERR_FILENO);
+            ::close(log_fd);
+            ::execl(bin_path.c_str(),
+                    bin_path.c_str(),
+                    "serve",
+                    "--bind", bind.c_str(),
+                    "--udp-bind", "127.0.0.1:0",
+                    "--tokens", token_path_.c_str(),
+                    "--captures-root", capture_root_.c_str(),
+                    "--lobby-channel", model.c_str(),
+                    "--lobby-snr-db", snr.c_str(),
+                    "--lobby-seed", seed_arg.c_str(),
+                    "--shutdown-deadline-sec", "2",
+                    nullptr);
+            ::_exit(127);
+        }
+
+        ::close(log_fd);
+        pid_ = pid;
+        grpc_target_ = bind;
+        if (!waitForReady(error)) {
+            killNow();
+            return false;
+        }
+        return true;
+    }
+
+    bool terminateCleanly(std::string* error) {
+        if (pid_ <= 0 || reaped_) {
+            return true;
+        }
+        if (::kill(pid_, SIGTERM) != 0) {
+            if (error) *error = "failed to send SIGTERM to ota_simulator";
+            killNow();
+            return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+        while (std::chrono::steady_clock::now() < deadline) {
+            int status = 0;
+            const pid_t result = ::waitpid(pid_, &status, WNOHANG);
+            if (result == pid_) {
+                markReaped(status);
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                    return true;
+                }
+                if (error) *error = "ota_simulator did not exit cleanly after SIGTERM";
+                return false;
+            }
+            if (result < 0 && errno != EINTR) {
+                if (error) *error = "waitpid failed during OTASim shutdown";
+                killNow();
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        if (error) *error = "ota_simulator did not exit before SIGTERM timeout";
+        killNow();
+        return false;
+    }
+
+    void killNow() {
+        if (pid_ > 0 && !reaped_) {
+            (void)::kill(pid_, SIGKILL);
+            int status = 0;
+            (void)::waitpid(pid_, &status, 0);
+            markReaped(status);
+        }
+    }
+
+    const std::string& grpcTarget() const { return grpc_target_; }
+    const std::filesystem::path& captureRoot() const { return capture_root_; }
+    const std::filesystem::path& logPath() const { return log_path_; }
+
+private:
+    static uint16_t findFreeTcpPort(std::string* error) {
+        const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) {
+            if (error) *error = "failed to create TCP socket";
+            return 0;
+        }
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_port = htons(0);
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+            ::close(fd);
+            if (error) *error = "failed to bind ephemeral TCP port";
+            return 0;
+        }
+        sockaddr_in actual{};
+        socklen_t len = sizeof(actual);
+        if (::getsockname(fd, reinterpret_cast<sockaddr*>(&actual), &len) != 0) {
+            ::close(fd);
+            if (error) *error = "failed to inspect ephemeral TCP port";
+            return 0;
+        }
+        const uint16_t port = ntohs(actual.sin_port);
+        ::close(fd);
+        return port;
+    }
+
+    bool waitForReady(std::string* error) {
+        auto channel = grpc::CreateChannel(grpc_target_, grpc::InsecureChannelCredentials());
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (channel->WaitForConnected(std::chrono::system_clock::now() +
+                                          std::chrono::milliseconds(200))) {
+                return true;
+            }
+            int status = 0;
+            const pid_t result = ::waitpid(pid_, &status, WNOHANG);
+            if (result == pid_) {
+                markReaped(status);
+                if (error) {
+                    *error = "ota_simulator exited before ready; log=" + log_path_.string();
+                }
+                return false;
+            }
+            if (result < 0 && errno != EINTR) {
+                if (error) *error = "waitpid failed while waiting for OTASim";
+                return false;
+            }
+        }
+        if (error) {
+            *error = "timed out waiting for ota_simulator; log=" + log_path_.string();
+        }
+        return false;
+    }
+
+    void markReaped(int status) {
+        status_ = status;
+        reaped_ = true;
+        pid_ = -1;
+    }
+
+    pid_t pid_ = -1;
+    bool reaped_ = false;
+    int status_ = 0;
+    std::string grpc_target_;
+    std::filesystem::path temp_dir_;
+    std::filesystem::path token_path_;
+    std::filesystem::path capture_root_;
+    std::filesystem::path log_path_;
+};
+#else
+class LocalOtaServer {
+public:
+    bool start(const std::string&, ChannelType, float, uint64_t, std::string* error) {
+        if (error) *error = "cli_simulator self-spawn is not implemented on Windows; pass --ota-host";
+        return false;
+    }
+    bool terminateCleanly(std::string*) { return true; }
+    void killNow() {}
+    const std::string& grpcTarget() const { return grpc_target_; }
+    const std::filesystem::path& captureRoot() const { return empty_path_; }
+    const std::filesystem::path& logPath() const { return empty_path_; }
+private:
+    std::string grpc_target_;
+    std::filesystem::path empty_path_;
+};
+#endif
 
 }  // namespace
 
@@ -420,6 +856,11 @@ public:
     void setInjectGain(float gain) { inject_gain_ = std::clamp(gain, 0.05f, 1.0f); }
     void setAudioBufferSize(int n) { audio_buffer_size_ = n; }
     void setVerifySNR(bool v) { verify_snr_ = v; }
+    void setOtaHost(const std::string& host) { ota_host_ = host; }
+    void setOtaSessionId(const std::string& session_id) { ota_session_id_ = session_id.empty() ? kOtaDefaultSession : session_id; }
+    void setOtaAlphaToken(const std::string& token) { ota_alpha_token_ = token; }
+    void setOtaBravoToken(const std::string& token) { ota_bravo_token_ = token; }
+    void setOtaSimulatorPath(const std::string& path) { ota_server_binary_ = path; }
 
     bool runTest() {
         if (verify_snr_ && !runSNRVerification()) {
@@ -435,33 +876,68 @@ public:
 
         printHeader();
 
-        // Setup channel
-        channel_.setSeed(seed_);
-        channel_.setTxCFO(tx_cfo_hz_);
-        channel_.configure(snr_db_, channel_type_);
-        channel_.setSignalCaptureEnabled(false);
-        if (save_signals_) {
-            capture_limit_hit_.store(false);
-            channel_.setSignalCaptureMaxSamples(save_signals_max_samples_);
-            channel_.clearCapturedSignals();
-            channel_.setSignalCaptureEnabled(true);
-            std::cout << "  [capture] enabled";
-            if (save_signals_message_limit_ > 0) {
-                std::cout << ", will stop after " << save_signals_message_limit_
-                          << " received app message(s)";
+        LocalOtaServer local_server;
+        active_ota_grpc_target_ = ota_host_;
+        const bool spawned_local = active_ota_grpc_target_.empty();
+        if (active_ota_grpc_target_.empty()) {
+            std::string error;
+            if (!local_server.start(ota_server_binary_, channel_type_, snr_db_, seed_, &error)) {
+                std::cerr << "Failed to start local ota_simulator serve: " << error << "\n";
+                return false;
             }
-            if (save_signals_max_samples_ > 0) {
-                std::cout << ", max " << save_signals_max_samples_ << " samples/stream";
-            }
-            std::cout << "\n";
+            active_ota_grpc_target_ = local_server.grpcTarget();
+            std::cout << "  OTASim: spawned " << active_ota_grpc_target_
+                      << " (captures " << local_server.captureRoot().string() << ")\n";
+        } else {
+            std::cout << "  OTASim: using " << active_ota_grpc_target_ << "\n";
         }
 
-        // Create stations with virtual audio ports (in-process channel sim)
+        {
+            std::string error;
+            if (!setOtaChannel(active_ota_grpc_target_, ota_alpha_token_,
+                               ota_session_id_, channel_type_, snr_db_, seed_, &error)) {
+                std::cerr << "Failed to configure OTASim channel: " << error << "\n";
+                return false;
+            }
+            std::cout << "  OTASim channel: " << channelModelForOta(channel_type_)
+                      << " @ " << snr_db_ << " dB, seed=" << seed_ << "\n";
+        }
+
+        ota_capture_active_ = false;
+        ota_capture_path_.clear();
+        if (save_signals_) {
+            capture_limit_hit_.store(false);
+            std::string error;
+            if (startOtaCapture(active_ota_grpc_target_, ota_alpha_token_,
+                                ota_session_id_, &ota_capture_path_, &error)) {
+                ota_capture_active_ = true;
+                std::cout << "  [capture] OTASim capture enabled";
+                if (!ota_capture_path_.empty()) {
+                    std::cout << " at " << ota_capture_path_;
+                }
+                std::cout << "\n";
+            } else {
+                std::cout << "  \033[33m[capture] warning: " << error << "\033[0m\n";
+            }
+        }
+
+        otasim_client::OtaAudioBackendConfig alpha_ota;
+        alpha_ota.grpc_target = active_ota_grpc_target_;
+        alpha_ota.token = ota_alpha_token_;
+        alpha_ota.station_id = "ALPHA";
+        alpha_ota.session_id = ota_session_id_;
+
+        otasim_client::OtaAudioBackendConfig bravo_ota;
+        bravo_ota.grpc_target = active_ota_grpc_target_;
+        bravo_ota.token = ota_bravo_token_;
+        bravo_ota.station_id = "BRAVO";
+        bravo_ota.session_id = ota_session_id_;
+
         alpha_ = std::make_unique<SimulatedStation>(
-            "ALPHA", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/true),
+            "ALPHA", std::make_unique<OtaAudioPort>(std::move(alpha_ota), "ALPHA"),
             ofdm_config_preset_, mc_dpsk_config_);
         bravo_ = std::make_unique<SimulatedStation>(
-            "BRAVO", std::make_unique<VirtualAudioPort>(channel_, /*is_station_a=*/false),
+            "BRAVO", std::make_unique<OtaAudioPort>(std::move(bravo_ota), "BRAVO"),
             ofdm_config_preset_, mc_dpsk_config_);
         alpha_->setRxOverfeedFactor(rx_overfeed_factor_);
         bravo_->setRxOverfeedFactor(rx_overfeed_factor_);
@@ -534,8 +1010,7 @@ public:
                 save_signals_message_limit_ > 0 &&
                 count >= save_signals_message_limit_ &&
                 !capture_limit_hit_.exchange(true)) {
-                channel_.setSignalCaptureEnabled(false);
-                LOG_MODEM(INFO, "[capture] reached message limit (%d), signal capture stopped",
+                LOG_MODEM(INFO, "[capture] reached message limit (%d), capture will finish at teardown",
                           save_signals_message_limit_);
             }
         });
@@ -568,9 +1043,32 @@ public:
         // Stop
         alpha_->stop();
         bravo_->stop();
-        channel_.setSignalCaptureEnabled(false);
+        if (ota_capture_active_) {
+            std::string error;
+            std::string stopped_path;
+            if (stopOtaCapture(active_ota_grpc_target_, ota_alpha_token_,
+                               ota_session_id_, &stopped_path, &error)) {
+                ota_capture_active_ = false;
+                if (!stopped_path.empty()) {
+                    ota_capture_path_ = stopped_path;
+                }
+            } else {
+                std::cout << "  \033[33m[capture] warning: " << error << "\033[0m\n";
+            }
+        }
         if (save_signals_) {
             saveCapturedSignals(success);
+        }
+        if (spawned_local) {
+            std::string error;
+            if (!local_server.terminateCleanly(&error)) {
+                std::cout << "  \033[31m✗ OTASim shutdown failed: "
+                          << error << "\033[0m\n";
+                if (!local_server.logPath().empty()) {
+                    std::cout << "  OTASim log: " << local_server.logPath().string() << "\n";
+                }
+                success = false;
+            }
         }
 
         if (success) {
@@ -637,8 +1135,15 @@ private:
     float inject_gain_ = 0.70f;         // Post-injection headroom before DAC full scale
     int audio_buffer_size_ = 0;         // 0 = AudioEngine default (4096)
     bool verify_snr_ = false;
+    std::string ota_host_;
+    std::string ota_session_id_ = kOtaDefaultSession;
+    std::string ota_alpha_token_ = kOtaAlphaToken;
+    std::string ota_bravo_token_ = kOtaBravoToken;
+    std::string ota_server_binary_;
+    std::string active_ota_grpc_target_;
+    bool ota_capture_active_ = false;
+    std::string ota_capture_path_;
 
-    SimulatedChannel channel_;
     std::unique_ptr<SimulatedStation> alpha_;
     std::unique_ptr<SimulatedStation> bravo_;
 
@@ -668,72 +1173,10 @@ private:
     }
 
     void saveCapturedSignals(bool test_success) {
-        auto cap = channel_.getCapturedSignals();
-        std::string prefix = capturePrefixForRun();
-
-        std::string a_tx = prefix + "_a_tx_raw.f32";
-        std::string b_tx = prefix + "_b_tx_raw.f32";
-        std::string a_rx = prefix + "_a_rx_raw.f32";
-        std::string b_rx = prefix + "_b_rx_raw.f32";
-        std::string meta = prefix + "_meta.txt";
-
-        bool ok = true;
-        ok = writeF32File(a_tx, cap.a_tx_raw) && ok;
-        ok = writeF32File(b_tx, cap.b_tx_raw) && ok;
-        ok = writeF32File(a_rx, cap.a_rx_raw) && ok;
-        ok = writeF32File(b_rx, cap.b_rx_raw) && ok;
-
-        std::ofstream meta_out(meta);
-        if (meta_out) {
-            const char* mod_str =
-                (forced_mod_ == Modulation::AUTO) ? "AUTO" : modulationToString(forced_mod_);
-            const char* rate_str =
-                (forced_rate_ == CodeRate::AUTO) ? "AUTO" : codeRateToString(forced_rate_);
-            const char* wf_str =
-                (forced_waveform_ == WaveformMode::AUTO) ? "AUTO" : waveformModeToString(forced_waveform_);
-
-            meta_out << "sample_rate=48000\n";
-            meta_out << "seed=" << seed_ << "\n";
-            meta_out << "snr_db=" << snr_db_ << "\n";
-            meta_out << "tx_cfo_hz=" << tx_cfo_hz_ << "\n";
-            meta_out << "channel=" << channelTypeName() << "\n";
-            meta_out << "forced_modulation=" << mod_str << "\n";
-            meta_out << "forced_code_rate=" << rate_str << "\n";
-            meta_out << "forced_waveform=" << wf_str << "\n";
-            meta_out << "ofdm_config=" << ofdmConfigPresetToString(ofdm_config_preset_) << "\n";
-            meta_out << "mc_dpsk_preset=" << mc_dpsk_preset_name_ << "\n";
-            meta_out << "mc_dpsk_carriers=" << mc_dpsk_config_.num_carriers << "\n";
-            meta_out << "mc_dpsk_samples_per_symbol=" << mc_dpsk_config_.samples_per_symbol << "\n";
-            meta_out << "mc_dpsk_bits_per_symbol=" << mc_dpsk_config_.bits_per_symbol << "\n";
-            meta_out << "test_type="
-                     << (test_file_transfer_ ? "file_transfer" : (test_burst_ ? "burst" : "messages"))
-                     << "\n";
-            meta_out << "test_success=" << (test_success ? "1" : "0") << "\n";
-            meta_out << "capture_message_limit=" << save_signals_message_limit_ << "\n";
-            meta_out << "capture_limit_hit=" << (capture_limit_hit_.load() ? "1" : "0") << "\n";
-            meta_out << "capture_max_samples=" << cap.max_samples << "\n";
-            meta_out << "capture_truncated=" << (cap.truncated ? "1" : "0") << "\n";
-            meta_out << "a_tx_samples=" << cap.a_tx_raw.size() << "\n";
-            meta_out << "b_tx_samples=" << cap.b_tx_raw.size() << "\n";
-            meta_out << "a_rx_samples=" << cap.a_rx_raw.size() << "\n";
-            meta_out << "b_rx_samples=" << cap.b_rx_raw.size() << "\n";
-            meta_out << "files=" << a_tx << "," << b_tx << "," << a_rx << "," << b_rx << "\n";
-            meta_out << "notes=Compare TX vs RX using training/LTS CFO estimator to validate residual CFO after correction.\n";
-            meta_out.close();
-        } else {
-            ok = false;
-        }
-
-        if (ok) {
-            std::cout << "\n  [capture] wrote:\n"
-                      << "    " << a_tx << "\n"
-                      << "    " << b_tx << "\n"
-                      << "    " << a_rx << "\n"
-                      << "    " << b_rx << "\n"
-                      << "    " << meta << "\n";
-        } else {
-            std::cout << "\n  \033[33m[capture] warning: failed to write one or more capture files under prefix "
-                      << prefix << "\033[0m\n";
+        (void)test_success;
+        if (!ota_capture_path_.empty()) {
+            std::cout << "\n  [capture] OTASim capture path: "
+                      << ota_capture_path_ << "\n";
         }
     }
 
@@ -826,7 +1269,14 @@ private:
 
         std::cout << "  Switching to Condition B: SNR=" << adaptive_hop_snr_db_
                   << " dB, channel=" << channelTypeToString(adaptive_hop_channel_) << "\n";
-        channel_.configure(adaptive_hop_snr_db_, adaptive_hop_channel_);
+        std::string error;
+        if (!setOtaChannel(active_ota_grpc_target_, ota_alpha_token_,
+                           ota_session_id_, adaptive_hop_channel_,
+                           adaptive_hop_snr_db_, seed_, &error)) {
+            std::cout << "  \033[31m✗ OTASim channel update failed: "
+                      << error << "\033[0m\n";
+            return false;
+        }
         alpha_->setSNR(adaptive_hop_snr_db_);
         bravo_->setSNR(adaptive_hop_snr_db_);
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -1222,7 +1672,7 @@ private:
 
     int mcDpskHandshakeTimeoutSeconds() const {
         return (mc_dpsk_config_.samples_per_symbol > 512 ||
-                mc_dpsk_config_.bits_per_symbol < 2) ? 75 : 30;
+                mc_dpsk_config_.bits_per_symbol < 2) ? 120 : 30;
     }
 
     bool isRobustMCDPSKPreset() const {
@@ -1232,6 +1682,7 @@ private:
 
     const char* channelTypeName() const {
         switch (channel_type_) {
+            case ChannelType::PASSTHROUGH: return "Passthrough";
             case ChannelType::AWGN:     return "AWGN (no fading)";
             case ChannelType::GOOD:     return "Good (0.5ms, 0.1Hz)";
             case ChannelType::MODERATE: return "Moderate (1ms, 0.5Hz)";
@@ -1623,7 +2074,8 @@ private:
                       << channelTypeToString(adaptive_hop_channel_)
                       << " @ " << adaptive_hop_snr_db_ << " dB)\n";
         }
-        std::cout << "  Model:   Real-time (48kHz, 10ms callbacks)\n";
+        std::cout << "  Model:   OTASim server (48kHz, 10ms callbacks)\n";
+        std::cout << "  Session: " << ota_session_id_ << "\n";
         if (rx_overfeed_factor_ > 1) {
             std::cout << "  Stress:  RX overfeed x" << rx_overfeed_factor_ << "\n";
         }
@@ -1908,6 +2360,7 @@ int main(int argc, char* argv[]) {
 
         setOperatorLogProfile();
         CLISimulator sim;
+        sim.setOtaSimulatorPath(defaultOtaSimulatorPath(argv[0]));
 
         for (int i = 1; i < argc; i++) {
             std::string arg = argv[i];
@@ -1919,10 +2372,10 @@ int main(int argc, char* argv[]) {
                 // --fading alone = moderate, --fading <type> = specified type
                 if (i + 1 < argc && argv[i + 1][0] != '-') {
                     std::string ftype = argv[++i];
-                    auto channel = cli::parseChannelType(ftype, cli::AllowAwgn::No);
+                    auto channel = parseFadingType(ftype);
                     if (!channel) {
                         std::cerr << "Unknown fading type: " << ftype
-                                  << " (use " << cli::channelChoices(cli::AllowAwgn::No) << ")\n";
+                                  << " (use none, awgn, good, moderate, poor, flutter)\n";
                         return 1;
                     }
                     sim.setChannelType(*channel);
@@ -2105,6 +2558,16 @@ int main(int argc, char* argv[]) {
                 sim.setInjectGain(std::stof(argv[++i]));
             } else if (arg == "--audio-buffer-size" && i + 1 < argc) {
                 sim.setAudioBufferSize(std::stoi(argv[++i]));
+            } else if (arg == "--ota-host" && i + 1 < argc) {
+                sim.setOtaHost(argv[++i]);
+            } else if (arg == "--ota-session" && i + 1 < argc) {
+                sim.setOtaSessionId(argv[++i]);
+            } else if (arg == "--ota-alpha-token" && i + 1 < argc) {
+                sim.setOtaAlphaToken(argv[++i]);
+            } else if (arg == "--ota-bravo-token" && i + 1 < argc) {
+                sim.setOtaBravoToken(argv[++i]);
+            } else if (arg == "--ota-server-bin" && i + 1 < argc) {
+                sim.setOtaSimulatorPath(argv[++i]);
             } else if (arg == "--log-level" && i + 1 < argc) {
                 const std::string value = argv[++i];
                 if (!parseLogLevel(value, log_level)) {
@@ -2124,13 +2587,14 @@ int main(int argc, char* argv[]) {
                 std::cout << "Every 10ms: read RX, feed decoder, get TX, send to channel.\n\n";
                 std::cout << "Options:\n";
                 std::cout << "  --snr, -s <dB>      SNR (default: 20)\n";
-                std::cout << "  --channel, -c <CH>  Channel type: awgn, good, moderate, poor, flutter\n";
+                std::cout << "  --channel, -c <CH>  Channel type: passthrough, awgn, good, moderate, poor, flutter\n";
+                std::cout << "                        passthrough - Null OTASim channel\n";
                 std::cout << "                        awgn     - No fading, no multipath\n";
                 std::cout << "                        good     - 0.5ms delay, 0.1Hz Doppler (quiet)\n";
                 std::cout << "                        moderate - 1.0ms delay, 0.5Hz Doppler (typical)\n";
                 std::cout << "                        poor     - 2.0ms delay, 1.0Hz Doppler (disturbed)\n";
                 std::cout << "                        flutter  - 0.5ms delay, 10Hz Doppler (auroral)\n";
-                std::cout << "  --fading, -f        Alias for --channel moderate\n";
+                std::cout << "  --fading, -f        Alias for --channel moderate; none/awgn selects AWGN\n";
                 std::cout << "  --mod, -m <MOD>     Force modulation: dqpsk (DBPSK via robust presets)\n";
                 std::cout << "  --expert            Allow lab-only forced PHY modes in --mod\n";
                 std::cout << "  --rate, -r <RATE>   Force code rate: auto, r1_4, r1_2, r2_3, r3_4\n";
@@ -2167,6 +2631,11 @@ int main(int argc, char* argv[]) {
                 std::cout << "  --log-category <list>  Comma list: operator,audio,tnc,modem,demod,sync,ldpc,channel,all\n";
                 std::cout << "  --log-file <PATH>      Write logs to file instead of stderr\n";
                 std::cout << "  --verify-snr           Probe configured broadband SNR and fail if error exceeds +/-2 dB\n";
+                std::cout << "  --ota-host HOST:PORT   Use existing ota_simulator serve instead of self-spawn\n";
+                std::cout << "  --ota-session ID       OTASim session id (default: lobby)\n";
+                std::cout << "  --ota-alpha-token T    Token for ALPHA (default: alpha_token)\n";
+                std::cout << "  --ota-bravo-token T    Token for BRAVO (default: bravo_token)\n";
+                std::cout << "  --ota-server-bin PATH  ota_simulator binary for self-spawn\n";
                 std::cout << "\nHardware audio mode (real soundcard, two-machine setup):\n";
                 std::cout << "  --role A|B|both     A=initiator, B=responder, both=in-process sim (default)\n";
                 std::cout << "  --callsign <NAME>   Local callsign (default: ALPHA for A, BRAVO for B)\n";

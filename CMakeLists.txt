@@ -563,7 +563,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(cli_simulator PRIVATE ultra_sim_station)
+    target_link_libraries(cli_simulator PRIVATE ultra_sim_station ultra_otasim_client)
 
     add_executable(session_decode
         tools/session_decode.cpp

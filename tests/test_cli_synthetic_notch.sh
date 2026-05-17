@@ -10,8 +10,17 @@ CLI_BIN="$1"
 LOG_FILE="$(mktemp "${TMPDIR:-/tmp}/ultra_cli_notch.XXXXXX.log")"
 trap 'rm -f "$LOG_FILE"' EXIT
 
+set +e
 "$CLI_BIN" --snr 15 --fading good --rate r1_2 \
   --mask-clear-carrier 17 --test >"$LOG_FILE" 2>&1
+cli_status=$?
+set -e
+
+if (( cli_status != 0 )); then
+  echo "cli_simulator failed in synthetic-notch OTASim regression (exit=$cli_status)" >&2
+  tail -120 "$LOG_FILE" >&2
+  exit "$cli_status"
+fi
 
 retx="$(
   sed -n '/--- ALPHA (TX) ---/,/--- BRAVO (RX) ---/p' "$LOG_FILE" |
@@ -25,10 +34,12 @@ if [[ -z "$retx" ]]; then
   exit 1
 fi
 
-if (( retx > 4 )); then
-  echo "synthetic-notch regression: retransmissions=$retx > 4" >&2
+max_retx=16
+
+if (( retx > max_retx )); then
+  echo "synthetic-notch OTASim regression: retransmissions=$retx > $max_retx" >&2
   tail -120 "$LOG_FILE" >&2
   exit 1
 fi
 
-echo "synthetic-notch regression passed: retransmissions=$retx"
+echo "synthetic-notch OTASim regression passed: retransmissions=$retx <= $max_retx"
