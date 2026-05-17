@@ -632,8 +632,9 @@ if(ULTRA_BUILD_TOOLS)
     target_include_directories(ota_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_BINARY_DIR}/generated/include
     )
-    target_link_libraries(ota_simulator PRIVATE ultra_sim_station ultra_tool_wav_io)
+    target_link_libraries(ota_simulator PRIVATE ultra_sim_station ultra_tool_wav_io ota_simulator_service)
 
     add_executable(ultra_report
         tools/ultra_report.cpp

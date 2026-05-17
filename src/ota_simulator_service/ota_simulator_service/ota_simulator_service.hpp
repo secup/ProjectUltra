@@ -6,6 +6,7 @@
 #include "ota_simulator_service/audio_plane.hpp"
 #include "ota_simulator_service/capture_writer.hpp"
 
+#include <atomic>
 #include <condition_variable>
 #include <filesystem>
 #include <map>
@@ -36,7 +37,9 @@ public:
     OtaSimulatorService& operator=(const OtaSimulatorService&) = delete;
 
     bool start(std::string* error = nullptr);
+    void beginDraining();
     void shutdown();
+    bool healthy() const;
     uint16_t audioPort() const { return audio_plane_.port(); }
     const std::string& audioHost() const { return config_.udp_bind_host; }
     ultra::ota_channel_core::SessionManager& sessionManager() { return sessions_; }
@@ -114,12 +117,14 @@ private:
                    std::string type,
                    std::string payload_json);
     void onAudioPacket(const ReceivedAudioPacket& packet);
+    void stopActiveCaptures();
     SessionCaptureWriter* captureForSessionLocked(std::string_view session_id);
 
     AuthAllowlist auth_;
     OtaSimulatorServiceConfig config_;
     ultra::ota_channel_core::SessionManager sessions_;
     UdpAudioPlane audio_plane_;
+    std::atomic<bool> draining_{false};
     mutable std::mutex mutex_;
     std::map<std::string, RegisteredStation> registered_;
     std::map<std::string, SessionCaptureWriter> captures_;

@@ -83,6 +83,7 @@ OtaSimulatorService::~OtaSimulatorService() {
 }
 
 bool OtaSimulatorService::start(std::string* error) {
+    draining_.store(false);
     return audio_plane_.start(
         config_.udp_bind_host,
         config_.udp_bind_port,
@@ -90,9 +91,20 @@ bool OtaSimulatorService::start(std::string* error) {
         error);
 }
 
-void OtaSimulatorService::shutdown() {
-    audio_plane_.stop();
+void OtaSimulatorService::beginDraining() {
+    draining_.store(true);
     events_cv_.notify_all();
+}
+
+void OtaSimulatorService::shutdown() {
+    beginDraining();
+    audio_plane_.stop();
+    stopActiveCaptures();
+    events_cv_.notify_all();
+}
+
+bool OtaSimulatorService::healthy() const {
+    return !draining_.load() && audio_plane_.running();
 }
 
 grpc::Status OtaSimulatorService::RegisterStation(
@@ -531,8 +543,9 @@ grpc::Status OtaSimulatorService::Health(
         return status;
     }
     (void)request;
-    response->set_ok(audio_plane_.running());
-    response->set_message(audio_plane_.running() ? "ok" : "audio plane stopped");
+    const bool ok = healthy();
+    response->set_ok(ok);
+    response->set_message(ok ? "ok" : "not serving");
     *response->mutable_server_time() = nowTimestamp();
     return grpc::Status::OK;
 }
@@ -677,6 +690,32 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
         (void)audio_plane_.sendAudio(lease.lease_id, packet.start_sample, rx);
     }
     session->discardBefore(packet.start_sample + packet.samples.size());
+}
+
+void OtaSimulatorService::stopActiveCaptures() {
+    std::vector<std::string> session_ids;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        session_ids.reserve(captures_.size());
+        for (const auto& [session_id, _] : captures_) {
+            session_ids.push_back(session_id);
+        }
+    }
+
+    for (const auto& session_id : session_ids) {
+        auto session = sessions_.getSession(session_id);
+        if (!session) {
+            continue;
+        }
+        const auto config = session->config();
+        const auto stations = session->listStations();
+        std::string error;
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = captures_.find(session_id);
+        if (it != captures_.end() && it->second.active()) {
+            (void)it->second.stop(config, stations, &error);
+        }
+    }
 }
 
 SessionCaptureWriter* OtaSimulatorService::captureForSessionLocked(
