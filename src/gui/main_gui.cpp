@@ -188,7 +188,12 @@ void printGuiUsage(const char* prog) {
     std::printf("ProjectUltra GUI\n\n");
     std::printf("Usage: %s [options]\n\n", prog ? prog : "ultra_gui");
     std::printf("Options:\n");
-    std::printf("  -sim                         Enable developer simulator UI\n");
+    std::printf("  -sim                         Use OTASim server audio backend\n");
+    std::printf("  --ota-host <host:port>        OTASim gRPC endpoint for -sim\n");
+    std::printf("  --ota-udp-host <host:port>    OTASim UDP audio endpoint override\n");
+    std::printf("  --token <bearer_token>        OTASim auth token for -sim\n");
+    std::printf("  --station-id <id>             OTASim station id for -sim\n");
+    std::printf("  --session-id <id>             OTASim session id (default: lobby)\n");
     std::printf("  -rec [path]                   Record received audio\n");
     std::printf("  --software, -sw               Use software renderer and safe startup\n");
     std::printf("  --opengl, --gl                Use OpenGL renderer\n");
@@ -462,6 +467,41 @@ int main(int argc, char* argv[]) {
         std::string arg = argv[i];
         if (arg == "-sim") {
             opts.enable_sim = true;
+        } else if (arg == "--ota-host") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --ota-host\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.ota_host = argv[++i];
+        } else if (arg == "--ota-udp-host") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --ota-udp-host\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.ota_udp_host = argv[++i];
+        } else if (arg == "--token") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --token\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.token = argv[++i];
+        } else if (arg == "--station-id") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --station-id\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.station_id = argv[++i];
+        } else if (arg == "--session-id") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --session-id\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.session_id = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             printGuiUsage(argv[0]);
             closeStartupLog();
@@ -562,17 +602,32 @@ int main(int argc, char* argv[]) {
     }
     LOG_INFO("OPERATOR", "ultra_gui starting: log=%s", ultra::logLevelName(log_level));
 
+    if (opts.enable_sim) {
+        if (opts.ota_host.empty() || opts.token.empty() || opts.station_id.empty()) {
+            std::fprintf(stderr,
+                         "Error: -sim requires --ota-host <host:port>, --token <token>, and --station-id <id>\n");
+            closeStartupLog();
+            return 1;
+        }
+        if (opts.session_id.empty()) {
+            opts.session_id = "lobby";
+        }
+    }
+
     // Software path implies safer startup defaults (deferred audio + no waterfall)
     if (force_software_renderer) {
         opts.safe_startup = true;
         opts.disable_waterfall = true;
     }
     writeStartupLog(
-        "Parsed arguments: sim=%d, rec=%d, software_renderer=%d, disable_waterfall=%d",
+        "Parsed arguments: sim=%d, rec=%d, software_renderer=%d, disable_waterfall=%d, ota_host=%s, station_id=%s, session_id=%s",
         opts.enable_sim ? 1 : 0,
         opts.record_audio ? 1 : 0,
         force_software_renderer ? 1 : 0,
-        opts.disable_waterfall ? 1 : 0
+        opts.disable_waterfall ? 1 : 0,
+        opts.ota_host.c_str(),
+        opts.station_id.c_str(),
+        opts.session_id.c_str()
     );
 
     // Initialize SDL

@@ -56,6 +56,9 @@ add_test(NAME GrpcServiceSmoke COMMAND test_grpc_service_smoke)
 add_executable(test_otasim_serve_smoke test_otasim_serve_smoke.cpp)
 target_link_libraries(test_otasim_serve_smoke PRIVATE ota_simulator_service)
 
+add_executable(test_ultra_gui_ota_client test_ultra_gui_ota_client.cpp)
+target_link_libraries(test_ultra_gui_ota_client PRIVATE ultra_gui_ota_audio_backend)
+
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
@@ -458,6 +461,13 @@ if(TARGET ota_simulator)
         RUN_SERIAL TRUE
         LABELS regression)
 
+    add_test(NAME UltraGuiOtaClient
+        COMMAND test_ultra_gui_ota_client $<TARGET_FILE:ota_simulator>)
+    set_tests_properties(UltraGuiOtaClient PROPERTIES
+        TIMEOUT 30
+        RUN_SERIAL TRUE
+        LABELS regression)
+
     add_test(NAME OTASimulatorSmoke
         COMMAND $<TARGET_FILE:ota_simulator> run
                 --scenario tests/fixtures/ota_simulator/smoke_ping_disconnected.json)
@@ -532,6 +542,7 @@ ultra_enable_test_warnings(
     test_dsp_primitives.cpp
     test_grpc_service_smoke.cpp
     test_otasim_serve_smoke.cpp
+    test_ultra_gui_ota_client.cpp
     test_channel_core_rng.cpp
     test_channel_core_models.cpp
     test_channel_core_mixer.cpp

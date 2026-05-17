@@ -9,10 +9,10 @@
 #include "widgets/file_browser.hpp"
 #include "image_util.hpp"
 #include "audio_engine.hpp"
+#include "ota_audio_backend.hpp"
 #include "modem/modem_engine.hpp"
 #include "ptt/ptt_driver.hpp"
 #include "protocol/protocol_engine.hpp"
-#include "sim/hf_channel.hpp"
 
 #include <vector>
 #include <complex>
@@ -37,6 +37,11 @@ public:
         bool safe_startup = false;    // Defer heavyweight init (audio/sim) until needed
         bool disable_waterfall = false; // Skip waterfall construction (startup safety)
         std::string record_path = "sim_recording.f32";  // Recording output base path
+        std::string ota_host;
+        std::string ota_udp_host;
+        std::string token;
+        std::string station_id;
+        std::string session_id = "lobby";
 
         // Monitor mode: skip the full PING/CONNECT handshake and force
         // the decoder into a specific waveform/rate. Useful for OTA
@@ -185,65 +190,14 @@ private:
     // ========================================
     Options options_;                           // Command-line options
 
-    // ========================================
-    // Virtual Station Simulator (requires -sim flag)
-    // ========================================
-    // When enabled, a virtual station (callsign "SIM") responds to your
-    // transmissions through full modem simulation (LDPC, OFDM, channel effects).
-    // Connect to "SIM" to test the complete protocol flow in the real UI.
-
-    bool sim_ui_visible_ = false;               // Show simulation UI (-sim flag)
-    bool simulation_enabled_ = false;           // Enable virtual station
-    float simulation_snr_db_ = 20.0f;           // Simulated channel SNR
-    int simulation_channel_type_ = 0;           // 0=AWGN, 1=Good, 2=Moderate, 3=Poor
+    bool simulation_enabled_ = false;           // -sim: OTASim server client mode
 
     // Audio recording (requires -rec flag)
     bool recording_enabled_ = false;            // Currently recording
-    std::vector<float> recorded_samples_;       // Legacy sim capture (post-channel)
     std::vector<float> recorded_rx_samples_;    // Real RX audio fed to modem
     std::vector<float> recorded_tx_samples_;    // Real TX audio queued to output
     void writeRecordingToFile();                // Save recording buffers to disk
-    std::string virtual_callsign_ = "SIM";      // Virtual station's callsign
-
-    // Virtual station's protocol and modem
-    protocol::ProtocolEngine virtual_protocol_;
-    std::unique_ptr<ModemEngine> virtual_modem_;
-
-    // ========================================
-    // Simplified Simulator (single thread model)
-    // ========================================
-    // Our TX -> channel effects -> virtual modem
-    // Virtual TX -> channel effects -> our modem
-
-    // TX pending buffers (queued by protocol TX callbacks)
-    std::mutex our_tx_pending_mutex_;
-    std::vector<float> our_tx_pending_;
-    std::mutex virtual_tx_pending_mutex_;
-    std::vector<float> virtual_tx_pending_;
-
-    // Channel simulation RNG and persistent fading channels (one per direction)
-    std::mt19937 sim_rng_{42};
-    std::unique_ptr<sim::WattersonChannel> sim_channel_a_to_b_;  // Our TX -> virtual RX
-    std::unique_ptr<sim::WattersonChannel> sim_channel_b_to_a_;  // Virtual TX -> our RX
-    int sim_channel_active_type_ = -1;  // Track which channel type is active
-
-    // Single simulation thread handles everything
-    std::thread sim_thread_;
-    std::atomic<bool> sim_thread_running_{false};
-    std::atomic<bool> sim_drop_local_tx_requested_{false};
-
-    // Virtual station initialization
-    void initVirtualStation();
-
-    // Start/stop simulator
-    void startSimulator();
-    void stopSimulator();
-
-    // Main simulation loop (runs in sim_thread_)
-    void simulationLoop();
-
-    // Channel simulation (direction: 0 = our TX→virtual RX, 1 = virtual TX→our RX)
-    std::vector<float> applyChannelEffects(const std::vector<float>& samples, int direction);
+    std::unique_ptr<OtaAudioBackend> ota_audio_;
 
     // ========================================
     // UI Rendering
@@ -252,6 +206,9 @@ private:
     void renderCompactChannelStatus(const LoopbackStats& stats, Modulation data_mod, CodeRate data_rate,
                                     const protocol::ConnectionStats& conn_stats);
     void initAudio();
+    void initOtaAudio();
+    void stopOtaAudio();
+    void pollOtaRx();
     void appendRxLogLine(const std::string& msg);
     std::deque<std::string> snapshotRxLog() const;
     void clearRxLog();
