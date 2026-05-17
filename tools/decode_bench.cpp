@@ -219,6 +219,7 @@ void applyAWGN(std::vector<float>& samples, float snr_db, uint32_t seed) {
 
 ultra::sim::WattersonChannel::Config channelConfig(ChannelType type, float snr_db) {
     switch (type) {
+        case ChannelType::PASSTHROUGH: return ultra::sim::itu_r_f1487::awgn(80.0f);
         case ChannelType::AWGN:     return ultra::sim::itu_r_f1487::awgn(snr_db);
         case ChannelType::GOOD:     return ultra::sim::itu_r_f1487::good(snr_db);
         case ChannelType::MODERATE: return ultra::sim::itu_r_f1487::moderate(snr_db);
@@ -238,6 +239,7 @@ std::vector<float> applyFadingChannel(const std::vector<float>& samples,
 
 std::string channelName(ChannelType type) {
     switch (type) {
+        case ChannelType::PASSTHROUGH: return "passthrough";
         case ChannelType::AWGN:     return "awgn";
         case ChannelType::GOOD:     return "good";
         case ChannelType::MODERATE: return "moderate";

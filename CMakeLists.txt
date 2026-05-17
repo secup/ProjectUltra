@@ -232,6 +232,21 @@ else()
     message(STATUS "SDL2 not found: cli_simulator --role A|B will be unavailable")
 endif()
 
+add_library(ota_channel_core STATIC
+    src/ota_channel_core/rng.cpp
+    src/ota_channel_core/models.cpp
+    src/ota_channel_core/mixer.cpp
+    src/ota_channel_core/channel.cpp
+)
+set_target_properties(ota_channel_core PROPERTIES OUTPUT_NAME ota_channel_core)
+target_include_directories(ota_channel_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_channel_core
+)
+target_include_directories(ota_channel_core PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+)
+target_link_libraries(ota_channel_core PUBLIC Threads::Threads)
+
 # Core library
 add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
@@ -391,6 +406,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
     target_link_libraries(ultra_sim_station PUBLIC ultra_core)
+    target_link_libraries(ultra_sim_station PUBLIC ota_channel_core)
 
     add_executable(ultra
         src/main.cpp
@@ -400,7 +416,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(ultra PRIVATE ultra_core)
+    target_link_libraries(ultra PRIVATE ultra_core ota_channel_core)
 
     # CLI Simulator - Uses IWaveform + StreamingDecoder/Encoder directly (NOT ModemEngine)
     add_executable(cli_simulator
@@ -544,7 +560,7 @@ if(ULTRA_BUILD_TOOLS)
             ULTRA_HAVE_SDL2
             SDL_MAIN_HANDLED
         )
-        target_link_libraries(ultra_tnc PRIVATE ultra_core)
+        target_link_libraries(ultra_tnc PRIVATE ultra_core ota_channel_core)
         ultra_link_hamlib(ultra_tnc)
     else()
         message(STATUS "ultra_tnc disabled: SDL2 not found")
@@ -562,7 +578,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io)
+    target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io ota_channel_core)
 
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
@@ -586,7 +602,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(test_waveform_simple PRIVATE ultra_core)
+    target_link_libraries(test_waveform_simple PRIVATE ultra_core ota_channel_core)
 endif()
 
 # GUI Application
@@ -630,6 +646,7 @@ if(ULTRA_BUILD_GUI)
 
         target_link_libraries(ultra_gui PRIVATE
             ultra_core
+            ota_channel_core
             ${SDL2_LIBRARIES}
             ${OPENGL_LIBRARIES}
         )

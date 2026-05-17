@@ -13,6 +13,18 @@ add_executable(test_dsp_primitives test_dsp_primitives.cpp)
 target_link_libraries(test_dsp_primitives PRIVATE ultra_core)
 add_test(NAME DSPPrimitives COMMAND test_dsp_primitives)
 
+add_executable(test_channel_core_rng test_channel_core_rng.cpp)
+target_link_libraries(test_channel_core_rng PRIVATE ota_channel_core)
+add_test(NAME ChannelCoreRNG COMMAND test_channel_core_rng)
+
+add_executable(test_channel_core_models test_channel_core_models.cpp)
+target_link_libraries(test_channel_core_models PRIVATE ota_channel_core)
+add_test(NAME ChannelCoreModels COMMAND test_channel_core_models)
+
+add_executable(test_channel_core_mixer test_channel_core_mixer.cpp)
+target_link_libraries(test_channel_core_mixer PRIVATE ota_channel_core)
+add_test(NAME ChannelCoreMixer COMMAND test_channel_core_mixer)
+
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
@@ -32,7 +44,7 @@ target_link_libraries(test_protocol PRIVATE ultra_core)
 add_test(NAME Protocol COMMAND test_protocol)
 
 add_executable(test_tnc_session test_tnc_session.cpp)
-target_link_libraries(test_tnc_session PRIVATE ultra_core)
+target_link_libraries(test_tnc_session PRIVATE ultra_core ota_channel_core)
 if(SDL2_FOUND)
     target_sources(test_tnc_session PRIVATE
         ../tools/ultra_tnc_config.cpp
@@ -60,7 +72,7 @@ target_include_directories(test_ultra_tnc_config PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
     ${CMAKE_CURRENT_SOURCE_DIR}/../tools
 )
-target_link_libraries(test_ultra_tnc_config PRIVATE ultra_core)
+target_link_libraries(test_ultra_tnc_config PRIVATE ultra_core ota_channel_core)
 add_test(NAME UltraTNCConfig COMMAND test_ultra_tnc_config)
 
 add_executable(test_ptt_driver
@@ -480,6 +492,9 @@ ultra_enable_test_warnings(
     test_layers.cpp
     test_fft.cpp
     test_dsp_primitives.cpp
+    test_channel_core_rng.cpp
+    test_channel_core_models.cpp
+    test_channel_core_mixer.cpp
     test_ofdm.cpp
     test_audio_basic.cpp
     test_wav_loopback.cpp

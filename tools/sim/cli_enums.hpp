@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ota_channel_core/models.hpp"
 #include "protocol/waveform_selection.hpp"
 #include "ultra/types.hpp"
 
@@ -9,15 +10,7 @@
 #include <stdexcept>
 #include <string>
 
-// Existing simulator API uses ChannelType unqualified. Keep the type name
-// stable while consolidating parser behavior.
-enum class ChannelType {
-    AWGN,
-    GOOD,
-    MODERATE,
-    POOR,
-    FLUTTER
-};
+using ChannelType = ultra::ota_channel_core::ChannelType;
 
 namespace ultra::tools::cli {
 
@@ -73,7 +66,7 @@ inline const char* waveformChoices() {
 
 inline const char* channelChoices(AllowAwgn allow_awgn = AllowAwgn::Yes) {
     return allow_awgn == AllowAwgn::Yes
-        ? "awgn, good, moderate, poor, flutter"
+        ? "passthrough, awgn, good, moderate, poor, flutter"
         : "good, moderate, poor, flutter";
 }
 
@@ -156,6 +149,9 @@ inline std::optional<ChannelType> parseChannelType(
     const std::string& value,
     AllowAwgn allow_awgn = AllowAwgn::Yes) {
     const std::string v = normalizedToken(value);
+    if (allow_awgn == AllowAwgn::Yes && (v == "passthrough" || v == "null")) {
+        return ChannelType::PASSTHROUGH;
+    }
     if (allow_awgn == AllowAwgn::Yes && v == "awgn") return ChannelType::AWGN;
     if (v == "good") return ChannelType::GOOD;
     if (v == "moderate") return ChannelType::MODERATE;
