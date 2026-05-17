@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <grpcpp/grpcpp.h>
@@ -117,6 +118,11 @@ private:
                    std::string type,
                    std::string payload_json);
     void onAudioPacket(const ReceivedAudioPacket& packet);
+    void startSessionClock();
+    void stopSessionClock();
+    void runSessionClock();
+    void processSessionClockTick(
+        const std::shared_ptr<ultra::ota_channel_core::SessionContext>& session);
     void stopActiveCaptures();
     SessionCaptureWriter* captureForSessionLocked(std::string_view session_id);
 
@@ -125,6 +131,8 @@ private:
     ultra::ota_channel_core::SessionManager sessions_;
     UdpAudioPlane audio_plane_;
     std::atomic<bool> draining_{false};
+    std::atomic<bool> session_clock_running_{false};
+    std::thread session_clock_thread_;
     mutable std::mutex mutex_;
     std::map<std::string, RegisteredStation> registered_;
     std::map<std::string, SessionCaptureWriter> captures_;

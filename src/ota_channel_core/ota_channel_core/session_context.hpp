@@ -7,6 +7,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -28,6 +30,19 @@ struct CaptureState {
     bool enabled = false;
     uint64_t tx_samples = 0;
     uint64_t rx_samples = 0;
+};
+
+struct SessionAudioBlock {
+    std::string station_id;
+    uint64_t start_sample = 0;
+    std::vector<float> samples;
+};
+
+struct SessionClockTick {
+    uint64_t start_sample = 0;
+    size_t sample_count = 0;
+    std::vector<SessionAudioBlock> tx_blocks;
+    std::vector<SessionAudioBlock> rx_blocks;
 };
 
 class SessionContext {
@@ -61,6 +76,14 @@ public:
     void discardBefore(uint64_t sample_index);
     size_t pendingAudioBlocks() const;
 
+    bool enqueueTransmit(std::string_view station_id, std::span<const float> samples);
+    SessionClockTick advanceSessionClock();
+    std::vector<SessionAudioBlock> drainReceiveOutbox();
+    uint64_t sessionClockSamples() const;
+    size_t sessionTickSamples() const { return tick_samples_; }
+    size_t maxQueuedSamples() const { return max_tx_queue_samples_; }
+    size_t pendingTransmitSamples(std::string_view station_id) const;
+
     RngStream rngStream(std::string_view name, uint64_t index = 0) const;
     uint32_t rngChildSeed(std::string_view name, uint64_t index = 0) const;
 
@@ -73,6 +96,18 @@ public:
     std::vector<SessionEvent> eventLog() const;
 
 private:
+    struct QueuedAudioBlock {
+        uint64_t start_sample = 0;
+        std::vector<float> samples;
+    };
+
+    struct StationAudioQueues {
+        std::deque<float> tx_inbox;
+        std::deque<QueuedAudioBlock> rx_outbox;
+    };
+
+    void trimQueueLocked(std::deque<float>& queue) const;
+    void trimOutboxLocked(std::deque<QueuedAudioBlock>& queue) const;
     void appendEventLocked(std::string type,
                            std::string station_id,
                            uint64_t sample_index);
@@ -82,8 +117,13 @@ private:
     std::unique_ptr<IChannelModel> channel_;
     SampleIndexedMixer mixer_;
     std::set<std::string> stations_;
+    std::map<std::string, StationAudioQueues> audio_queues_;
     CaptureState capture_;
     std::vector<SessionEvent> events_;
+    uint64_t session_clock_samples_ = 0;
+    size_t tick_samples_ = 0;
+    size_t max_tx_queue_samples_ = 0;
+    size_t max_rx_queue_samples_ = 0;
     uint64_t next_event_sequence_ = 0;
     mutable std::mutex mutex_;
 };

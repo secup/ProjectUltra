@@ -82,7 +82,6 @@ private:
         uint64_t lease_id = 0;
         std::string session_id;
         std::string station_id;
-        OrderedAudioQueue queue;
         std::optional<Endpoint> endpoint;
         uint64_t next_rx_seq = 0;
     };

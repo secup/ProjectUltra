@@ -295,7 +295,7 @@ void UdpAudioPlane::handleDatagram(std::span<const uint8_t> bytes,
         return;
     }
 
-    std::vector<ReceivedAudioPacket> ready;
+    ReceivedAudioPacket ready;
     PacketCallback callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -304,28 +304,21 @@ void UdpAudioPlane::handleDatagram(std::span<const uint8_t> bytes,
             return;
         }
         it->second.endpoint = Endpoint{.addr = peer, .len = peer_len};
-        if (!it->second.queue.push(packet->header.start_sample, packet->samples)) {
-            return;
-        }
-        for (auto& block : it->second.queue.drainReady()) {
-            ready.push_back({
-                .lease_id = it->second.lease_id,
-                .seq = packet->header.seq,
-                .session_id = it->second.session_id,
-                .station_id = it->second.station_id,
-                .start_sample = block.start_sample,
-                .samples = std::move(block.samples),
-            });
-        }
+        ready = {
+            .lease_id = it->second.lease_id,
+            .seq = packet->header.seq,
+            .session_id = it->second.session_id,
+            .station_id = it->second.station_id,
+            .start_sample = packet->header.start_sample,
+            .samples = std::move(packet->samples),
+        };
         callback = callback_;
     }
 
     if (!callback) {
         return;
     }
-    for (const auto& item : ready) {
-        callback(item);
-    }
+    callback(ready);
 }
 
 }  // namespace ultra::ota_simulator_service

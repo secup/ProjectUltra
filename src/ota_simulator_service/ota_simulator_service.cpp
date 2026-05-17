@@ -83,12 +83,17 @@ OtaSimulatorService::~OtaSimulatorService() {
 }
 
 bool OtaSimulatorService::start(std::string* error) {
+    stopSessionClock();
     draining_.store(false);
-    return audio_plane_.start(
+    if (!audio_plane_.start(
         config_.udp_bind_host,
         config_.udp_bind_port,
         [this](const ReceivedAudioPacket& packet) { onAudioPacket(packet); },
-        error);
+        error)) {
+        return false;
+    }
+    startSessionClock();
+    return true;
 }
 
 void OtaSimulatorService::beginDraining() {
@@ -98,6 +103,7 @@ void OtaSimulatorService::beginDraining() {
 
 void OtaSimulatorService::shutdown() {
     beginDraining();
+    stopSessionClock();
     audio_plane_.stop();
     stopActiveCaptures();
     events_cv_.notify_all();
@@ -658,41 +664,68 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
     if (!session) {
         return;
     }
-    if (!session->submitTransmit(packet.station_id, packet.start_sample, packet.samples)) {
+    if (!session->enqueueTransmit(packet.station_id, packet.samples)) {
         return;
     }
+}
+
+void OtaSimulatorService::startSessionClock() {
+    session_clock_running_.store(true);
+    session_clock_thread_ = std::thread(&OtaSimulatorService::runSessionClock, this);
+}
+
+void OtaSimulatorService::stopSessionClock() {
+    session_clock_running_.store(false);
+    if (session_clock_thread_.joinable()) {
+        session_clock_thread_.join();
+    }
+}
+
+void OtaSimulatorService::runSessionClock() {
+    constexpr auto kTickInterval = std::chrono::milliseconds(10);
+    auto next_tick = std::chrono::steady_clock::now() + kTickInterval;
+    while (session_clock_running_.load()) {
+        std::this_thread::sleep_until(next_tick);
+        if (!session_clock_running_.load()) {
+            break;
+        }
+        next_tick += kTickInterval;
+
+        for (const auto& session_id : sessions_.listSessions()) {
+            auto session = sessions_.getSession(session_id);
+            if (session) {
+                processSessionClockTick(session);
+            }
+        }
+    }
+}
+
+void OtaSimulatorService::processSessionClockTick(
+    const std::shared_ptr<ultra::ota_channel_core::SessionContext>& session) {
+    const auto tick = session->advanceSessionClock();
+    const auto rx_blocks = session->drainReceiveOutbox();
+    const auto leases = audio_plane_.leasesForSession(session->id());
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (auto* capture = captureForSessionLocked(packet.session_id)) {
-            capture->recordTx(packet.station_id, packet.start_sample, packet.samples);
+        if (auto* capture = captureForSessionLocked(session->id())) {
+            for (const auto& block : tick.tx_blocks) {
+                capture->recordTx(block.station_id, block.start_sample, block.samples);
+            }
+            for (const auto& block : rx_blocks) {
+                capture->recordRx(block.station_id, block.start_sample, block.samples);
+            }
         }
     }
 
-    const auto leases = audio_plane_.leasesForSession(packet.session_id);
-    for (const auto& lease : leases) {
-        if (!lease.has_endpoint) {
-            continue;
-        }
-        if (lease.station_id == packet.station_id) {
-            continue;
-        }
-        std::vector<float> rx;
-        if (!session->receiveForStation(lease.station_id,
-                                        packet.start_sample,
-                                        packet.samples.size(),
-                                        rx)) {
-            continue;
-        }
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (auto* capture = captureForSessionLocked(packet.session_id)) {
-                capture->recordRx(lease.station_id, packet.start_sample, rx);
+    for (const auto& block : rx_blocks) {
+        for (const auto& lease : leases) {
+            if (!lease.has_endpoint || lease.station_id != block.station_id) {
+                continue;
             }
+            (void)audio_plane_.sendAudio(lease.lease_id, block.start_sample, block.samples);
         }
-        (void)audio_plane_.sendAudio(lease.lease_id, packet.start_sample, rx);
     }
-    session->discardBefore(packet.start_sample + packet.samples.size());
 }
 
 void OtaSimulatorService::stopActiveCaptures() {

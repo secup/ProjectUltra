@@ -292,10 +292,17 @@ bool sameSamples(const std::vector<float>& actual, const std::vector<float>& exp
            std::equal(actual.begin(), actual.end(), expected.begin());
 }
 
-void waitForSamples(int fd,
-                    uint64_t lease_id,
-                    uint64_t start_sample,
-                    const std::vector<float>& expected) {
+std::vector<float> makeSamples(size_t count, float sign) {
+    std::vector<float> out(count);
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = sign * static_cast<float>((i % 31) + 1) / 32.0f;
+    }
+    return out;
+}
+
+uint64_t waitForSamples(int fd,
+                        uint64_t lease_id,
+                        const std::vector<float>& expected) {
     std::array<uint8_t, 8192> buffer{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -323,9 +330,8 @@ void waitForSamples(int fd,
             continue;
         }
         if (packet->header.lease_id == lease_id &&
-            packet->header.start_sample == start_sample &&
             sameSamples(packet->samples, expected)) {
-            return;
+            return packet->header.start_sample;
         }
     }
     throw std::runtime_error("timed out waiting for exact passthrough audio");
@@ -439,14 +445,14 @@ int main(int argc, char** argv) {
         UniqueFd bob_udp = makeUdpSocket();
         const sockaddr_in udp_server = udpAddress(ready.udp_host, ready.udp_port);
 
-        const std::vector<float> warmup(8, 0.0f);
+        const std::vector<float> warmup(480, 0.0f);
         sendPacket(alice_udp.fd, udp_server, alice_audio.lease_id(), 0, 0, warmup);
         sendPacket(bob_udp.fd, udp_server, bob_audio.lease_id(), 0, 0, warmup);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         otasim::StartCaptureRequest start_capture;
         start_capture.set_session_id(ultra::ota_channel_core::kLobbySessionId);
-        start_capture.set_start_sample(8);
+        start_capture.set_start_sample(0);
         otasim::CaptureInfo started;
         grpc::ClientContext start_capture_context;
         addToken(start_capture_context, "alice_token");
@@ -454,14 +460,16 @@ int main(int argc, char** argv) {
         check(status.ok(), "start capture failed: " + status.error_message());
         check(started.active(), "capture did not become active");
 
-        const std::vector<float> alice_samples{0.125f, -0.25f, 0.5f, -0.75f,
-                                               0.875f, -1.0f, 0.375f, -0.625f};
-        const std::vector<float> bob_samples{-0.125f, 0.25f, -0.5f, 0.75f,
-                                             -0.875f, 1.0f, -0.375f, 0.625f};
-        sendPacket(alice_udp.fd, udp_server, alice_audio.lease_id(), 1, 8, alice_samples);
-        sendPacket(bob_udp.fd, udp_server, bob_audio.lease_id(), 1, 8, bob_samples);
-        waitForSamples(bob_udp.fd, bob_audio.lease_id(), 8, alice_samples);
-        waitForSamples(alice_udp.fd, alice_audio.lease_id(), 8, bob_samples);
+        const std::vector<float> alice_samples = makeSamples(480, 1.0f);
+        const std::vector<float> bob_samples = makeSamples(480, -1.0f);
+        sendPacket(alice_udp.fd, udp_server, alice_audio.lease_id(), 1, 480, alice_samples);
+        sendPacket(bob_udp.fd, udp_server, bob_audio.lease_id(), 1, 480, bob_samples);
+        const uint64_t bob_start =
+            waitForSamples(bob_udp.fd, bob_audio.lease_id(), alice_samples);
+        const uint64_t alice_start =
+            waitForSamples(alice_udp.fd, alice_audio.lease_id(), bob_samples);
+        check(bob_start % 480 == 0, "bob RX start sample is not session tick aligned");
+        check(alice_start % 480 == 0, "alice RX start sample is not session tick aligned");
 
         otasim::StopCaptureRequest stop_capture;
         stop_capture.set_session_id(ultra::ota_channel_core::kLobbySessionId);
