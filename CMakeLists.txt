@@ -704,6 +704,16 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(decode_bench PRIVATE ultra_tool_wav_io ota_channel_core)
 
+    # otasim_audio_demo - generates a ~60s WAV of channel-model audio
+    # for human listening (sanity check / iCloud sample).
+    add_executable(otasim_audio_demo tools/otasim_audio_demo.cpp)
+    target_include_directories(otasim_audio_demo PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+    )
+    target_link_libraries(otasim_audio_demo PRIVATE
+        ultra_tool_wav_io ota_channel_core)
+
     # Threaded simulator - proper real-time audio simulation
     add_executable(threaded_simulator
         tools/threaded_simulator.cpp
