@@ -25,6 +25,18 @@ add_executable(test_channel_core_mixer test_channel_core_mixer.cpp)
 target_link_libraries(test_channel_core_mixer PRIVATE ota_channel_core)
 add_test(NAME ChannelCoreMixer COMMAND test_channel_core_mixer)
 
+add_executable(test_session_context test_session_context.cpp)
+target_link_libraries(test_session_context PRIVATE ota_channel_core)
+add_test(NAME SessionContext COMMAND test_session_context)
+
+add_executable(test_session_manager test_session_manager.cpp)
+target_link_libraries(test_session_manager PRIVATE ota_channel_core)
+add_test(NAME SessionManager COMMAND test_session_manager)
+
+add_executable(test_session_isolation test_session_isolation.cpp)
+target_link_libraries(test_session_isolation PRIVATE ota_channel_core)
+add_test(NAME SessionIsolation COMMAND test_session_isolation)
+
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
@@ -495,6 +507,9 @@ ultra_enable_test_warnings(
     test_channel_core_rng.cpp
     test_channel_core_models.cpp
     test_channel_core_mixer.cpp
+    test_session_context.cpp
+    test_session_manager.cpp
+    test_session_isolation.cpp
     test_ofdm.cpp
     test_audio_basic.cpp
     test_wav_loopback.cpp

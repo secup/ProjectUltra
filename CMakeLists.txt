@@ -236,6 +236,8 @@ add_library(ota_channel_core STATIC
     src/ota_channel_core/rng.cpp
     src/ota_channel_core/models.cpp
     src/ota_channel_core/mixer.cpp
+    src/ota_channel_core/session_context.cpp
+    src/ota_channel_core/session_manager.cpp
     src/ota_channel_core/channel.cpp
 )
 set_target_properties(ota_channel_core PROPERTIES OUTPUT_NAME ota_channel_core)
