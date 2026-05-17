@@ -34,7 +34,7 @@ if [[ -z "$retx" ]]; then
   exit 1
 fi
 
-max_retx=16
+max_retx=4
 
 if (( retx > max_retx )); then
   echo "synthetic-notch OTASim regression: retransmissions=$retx > $max_retx" >&2
