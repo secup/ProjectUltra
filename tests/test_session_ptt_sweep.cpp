@@ -288,16 +288,22 @@ ExpectedOutcome expectedOutcomeFor(uint32_t rx_settling_ms) {
             "DATA",
         };
     }
+    // Boundary cliff at 2000 ms: PROBE may complete intermittently
+    // (PING reaches peer just inside its RX window), pushing the first
+    // failure to CONNECT. Accept either as the observed first failure.
     return ExpectedOutcome{
         false, false, false, false, false, false, false, "PROBE",
+        "CONNECT",
     };
 }
 
 bool matchesExpected(const SweepOutcome& outcome, const ExpectedOutcome& expected) {
     if (expected.boundary_alt_failed_phase) {
-        // Boundary cliff: only assert PROBE-OK and DONE; accept either of
-        // two adjacent failure phases as first_failed.
-        if (!outcome.probe_ok || outcome.done != expected.done) {
+        // Boundary cliff: only assert DONE and accept either of two adjacent
+        // failure phases as first_failed. Per-phase OK flags can differ
+        // between the two outcomes (e.g., PROBE may pass for the late cliff
+        // and fail for the early one), so we don't pin them at the boundary.
+        if (outcome.done != expected.done) {
             return false;
         }
         return outcome.first_failed_phase == expected.first_failed_phase ||

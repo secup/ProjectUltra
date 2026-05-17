@@ -1,0 +1,201 @@
+syntax = "proto3";
+
+package projectultra.otasim.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service OtaSimulatorControl {
+  rpc RegisterStation(RegisterStationRequest) returns (StationLease);
+  rpc NegotiateAudio(NegotiateAudioRequest) returns (AudioLease);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  rpc CreateSession(CreateSessionRequest) returns (SessionInfo);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc JoinSession(JoinSessionRequest) returns (JoinSessionResponse);
+  rpc LeaveSession(LeaveSessionRequest) returns (google.protobuf.Empty);
+
+  rpc GetChannel(GetChannelRequest) returns (ChannelState);
+  rpc SetChannel(SetChannelRequest) returns (CommandAck);
+  rpc InjectEffect(InjectEffectRequest) returns (CommandAck);
+  rpc CancelEffect(CancelEffectRequest) returns (CommandAck);
+
+  rpc StartCapture(StartCaptureRequest) returns (CaptureInfo);
+  rpc StopCapture(StopCaptureRequest) returns (CaptureInfo);
+  rpc StreamEvents(StreamEventsRequest) returns (stream ServerEvent);
+
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_ACTIVE = 1;
+  SESSION_STATE_DRAINING = 2;
+}
+
+message RegisterStationRequest {
+  string station_id = 1;
+}
+
+message StationLease {
+  string station_id = 1;
+  string callsign = 2;
+  string label = 3;
+}
+
+message NegotiateAudioRequest {
+  string session_id = 1;
+  string station_id = 2;
+}
+
+message AudioLease {
+  uint64 lease_id = 1;
+  string session_id = 2;
+  string station_id = 3;
+  string udp_host = 4;
+  uint32 udp_port = 5;
+  uint32 sample_rate = 6;
+  uint32 sample_format = 7;
+  uint32 channel_count = 8;
+  uint32 max_packet_samples = 9;
+}
+
+message HeartbeatRequest {
+  string session_id = 1;
+  string station_id = 2;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+  string message = 2;
+  google.protobuf.Timestamp server_time = 3;
+}
+
+message CreateSessionRequest {
+  string session_id = 1;
+  string display_name = 2;
+  string channel_model = 3;
+  double snr_db = 4;
+  uint64 seed = 5;
+  uint32 station_cap = 6;
+}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated SessionInfo sessions = 1;
+}
+
+message JoinSessionRequest {
+  string session_id = 1;
+  string station_id = 2;
+}
+
+message JoinSessionResponse {
+  SessionInfo session = 1;
+  StationLease station = 2;
+}
+
+message LeaveSessionRequest {
+  string session_id = 1;
+  string station_id = 2;
+}
+
+message SessionInfo {
+  string session_id = 1;
+  string display_name = 2;
+  bool is_lobby = 3;
+  uint32 station_count = 4;
+  uint32 station_cap = 5;
+  ChannelState channel = 6;
+  SessionState state = 7;
+  google.protobuf.Timestamp created_at = 8;
+  repeated string stations = 9;
+}
+
+message GetChannelRequest {
+  string session_id = 1;
+}
+
+message SetChannelRequest {
+  string session_id = 1;
+  string model = 2;
+  double snr_db = 3;
+  uint64 seed = 4;
+}
+
+message InjectEffectRequest {
+  string session_id = 1;
+  string effect_type = 2;
+  bytes params_json = 3;
+  uint64 start_sample = 4;
+  uint64 duration_samples = 5;
+}
+
+message CancelEffectRequest {
+  string session_id = 1;
+  string effect_id = 2;
+}
+
+message CommandAck {
+  bool accepted = 1;
+  string message = 2;
+  string command_id = 3;
+}
+
+message ChannelState {
+  string session_id = 1;
+  string model = 2;
+  double snr_db = 3;
+  uint64 channel_seed = 4;
+  uint64 applied_at_sample = 5;
+  repeated ActiveEffect active_effects = 6;
+}
+
+message ActiveEffect {
+  string effect_id = 1;
+  string effect_type = 2;
+  uint64 start_sample = 3;
+  uint64 duration_samples = 4;
+  bytes params_json = 5;
+}
+
+message StartCaptureRequest {
+  string session_id = 1;
+  uint64 start_sample = 2;
+}
+
+message StopCaptureRequest {
+  string session_id = 1;
+}
+
+message CaptureInfo {
+  string session_id = 1;
+  bool active = 2;
+  string capture_path = 3;
+  string manifest_path = 4;
+  uint64 started_at_sample = 5;
+  uint64 stopped_at_sample = 6;
+  uint64 tx_sample_count = 7;
+  uint64 rx_sample_count = 8;
+}
+
+message StreamEventsRequest {
+  string session_id = 1;
+}
+
+message ServerEvent {
+  string event_id = 1;
+  string session_id = 2;
+  uint64 sample_index = 3;
+  string type = 4;
+  bytes payload_json = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ok = 1;
+  string message = 2;
+  google.protobuf.Timestamp server_time = 3;
+}

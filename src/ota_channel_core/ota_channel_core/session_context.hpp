@@ -39,6 +39,8 @@ public:
     ChannelType channelType() const { return config_.default_channel_model; }
     float snrDb() const { return config_.default_snr_db; }
     uint64_t seed() const { return config_.seed; }
+    ChannelConfig currentChannelConfig() const;
+    void setChannel(ChannelConfig config);
 
     bool registerStation(std::string station_id);
     bool leaveStation(std::string_view station_id);

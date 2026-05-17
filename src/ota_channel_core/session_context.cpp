@@ -68,6 +68,24 @@ bool SessionContext::hasStation(std::string_view station_id) const {
     return stations_.find(std::string(station_id)) != stations_.end();
 }
 
+ChannelConfig SessionContext::currentChannelConfig() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_.channelConfig();
+}
+
+void SessionContext::setChannel(ChannelConfig config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.default_channel_model = config.type;
+    config_.default_snr_db = config.snr_db;
+    config_.seed = config.seed;
+    config_.sample_rate = config.sample_rate;
+    rng_root_ = RngRoot(config_.seed);
+    channel_ = createChannelModel(config_.channelConfig(),
+                                  rng_root_,
+                                  streamNameForSession(config_.session_id, "channel"));
+    appendEventLocked("channel_set", {}, 0);
+}
+
 size_t SessionContext::stationCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return stations_.size();

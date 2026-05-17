@@ -37,6 +37,7 @@ option(ULTRA_BUILD_TOOLS "Build command-line tools" ON)
 option(ULTRA_BUILD_GUI "Build GUI application" ON)
 option(ULTRA_BUILD_HARDWARE_TESTS "Register opt-in hardware smoke CTest target" OFF)
 option(ULTRA_USE_LIBHAMLIB "Link libhamlib for built-in rig control" ON)
+option(ULTRA_FETCH_GRPC "Fetch gRPC/protobuf when CMake packages are unavailable" ON)
 
 if(DEFINED ENV{ULTRA_HARDWARE_TESTS} AND "$ENV{ULTRA_HARDWARE_TESTS}" STREQUAL "1")
     set(ULTRA_BUILD_HARDWARE_TESTS ON CACHE BOOL
@@ -69,6 +70,93 @@ endfunction()
 
 # Find dependencies
 find_package(Threads REQUIRED)
+
+find_package(Protobuf CONFIG QUIET)
+find_package(gRPC CONFIG QUIET)
+
+if(TARGET gRPC::grpc++ AND TARGET protobuf::libprotobuf)
+    message(STATUS "Found gRPC/protobuf via CMake packages")
+    set(ULTRA_GRPC_GRPCPP_TARGET gRPC::grpc++)
+    set(ULTRA_PROTOBUF_LIB_TARGET protobuf::libprotobuf)
+else()
+    if(NOT ULTRA_FETCH_GRPC)
+        message(FATAL_ERROR "gRPC/protobuf CMake packages not found and ULTRA_FETCH_GRPC=OFF")
+    endif()
+
+    include(FetchContent)
+    set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
+    set(gRPC_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(gRPC_INSTALL OFF CACHE BOOL "" FORCE)
+    set(gRPC_ABSL_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_CARES_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_PROTOBUF_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_RE2_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_SSL_PROVIDER module CACHE STRING "" FORCE)
+    set(gRPC_ZLIB_PROVIDER module CACHE STRING "" FORCE)
+
+    FetchContent_Declare(
+        grpc
+        GIT_REPOSITORY https://github.com/grpc/grpc.git
+        GIT_TAG v1.62.2
+        GIT_SUBMODULES_RECURSE TRUE
+    )
+    FetchContent_MakeAvailable(grpc)
+    set(ULTRA_GRPC_GRPCPP_TARGET grpc++)
+    set(ULTRA_PROTOBUF_LIB_TARGET libprotobuf)
+endif()
+
+if(TARGET protobuf::protoc)
+    set(ULTRA_PROTOC_EXECUTABLE $<TARGET_FILE:protobuf::protoc>)
+elseif(TARGET protoc)
+    set(ULTRA_PROTOC_EXECUTABLE $<TARGET_FILE:protoc>)
+else()
+    find_program(ULTRA_PROTOC_EXECUTABLE protoc REQUIRED)
+endif()
+
+if(TARGET gRPC::grpc_cpp_plugin)
+    set(ULTRA_GRPC_CPP_PLUGIN $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
+elseif(TARGET grpc_cpp_plugin)
+    set(ULTRA_GRPC_CPP_PLUGIN $<TARGET_FILE:grpc_cpp_plugin>)
+else()
+    find_program(ULTRA_GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+endif()
+
+set(ULTRA_OTASIM_PROTO_FILE
+    ${CMAKE_CURRENT_SOURCE_DIR}/proto/ota_simulator.proto)
+set(ULTRA_OTASIM_PROTO_GEN_DIR
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/otasim_proto)
+set(ULTRA_OTASIM_PROTO_SRCS
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.pb.cc
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.grpc.pb.cc)
+set(ULTRA_OTASIM_PROTO_HDRS
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.pb.h
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}/ota_simulator.grpc.pb.h)
+
+add_custom_command(
+    OUTPUT ${ULTRA_OTASIM_PROTO_SRCS} ${ULTRA_OTASIM_PROTO_HDRS}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${ULTRA_OTASIM_PROTO_GEN_DIR}
+    COMMAND ${ULTRA_PROTOC_EXECUTABLE}
+            --proto_path=${CMAKE_CURRENT_SOURCE_DIR}/proto
+            --cpp_out=${ULTRA_OTASIM_PROTO_GEN_DIR}
+            --grpc_out=${ULTRA_OTASIM_PROTO_GEN_DIR}
+            --plugin=protoc-gen-grpc=${ULTRA_GRPC_CPP_PLUGIN}
+            ${ULTRA_OTASIM_PROTO_FILE}
+    DEPENDS ${ULTRA_OTASIM_PROTO_FILE}
+    VERBATIM)
+
+add_library(otasim_proto STATIC
+    ${ULTRA_OTASIM_PROTO_SRCS}
+    ${ULTRA_OTASIM_PROTO_HDRS}
+)
+target_include_directories(otasim_proto PUBLIC
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}
+)
+target_link_libraries(otasim_proto PUBLIC
+    ${ULTRA_GRPC_GRPCPP_TARGET}
+    ${ULTRA_PROTOBUF_LIB_TARGET}
+)
 
 if(ULTRA_USE_LIBHAMLIB)
     if(WIN32)
@@ -248,6 +336,39 @@ target_include_directories(ota_channel_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
 )
 target_link_libraries(ota_channel_core PUBLIC Threads::Threads)
+
+add_library(ota_simulator_service STATIC
+    src/ota_simulator_service/auth_allowlist.cpp
+    src/ota_simulator_service/audio_packet.cpp
+    src/ota_simulator_service/audio_plane.cpp
+    src/ota_simulator_service/capture_writer.cpp
+    src/ota_simulator_service/ota_simulator_service.cpp
+    src/tnc/socket_compat.cpp
+)
+set_target_properties(ota_simulator_service PROPERTIES OUTPUT_NAME ota_simulator_service)
+target_include_directories(ota_simulator_service PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ota_simulator_service
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${ULTRA_OTASIM_PROTO_GEN_DIR}
+)
+target_include_directories(ota_simulator_service PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/include
+)
+target_link_libraries(ota_simulator_service PUBLIC
+    ota_channel_core
+    otasim_proto
+    Threads::Threads
+)
+if(WIN32)
+    target_link_libraries(ota_simulator_service PRIVATE ws2_32)
+endif()
+ultra_enable_tool_test_warnings(
+    src/ota_simulator_service/auth_allowlist.cpp
+    src/ota_simulator_service/audio_packet.cpp
+    src/ota_simulator_service/audio_plane.cpp
+    src/ota_simulator_service/capture_writer.cpp
+    src/ota_simulator_service/ota_simulator_service.cpp
+)
 
 # Core library
 add_library(ultra_core STATIC

@@ -37,6 +37,18 @@ add_executable(test_session_isolation test_session_isolation.cpp)
 target_link_libraries(test_session_isolation PRIVATE ota_channel_core)
 add_test(NAME SessionIsolation COMMAND test_session_isolation)
 
+add_executable(test_auth_allowlist test_auth_allowlist.cpp)
+target_link_libraries(test_auth_allowlist PRIVATE ota_simulator_service)
+add_test(NAME AuthAllowlist COMMAND test_auth_allowlist)
+
+add_executable(test_audio_packet test_audio_packet.cpp)
+target_link_libraries(test_audio_packet PRIVATE ota_simulator_service)
+add_test(NAME AudioPacket COMMAND test_audio_packet)
+
+add_executable(test_audio_plane_ordering test_audio_plane_ordering.cpp)
+target_link_libraries(test_audio_plane_ordering PRIVATE ota_simulator_service)
+add_test(NAME AudioPlaneOrdering COMMAND test_audio_plane_ordering)
+
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
 add_test(NAME OFDM COMMAND test_ofdm)
