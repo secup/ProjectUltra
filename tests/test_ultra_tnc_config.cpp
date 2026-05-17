@@ -197,6 +197,28 @@ void test_applyConfigKey_audio_devices() {
     pass("applyConfigKey: audio_output/audio-input both spellings");
 }
 
+void test_applyConfigKey_sim_audio() {
+    Config cfg;
+    CHECK(applyConfigKey("sim_audio", "true", cfg) && cfg.sim_audio,
+          "sim_audio=true should enable OTASim audio");
+    CHECK(applyConfigKey("ota_host", "127.0.0.1:47000", cfg), "ota_host ok");
+    CHECK(applyConfigKey("ota_udp_host", "127.0.0.1:47001", cfg), "ota_udp_host ok");
+    CHECK(applyConfigKey("token", "test_token", cfg), "token ok");
+    CHECK(applyConfigKey("station_id", "alice", cfg), "station_id ok");
+    CHECK(applyConfigKey("session_id", "lobby", cfg), "session_id ok");
+    CHECK(cfg.ota_host == "127.0.0.1:47000", "ota_host stored");
+    CHECK(cfg.ota_udp_host == "127.0.0.1:47001", "ota_udp_host stored");
+    CHECK(cfg.token == "test_token", "token stored");
+    CHECK(cfg.station_id == "alice", "station_id stored");
+    CHECK(cfg.session_id == "lobby", "session_id stored");
+    CHECK(!applyConfigKey("sim_audio", "maybe", cfg), "bad sim_audio bool rejected");
+    CHECK(!applyConfigKey("ota_host", "", cfg), "empty ota_host rejected");
+    CHECK(!applyConfigKey("token", "", cfg), "empty token rejected");
+    CHECK(!applyConfigKey("station_id", "", cfg), "empty station_id rejected");
+    CHECK(!applyConfigKey("session_id", "", cfg), "empty session_id rejected");
+    pass("applyConfigKey: OTASim audio keys parsed strictly");
+}
+
 void test_applyConfigKey_port_bounds() {
     Config cfg;
     CHECK(applyConfigKey("port", "8300", cfg), "8300 ok");
@@ -490,6 +512,32 @@ void test_parseArgs_log_flags() {
     pass("parseArgs: log flags stored");
 }
 
+void test_parseArgs_sim_audio_flags() {
+    Argv argv({"ultra_tnc", "--sim-audio",
+               "--ota-host", "127.0.0.1:47000",
+               "--ota-udp-host", "127.0.0.1:47001",
+               "--token", "test_token",
+               "--station-id", "alice",
+               "--session-id", "lobby"});
+    Config cfg;
+    CHECK(parseArgs(argv.argc(), argv.data(), cfg), "parse ok");
+    CHECK(cfg.sim_audio, "--sim-audio stored");
+    CHECK(cfg.ota_host == "127.0.0.1:47000", "ota host stored");
+    CHECK(cfg.ota_udp_host == "127.0.0.1:47001", "udp host stored");
+    CHECK(cfg.token == "test_token", "token stored");
+    CHECK(cfg.station_id == "alice", "station id stored");
+    CHECK(cfg.session_id == "lobby", "session id stored");
+    pass("parseArgs: --sim-audio OTASim flags stored");
+}
+
+void test_parseArgs_sim_audio_requires_identity() {
+    Argv argv({"ultra_tnc", "--sim-audio", "--ota-host", "127.0.0.1:47000"});
+    Config cfg;
+    CHECK(!parseArgs(argv.argc(), argv.data(), cfg),
+          "--sim-audio without token/station-id must reject");
+    pass("parseArgs: --sim-audio requires host/token/station-id");
+}
+
 void test_parseArgs_mod_qam16_requires_expert() {
     Argv argv({"ultra_tnc", "--mod", "qam16"});
     Config cfg;
@@ -554,6 +602,7 @@ int main() {
 
     // applyConfigKey
     test_applyConfigKey_audio_devices();
+    test_applyConfigKey_sim_audio();
     test_applyConfigKey_port_bounds();
     test_applyConfigKey_callsign_sanitized();
     test_applyConfigKey_inject_channel_modes();
@@ -585,6 +634,8 @@ int main() {
     test_parseArgs_ptt_cat_serial_mutual_exclusion();
     test_parseArgs_ptt_cat_serial_mutual_exclusion_from_config();
     test_parseArgs_log_flags();
+    test_parseArgs_sim_audio_flags();
+    test_parseArgs_sim_audio_requires_identity();
     test_parseArgs_mod_qam16_requires_expert();
     test_parseArgs_mod_qam16_with_expert();
     test_parseArgs_unknown_flag_rejected();

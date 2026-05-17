@@ -124,6 +124,12 @@ void printUsage(std::ostream& out) {
         << "                              flags override config-file values.\n"
         << "  --audio-output <name>       SDL audio output device, or none\n"
         << "  --audio-input <name>        SDL audio input device, or none\n"
+        << "  --sim-audio                 Use OTASim audio instead of SDL devices\n"
+        << "  --ota-host <host:port>      OTASim gRPC endpoint for --sim-audio\n"
+        << "  --ota-udp-host <host:port>  Optional OTASim UDP endpoint override\n"
+        << "  --token <bearer_token>      OTASim bearer token for --sim-audio\n"
+        << "  --station-id <id>           OTASim station id for --sim-audio\n"
+        << "  --session-id <id>           OTASim session id (default: lobby)\n"
         << "  --port <N>                  TNC command port (default: 8300; data=N+1)\n"
         << "  --bind <addr>               Bind address (default: 127.0.0.1)\n"
         << "  --callsign <call>           Default callsign (default: NOCALL)\n"
@@ -198,6 +204,22 @@ bool applyConfigKey(const std::string& key, const std::string& value, Config& cf
         cfg.audio_output = value;
     } else if (key == "audio_input" || key == "audio-input") {
         cfg.audio_input = value;
+    } else if (key == "sim_audio" || key == "sim-audio") {
+        if (!parseBoolStrict(value, cfg.sim_audio)) return false;
+    } else if (key == "ota_host" || key == "ota-host") {
+        if (value.empty()) return false;
+        cfg.ota_host = value;
+    } else if (key == "ota_udp_host" || key == "ota-udp-host") {
+        cfg.ota_udp_host = value;
+    } else if (key == "token") {
+        if (value.empty()) return false;
+        cfg.token = value;
+    } else if (key == "station_id" || key == "station-id") {
+        if (value.empty()) return false;
+        cfg.station_id = value;
+    } else if (key == "session_id" || key == "session-id") {
+        if (value.empty()) return false;
+        cfg.session_id = value;
     } else if (key == "port") {
         if (!parseUint16(value, cfg.port) ||
             cfg.port == std::numeric_limits<uint16_t>::max()) return false;
@@ -407,6 +429,40 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             auto value = requireValue("--audio-input");
             if (!value) return false;
             cfg.audio_input = *value;
+        } else if (arg == "--sim-audio") {
+            cfg.sim_audio = true;
+        } else if (arg == "--ota-host") {
+            auto value = requireValue("--ota-host");
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --ota-host value\n";
+                return false;
+            }
+            cfg.ota_host = *value;
+        } else if (arg == "--ota-udp-host") {
+            auto value = requireValue("--ota-udp-host");
+            if (!value) return false;
+            cfg.ota_udp_host = *value;
+        } else if (arg == "--token") {
+            auto value = requireValue("--token");
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --token value\n";
+                return false;
+            }
+            cfg.token = *value;
+        } else if (arg == "--station-id") {
+            auto value = requireValue("--station-id");
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --station-id value\n";
+                return false;
+            }
+            cfg.station_id = *value;
+        } else if (arg == "--session-id") {
+            auto value = requireValue("--session-id");
+            if (!value || value->empty()) {
+                std::cerr << "Invalid --session-id value\n";
+                return false;
+            }
+            cfg.session_id = *value;
         } else if (arg == "--port") {
             auto value = requireValue("--port");
             if (!value || !parseUint16(*value, cfg.port) ||
@@ -587,6 +643,15 @@ bool parseArgs(int argc, char** argv, Config& cfg) {
             std::cerr << "PTT must be exactly one of: serial, --ptt-cat, "
                          "or --ptt-hamlib (built-in).\n";
             return false;
+        }
+    }
+    if (cfg.sim_audio) {
+        if (cfg.ota_host.empty() || cfg.token.empty() || cfg.station_id.empty()) {
+            std::cerr << "--sim-audio requires --ota-host, --token, and --station-id\n";
+            return false;
+        }
+        if (cfg.session_id.empty()) {
+            cfg.session_id = "lobby";
         }
     }
     return true;

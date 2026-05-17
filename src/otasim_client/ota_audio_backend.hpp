@@ -15,7 +15,7 @@
 #include "ota_simulator.grpc.pb.h"
 #include "tnc/socket_compat.hpp"
 
-namespace ultra::gui {
+namespace ultra::otasim_client {
 
 struct OtaAudioBackendConfig {
     std::string grpc_target;
@@ -111,4 +111,4 @@ private:
     std::vector<float> rx_buffer_;
 };
 
-}  // namespace ultra::gui
+}  // namespace ultra::otasim_client

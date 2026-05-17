@@ -31,6 +31,11 @@
 namespace ultra {
 namespace gui {
 
+using ultra::otasim_client::OtaAudioBackend;
+using ultra::otasim_client::OtaAudioBackendConfig;
+using ultra::otasim_client::OtaAudioConnectionState;
+using ultra::otasim_client::OtaAudioStatus;
+
 // File logger for GUI debugging - writes to logs/gui.log next to binary
 // ALL logging (including modem, protocol, etc.) goes to this file
 static FILE* g_gui_log_file = nullptr;

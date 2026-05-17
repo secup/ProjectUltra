@@ -9,7 +9,7 @@ int main() {
 
 #else
 
-#include "gui/ota_audio_backend.hpp"
+#include "otasim_client/ota_audio_backend.hpp"
 #include "helpers/temp_dir.hpp"
 
 #include <algorithm>
@@ -33,6 +33,8 @@ int main() {
 #include <unistd.h>
 
 namespace {
+
+namespace otasim_client = ultra::otasim_client;
 
 struct UniqueFd {
     int fd = -1;
@@ -214,7 +216,7 @@ bool containsSamples(const std::vector<float>& haystack, const std::vector<float
     return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end()) != haystack.end();
 }
 
-void waitForSamples(ultra::gui::OtaAudioBackend& backend,
+void waitForSamples(otasim_client::OtaAudioBackend& backend,
                     const std::vector<float>& expected) {
     std::vector<float> received;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -248,8 +250,8 @@ int main(int argc, char** argv) {
         child = startDaemon(argv[1], token_path, temp.child("captures"));
         const ReadyBanner ready = waitForReady(child);
 
-        ultra::gui::OtaAudioBackend alice;
-        ultra::gui::OtaAudioBackend bob;
+        otasim_client::OtaAudioBackend alice;
+        otasim_client::OtaAudioBackend bob;
         std::string error;
         check(alice.start({.grpc_target = ready.grpc_target,
                            .token = "alice_token",
@@ -275,9 +277,9 @@ int main(int argc, char** argv) {
 
         alice.close();
         bob.close();
-        check(alice.status().state == ultra::gui::OtaAudioConnectionState::Disconnected,
+        check(alice.status().state == otasim_client::OtaAudioConnectionState::Disconnected,
               "alice did not close cleanly");
-        check(bob.status().state == ultra::gui::OtaAudioConnectionState::Disconnected,
+        check(bob.status().state == otasim_client::OtaAudioConnectionState::Disconnected,
               "bob did not close cleanly");
 
         child.terminateCleanly();

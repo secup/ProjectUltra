@@ -1,4 +1,4 @@
-#include "gui/ota_audio_backend.hpp"
+#include "otasim_client/ota_audio_backend.hpp"
 
 #include "ota_simulator_service/audio_packet.hpp"
 
@@ -16,7 +16,7 @@
 #include <netdb.h>
 #endif
 
-namespace ultra::gui {
+namespace ultra::otasim_client {
 namespace {
 
 namespace otasim = projectultra::otasim::v1;
@@ -685,4 +685,4 @@ OtaAudioBackend::resolveUdpTarget(const std::string& host, uint16_t port, std::s
     return UdpTarget{.host = host, .port = port};
 }
 
-}  // namespace ultra::gui
+}  // namespace ultra::otasim_client

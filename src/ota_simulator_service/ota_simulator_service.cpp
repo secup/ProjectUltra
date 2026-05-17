@@ -674,6 +674,9 @@ void OtaSimulatorService::onAudioPacket(const ReceivedAudioPacket& packet) {
         if (!lease.has_endpoint) {
             continue;
         }
+        if (lease.station_id == packet.station_id) {
+            continue;
+        }
         std::vector<float> rx;
         if (!session->receiveForStation(lease.station_id,
                                         packet.start_sample,

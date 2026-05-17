@@ -2,6 +2,7 @@
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
+#include "otasim_client/ota_audio_backend.hpp"
 #include "ptt/ptt_driver_factory.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
 #include "protocol/frame_v2.hpp"
@@ -44,6 +45,9 @@ using ultra::Modulation;
 using ultra::gui::DecodeResult;
 using ultra::gui::StreamingDecoder;
 using ultra::gui::StreamingEncoder;
+using ultra::otasim_client::OtaAudioBackend;
+using ultra::otasim_client::OtaAudioBackendConfig;
+using ultra::otasim_client::OtaAudioConnectionState;
 using ultra::protocol::ConnectionState;
 using ultra::protocol::WaveformMode;
 namespace v2 = ultra::protocol::v2;
@@ -190,6 +194,29 @@ public:
         const bool use_output = !isNoneDevice(cfg_.audio_output);
         const bool use_input = !isNoneDevice(cfg_.audio_input);
 
+        if (cfg_.sim_audio) {
+            OtaAudioBackendConfig ota_config;
+            ota_config.grpc_target = cfg_.ota_host;
+            ota_config.udp_target = cfg_.ota_udp_host;
+            ota_config.token = cfg_.token;
+            ota_config.station_id = cfg_.station_id;
+            ota_config.session_id = cfg_.session_id.empty() ? "lobby" : cfg_.session_id;
+
+            ota_audio_ = std::make_unique<OtaAudioBackend>();
+            std::string error;
+            if (!ota_audio_->start(std::move(ota_config), &error)) {
+                std::cerr << "OTASim audio start failed: " << error << "\n";
+                ota_audio_.reset();
+                return false;
+            }
+            input_enabled_ = true;
+            output_enabled_ = true;
+            running_.store(true);
+            decode_thread_ = std::thread(&UltraTNCStation::decodeLoop, this);
+            reportOtaStatus(true);
+            return true;
+        }
+
         if (use_output || use_input) {
             if (!audio_.initialize()) {
                 std::cerr << "AudioEngine init failed\n";
@@ -239,6 +266,16 @@ public:
             decode_thread_.join();
         }
 
+        if (cfg_.sim_audio) {
+            if (ota_audio_) {
+                ota_audio_->close();
+                ota_audio_.reset();
+            }
+            input_enabled_ = false;
+            output_enabled_ = false;
+            return;
+        }
+
         if (input_enabled_) {
             audio_.stopCapture();
             audio_.closeInput();
@@ -255,7 +292,19 @@ public:
     void tick(uint32_t elapsed_ms) {
         engine_.tick(elapsed_ms);
 
-        if (input_enabled_) {
+        if (cfg_.sim_audio) {
+            reportOtaStatus(false);
+            if (input_enabled_ && ota_audio_) {
+                std::lock_guard<std::mutex> lock(input_audio_mutex_);
+                const size_t target_samples = std::clamp<size_t>(
+                    (static_cast<size_t>(elapsed_ms) * kSampleRate) / 1000,
+                    1,
+                    4096);
+                auto samples = ota_audio_->getRxSamples(target_samples);
+                samples.resize(target_samples, 0.0f);
+                decoder_.feedAudio(samples);
+            }
+        } else if (input_enabled_) {
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
             auto samples = audio_.getRxSamples(4096);
             if (!samples.empty()) {
@@ -319,6 +368,10 @@ private:
     bool handshake_complete_ = false;
     bool connected_ = false;
     int consecutive_decode_failures_ = 0;
+    std::unique_ptr<OtaAudioBackend> ota_audio_;
+    OtaAudioConnectionState last_ota_state_ = OtaAudioConnectionState::Disconnected;
+    std::string last_ota_text_;
+    bool ota_status_seen_ = false;
 
     std::mt19937 rng_;
 
@@ -615,7 +668,9 @@ private:
             }
         } else {
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
-            audio_.pauseInput();
+            if (!cfg_.sim_audio) {
+                audio_.pauseInput();
+            }
             decoder_.reset();
             decoder_.setMode(WaveformMode::MC_DPSK, false);
             decoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
@@ -630,8 +685,12 @@ private:
             encoder_.setMode(WaveformMode::MC_DPSK);
             encoder_.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
             last_cfo_hz_ = 0.0f;
-            audio_.drainInput();
-            audio_.resumeInput();
+            if (cfg_.sim_audio) {
+                drainOtaRxLocked();
+            } else {
+                audio_.drainInput();
+                audio_.resumeInput();
+            }
         }
     }
 
@@ -691,7 +750,49 @@ private:
             applyAwgn(samples);
         }
 
+        if (cfg_.sim_audio) {
+            if (!ota_audio_ || !ota_audio_->isConnected()) {
+                reportOtaStatus(false);
+                LOG_WARN("AUDIO", "OTASim TX dropped: audio backend is not connected");
+                return;
+            }
+            std::string error;
+            if (!ota_audio_->queueTxSamples(samples, &error)) {
+                LOG_WARN("AUDIO", "OTASim TX failed: %s", error.c_str());
+                std::cerr << "[otasim] TX failed: " << error << "\n";
+            }
+            return;
+        }
+
         audio_.queueTxSamples(samples);
+    }
+
+    void drainOtaRxLocked() {
+        if (!ota_audio_) {
+            return;
+        }
+        for (int i = 0; i < 16; ++i) {
+            if (ota_audio_->getRxSamples(65536).empty()) {
+                break;
+            }
+        }
+    }
+
+    void reportOtaStatus(bool force) {
+        if (!cfg_.sim_audio || !ota_audio_) {
+            return;
+        }
+        const auto status = ota_audio_->status();
+        if (!force && ota_status_seen_ &&
+            status.state == last_ota_state_ &&
+            status.text == last_ota_text_) {
+            return;
+        }
+        ota_status_seen_ = true;
+        last_ota_state_ = status.state;
+        last_ota_text_ = status.text;
+        std::cerr << "[otasim] " << status.text << "\n";
+        LOG_INFO("AUDIO", "OTASim: %s", status.text.c_str());
     }
 
     void applyAwgn(std::vector<float>& samples) {

@@ -57,7 +57,9 @@ add_executable(test_otasim_serve_smoke test_otasim_serve_smoke.cpp)
 target_link_libraries(test_otasim_serve_smoke PRIVATE ota_simulator_service)
 
 add_executable(test_ultra_gui_ota_client test_ultra_gui_ota_client.cpp)
-target_link_libraries(test_ultra_gui_ota_client PRIVATE ultra_gui_ota_audio_backend)
+target_link_libraries(test_ultra_gui_ota_client PRIVATE ultra_otasim_client)
+
+add_executable(test_ultra_tnc_sim_audio test_ultra_tnc_sim_audio.cpp)
 
 add_executable(test_ofdm test_ofdm.cpp)
 target_link_libraries(test_ofdm PRIVATE ultra_core)
@@ -78,7 +80,7 @@ target_link_libraries(test_protocol PRIVATE ultra_core)
 add_test(NAME Protocol COMMAND test_protocol)
 
 add_executable(test_tnc_session test_tnc_session.cpp)
-target_link_libraries(test_tnc_session PRIVATE ultra_core ota_channel_core)
+target_link_libraries(test_tnc_session PRIVATE ultra_core ota_channel_core ultra_otasim_client)
 if(SDL2_FOUND)
     target_sources(test_tnc_session PRIVATE
         ../tools/ultra_tnc_config.cpp
@@ -468,6 +470,17 @@ if(TARGET ota_simulator)
         RUN_SERIAL TRUE
         LABELS regression)
 
+    if(TARGET ultra_tnc)
+        add_test(NAME UltraTncSimAudio
+            COMMAND test_ultra_tnc_sim_audio
+                    $<TARGET_FILE:ota_simulator>
+                    $<TARGET_FILE:ultra_tnc>)
+        set_tests_properties(UltraTncSimAudio PROPERTIES
+            TIMEOUT 90
+            RUN_SERIAL TRUE
+            LABELS regression)
+    endif()
+
     add_test(NAME OTASimulatorSmoke
         COMMAND $<TARGET_FILE:ota_simulator> run
                 --scenario tests/fixtures/ota_simulator/smoke_ping_disconnected.json)
@@ -543,6 +556,7 @@ ultra_enable_test_warnings(
     test_grpc_service_smoke.cpp
     test_otasim_serve_smoke.cpp
     test_ultra_gui_ota_client.cpp
+    test_ultra_tnc_sim_audio.cpp
     test_channel_core_rng.cpp
     test_channel_core_models.cpp
     test_channel_core_mixer.cpp

@@ -25,6 +25,12 @@ enum class OFDMConfigPreset {
 struct Config {
     std::string audio_output;
     std::string audio_input;
+    bool sim_audio = false;
+    std::string ota_host;
+    std::string ota_udp_host;
+    std::string token;
+    std::string station_id;
+    std::string session_id = "lobby";
     std::string bind_address = "127.0.0.1";
     uint16_t port = 8300;
     std::string callsign = "NOCALL";

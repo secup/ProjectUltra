@@ -9,7 +9,7 @@
 #include "widgets/file_browser.hpp"
 #include "image_util.hpp"
 #include "audio_engine.hpp"
-#include "ota_audio_backend.hpp"
+#include "otasim_client/ota_audio_backend.hpp"
 #include "modem/modem_engine.hpp"
 #include "ptt/ptt_driver.hpp"
 #include "protocol/protocol_engine.hpp"
@@ -197,7 +197,7 @@ private:
     std::vector<float> recorded_rx_samples_;    // Real RX audio fed to modem
     std::vector<float> recorded_tx_samples_;    // Real TX audio queued to output
     void writeRecordingToFile();                // Save recording buffers to disk
-    std::unique_ptr<OtaAudioBackend> ota_audio_;
+    std::unique_ptr<ultra::otasim_client::OtaAudioBackend> ota_audio_;
 
     // ========================================
     // UI Rendering

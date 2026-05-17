@@ -363,17 +363,17 @@ if(WIN32)
     target_link_libraries(ota_simulator_service PRIVATE ws2_32)
 endif()
 
-add_library(ultra_gui_ota_audio_backend STATIC
-    src/gui/ota_audio_backend.cpp
+add_library(ultra_otasim_client STATIC
+    src/otasim_client/ota_audio_backend.cpp
 )
-target_include_directories(ultra_gui_ota_audio_backend PUBLIC
+target_include_directories(ultra_otasim_client PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
-target_link_libraries(ultra_gui_ota_audio_backend PUBLIC
+target_link_libraries(ultra_otasim_client PUBLIC
     ota_simulator_service
 )
 if(WIN32)
-    target_link_libraries(ultra_gui_ota_audio_backend PRIVATE ws2_32)
+    target_link_libraries(ultra_otasim_client PRIVATE ws2_32)
 endif()
 ultra_enable_tool_test_warnings(
     src/ota_simulator_service/auth_allowlist.cpp
@@ -697,7 +697,7 @@ if(ULTRA_BUILD_TOOLS)
             ULTRA_HAVE_SDL2
             SDL_MAIN_HANDLED
         )
-        target_link_libraries(ultra_tnc PRIVATE ultra_core ota_channel_core)
+        target_link_libraries(ultra_tnc PRIVATE ultra_core ota_channel_core ultra_otasim_client)
         ultra_link_hamlib(ultra_tnc)
     else()
         message(STATUS "ultra_tnc disabled: SDL2 not found")
@@ -794,7 +794,7 @@ if(ULTRA_BUILD_GUI)
         target_link_libraries(ultra_gui PRIVATE
             ultra_core
             ota_channel_core
-            ultra_gui_ota_audio_backend
+            ultra_otasim_client
             ${SDL2_LIBRARIES}
             ${OPENGL_LIBRARIES}
         )
