@@ -14,9 +14,10 @@ int main() {
     const auto path = temp.child("tokens.conf");
     {
         std::ofstream out(path);
-        out << "# format: <token>:<callsign>:<label>\n";
-        out << "alice_token:8P9QC:Mathieu\n";
-        out << "bob_token:KC3VPB:Field laptop\n";
+        out << "# format: <token>:<callsign>:<label>[:<role>]\n";
+        out << "alice_token:8P9QC:Mathieu\n";                       // implicit operator
+        out << "bob_token:KC3VPB:Field laptop:operator\n";          // explicit operator
+        out << "math_admin:8P9QC:Mathieu admin role:admin\n";       // admin role
         out << "\n";
     }
 
@@ -24,14 +25,36 @@ int main() {
     std::string error;
     assert(allowlist.loadFromFile(path, &error));
     assert(error.empty());
-    assert(allowlist.size() == 2);
+    assert(allowlist.size() == 3);
 
     auto alice = allowlist.authenticate("alice_token");
     assert(alice);
     assert(alice->callsign == "8P9QC");
     assert(alice->label == "Mathieu");
+    assert(alice->admin == false);
+
+    auto bob = allowlist.authenticate("bob_token");
+    assert(bob);
+    assert(bob->admin == false);
+    assert(bob->label == "Field laptop");
+
+    auto math_admin = allowlist.authenticate("math_admin");
+    assert(math_admin);
+    assert(math_admin->admin == true);
+    assert(math_admin->label == "Mathieu admin role");
+
     assert(!allowlist.authenticate("missing_token"));
     assert(!allowlist.authenticate(""));
+
+    // Unknown role must be rejected so typos don't silently grant admin.
+    const auto bad_role_path = temp.child("bad_role.conf");
+    {
+        std::ofstream out(bad_role_path);
+        out << "tok:CALL:label:superuser\n";
+    }
+    AuthAllowlist bad_role;
+    assert(!bad_role.loadFromFile(bad_role_path, &error));
+    assert(!error.empty());
 
     auto token = bearerTokenFromAuthorization("Bearer bob_token");
     assert(token);

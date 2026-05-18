@@ -377,8 +377,9 @@ int main(int argc, char** argv) {
         const auto token_path = temp.child("tokens.conf");
         {
             std::ofstream out(token_path);
-            out << "alice_token:ALPHA:Alpha station\n";
-            out << "bob_token:BRAVO:Bravo station\n";
+            out << "alice_token:ALPHA:Alpha station\n";          // operator (implicit)
+            out << "bob_token:BRAVO:Bravo station\n";            // operator (implicit)
+            out << "admin_token:ADMIN:capture admin:admin\n";    // admin role for capture RPCs
         }
         const auto capture_root = temp.child("captures");
 
@@ -453,9 +454,24 @@ int main(int argc, char** argv) {
         otasim::StartCaptureRequest start_capture;
         start_capture.set_session_id(ultra::ota_channel_core::kLobbySessionId);
         start_capture.set_start_sample(0);
+
+        // Operator token must be denied with PERMISSION_DENIED — capture is an
+        // admin-only RPC (mutates shared session state by spawning a recorder).
+        {
+            otasim::CaptureInfo denied;
+            grpc::ClientContext denied_context;
+            addToken(denied_context, "alice_token");
+            const auto denied_status =
+                stub->StartCapture(&denied_context, start_capture, &denied);
+            check(denied_status.error_code() == grpc::StatusCode::PERMISSION_DENIED,
+                  "operator token must not be allowed to StartCapture; got: " +
+                      std::to_string(denied_status.error_code()) + " " +
+                      denied_status.error_message());
+        }
+
         otasim::CaptureInfo started;
         grpc::ClientContext start_capture_context;
-        addToken(start_capture_context, "alice_token");
+        addToken(start_capture_context, "admin_token");
         status = stub->StartCapture(&start_capture_context, start_capture, &started);
         check(status.ok(), "start capture failed: " + status.error_message());
         check(started.active(), "capture did not become active");
@@ -475,7 +491,7 @@ int main(int argc, char** argv) {
         stop_capture.set_session_id(ultra::ota_channel_core::kLobbySessionId);
         otasim::CaptureInfo stopped;
         grpc::ClientContext stop_capture_context;
-        addToken(stop_capture_context, "alice_token");
+        addToken(stop_capture_context, "admin_token");
         status = stub->StopCapture(&stop_capture_context, stop_capture, &stopped);
         check(status.ok(), "stop capture failed: " + status.error_message());
         check(!stopped.active(), "capture stayed active after stop");

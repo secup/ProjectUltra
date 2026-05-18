@@ -63,12 +63,39 @@ bool AuthAllowlist::loadFromFile(const std::filesystem::path& path, std::string*
             }
             return false;
         }
+        // Optional 4th field is role: "admin" or "operator" (default).
+        // Lines with exactly 3 fields stay valid as operator-role.
+        const auto third = line.find(':', second + 1);
+        std::string label_part;
+        std::string role_part;
+        if (third == std::string::npos) {
+            label_part = line.substr(second + 1);
+        } else {
+            label_part = line.substr(second + 1, third - second - 1);
+            role_part = line.substr(third + 1);
+        }
 
         AuthPrincipal principal{
             .token = trim(line.substr(0, first)),
             .callsign = trim(line.substr(first + 1, second - first - 1)),
-            .label = trim(line.substr(second + 1)),
+            .label = trim(label_part),
+            .admin = false,
         };
+        std::string role = trim(role_part);
+        std::transform(role.begin(), role.end(), role.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (role.empty() || role == "operator" || role == "op") {
+            principal.admin = false;
+        } else if (role == "admin") {
+            principal.admin = true;
+        } else {
+            if (error) {
+                *error = "unknown role '" + role_part +
+                         "' on line " + std::to_string(line_number) +
+                         " (expected 'operator' or 'admin')";
+            }
+            return false;
+        }
         if (principal.token.empty() || principal.callsign.empty()) {
             if (error) {
                 *error = "empty token or callsign on line " + std::to_string(line_number);

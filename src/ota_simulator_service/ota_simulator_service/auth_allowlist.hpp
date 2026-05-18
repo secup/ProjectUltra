@@ -12,6 +12,11 @@ struct AuthPrincipal {
     std::string token;
     std::string callsign;
     std::string label;
+    // Admin role grants permission to call destructive / shared-state-
+    // mutating RPCs (SetChannel, InjectEffect, CancelEffect, CreateSession,
+    // StartCapture, StopCapture). Operator-role tokens can join sessions
+    // and exchange audio but cannot reconfigure the channel mid-QSO.
+    bool admin = false;
 };
 
 class AuthAllowlist {

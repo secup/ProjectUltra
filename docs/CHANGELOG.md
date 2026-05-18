@@ -10,6 +10,74 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-18: OTASim admin role + otasim_ctl admin CLI
+
+**Fixed:** Any authenticated OTASim token could call destructive RPCs
+(`SetChannel`, `InjectEffect`, `CancelEffect`, `CreateSession`,
+`StartCapture`, `StopCapture`) — meaning any joined operator could
+reconfigure the channel mid-QSO, kill an effect that another operator
+just injected, or start/stop session recordings. Not safe for the
+multi-operator friend-lab deployment the OTASim design was built for.
+
+**Added:** Two-level RBAC on the token allowlist.
+
+- Token-file format gains an optional 4th field for the role:
+  ```
+  alice_tok:ALPHA:Alpha station                     # implicit operator
+  bob_tok:BRAVO:Bravo station:operator              # explicit operator
+  admin_tok:ADMIN:operator + admin:admin            # admin role
+  ```
+  Existing 3-field lines remain valid as operator-role.
+
+- `AuthPrincipal` gains a `bool admin` field. Default `false`.
+
+- `requireAdmin(principal)` helper in `OtaSimulatorService` returns
+  `PERMISSION_DENIED` with an actionable error message when an operator-
+  role token attempts an admin-only RPC.
+
+- Admin-only RPCs (all 6 destructive ones above) now call
+  `requireAdmin(principal)` immediately after `authenticate()`.
+  Read-only and audio-path RPCs (`RegisterStation`, `NegotiateAudio`,
+  `Heartbeat`, `ListSessions`, `JoinSession`, `LeaveSession`,
+  `GetChannel`, `Health`, `StreamEvents`) remain available to any
+  authenticated token.
+
+**Added:** `tools/otasim_ctl.cpp` — small admin CLI for the OTASim
+server. Subcommands: `health`, `list-sessions`, `get-channel`,
+`set-channel`. Useful for live demos (bump SNR without restarting),
+ops debugging, scripted scenarios. Token via `--token` or
+`OTASIM_TOKEN` env var.
+
+```
+./build/otasim_ctl --token admin_tok set-channel --model awgn --snr 20
+./build/otasim_ctl --token admin_tok set-channel \
+    --model watterson_moderate --snr 12
+./build/otasim_ctl --token alpha_tok get-channel
+./build/otasim_ctl --token alpha_tok list-sessions
+```
+
+**Verification:**
+
+```bash
+cmake --build build -j4
+ctest --test-dir build -R "AuthAllowlist|OtasimServe|UltraGuiOta|UltraTncSimAudio|SessionContext" \
+    --output-on-failure -j1   # 9/9 pass
+
+# Manual end-to-end check (with the server running):
+./build/otasim_ctl --token alpha_tok set-channel --model awgn --snr 20
+# -> "SetChannel failed: admin role required for this RPC; token 'ALPHA' is operator-only"
+./build/otasim_ctl --token admin_tok set-channel --model awgn --snr 20
+# -> "ok session=lobby model=awgn snr_db=20.00"
+./build/otasim_ctl --token alpha_tok get-channel
+# -> "session=lobby model=awgn snr_db=20.00 ..."
+```
+
+**Migration:** existing token files keep working — operator role is the
+default. Add an admin entry to a new token file line when you want a
+principal that can also reconfigure the channel.
+
+---
+
 ## 2026-05-18: OTASim two-station GUI connect end-to-end
 
 **Fixed:** Two `ultra_gui -sim` instances pointed at the same

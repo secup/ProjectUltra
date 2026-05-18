@@ -199,6 +199,9 @@ grpc::Status OtaSimulatorService::CreateSession(
     if (!status.ok()) {
         return status;
     }
+    if (auto admin_status = requireAdmin(principal); !admin_status.ok()) {
+        return admin_status;
+    }
     (void)principal;
 
     if (request->session_id().empty()) {
@@ -327,6 +330,9 @@ grpc::Status OtaSimulatorService::SetChannel(
     if (!status.ok()) {
         return status;
     }
+    if (auto admin_status = requireAdmin(principal); !admin_status.ok()) {
+        return admin_status;
+    }
     auto session = sessions_.getSession(request->session_id());
     if (!session) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "session not found");
@@ -364,6 +370,9 @@ grpc::Status OtaSimulatorService::InjectEffect(
     auto status = authenticate(context, &principal);
     if (!status.ok()) {
         return status;
+    }
+    if (auto admin_status = requireAdmin(principal); !admin_status.ok()) {
+        return admin_status;
     }
     auto session = sessions_.getSession(request->session_id());
     if (!session) {
@@ -405,6 +414,9 @@ grpc::Status OtaSimulatorService::CancelEffect(
     if (!status.ok()) {
         return status;
     }
+    if (auto admin_status = requireAdmin(principal); !admin_status.ok()) {
+        return admin_status;
+    }
     auto session = sessions_.getSession(request->session_id());
     if (!session) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "session not found");
@@ -444,6 +456,9 @@ grpc::Status OtaSimulatorService::StartCapture(
     if (!status.ok()) {
         return status;
     }
+    if (auto admin_status = requireAdmin(principal); !admin_status.ok()) {
+        return admin_status;
+    }
     auto session = sessions_.getSession(request->session_id());
     if (!session) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "session not found");
@@ -478,6 +493,9 @@ grpc::Status OtaSimulatorService::StopCapture(
     auto status = authenticate(context, &principal);
     if (!status.ok()) {
         return status;
+    }
+    if (auto admin_status = requireAdmin(principal); !admin_status.ok()) {
+        return admin_status;
     }
     auto session = sessions_.getSession(request->session_id());
     if (!session) {
@@ -554,6 +572,15 @@ grpc::Status OtaSimulatorService::Health(
     response->set_message(ok ? "ok" : "not serving");
     *response->mutable_server_time() = nowTimestamp();
     return grpc::Status::OK;
+}
+
+grpc::Status OtaSimulatorService::requireAdmin(const AuthPrincipal& principal) const {
+    if (principal.admin) {
+        return grpc::Status::OK;
+    }
+    return grpc::Status(grpc::StatusCode::PERMISSION_DENIED,
+                        "admin role required for this RPC; token '" +
+                            principal.callsign + "' is operator-only");
 }
 
 grpc::Status OtaSimulatorService::authenticate(grpc::ServerContext* context,

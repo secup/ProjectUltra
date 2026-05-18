@@ -571,6 +571,13 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(cli_simulator PRIVATE ultra_sim_station ultra_otasim_client)
 
+    # otasim_ctl - admin CLI for the OTASim server (SetChannel etc.)
+    add_executable(otasim_ctl
+        tools/otasim_ctl.cpp
+    )
+    ultra_enable_tool_test_warnings(tools/otasim_ctl.cpp)
+    target_link_libraries(otasim_ctl PRIVATE ultra_otasim_client)
+
     add_executable(session_decode
         tools/session_decode.cpp
     )

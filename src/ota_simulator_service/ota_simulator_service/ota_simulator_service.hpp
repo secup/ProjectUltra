@@ -104,6 +104,7 @@ private:
 
     grpc::Status authenticate(grpc::ServerContext* context,
                               AuthPrincipal* principal) const;
+    grpc::Status requireAdmin(const AuthPrincipal& principal) const;
     std::string stationIdFor(const std::string& requested,
                              const AuthPrincipal& principal) const;
     projectultra::otasim::v1::SessionInfo sessionInfo(
