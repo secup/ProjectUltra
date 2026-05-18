@@ -220,7 +220,11 @@ if [[ "$TARGET" == "windows" ]]; then
 
   grpc_root=""
   for vcpkg_root in "${vcpkg_install_roots[@]}"; do
-    if [[ -f "$vcpkg_root/bin/grpc++.dll" || -f "$vcpkg_root/bin/grpc.dll" ]]; then
+    if [[ -d "$vcpkg_root/bin" ]] && compgen -G "$vcpkg_root/bin/grpc*.dll" > /dev/null; then
+      grpc_root="$vcpkg_root"
+      break
+    fi
+    if [[ -f "$vcpkg_root/bin/gpr.dll" ]]; then
       grpc_root="$vcpkg_root"
       break
     fi
@@ -228,6 +232,16 @@ if [[ "$TARGET" == "windows" ]]; then
 
   if [[ -z "$grpc_root" ]]; then
     echo "gRPC runtime DLLs were not found. Expected from vcpkg x64-windows." >&2
+    echo "Searched vcpkg roots:" >&2
+    for vcpkg_root in "${vcpkg_install_roots[@]}"; do
+      echo "  $vcpkg_root" >&2
+      if [[ -d "$vcpkg_root/bin" ]]; then
+        echo "  --> bin/ exists, listing *.dll:" >&2
+        ls "$vcpkg_root/bin"/*.dll 2>/dev/null | sed 's/^/    /' >&2 || echo "    (no dlls)" >&2
+      else
+        echo "  --> bin/ missing" >&2
+      fi
+    done
     exit 1
   fi
 
