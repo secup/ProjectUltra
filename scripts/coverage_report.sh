@@ -110,7 +110,7 @@ REPORT="$BUILD_DIR/coverage.txt"
   -instr-profile="$BUILD_DIR/coverage.profdata" \
   "${executables[0]}" \
   "${object_args[@]}" \
-  -ignore-filename-regex='(/thirdparty/|/tests/|/Applications/|/opt/homebrew/|/usr/include/|/Library/Developer/)' \
+  -ignore-filename-regex='(/thirdparty/|/tests/|/generated/|/Applications/|/opt/homebrew/|/usr/include/|/Library/Developer/)' \
   | tee "$REPORT"
 
 read -r function_pct line_pct branch_pct < <(
