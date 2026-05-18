@@ -39,7 +39,10 @@ int main() {
     const auto token_path = temp.child("tokens.conf");
     {
         std::ofstream out(token_path);
-        out << "alice_token:ALPHA:Alpha station\n";
+        // Alice runs the smoke test end-to-end including admin RPCs
+        // (CreateSession + SetChannel), so she carries the admin role.
+        // Bob stays operator-only to mirror a normal joined station.
+        out << "alice_token:ALPHA:Alpha station:admin\n";
         out << "bob_token:BRAVO:Bravo station\n";
     }
 
