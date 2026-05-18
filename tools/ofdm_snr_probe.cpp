@@ -31,6 +31,7 @@ struct Args {
     ::ChannelType channel = ::ChannelType::AWGN;
     CodeRate rate = CodeRate::R1_2;
     Modulation mod = Modulation::DQPSK;
+    int cw_count = 4;
     uint32_t seed = 42;
     size_t payload_bytes = 32;
     bool header = true;
@@ -39,7 +40,8 @@ struct Args {
 void usage(const char* argv0) {
     std::cout
         << "Usage: " << argv0 << " [--snr DB] [--channel awgn|good|moderate|poor|flutter]\n"
-        << "       [--rate r1_4|r1_2|r2_3|r3_4] [--seed N] [--payload BYTES]\n";
+        << "       [--rate r1_4|r1_2|r2_3|r3_4] [--mod dqpsk|d8psk]\n"
+        << "       [--cw-count N] [--seed N] [--payload BYTES]\n";
 }
 
 const char* channelName(::ChannelType channel) {
@@ -86,6 +88,20 @@ bool parseArgs(int argc, char** argv, Args& args) {
                 return false;
             }
             args.rate = *parsed;
+        } else if (arg == "--mod") {
+            const char* v = need("--mod");
+            if (!v) return false;
+            auto parsed = cli::parseModulation(
+                v, cli::AllowAuto::No, cli::AllowExperimentalModulation::Yes);
+            if (!parsed) {
+                std::cerr << "Unknown modulation: " << v << "\n";
+                return false;
+            }
+            args.mod = *parsed;
+        } else if (arg == "--cw-count") {
+            const char* v = need("--cw-count");
+            if (!v) return false;
+            args.cw_count = v2::sanitizeFixedFrameCodewords(std::stoi(v));
         } else if (arg == "--seed") {
             const char* v = need("--seed");
             if (!v) return false;
@@ -146,15 +162,18 @@ TxFrame buildTxFrame(const Args& args, const ModemConfig& cfg) {
         payload[i] = static_cast<uint8_t>((i * 37u + 11u) & 0xffu);
     }
 
-    const auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", 1, payload, args.rate);
+    const auto frame = v2::makeFixedDataFrame("ALPHA", "BRAVO", 1, payload,
+                                              args.rate, args.cw_count);
     const Bytes frame_data = frame.serialize();
-    const Bytes encoded = v2::encodeFixedFrame(frame_data, args.rate);
+    const Bytes encoded = v2::encodeFixedFrame(frame_data, args.rate,
+                                               args.cw_count, true,
+                                               static_cast<size_t>(bitsPerOFDMSymbol(cfg)));
 
     TxFrame tx;
     tx.serialized_frame = frame_data;
     tx.signal_start = 48000;
     tx.samples.reserve(48000 + waveform.getDataPreambleSamples() +
-                       waveform.getMinSamplesForCWCount(4) + 48000);
+                       waveform.getMinSamplesForCWCount(args.cw_count) + 48000);
     tx.samples.resize(tx.signal_start, 0.0f);
 
     Samples preamble = waveform.generateDataPreamble();
@@ -208,13 +227,13 @@ ProbeResult decodeProbe(const Args& args, const ModemConfig& cfg,
     result.fading_index = rx_waveform.getFadingIndex();
 
     std::vector<float> soft_bits = rx_waveform.getSoftBits();
-    if (soft_bits.size() < 4u * v2::LDPC_CODEWORD_BITS) {
+    if (soft_bits.size() < static_cast<size_t>(args.cw_count) * v2::LDPC_CODEWORD_BITS) {
         result.got_result = false;
         return result;
     }
 
     auto status = v2::decodeFixedFrame(
-        soft_bits, args.rate, 4, false,
+        soft_bits, args.rate, args.cw_count, true,
         static_cast<size_t>(bitsPerOFDMSymbol(cfg)));
     result.cw_failed = status.countFailures();
     result.cw_ok = static_cast<int>(status.decoded.size()) - result.cw_failed;
@@ -243,13 +262,15 @@ int main(int argc, char** argv) {
 
     const ProbeResult r = decodeProbe(args, cfg, tx, rx);
     if (args.header) {
-        std::cout << "channel,configured_snr,rate,success,cw_ok,cw_failed,"
+        std::cout << "channel,configured_snr,mod,rate,cw_count,success,cw_ok,cw_failed,"
                   << "sync_snr_db,pilot_snr_db,lts_snr_db,fading_index\n";
     }
     std::cout << channelName(args.channel) << ","
               << std::fixed << std::setprecision(2)
               << args.snr_db << ","
+              << ultra::modulationToString(args.mod) << ","
               << ultra::codeRateToString(args.rate) << ","
+              << args.cw_count << ","
               << (r.success ? 1 : 0) << ","
               << r.cw_ok << ","
               << r.cw_failed << ","

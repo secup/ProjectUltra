@@ -413,8 +413,13 @@ public:
                 if (error) *error = "failed to write OTASim token file";
                 return false;
             }
-            out << kOtaAlphaToken << ":ALPHA:Alpha station\n";
-            out << kOtaBravoToken << ":BRAVO:Bravo station\n";
+            // cli_simulator calls SetChannel (admin-gated since PR #30) to
+            // configure the spawned OTASim's channel model. Both tokens get
+            // admin role here because the test harness fully owns its own
+            // sandbox; production servers should not hand out admin tokens
+            // this freely.
+            out << kOtaAlphaToken << ":ALPHA:Alpha station:admin\n";
+            out << kOtaBravoToken << ":BRAVO:Bravo station:admin\n";
         }
 
         const int log_fd = ::open(log_path_.c_str(), O_CREAT | O_WRONLY | O_TRUNC, 0600);

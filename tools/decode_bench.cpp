@@ -315,9 +315,11 @@ int runGen(const Args& a) {
     enc.setMode(ultra::tools::cli::requireWaveformMode(a.waveform));
     enc.setOFDMConfig(benchOFDMConfig());
     enc.setDataMode(*modulation, code_rate);
-    // Bench targets the connected-mode 4-CW fixed-frame data path —
-    // that's the throughput hot path agents will be optimizing.
-    enc.setFixedFrameCodewords(4);
+    const int fixed_cw = (a.cw_count > 0)
+        ? v2::sanitizeFixedFrameCodewords(a.cw_count)
+        : v2::kDefaultFixedFrameCodewords;
+    // Bench targets the connected-mode fixed-frame data path.
+    enc.setFixedFrameCodewords(fixed_cw);
     // Channel interleave defaults to true on both encoder and decoder.
     // Match the default so fixtures are decodable by anything that
     // hasn't explicitly overridden — including the GUI in monitor mode
@@ -327,7 +329,7 @@ int runGen(const Args& a) {
     // into multi-frame fragmentation. We want a deterministic single-
     // frame burst per iteration.
     const size_t cap = v2::getFixedFramePayloadCapacity(
-        code_rate, 4);
+        code_rate, fixed_cw);
     const size_t payload_bytes = std::min(static_cast<size_t>(a.payload_bytes), cap);
 
     std::cout << "[gen] waveform=" << a.waveform
@@ -338,6 +340,7 @@ int runGen(const Args& a) {
               << " wav_format=" << a.wav_format
               << " sample_rate=" << a.output_sample_rate
               << " frames=" << a.num_frames
+              << " fixed_cw=" << fixed_cw
               << " payload=" << payload_bytes << " bytes/frame (capacity=" << cap << ")"
               << " seed=" << a.seed << "\n";
 
@@ -363,16 +366,17 @@ int runGen(const Args& a) {
         }
 
         // Use v2::makeFixedDataFrame so total_cw is explicitly set to
-        // 4. DataFrame::makeData() calls calculateCodewords() which for
-        // a 60-byte payload at R1/4 returns 5 CWs (continuation CWs
+        // the requested fixed-CW geometry. DataFrame::makeData() calls
+        // calculateCodewords() which for a 60-byte payload at R1/4 returns 5 CWs
+        // (continuation CWs
         // reserve DATA_CW_HEADER_SIZE bytes). The OFDM encoder trusts
         // byte 12 of the serialized frame and frame-interleaves over
-        // that count — if it's 5 while the decoder expects 4, the
+        // that count — if it disagrees with the decoder, the
         // de-interleave permutation is wrong and LDPC fails on every
         // CW with saturated-but-wrong-position bits. (Codex review.)
         auto frame = v2::makeFixedDataFrame(
             "BENCH1", "BENCH2", static_cast<uint16_t>(f), payload,
-            code_rate, /*cw_count=*/4);
+            code_rate, fixed_cw);
         Bytes serialized = frame.serialize();
 
         // Preamble selection:

@@ -1028,15 +1028,27 @@ void StreamingDecoder::decodeCurrentFrame() {
 
     // Multi-candidate light-sync recovery (connected OFDM):
     // If decode fails at the detected sync point, retry nearby timing candidates.
-    // detectDataSync() scans with coarse steps, and fading can shift the best
-    // decode point by a few samples even when correlation looks valid.
-    if (!result.success && result.codewords_ok == 0 && is_ofdm && connected_) {
-        // Keep this recovery path tight. Moderate-fading hardware traces showed
-        // low-confidence syncs can pass the LLR gate, then repeated full fixed-frame LDPC
-        // retries burn several seconds with zero recoveries and trigger ARQ
-        // timeouts. Nearby timing retry is still useful for clean, high-corr
-        // locks, but beyond +/-8 samples the candidate is usually a bad lock.
-        const int retry_deltas[] = {8, -8};
+    // detectDataSync() scans with coarse steps, and clean light-preamble locks can
+    // still land late enough to leave only part of a fixed frame decodable.
+    const int attempted_codewords = result.codewords_ok + result.codewords_failed;
+    const bool partial_fixed_ofdm_failure =
+        attempted_codewords >= 2 &&
+        attempted_codewords <= v2::kMaxFixedFrameCodewords &&
+        result.codewords_ok < attempted_codewords;
+    const bool d8psk_data_mode = (current_modulation_ == Modulation::D8PSK);
+    if (!result.success && is_ofdm && connected_ &&
+        (result.codewords_ok == 0 || (d8psk_data_mode && partial_fixed_ofdm_failure))) {
+        // Keep this recovery path gated by high sync correlation. Moderate-fading
+        // hardware traces showed low-confidence syncs can pass the LLR gate, then
+        // repeated full fixed-frame LDPC retries burn several seconds with zero
+        // recoveries and trigger ARQ timeouts. Prefer earlier candidates first:
+        // late light-sync locks show up as a positive LTS phase slope.
+        const int d8psk_retry_deltas[] = {-32, -24, -16, -8, 8, 16, 24, 32};
+        const int default_retry_deltas[] = {8, -8};
+        const int* retry_deltas = d8psk_data_mode ? d8psk_retry_deltas : default_retry_deltas;
+        const size_t retry_delta_count = d8psk_data_mode
+            ? (sizeof(d8psk_retry_deltas) / sizeof(d8psk_retry_deltas[0]))
+            : (sizeof(default_retry_deltas) / sizeof(default_retry_deltas[0]));
         bool recovered = false;
         int recovered_delta = 0;
         uint64_t recovery_attempts = 0;
@@ -1061,7 +1073,12 @@ void StreamingDecoder::decodeCurrentFrame() {
         };
 
         if (allow_sync_recovery) {
-            for (int delta : retry_deltas) {
+            for (size_t retry_idx = 0; retry_idx < retry_delta_count; ++retry_idx) {
+                const int delta = retry_deltas[retry_idx];
+                if (delta < 0 && total_fed_ < buffer_capacity_samples_ &&
+                    sync_position_ < static_cast<size_t>(-delta)) {
+                    continue;
+                }
                 recovery_attempts++;
                 size_t retry_sync = wrapRingIndexLocked(sync_position_ + buffer_capacity_samples_ + delta);
 
@@ -1107,7 +1124,11 @@ void StreamingDecoder::decodeCurrentFrame() {
                 }
 
                 auto retry_result = decodeFrame(retry_bits, sync_snr_, sync_cfo_);
-                if (!(retry_result.success || retry_result.codewords_ok > 0)) {
+                if (d8psk_data_mode) {
+                    if (!retry_result.success) {
+                        continue;
+                    }
+                } else if (!(retry_result.success || retry_result.codewords_ok > 0)) {
                     continue;
                 }
 
