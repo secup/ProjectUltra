@@ -22,6 +22,12 @@ endif()
 if(MSVC)
     # Ensure math constants (M_PI, etc.) are available from <cmath> in all TUs.
     add_compile_definitions(_USE_MATH_DEFINES)
+    # Block windows.h macro pollution: NOMINMAX kills max()/min() macros
+    # that collide with std::numeric_limits<>::max() in protobuf/gRPC templates,
+    # NOGDI skips wingdi.h which defines PASSTHROUGH and many other identifiers
+    # that collide with normal C++ identifiers (e.g., our ChannelType::PASSTHROUGH),
+    # WIN32_LEAN_AND_MEAN trims the windows.h surface area generally.
+    add_compile_definitions(WIN32_LEAN_AND_MEAN NOMINMAX NOGDI)
     # Enable parallel builds
     add_compile_options(/MP)
     # Suppress some common warnings
