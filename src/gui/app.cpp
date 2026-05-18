@@ -46,6 +46,16 @@ static void initLog() {
     if (g_log_initialized) return;
     g_log_initialized = true;
 
+    // If --log-file was passed (main_gui.cpp set ultra::g_log_file before
+    // App is constructed), adopt that as our gui-log sink too. Otherwise
+    // every call into guiLog() would overwrite the user's chosen destination
+    // with our own logs/gui.log.
+    if (ultra::g_log_file != nullptr) {
+        g_gui_log_file = ultra::g_log_file;
+        g_gui_log_path = "(via --log-file)";
+        return;
+    }
+
 #ifdef _WIN32
     auto tryOpenLog = [](const char* path) -> FILE* {
         if (!path || path[0] == '\0') {
@@ -1126,9 +1136,38 @@ void App::initOtaAudio() {
     appendRxLogLine("[OTASIM] Connecting to " + options_.ota_host +
                     " as " + options_.station_id +
                     " in session " + (options_.session_id.empty() ? "lobby" : options_.session_id));
+
+    if (options_.monitor_audio && ota_monitor_device_id_ == 0) {
+        SDL_AudioSpec want{};
+        SDL_AudioSpec have{};
+        want.freq = 48000;
+        want.format = AUDIO_F32SYS;
+        want.channels = 1;
+        want.samples = 2048;
+        want.callback = nullptr;
+        const char* device_name = options_.monitor_device.empty()
+            ? nullptr
+            : options_.monitor_device.c_str();
+        SDL_AudioDeviceID dev = SDL_OpenAudioDevice(device_name, 0, &want, &have, 0);
+        if (dev == 0) {
+            guiLog("OTASim monitor: SDL_OpenAudioDevice failed: %s", SDL_GetError());
+            appendRxLogLine(std::string("[OTASIM] Monitor unavailable: ") + SDL_GetError());
+        } else {
+            ota_monitor_device_id_ = dev;
+            SDL_PauseAudioDevice(dev, 0);
+            guiLog("OTASim monitor: playing RX through SDL device '%s'",
+                   device_name ? device_name : "(default)");
+            appendRxLogLine(std::string("[OTASIM] Monitor: ") +
+                            (device_name ? device_name : "(default output)"));
+        }
+    }
 }
 
 void App::stopOtaAudio() {
+    if (ota_monitor_device_id_ != 0) {
+        SDL_CloseAudioDevice(ota_monitor_device_id_);
+        ota_monitor_device_id_ = 0;
+    }
     if (ota_audio_) {
         ota_audio_->close();
         ota_audio_.reset();
@@ -1156,6 +1195,16 @@ void App::pollOtaRx() {
         }
         if (waterfall_) {
             waterfall_->addSamples(samples.data(), samples.size());
+        }
+        if (ota_monitor_device_id_ != 0) {
+            // ~500ms cap at 48kHz mono float = 24000 samples = 96000 bytes
+            constexpr Uint32 kMaxQueueBytes = 96000;
+            if (SDL_GetQueuedAudioSize(ota_monitor_device_id_) > kMaxQueueBytes) {
+                SDL_ClearQueuedAudio(ota_monitor_device_id_);
+            }
+            SDL_QueueAudio(ota_monitor_device_id_,
+                           samples.data(),
+                           static_cast<Uint32>(samples.size() * sizeof(float)));
         }
     }
 }
@@ -1958,6 +2007,14 @@ ptt::PttConfig App::pttConfigFromSettings(const AppSettings& settings) const {
 }
 
 bool App::ensurePttReadyLocked(const AppSettings& settings) {
+    if (simulation_enabled_) {
+        if (ptt_driver_) {
+            ptt_driver_->close();
+            ptt_driver_.reset();
+        }
+        ptt_config_ = ptt::PttConfig{};
+        return true;
+    }
     const ptt::PttConfig config = pttConfigFromSettings(settings);
     if (config.mode == ptt::PttMode::None) {
         if (ptt_driver_) {
@@ -2013,6 +2070,18 @@ bool App::ensurePttReady() {
 
 void App::updateWaterfallFrequencyDisplay() {
     if (!waterfall_) {
+        return;
+    }
+
+    if (simulation_enabled_) {
+        std::lock_guard<std::mutex> lock(ptt_driver_mutex_);
+        if (ptt_driver_) {
+            ptt_driver_->close();
+            ptt_driver_.reset();
+            ptt_config_ = ptt::PttConfig{};
+            cat_frequency_next_open_attempt_ms_ = 0;
+        }
+        waterfall_->setRadioFrequency(std::nullopt, false);
         return;
     }
 

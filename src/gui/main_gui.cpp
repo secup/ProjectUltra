@@ -194,6 +194,8 @@ void printGuiUsage(const char* prog) {
     std::printf("  --token <bearer_token>        OTASim auth token for -sim\n");
     std::printf("  --station-id <id>             OTASim station id for -sim\n");
     std::printf("  --session-id <id>             OTASim session id (default: lobby)\n");
+    std::printf("  --monitor-audio               Play OTASim RX through local speakers\n");
+    std::printf("  --monitor-device <name>       SDL audio output device for --monitor-audio\n");
     std::printf("  -rec [path]                   Record received audio\n");
     std::printf("  --software, -sw               Use software renderer and safe startup\n");
     std::printf("  --opengl, --gl                Use OpenGL renderer\n");
@@ -502,6 +504,15 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             opts.session_id = argv[++i];
+        } else if (arg == "--monitor-audio") {
+            opts.monitor_audio = true;
+        } else if (arg == "--monitor-device") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --monitor-device\n");
+                closeStartupLog();
+                return 1;
+            }
+            opts.monitor_device = argv[++i];
         } else if (arg == "--help" || arg == "-h") {
             printGuiUsage(argv[0]);
             closeStartupLog();

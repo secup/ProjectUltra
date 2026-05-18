@@ -42,6 +42,8 @@ public:
         std::string token;
         std::string station_id;
         std::string session_id = "lobby";
+        bool monitor_audio = false;   // -sim: also play RX audio through local speakers
+        std::string monitor_device;   // -sim: optional SDL output device name
 
         // Monitor mode: skip the full PING/CONNECT handshake and force
         // the decoder into a specific waveform/rate. Useful for OTA
@@ -198,6 +200,7 @@ private:
     std::vector<float> recorded_tx_samples_;    // Real TX audio queued to output
     void writeRecordingToFile();                // Save recording buffers to disk
     std::unique_ptr<ultra::otasim_client::OtaAudioBackend> ota_audio_;
+    uint32_t ota_monitor_device_id_ = 0;  // SDL_AudioDeviceID; 0 = closed
 
     // ========================================
     // UI Rendering
