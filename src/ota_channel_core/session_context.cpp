@@ -94,6 +94,7 @@ void SessionContext::setChannel(ChannelConfig config) {
     config_.default_snr_db = config.snr_db;
     config_.seed = config.seed;
     config_.sample_rate = config.sample_rate;
+    config_.real_hf_loop_noise = std::move(config.real_hf_loop_noise);
     tick_samples_ = samplesForMs(config_.sample_rate, kDefaultTickIntervalMs);
     max_tx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxTxQueuedAudioMs);
     max_rx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxRxQueuedAudioMs);

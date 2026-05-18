@@ -142,6 +142,18 @@ int main() {
     assert(status.ok());
     assert(ack.accepted());
 
+    otasim::SetChannelRequest real_hf_without_bed;
+    real_hf_without_bed.set_session_id(ultra::ota_channel_core::kLobbySessionId);
+    real_hf_without_bed.set_model("real_hf_loop");
+    real_hf_without_bed.set_snr_db(12.0);
+    otasim::CommandAck rejected_ack;
+    grpc::ClientContext real_hf_context;
+    addToken(real_hf_context, "alice_token");
+    status = stub->SetChannel(&real_hf_context, real_hf_without_bed, &rejected_ack);
+    assert(!status.ok());
+    assert(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+    assert(status.error_message().find("--noise-bed-wav") != std::string::npos);
+
     service.beginDraining();
     otasim::HealthResponse draining_health;
     grpc::ClientContext draining_context;

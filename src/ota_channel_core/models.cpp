@@ -8,8 +8,13 @@
 #include "pocketfft/pocketfft_hdronly.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
 #include <cmath>
+#include <fstream>
+#include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace ultra::ota_channel_core {
@@ -18,6 +23,9 @@ namespace {
 using Complex = std::complex<float>;
 
 constexpr float kPi = 3.14159265358979323846f;
+constexpr uint16_t kWavFormatPcm = 1;
+constexpr uint16_t kRealHfLoopChannels = 1;
+constexpr uint16_t kRealHfLoopBitsPerSample = 16;
 
 void analyticFrequencyShift(std::vector<float>& samples,
                             float cfo_hz,
@@ -74,6 +82,40 @@ void analyticFrequencyShift(std::vector<float>& samples,
     phase_acc = phase;
 }
 
+uint16_t readLe16(const uint8_t* p) {
+    return static_cast<uint16_t>(p[0]) |
+           static_cast<uint16_t>(p[1] << 8);
+}
+
+uint32_t readLe32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) |
+           (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
+}
+
+bool readExact(std::istream& in, void* dst, size_t len) {
+    in.read(static_cast<char*>(dst), static_cast<std::streamsize>(len));
+    return static_cast<size_t>(in.gcount()) == len;
+}
+
+std::string normalizedChannelToken(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (const char c : value) {
+        out.push_back(c == '-'
+            ? '_'
+            : static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+std::runtime_error realHfLoopWavError(std::string_view path,
+                                      const std::string& detail) {
+    return std::runtime_error("real_hf_loop noise-bed WAV " +
+                              std::string(path) + ": " + detail);
+}
+
 }  // namespace
 
 float modemReferenceNoiseStddev(float snr_db) {
@@ -88,8 +130,121 @@ const char* channelTypeName(ChannelType type) {
         case ChannelType::MODERATE:    return "moderate";
         case ChannelType::POOR:        return "poor";
         case ChannelType::FLUTTER:     return "flutter";
+        case ChannelType::REAL_HF_LOOP:return "real_hf_loop";
         default:                       return "unknown";
     }
+}
+
+std::optional<ChannelType> parseChannelType(std::string_view value) {
+    const std::string v = normalizedChannelToken(value);
+    if (v.empty() || v == "passthrough" || v == "null") {
+        return ChannelType::PASSTHROUGH;
+    }
+    if (v == "awgn") {
+        return ChannelType::AWGN;
+    }
+    if (v == "good" || v == "watterson_good") {
+        return ChannelType::GOOD;
+    }
+    if (v == "moderate" || v == "watterson_moderate") {
+        return ChannelType::MODERATE;
+    }
+    if (v == "poor" || v == "watterson_poor") {
+        return ChannelType::POOR;
+    }
+    if (v == "flutter" || v == "watterson_flutter") {
+        return ChannelType::FLUTTER;
+    }
+    if (v == "real_hf_loop") {
+        return ChannelType::REAL_HF_LOOP;
+    }
+    return std::nullopt;
+}
+
+std::vector<float> loadRealHfLoopNoiseBedWav(std::string_view path_view) {
+    const std::string path(path_view);
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw realHfLoopWavError(path_view, "failed to open");
+    }
+
+    uint8_t riff_header[12] = {};
+    if (!readExact(in, riff_header, sizeof(riff_header)) ||
+        std::memcmp(riff_header, "RIFF", 4) != 0 ||
+        std::memcmp(riff_header + 8, "WAVE", 4) != 0) {
+        throw realHfLoopWavError(path_view, "not a RIFF/WAVE file");
+    }
+
+    std::vector<uint8_t> fmt_chunk;
+    std::vector<uint8_t> data_chunk;
+    while (in) {
+        uint8_t chunk_header[8] = {};
+        if (!readExact(in, chunk_header, sizeof(chunk_header))) {
+            break;
+        }
+        const uint32_t chunk_size = readLe32(chunk_header + 4);
+        std::vector<uint8_t> chunk(chunk_size);
+        if (chunk_size > 0 && !readExact(in, chunk.data(), chunk_size)) {
+            throw realHfLoopWavError(path_view, "truncated chunk");
+        }
+        if (chunk_size & 1u) {
+            in.seekg(1, std::ios::cur);
+        }
+
+        if (std::memcmp(chunk_header, "fmt ", 4) == 0) {
+            fmt_chunk = std::move(chunk);
+        } else if (std::memcmp(chunk_header, "data", 4) == 0) {
+            data_chunk = std::move(chunk);
+        }
+    }
+
+    if (fmt_chunk.size() < 16) {
+        throw realHfLoopWavError(path_view, "missing fmt chunk");
+    }
+    if (data_chunk.empty()) {
+        throw realHfLoopWavError(path_view, "missing data chunk");
+    }
+
+    const uint16_t format = readLe16(fmt_chunk.data());
+    const uint16_t channels = readLe16(fmt_chunk.data() + 2);
+    const uint32_t sample_rate = readLe32(fmt_chunk.data() + 4);
+    const uint16_t block_align = readLe16(fmt_chunk.data() + 12);
+    const uint16_t bits = readLe16(fmt_chunk.data() + 14);
+    if (format != kWavFormatPcm ||
+        channels != kRealHfLoopChannels ||
+        sample_rate != kDefaultSampleRate ||
+        bits != kRealHfLoopBitsPerSample ||
+        block_align != sizeof(int16_t)) {
+        throw realHfLoopWavError(
+            path_view,
+            "must be 16-bit PCM mono 48000 Hz; no resampling is applied");
+    }
+    if ((data_chunk.size() % sizeof(int16_t)) != 0) {
+        throw realHfLoopWavError(path_view, "data chunk is not aligned to 16-bit samples");
+    }
+
+    std::vector<float> samples;
+    samples.reserve(data_chunk.size() / sizeof(int16_t));
+    double sum_squares = 0.0;
+    for (size_t i = 0; i < data_chunk.size(); i += sizeof(int16_t)) {
+        const int16_t raw = static_cast<int16_t>(readLe16(data_chunk.data() + i));
+        const float sample = static_cast<float>(raw) / 32768.0f;
+        samples.push_back(sample);
+        sum_squares += static_cast<double>(sample) * static_cast<double>(sample);
+    }
+    if (samples.empty()) {
+        throw realHfLoopWavError(path_view, "contains no samples");
+    }
+
+    const double rms = std::sqrt(sum_squares / static_cast<double>(samples.size()));
+    if (!(rms > std::numeric_limits<double>::min())) {
+        throw realHfLoopWavError(path_view, "RMS is zero");
+    }
+    const float inv_rms = static_cast<float>(1.0 / rms);
+    for (float& sample : samples) {
+        sample *= inv_rms;
+    }
+    return samples;
 }
 
 void PassthroughChannelModel::process(std::span<const float> input,
@@ -111,6 +266,50 @@ void AWGNChannelModel::process(std::span<const float> input,
     output.resize(input.size());
     for (size_t i = 0; i < input.size(); ++i) {
         output[i] = input[i] + noise_stddev_ * rng_.normal();
+    }
+}
+
+RealHfLoopChannelModel::RealHfLoopChannelModel(float snr_db,
+                                               std::vector<float> normalized_loop,
+                                               uint64_t seed_for_phase)
+    : RealHfLoopChannelModel(
+          snr_db,
+          std::make_shared<const std::vector<float>>(std::move(normalized_loop)),
+          seed_for_phase) {}
+
+RealHfLoopChannelModel::RealHfLoopChannelModel(
+    float snr_db,
+    std::shared_ptr<const std::vector<float>> normalized_loop,
+    uint64_t seed_for_phase)
+    : loop_(std::move(normalized_loop)) {
+    if (loop_ && !loop_->empty() && seed_for_phase != 0) {
+        start_position_ = static_cast<size_t>(
+            seed_for_phase % static_cast<uint64_t>(loop_->size()));
+        position_ = start_position_;
+    }
+    setSNR(snr_db);
+}
+
+void RealHfLoopChannelModel::reset() {
+    position_ = start_position_;
+}
+
+void RealHfLoopChannelModel::setSNR(float snr_db) {
+    scale_ = modemReferenceNoiseStddev(snr_db);
+}
+
+void RealHfLoopChannelModel::process(std::span<const float> input,
+                                     std::vector<float>& output) {
+    output.resize(input.size());
+    if (!loop_ || loop_->empty()) {
+        std::copy(input.begin(), input.end(), output.begin());
+        return;
+    }
+
+    const auto& loop = *loop_;
+    for (size_t i = 0; i < input.size(); ++i) {
+        output[i] = input[i] + scale_ * loop[position_];
+        position_ = (position_ + 1) % loop.size();
     }
 }
 
@@ -385,6 +584,18 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
         case ChannelType::AWGN:
             return std::make_unique<AWGNChannelModel>(
                 config.snr_db, rng_root.stream(stream_name));
+        case ChannelType::REAL_HF_LOOP:
+            if (!config.real_hf_loop_noise || config.real_hf_loop_noise->empty()) {
+                throw std::invalid_argument(
+                    "real_hf_loop requires a normalized noise-bed loop");
+            }
+            if (config.sample_rate != kDefaultSampleRate) {
+                throw std::invalid_argument("real_hf_loop requires 48000 Hz sample rate");
+            }
+            return std::make_unique<RealHfLoopChannelModel>(
+                config.snr_db,
+                config.real_hf_loop_noise,
+                rng_root.childSeed(stream_name));
         case ChannelType::GOOD:
         case ChannelType::MODERATE:
         case ChannelType::POOR:

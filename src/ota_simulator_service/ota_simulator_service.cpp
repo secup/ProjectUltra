@@ -3,9 +3,7 @@
 #include "ota_channel_core/models.hpp"
 #include "ultra/version.hpp"
 
-#include <algorithm>
 #include <chrono>
-#include <cctype>
 #include <sstream>
 #include <utility>
 
@@ -13,6 +11,10 @@ namespace ultra::ota_simulator_service {
 namespace {
 
 namespace pb = projectultra::otasim::v1;
+namespace channel = ultra::ota_channel_core;
+
+constexpr const char* kRealHfLoopMissingMessage =
+    "real_hf_loop requires the server's --noise-bed-wav flag";
 
 google::protobuf::Timestamp nowTimestamp() {
     const auto now = std::chrono::system_clock::now().time_since_epoch();
@@ -22,35 +24,6 @@ google::protobuf::Timestamp nowTimestamp() {
     ts.set_seconds(seconds.count());
     ts.set_nanos(static_cast<int32_t>(nanos.count()));
     return ts;
-}
-
-std::string lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-
-std::optional<ultra::ota_channel_core::ChannelType> parseChannelType(std::string value) {
-    value = lower(std::move(value));
-    if (value.empty() || value == "passthrough" || value == "null") {
-        return ultra::ota_channel_core::ChannelType::PASSTHROUGH;
-    }
-    if (value == "awgn") {
-        return ultra::ota_channel_core::ChannelType::AWGN;
-    }
-    if (value == "good" || value == "watterson_good") {
-        return ultra::ota_channel_core::ChannelType::GOOD;
-    }
-    if (value == "moderate" || value == "watterson_moderate") {
-        return ultra::ota_channel_core::ChannelType::MODERATE;
-    }
-    if (value == "poor" || value == "watterson_poor") {
-        return ultra::ota_channel_core::ChannelType::POOR;
-    }
-    if (value == "flutter" || value == "watterson_flutter") {
-        return ultra::ota_channel_core::ChannelType::FLUTTER;
-    }
-    return std::nullopt;
 }
 
 std::string jsonPair(std::string_view key, std::string_view value) {
@@ -207,12 +180,16 @@ grpc::Status OtaSimulatorService::CreateSession(
     if (request->session_id().empty()) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "session_id is required");
     }
-    auto channel_type = parseChannelType(request->channel_model());
+    auto channel_type = channel::parseChannelType(request->channel_model());
     if (!channel_type) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown channel model");
     }
+    if (*channel_type == channel::ChannelType::REAL_HF_LOOP &&
+        (!config_.real_hf_loop_noise || config_.real_hf_loop_noise->empty())) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, kRealHfLoopMissingMessage);
+    }
 
-    ultra::ota_channel_core::SessionConfig config;
+    channel::SessionConfig config;
     config.display_name = request->display_name().empty()
         ? request->session_id()
         : request->display_name();
@@ -221,6 +198,7 @@ grpc::Status OtaSimulatorService::CreateSession(
                                                      : static_cast<float>(request->snr_db());
     config.seed = request->seed();
     config.station_cap = request->station_cap() == 0 ? 16 : request->station_cap();
+    config.real_hf_loop_noise = config_.real_hf_loop_noise;
 
     auto session = sessions_.createSession(request->session_id(), std::move(config));
     if (!session) {
@@ -337,16 +315,21 @@ grpc::Status OtaSimulatorService::SetChannel(
     if (!session) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "session not found");
     }
-    auto channel_type = parseChannelType(request->model());
+    auto channel_type = channel::parseChannelType(request->model());
     if (!channel_type) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unknown channel model");
+    }
+    if (*channel_type == channel::ChannelType::REAL_HF_LOOP &&
+        (!config_.real_hf_loop_noise || config_.real_hf_loop_noise->empty())) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, kRealHfLoopMissingMessage);
     }
 
     session->setChannel({
         .type = *channel_type,
         .snr_db = static_cast<float>(request->snr_db()),
         .seed = request->seed(),
-        .sample_rate = ultra::ota_channel_core::kDefaultSampleRate,
+        .sample_rate = channel::kDefaultSampleRate,
+        .real_hf_loop_noise = config_.real_hf_loop_noise,
     });
 
     uint64_t command_id = 0;

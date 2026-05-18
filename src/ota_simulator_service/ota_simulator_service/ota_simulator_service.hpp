@@ -24,6 +24,7 @@ struct OtaSimulatorServiceConfig {
     std::string udp_bind_host = "127.0.0.1";
     uint16_t udp_bind_port = 0;
     std::filesystem::path capture_root = "captures";
+    std::shared_ptr<const std::vector<float>> real_hf_loop_noise;
     ultra::ota_channel_core::SessionConfig lobby_config =
         ultra::ota_channel_core::SessionManager::defaultLobbyConfig();
 };

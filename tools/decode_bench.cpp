@@ -36,6 +36,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -225,6 +226,9 @@ ultra::sim::WattersonChannel::Config channelConfig(ChannelType type, float snr_d
         case ChannelType::MODERATE: return ultra::sim::itu_r_f1487::moderate(snr_db);
         case ChannelType::POOR:     return ultra::sim::itu_r_f1487::poor(snr_db);
         case ChannelType::FLUTTER:  return ultra::sim::itu_r_f1487::flutter(snr_db);
+        case ChannelType::REAL_HF_LOOP:
+            throw std::invalid_argument(
+                "real_hf_loop is only supported by ota_simulator serve --noise-bed-wav");
     }
     return ultra::sim::itu_r_f1487::awgn(snr_db);
 }
@@ -245,6 +249,7 @@ std::string channelName(ChannelType type) {
         case ChannelType::MODERATE: return "moderate";
         case ChannelType::POOR:     return "poor";
         case ChannelType::FLUTTER:  return "flutter";
+        case ChannelType::REAL_HF_LOOP: return "real_hf_loop";
     }
     return "unknown";
 }

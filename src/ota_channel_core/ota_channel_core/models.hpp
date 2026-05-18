@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <random>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace ultra::ota_channel_core {
@@ -25,7 +27,8 @@ enum class ChannelType {
     GOOD,
     MODERATE,
     POOR,
-    FLUTTER
+    FLUTTER,
+    REAL_HF_LOOP
 };
 
 struct ChannelConfig {
@@ -33,10 +36,13 @@ struct ChannelConfig {
     float snr_db = 20.0f;
     uint64_t seed = 42;
     uint32_t sample_rate = kDefaultSampleRate;
+    std::shared_ptr<const std::vector<float>> real_hf_loop_noise;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
 const char* channelTypeName(ChannelType type);
+std::optional<ChannelType> parseChannelType(std::string_view value);
+std::vector<float> loadRealHfLoopNoiseBedWav(std::string_view path);
 
 class IChannelModel {
 public:
@@ -72,6 +78,28 @@ public:
 private:
     float noise_stddev_ = 0.0f;
     RngStream rng_;
+};
+
+class RealHfLoopChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+
+    RealHfLoopChannelModel(float snr_db,
+                           std::vector<float> normalized_loop,
+                           uint64_t seed_for_phase = 0);
+    RealHfLoopChannelModel(float snr_db,
+                           std::shared_ptr<const std::vector<float>> normalized_loop,
+                           uint64_t seed_for_phase = 0);
+
+    void reset() override;
+    void setSNR(float snr_db);
+    void process(std::span<const float> input, std::vector<float>& output) override;
+
+private:
+    float scale_ = 0.0f;
+    std::shared_ptr<const std::vector<float>> loop_;
+    size_t start_position_ = 0;
+    size_t position_ = 0;
 };
 
 class WattersonChannel {

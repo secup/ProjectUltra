@@ -7,7 +7,6 @@
 #include "ota_simulator_service/ota_simulator_service.hpp"
 #include "ultra/version.hpp"
 
-#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -16,11 +15,11 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <grpcpp/grpcpp.h>
 
@@ -46,6 +45,7 @@ struct ServeOptions {
     uint64_t lobby_seed = 42;
     uint32_t lobby_station_cap = 16;
     uint32_t shutdown_deadline_seconds = 60;
+    std::filesystem::path noise_bed_wav;
 };
 
 void usage() {
@@ -53,41 +53,12 @@ void usage() {
         << "Usage:\n"
         << "  ota_simulator gen --frame FRAME --callsign CALL [--peer-callsign CALL] --out FILE.wav\n"
         << "  ota_simulator run --scenario FILE.json [--save-rx-audio]\n"
-        << "  ota_simulator serve --bind HOST:PORT --tokens FILE [--udp-bind HOST:PORT]\n";
+        << "  ota_simulator serve --bind HOST:PORT --tokens FILE [--udp-bind HOST:PORT]\n"
+        << "      [--noise-bed-wav FILE.wav]\n";
 }
 
 void handleStopSignal(int signal) {
     g_stop_signal = signal;
-}
-
-std::string lower(std::string value) {
-    for (char& c : value) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return value;
-}
-
-std::optional<channel::ChannelType> parseChannelType(std::string value) {
-    value = lower(std::move(value));
-    if (value.empty() || value == "passthrough" || value == "null") {
-        return channel::ChannelType::PASSTHROUGH;
-    }
-    if (value == "awgn") {
-        return channel::ChannelType::AWGN;
-    }
-    if (value == "good" || value == "watterson_good") {
-        return channel::ChannelType::GOOD;
-    }
-    if (value == "moderate" || value == "watterson_moderate") {
-        return channel::ChannelType::MODERATE;
-    }
-    if (value == "poor" || value == "watterson_poor") {
-        return channel::ChannelType::POOR;
-    }
-    if (value == "flutter" || value == "watterson_flutter") {
-        return channel::ChannelType::FLUTTER;
-    }
-    return std::nullopt;
 }
 
 std::string deriveRxPath(const std::string& tx_path) {
@@ -204,7 +175,7 @@ ServeOptions parseServeOptions(int argc, char** argv) {
         } else if (arg == "--captures-root") {
             options.captures_root = requireValue(i, argc, argv, arg);
         } else if (arg == "--lobby-channel") {
-            auto channel_type = parseChannelType(requireValue(i, argc, argv, arg));
+            auto channel_type = channel::parseChannelType(requireValue(i, argc, argv, arg));
             if (!channel_type) {
                 throw std::runtime_error("unknown lobby channel");
             }
@@ -219,6 +190,8 @@ ServeOptions parseServeOptions(int argc, char** argv) {
         } else if (arg == "--shutdown-deadline-sec") {
             options.shutdown_deadline_seconds = parseUint32(
                 requireValue(i, argc, argv, arg), 3600, arg);
+        } else if (arg == "--noise-bed-wav") {
+            options.noise_bed_wav = requireValue(i, argc, argv, arg);
         } else {
             throw std::runtime_error("unknown serve argument: " + arg);
         }
@@ -228,6 +201,10 @@ ServeOptions parseServeOptions(int argc, char** argv) {
     }
     if (options.lobby_station_cap == 0) {
         throw std::runtime_error("--lobby-station-cap must be non-zero");
+    }
+    if (options.lobby_channel == channel::ChannelType::REAL_HF_LOOP &&
+        options.noise_bed_wav.empty()) {
+        throw std::runtime_error("real_hf_loop requires --noise-bed-wav");
     }
     return options;
 }
@@ -244,16 +221,25 @@ int runServe(int argc, char** argv) {
         throw std::runtime_error("token allowlist is empty");
     }
 
+    std::shared_ptr<const std::vector<float>> real_hf_loop_noise;
+    if (!options.noise_bed_wav.empty()) {
+        auto samples = channel::loadRealHfLoopNoiseBedWav(options.noise_bed_wav.string());
+        real_hf_loop_noise =
+            std::make_shared<const std::vector<float>>(std::move(samples));
+    }
+
     auto lobby = channel::SessionManager::defaultLobbyConfig();
     lobby.default_channel_model = options.lobby_channel;
     lobby.default_snr_db = options.lobby_snr_db;
     lobby.seed = options.lobby_seed;
     lobby.station_cap = options.lobby_station_cap;
+    lobby.real_hf_loop_noise = real_hf_loop_noise;
 
     service::OtaSimulatorServiceConfig config;
     config.udp_bind_host = options.udp_bind.host;
     config.udp_bind_port = options.udp_bind.port;
     config.capture_root = options.captures_root;
+    config.real_hf_loop_noise = real_hf_loop_noise;
     config.lobby_config = lobby;
 
     service::OtaSimulatorService control(std::move(auth), std::move(config));

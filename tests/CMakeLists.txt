@@ -21,6 +21,10 @@ add_executable(test_channel_core_models test_channel_core_models.cpp)
 target_link_libraries(test_channel_core_models PRIVATE ota_channel_core)
 add_test(NAME ChannelCoreModels COMMAND test_channel_core_models)
 
+add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
+target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
+add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)
+
 add_executable(test_channel_core_mixer test_channel_core_mixer.cpp)
 target_link_libraries(test_channel_core_mixer PRIVATE ota_channel_core)
 add_test(NAME ChannelCoreMixer COMMAND test_channel_core_mixer)
@@ -559,6 +563,7 @@ ultra_enable_test_warnings(
     test_ultra_tnc_sim_audio.cpp
     test_channel_core_rng.cpp
     test_channel_core_models.cpp
+    test_real_hf_loop_channel.cpp
     test_channel_core_mixer.cpp
     test_session_context.cpp
     test_session_manager.cpp
