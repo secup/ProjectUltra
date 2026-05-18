@@ -251,6 +251,75 @@ Gate:
 ctest --test-dir build --output-on-failure -j4
 ```
 
+### D3. ALC tolerance — model + decoder sweep
+
+Goal: validate (and measure) whether the modem decodes through realistic
+HF transmitter ALC compression. Today there is **no ALC model** in OTASim,
+**no ALC tolerance test**, and **no documented evidence** the modem
+works through real radio ALC. Operator feedback (KC3VPB 2026-05-08,
+`feedback_kc3vpb_alc_handling`) was explicit: design for ALC, don't
+dodge it. The current 0.7×/0.8× WAV pre-attenuation is the wrong fix.
+
+Full spec: `docs/ALC_TOLERANCE_WORKSTREAM.md`.
+
+Scope:
+
+- `src/ota_channel_core/models.{cpp,hpp}` — new `AlcCompressor`
+  class (peak detect, exponential attack/release in dB domain,
+  configurable threshold / ratio / attack / release / overshoot).
+- `src/ota_channel_core/session_context.cpp::advanceSessionClock`
+  — wire ALC into the mixer chain BEFORE channel noise (ALC is in
+  the transmitter; noise is in the channel; order matters).
+- `proto/ota_simulator.proto` + `tools/cli_simulator.cpp::setOtaChannel`
+  + `tools/otasim_ctl.cpp` — extend channel model enum and
+  `SetChannel` plumbing for `alc` model.
+- `tests/test_alc_compressor.cpp` — unit test for the compressor
+  itself (steady-state gain, attack/release time, multi-tone IMD).
+- `tests/test_decoder_alc_tolerance.cpp` — sweep (modulation, code
+  rate, compression ratio, drive above threshold) and produce a
+  decode-success-rate table per cell.
+
+Acceptance:
+
+- Compressor unit test passes with all measured parameters within
+  ±20% of configured values.
+- Decoder sweep produces a numerical baseline table for the
+  production mode ladder (DQPSK R1/4 / R1/2 / R2/3 / R3/4, QPSK
+  R1/2 / R2/3, D8PSK R2/3) at compression ratios {1:1, 2:1, 4:1,
+  8:1, ∞:1} and drives {threshold, +6 dB, +12 dB}.
+- DQPSK R1/2 (the production baseline for most QSOs) **must**
+  decode at 4:1 / +6 dB with ≥95% success. If it doesn't, STOP
+  and flag as a PHY issue — that's the real-radio deployment
+  blocker.
+- Baseline table committed as a regression gate for future ALC
+  model or modulator changes.
+- `docs/INVARIANTS.md` updated with "decoder must tolerate ALC at
+  X ratio Y compression" once baseline is established.
+
+Out of scope:
+
+- PAPR reduction in the modulator (clip-and-filter, ACE) — separate
+  workstream, becomes interesting *after* baseline numbers exist.
+- Changing the default `tx_drive` value — per-radio operator choice.
+- Adding ALC to the Mac↔Pi5 cable rig — would need a Pi-side
+  software ALC injector; outside the OTASim contract.
+
+Gate:
+
+```bash
+ctest --test-dir build -R "AlcCompressor|DecoderAlcTolerance" --output-on-failure -j1
+```
+
+Risks:
+
+- Decoder may fail at modest ALC (≤4:1) on higher-order modulations
+  (QPSK, D8PSK). If so, the conclusion is "production-safe modes
+  are DQPSK only" — a real finding worth surfacing, not a test
+  failure to suppress.
+- Compressor parameters must match real-radio behavior; if model
+  is too gentle, we miss real failures. Pin parameters to documented
+  HF transceiver specs (FT-891, IC-7300, K3 — common rig classes).
+
 ## Lane E: Security And Agent Governance
 
 ### E1. Secret/Artifact Leak Gate
