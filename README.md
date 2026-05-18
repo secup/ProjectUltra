@@ -153,6 +153,17 @@ experimental branches awaiting further hardware validation.
 harness (Mac ↔ Pi5 over USB sound cards) with byte-exact
 end-to-end validation.
 
+**OTASim — network HF channel server.** Long-running daemon
+(`ota_simulator serve`) that hosts the HF medium in software:
+multiple clients join a session, audio flows over gRPC (control) +
+UDP (samples), and the channel model is applied server-side.
+`ultra_gui`, `ultra_tnc`, and `cli_simulator` can all run as OTASim
+clients instead of opening a soundcard, so protocol/feature work
+needs no cable rig and no audio hardware. The server holds a
+session reference clock that bridges per-host audio-clock drift,
+so cross-machine runs (e.g. Mac ↔ Pi5 ↔ Windows over LAN or VPN)
+behave as a single timeline.
+
 **Protocol v2.** PING / PONG, CONNECT / CONNECT_ACK,
 MODE_CHANGE, DATA, ACK / SACK, DISCONNECT. Wire-level CRC-16
 on every frame, capability flags, measured-SNR + fading-index
@@ -279,23 +290,37 @@ Simulator and bench binaries are published separately as
 - CMake 3.16+
 - C++20 compiler (GCC 10+, Clang 12+, MSVC 2019+)
 - SDL2 (GUI + audio I/O for `cli_simulator` / `ultra_tnc`)
+- gRPC + Protobuf + Abseil + c-ares + OpenSSL + RE2 + zlib
+  (network audio plane for `ota_simulator` and the OTASim client modes
+  of `ultra_gui` / `ultra_tnc` / `cli_simulator`)
 
 ### Building
 
 ```bash
 # Ubuntu/Debian
-sudo apt install libsdl2-dev cmake build-essential pkg-config
+sudo apt install \
+  libsdl2-dev cmake build-essential pkg-config \
+  libgrpc++-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
+  libabsl-dev libc-ares-dev libssl-dev libre2-dev zlib1g-dev
 
 # macOS
-brew install sdl2 cmake pkg-config
+brew install sdl2 cmake pkg-config grpc protobuf abseil c-ares
 
 # Windows (vcpkg)
-vcpkg install sdl2
+vcpkg install sdl2:x64-windows grpc:x64-windows
 
 git clone https://github.com/secup/ProjectUltra.git
 cd ProjectUltra
 cmake -S . -B build
 cmake --build build -j 4
+```
+
+On Windows, point CMake at the vcpkg toolchain:
+
+```powershell
+cmake -S . -B build -A x64 `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+cmake --build build -j 4 --config Release
 ```
 
 ### Running
@@ -331,6 +356,31 @@ cmake --build build -j 4
 > + notarization is on the post-alpha release roadmap.
 
 #### Diagnostic / lab tools
+
+**OTASim server** (network HF channel medium — multiple clients share a
+session, audio flows over gRPC + UDP, channel model is server-side):
+
+```bash
+# Token allowlist file: one `<token>:<station_id>:<description>` per line.
+cat >/tmp/ota_tokens.conf <<EOF
+alice_token:ALPHA:Alpha station
+bob_token:BRAVO:Bravo station
+EOF
+
+# Long-running daemon — bind to LAN or localhost.
+./build/ota_simulator serve \
+  --bind 0.0.0.0:50051 --udp-bind 0.0.0.0:50052 \
+  --tokens /tmp/ota_tokens.conf
+
+# Clients (any combination, same or different hosts):
+./build/ultra_gui  -sim --ota-host <server>:50051 --station-id ALPHA --token alice_token
+./build/ultra_tnc       --sim-audio --ota-host <server>:50051 --station-id BRAVO --token bob_token
+./build/cli_simulator   --snr 15 --channel good --rate auto --test
+```
+
+Use OTASim instead of the cable rig for protocol/feature work: no
+soundcard needed, fully portable, and the server-side reference clock
+bridges per-host audio-clock drift across multiple machines.
 
 **CLI simulator** (full protocol, two-station, channel injection; not the
 operator TNC):
