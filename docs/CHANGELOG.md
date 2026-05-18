@@ -10,6 +10,103 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-05-18: OTASim two-station GUI connect end-to-end
+
+**Fixed:** Two `ultra_gui -sim` instances pointed at the same
+`ota_simulator serve` daemon could PING/PONG but never complete the
+CONNECT/MODE_CHANGE handshake. The connect attempt would stall and the
+two GUIs sat in state 1 (PING_SENT) or state 2 (PONG_RECEIVED) for the
+session lifetime.
+
+**Root causes (three independent bugs, all compounding):**
+
+1. **OTASim client RX buffer cap was 20 s.**
+   `kMaxRxBufferSamples = 960000` at 48 kHz meant the client could
+   silently accumulate up to 20 seconds of audio before dropping any
+   samples. Server's session-clock tick emits continuous samples at
+   real-time rate (silence + audio, like a real soundcard); when the
+   GUI render loop briefly stalled (waterfall scroll, ImGui spike) the
+   audio piled up and never recovered. Real audio frames then sat
+   behind multi-second silence, well past the ARQ timeouts and the
+   modem's sync-search window.
+
+2. **`-sim` mode left modem callsign at default `8P9QC`.**
+   The GUI's `Connect to <remote>` uses the OTASim `--station-id` as
+   the destination callsign in the frame header. But the modem's local
+   callsign defaulted to `8P9QC` from settings; nothing forced it to
+   match the `--station-id`. `deliverFrame()` parses the header, sees
+   `dst=ALPHA` vs `local=8P9QC`, classifies the frame as "different
+   station", and drops it silently at TRACE level. LDPC was decoding
+   3/3 CWs successfully, the frame was then dropped before reaching
+   the protocol layer.
+
+3. **`--log-file` only captured the App-constructor startup logs.**
+   `App::initLog()` unconditionally called `ultra::setLogFile(g_gui_log_file)`
+   after opening `logs/gui.log`, overriding whatever `main_gui.cpp` had
+   set from `--log-file`. So per-station log files would receive ~12
+   lines of modem init and then go silent for the rest of the session,
+   making per-station debug impossible without juggling working
+   directories.
+
+**Changed:**
+
+- `src/otasim_client/ota_audio_backend.cpp` — `kMaxRxBufferSamples`
+  reduced from `960000` (20 s) to `23040` (480 ms). Behaves like a
+  real soundcard's driver buffer: continuous samples in, consumer
+  drains at real-time rate, oldest drops on consumer stall. 480 ms
+  ≈ 8x a 60 Hz render budget, which absorbs typical jitter without
+  building multi-second latency.
+- `src/otasim_client/ota_audio_backend.{cpp,hpp}` — optional
+  `#ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS` counters log RX queue depth
+  every 100 packets. Off by default.
+- `src/gui/app.cpp` — in `-sim` mode with non-empty `--station-id`,
+  force the modem's local callsign to the station id (overrides the
+  settings callsign for the protocol-address check only). Without this,
+  every inbound frame is dropped as "different station".
+- `src/gui/app.cpp` — `initLog()` adopts `ultra::g_log_file` if it is
+  already set externally (by `main_gui.cpp`'s `--log-file` parser),
+  instead of blindly opening `logs/gui.log` and clobbering the user's
+  chosen sink.
+- `tests/test_ultra_gui_ota_client.cpp` — extended to time the
+  passthrough latency (must be < 150 ms in-process) and to bound the
+  idle RX backlog at the new soundcard-like cap.
+
+**ACK diversity + CONNECT_ACK rescue retry are intentional.** Once the
+handshake completes you will see each ACK delivered twice (~440 ms
+apart) and one proactive CONNECT_ACK re-send. Both mechanisms exist
+for real HF where the dominant loss mode is plain cumulative ACKs
+disappearing into a fade — see comment in
+`src/protocol/selective_repeat_arq.cpp:1266`. On OTASim's clean AWGN
+channel they are visible but harmless; SR-ARQ correctly de-duplicates
+at the base/bitmap level. Do not propose disabling them.
+
+**Verification:**
+
+```bash
+cmake --build build -j4
+ctest --test-dir build -R "Otasim|UltraGuiOta|UltraTncSimAudio|SessionContext" \
+  --output-on-failure -j1   # 3/3 (or 4/4) pass
+
+# Manual two-station QSO over OTASim (localhost):
+./build/ota_simulator serve --bind 127.0.0.1:50051 --udp-bind 127.0.0.1:50052 \
+  --tokens /tmp/ota_tokens.conf &
+./build/ultra_gui -sim --ota-host 127.0.0.1:50051 \
+  --station-id ALPHA --token alpha_tok --monitor-audio \
+  --log-file /tmp/alpha.log --log-level debug &
+./build/ultra_gui -sim --ota-host 127.0.0.1:50051 \
+  --station-id BRAVO --token bravo_tok --monitor-audio \
+  --log-file /tmp/bravo.log --log-level debug &
+# In one GUI: Connect to other station.
+# Expected: both reach state 3 (CONNECTED), MODE_CHANGE to OFDM-CHIRP
+# DQPSK R1/4, in-session ACKs decode in OFDM control profile.
+```
+
+Verified end-to-end on 2026-05-18: full PING → PONG → CONNECT →
+CONNECT_ACK → MODE_CHANGE → CONNECTED on two macOS GUIs against a
+local `ota_simulator serve` daemon.
+
+---
+
 ## 2026-05-15: CONNECT call-collision handling
 
 **Fixed:** Inbound CONNECT frames arriving while the local station was in

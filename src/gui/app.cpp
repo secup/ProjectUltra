@@ -376,11 +376,22 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         guiLog("Waterfall disabled by startup option");
     }
 
-    // Initialize protocol with saved callsign
+    // Initialize protocol with saved callsign. In -sim mode the OTASim
+    // --station-id is what the peer uses to address us at the protocol
+    // level (the GUI's "Connect to <remote>" passes the station id); so
+    // force the modem's local callsign to match, otherwise deliverFrame()
+    // would drop every incoming frame as "different station".
     ultra::gui::startupTrace("App", "callsign-init-enter");
-    size_t local_call_len = boundedCStringLen(settings_.callsign);
-    if (local_call_len > 0) {
-        std::string local_call(settings_.callsign, local_call_len);
+    std::string local_call;
+    if (simulation_enabled_ && !options_.station_id.empty()) {
+        local_call = options_.station_id;
+    } else {
+        size_t local_call_len = boundedCStringLen(settings_.callsign);
+        if (local_call_len > 0) {
+            local_call.assign(settings_.callsign, local_call_len);
+        }
+    }
+    if (!local_call.empty()) {
         ultra::gui::startupTrace("App", "callsign-set-protocol-enter");
         protocol_.setLocalCallsign(local_call);
         ultra::gui::startupTrace("App", "callsign-set-protocol-exit");

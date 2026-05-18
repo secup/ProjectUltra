@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <iostream>
 #include <limits>
 #include <utility>
 
@@ -25,7 +26,15 @@ namespace service = ultra::ota_simulator_service;
 constexpr uint32_t kFallbackMaxPacketSamples =
     static_cast<uint32_t>((8192 - service::kOtaAudioHeaderBytes) / sizeof(float));
 constexpr size_t kPrimeSamples = 8;
-constexpr size_t kMaxRxBufferSamples = 960000;
+// 480 ms of audio at 48 kHz mono. Mirrors a real soundcard's bounded
+// driver buffer: the server emits continuous samples at real-time rate
+// (silence + audio just like a radio's RX line), the consumer drains
+// at real-time rate; if the consumer stalls (slow render frame, GC)
+// the oldest samples drop. 480 ms = ~8x a 60 Hz render budget, which
+// absorbs typical jitter without piling up multi-second latency. The
+// previous 20 s cap let 5+ seconds of silence sit in front of the
+// first real audio and stalled the connect handshake.
+constexpr size_t kMaxRxBufferSamples = 23040;
 constexpr auto kRpcDeadline = std::chrono::milliseconds(1500);
 constexpr auto kHeartbeatInterval = std::chrono::seconds(2);
 constexpr auto kReconnectInterval = std::chrono::seconds(5);
@@ -624,6 +633,9 @@ void OtaAudioBackend::pushRxPacket(uint64_t start_sample, std::span<const float>
     std::vector<float> copy(samples.begin() + static_cast<std::ptrdiff_t>(offset), samples.end());
     rx_pending_.emplace(start_sample, std::move(copy));
     drainReadyRxLocked();
+#ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS
+    logRxDiagnosticsLocked("push");
+#endif
 }
 
 void OtaAudioBackend::drainReadyRxLocked() {
@@ -642,6 +654,26 @@ void OtaAudioBackend::drainReadyRxLocked() {
         rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + static_cast<std::ptrdiff_t>(drop));
     }
 }
+
+#ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS
+void OtaAudioBackend::logRxDiagnosticsLocked(const char* context) {
+    if ((++rx_diagnostic_packet_counter_ % 100) != 0) {
+        return;
+    }
+    size_t pending_samples = 0;
+    for (const auto& [_, samples] : rx_pending_) {
+        pending_samples += samples.size();
+    }
+    std::clog << "[INFO] otasim.client_rx"
+              << " context=" << context
+              << " station=" << config_.station_id
+              << " session=" << config_.session_id
+              << " rx_pending_blocks=" << rx_pending_.size()
+              << " rx_pending_samples=" << pending_samples
+              << " rx_buffer_samples=" << rx_buffer_.size()
+              << " rx_next_sample=" << rx_next_sample_ << "\n";
+}
+#endif
 
 void OtaAudioBackend::setStatus(OtaAudioConnectionState state, std::string text, int attempt) {
     std::lock_guard<std::mutex> lock(mutex_);

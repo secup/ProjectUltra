@@ -77,6 +77,9 @@ private:
     void rxLoop();
     void pushRxPacket(uint64_t start_sample, std::span<const float> samples);
     void drainReadyRxLocked();
+#ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS
+    void logRxDiagnosticsLocked(const char* context);
+#endif
     void setStatus(OtaAudioConnectionState state, std::string text, int attempt = 0);
     void setStatusLocked(OtaAudioConnectionState state, std::string text, int attempt = 0);
 
@@ -109,6 +112,9 @@ private:
     uint64_t rx_next_sample_ = 0;
     std::map<uint64_t, std::vector<float>> rx_pending_;
     std::vector<float> rx_buffer_;
+#ifdef ULTRA_OTASIM_AUDIO_DIAGNOSTICS
+    uint64_t rx_diagnostic_packet_counter_ = 0;
+#endif
 };
 
 }  // namespace ultra::otasim_client

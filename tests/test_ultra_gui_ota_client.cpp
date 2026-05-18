@@ -216,19 +216,32 @@ bool containsSamples(const std::vector<float>& haystack, const std::vector<float
     return std::search(haystack.begin(), haystack.end(), needle.begin(), needle.end()) != haystack.end();
 }
 
-void waitForSamples(otasim_client::OtaAudioBackend& backend,
-                    const std::vector<float>& expected) {
+std::chrono::milliseconds waitForSamples(otasim_client::OtaAudioBackend& backend,
+                                         const std::vector<float>& expected,
+                                         std::chrono::milliseconds timeout) {
     std::vector<float> received;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    const auto start = std::chrono::steady_clock::now();
+    const auto deadline = start + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
-        auto chunk = backend.getRxSamples(256);
+        auto chunk = backend.getRxSamples(2048);
         received.insert(received.end(), chunk.begin(), chunk.end());
         if (containsSamples(received, expected)) {
-            return;
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start);
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (chunk.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
     }
     throw std::runtime_error("timed out waiting for passthrough audio");
+}
+
+std::vector<float> latencyPayload(size_t samples) {
+    std::vector<float> out(samples);
+    for (size_t i = 0; i < out.size(); ++i) {
+        out[i] = static_cast<float>((i % 251) + 1) * 0.001f;
+    }
+    return out;
 }
 
 }  // namespace
@@ -273,7 +286,19 @@ int main(int argc, char** argv) {
         const std::vector<float> tx{0.125f, -0.25f, 0.5f, -0.75f,
                                     0.875f, -1.0f, 0.375f, -0.625f};
         check(alice.queueTxSamples(tx, &error), "alice TX failed: " + error);
-        waitForSamples(bob, tx);
+        (void)waitForSamples(bob, tx, std::chrono::seconds(5));
+
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        const size_t idle_buffer = bob.getRxBufferSize();
+        check(idle_buffer <= 26000,
+              "bob exceeded soundcard-like rx buffer cap: " + std::to_string(idle_buffer));
+
+        const std::vector<float> latency_tx = latencyPayload(4096);
+        check(alice.queueTxSamples(latency_tx, &error), "alice latency TX failed: " + error);
+        const auto latency = waitForSamples(bob, latency_tx, std::chrono::seconds(2));
+        check(latency < std::chrono::milliseconds(150),
+              "OTASim localhost audio latency too high: " +
+                  std::to_string(latency.count()) + " ms");
 
         alice.close();
         bob.close();
