@@ -75,13 +75,39 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-
 
+      - name: Free Disk Space (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
+          $targets = @(
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "C:\Program Files\dotnet\sdk\NuGetFallbackFolder",
+            "C:\hostedtoolcache\windows\go",
+            "C:\hostedtoolcache\windows\Ruby",
+            "C:\hostedtoolcache\windows\PyPy",
+            "C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk",
+            "C:\ProgramData\chocolatey\lib\mingw",
+            "C:\ProgramData\chocolatey\lib\android-sdk",
+            "C:\ghcup"
+          )
+          foreach ($t in $targets) {
+            if (Test-Path $t) {
+              Write-Host "Removing $t ..."
+              Remove-Item -Path $t -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
+
       - name: Install Test Dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
+          New-Item -ItemType Directory -Force "D:/vcpkg-bt" | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
-          vcpkg install grpc:x64-windows
+          vcpkg install grpc:x64-windows --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Configure CMake (Linux/macOS)
@@ -266,13 +292,39 @@ jobs:
           restore-keys: |
             vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-
 
+      - name: Free Disk Space (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
+          $targets = @(
+            "C:\Android",
+            "C:\Program Files (x86)\Android",
+            "C:\Program Files\dotnet\sdk\NuGetFallbackFolder",
+            "C:\hostedtoolcache\windows\go",
+            "C:\hostedtoolcache\windows\Ruby",
+            "C:\hostedtoolcache\windows\PyPy",
+            "C:\hostedtoolcache\windows\Java_Temurin-Hotspot_jdk",
+            "C:\ProgramData\chocolatey\lib\mingw",
+            "C:\ProgramData\chocolatey\lib\android-sdk",
+            "C:\ghcup"
+          )
+          foreach ($t in $targets) {
+            if (Test-Path $t) {
+              Write-Host "Removing $t ..."
+              Remove-Item -Path $t -Recurse -Force -ErrorAction SilentlyContinue
+            }
+          }
+          Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
+
       - name: Install Windows GUI Dependencies
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
+          New-Item -ItemType Directory -Force "D:/vcpkg-bt" | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
-          vcpkg install sdl2:x64-windows grpc:x64-windows
+          vcpkg install sdl2:x64-windows grpc:x64-windows --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Configure CMake (Linux/macOS)
