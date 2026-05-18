@@ -220,18 +220,14 @@ if [[ "$TARGET" == "windows" ]]; then
 
   grpc_root=""
   for vcpkg_root in "${vcpkg_install_roots[@]}"; do
-    if [[ -d "$vcpkg_root/bin" ]] && compgen -G "$vcpkg_root/bin/grpc*.dll" > /dev/null; then
-      grpc_root="$vcpkg_root"
-      break
-    fi
-    if [[ -f "$vcpkg_root/bin/gpr.dll" ]]; then
+    if [[ -f "$vcpkg_root/bin/libprotobuf.dll" ]]; then
       grpc_root="$vcpkg_root"
       break
     fi
   done
 
   if [[ -z "$grpc_root" ]]; then
-    echo "gRPC runtime DLLs were not found. Expected from vcpkg x64-windows." >&2
+    echo "gRPC/protobuf runtime DLLs were not found. Expected from vcpkg x64-windows." >&2
     echo "Searched vcpkg roots:" >&2
     for vcpkg_root in "${vcpkg_install_roots[@]}"; do
       echo "  $vcpkg_root" >&2
@@ -246,19 +242,14 @@ if [[ "$TARGET" == "windows" ]]; then
   fi
 
   grpc_dependency_dlls=(
-    grpc++.dll
-    grpc.dll
-    gpr.dll
-    address_sorting.dll
     libprotobuf.dll
     abseil_dll.dll
     cares.dll
     re2.dll
-    utf8_range.dll
-    utf8_validity.dll
     libcrypto-3-x64.dll
     libssl-3-x64.dll
-    zlib1.dll
+    legacy.dll
+    z.dll
   )
 
   for dll in "${grpc_dependency_dlls[@]}"; do
