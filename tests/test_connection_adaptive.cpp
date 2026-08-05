@@ -451,6 +451,65 @@ struct ConnectionAdaptiveTestAccess {
         return !c.pending_tx_fragments_.empty();
     }
 
+    static void makeRemoteDataTurn(Connection& c) {
+        c.local_data_turn_ = false;
+        c.peer_data_turn_requested_ = false;
+        c.local_turn_request_pending_ = false;
+        c.data_turn_yield_pending_ = false;
+        c.data_turn_tx_guard_ms_ = 0;
+        c.turn_request_retransmit_ms_ = 0;
+        c.turn_request_holdoff_ms_ = 0;
+    }
+
+    static size_t queuedPayloadCount(const Connection& c) {
+        return c.queued_payloads_.size();
+    }
+
+    static std::string queuedPayloadText(const Connection& c, size_t index) {
+        if (index >= c.queued_payloads_.size()) {
+            return {};
+        }
+        const auto& data = c.queued_payloads_[index].data;
+        return std::string(data.begin(), data.end());
+    }
+
+    static size_t outboundMessageRecordCount(const Connection& c) {
+        return c.outbound_message_tx_records_.size();
+    }
+
+    static bool queuedFile(const Connection& c) {
+        return c.queued_file_path_.has_value();
+    }
+
+    static bool fileControllerSending(const Connection& c) {
+        return c.file_transfer_.getState() == FileTransferState::SENDING;
+    }
+
+    static void pumpQueuedOperation(Connection& c) {
+        c.sendNextQueuedPayloadIfReady();
+    }
+
+    static void setRawDataCodeRate(Connection& c, CodeRate rate) {
+        c.data_code_rate_ = rate;
+    }
+
+    static void clearArqCallsigns(Connection& c) {
+        c.arq_.setCallsigns({}, {});
+    }
+
+    static void restoreArqCallsigns(Connection& c) {
+        c.arq_.setCallsigns(c.local_call_, c.remote_call_);
+    }
+
+    static void applyDataMode(Connection& c, Modulation mod, CodeRate rate,
+                              int cw_count) {
+        c.applyDataMode(mod, rate, cw_count, LadderRungId::UNKNOWN);
+    }
+
+    static size_t rxReassemblyBytes(const Connection& c) {
+        return c.rx_reassembly_buffer_.size();
+    }
+
     static bool sendFixedData(Connection& c, const Bytes& payload, uint8_t flags) {
         return c.arq_.sendFixedDataWithFlags(payload, flags);
     }
@@ -795,6 +854,10 @@ struct ConnectionAdaptiveTestAccess {
 
     static void setForcedCWCount(Connection& c, int cw) {
         c.config_.forced_cw_count = cw;
+    }
+
+    static int configuredForcedCWCount(const Connection& c) {
+        return c.config_.forced_cw_count;
     }
 
     static bool txLatentStartupProbeActive(const Connection& c) {
@@ -2956,6 +3019,21 @@ void test_forced_r1_3_cw1_rejects_file_before_wire_tx() {
           "insufficient FILE_START capacity must fail before any wire transmission");
     CHECK(!c.isFileTransferInProgress(),
           "rejected forced profile must leave no queued or active file transfer");
+
+    // FILE_START needs 11 bytes of metadata, but a text message has no such
+    // minimum: it must remain usable by fragmenting over this tiny geometry.
+    ConnectionAdaptiveTestAccess::setDataTurnTxGuard(c, 0);
+    const std::string message = "message-over-eight-bytes";
+    CHECK(c.sendMessage(message),
+          "the same 8-byte profile must accept a fragmented operator message");
+    CHECK(tx_frames.size() == (message.size() + 7) / 8,
+          "message must split into the exact number of 8-byte DATA frames");
+    for (const auto& bytes : tx_frames) {
+        const auto frame = v2::DataFrame::deserialize(bytes);
+        CHECK(frame && frame->type == v2::FrameType::DATA &&
+                  frame->payload.size() <= 8,
+              "every tiny-profile message fragment must be bounded DATA");
+    }
 }
 
 void test_queued_file_geometry_shrink_reports_terminal_start_failure() {
@@ -3005,6 +3083,616 @@ void test_queued_file_geometry_shrink_reports_terminal_start_failure() {
           "terminal queued-start failure must clear queued and controller state");
     CHECK(tx_frames.empty(),
           "queued FILE_START capacity failure must occur before wire transmission");
+}
+
+void test_empty_message_requests_are_rejected_atomically() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    CHECK(!c.sendMessage(""), "empty single message must be rejected");
+    CHECK(!c.sendMessages({}), "empty batch must be rejected");
+    CHECK(!c.sendMessages({"valid", ""}),
+          "a batch containing an empty logical message must be rejected atomically");
+    CHECK(transmitted.empty() && c.getTxBacklogBytes() == 0 &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0,
+          "rejected empty requests must leave no wire, backlog, or status record");
+}
+
+void test_deferred_queue_refuses_newest_and_abort_fails_every_accepted_message() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::makeRemoteDataTurn(c);
+
+    constexpr size_t kQueueLimit = 32;
+    for (size_t i = 0; i < kQueueLimit; ++i) {
+        CHECK(c.sendMessage("queued-" + std::to_string(i)),
+              "every message through the documented deferred-queue limit must be accepted");
+    }
+    CHECK(!c.sendMessage("refused-newest"),
+          "the payload beyond the queue limit must be refused, not evict an accepted one");
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == kQueueLimit &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == kQueueLimit,
+          "queue overflow must preserve all previously accepted payloads and records");
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadText(c, 0) == "queued-0" &&
+              ConnectionAdaptiveTestAccess::queuedPayloadText(c, kQueueLimit - 1) ==
+                  "queued-31",
+          "queue overflow must preserve FIFO endpoints exactly");
+
+    const size_t wire_before_abort = transmitted.size();
+    c.abortTxNow();
+    size_t failed = 0;
+    for (const auto& status : statuses) {
+        failed += status.status == Connection::MessageTxStatus::FAILED ? 1 : 0;
+    }
+    CHECK(failed == kQueueLimit &&
+              ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 0 &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0,
+          "TX abort must terminal-fail and remove every accepted queued message");
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    ConnectionAdaptiveTestAccess::pumpQueuedOperation(c);
+    CHECK(transmitted.size() == wire_before_abort,
+          "an aborted queued message must never transmit later after turn acquisition");
+}
+
+void test_reset_terminal_fails_accepted_queued_message() {
+    Connection c;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    c.setTransmitCallback([](const Bytes&) {});
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::makeRemoteDataTurn(c);
+    CHECK(c.sendMessage("reset-me"),
+          "queued reset fixture message must be accepted");
+
+    c.reset();
+    CHECK(statuses.size() == 1 &&
+              statuses.front().status == Connection::MessageTxStatus::FAILED &&
+              statuses.front().text == "reset-me" &&
+              statuses.front().remote_call == "K2DEF" &&
+              ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 0 &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0,
+          "reset must publish one peer-attributed terminal failure and clear the accepted request");
+}
+
+void test_accepted_queued_start_failure_reports_terminal_status() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    std::vector<bool> legacy_results;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { legacy_results.push_back(success); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::makeRemoteDataTurn(c);
+    CHECK(c.sendMessage("accepted-before-start"),
+          "deferred message must be accepted while waiting for the turn");
+
+    // Model an asynchronous start-time invalidation after acceptance. The queue
+    // pump sees an otherwise-ready ARQ, but frame submission refuses missing peers.
+    ConnectionAdaptiveTestAccess::clearArqCallsigns(c);
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    ConnectionAdaptiveTestAccess::pumpQueuedOperation(c);
+
+    CHECK(transmitted.size() == 1,
+          "only the earlier TURN_REQUEST control may exist after start refusal");
+    CHECK(statuses.size() == 1 &&
+              statuses.front().status == Connection::MessageTxStatus::FAILED &&
+              statuses.front().text == "accepted-before-start" &&
+              legacy_results.size() == 1 && !legacy_results.front(),
+          "accepted start failure must publish exactly one terminal FAILED result");
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 0 &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0,
+          "terminal queued-start failure must leave no stranded queue or record");
+}
+
+void test_deferred_payload_fifo_survives_failed_head_and_new_submission() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::makeRemoteDataTurn(c);
+    CHECK(c.sendMessage("fifo-A") && c.sendMessage("fifo-B"),
+          "FIFO fixture head and successor must both enter the deferred queue");
+
+    ConnectionAdaptiveTestAccess::clearArqCallsigns(c);
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    ConnectionAdaptiveTestAccess::pumpQueuedOperation(c);
+    CHECK(statuses.size() == 1 &&
+              statuses.front().status == Connection::MessageTxStatus::FAILED &&
+              statuses.front().text == "fifo-A" &&
+              ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 1,
+          "failed queue head must terminal-fail once without consuming its successor");
+
+    const size_t wire_before_c = transmitted.size();
+    CHECK(c.sendMessage("fifo-C"),
+          "a new payload must remain admissible behind the surviving queued item");
+    CHECK(transmitted.size() == wire_before_c &&
+              ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 2 &&
+              ConnectionAdaptiveTestAccess::queuedPayloadText(c, 0) == "fifo-B" &&
+              ConnectionAdaptiveTestAccess::queuedPayloadText(c, 1) == "fifo-C",
+          "new payload must queue behind the older accepted successor, never bypass it");
+
+    ConnectionAdaptiveTestAccess::restoreArqCallsigns(c);
+    ConnectionAdaptiveTestAccess::pumpQueuedOperation(c);
+    CHECK(transmitted.size() == wire_before_c + 1,
+          "restoring the transport must start exactly one queued payload");
+    const auto first_after_recovery = v2::DataFrame::deserialize(transmitted.back());
+    CHECK(first_after_recovery &&
+              std::string(first_after_recovery->payload.begin(),
+                          first_after_recovery->payload.end()) == "fifo-B",
+          "the older surviving payload must retain wire priority over the new submission");
+
+    c.abortTxNow();
+    size_t failed_a = 0;
+    size_t failed_b = 0;
+    size_t failed_c = 0;
+    for (const auto& event : statuses) {
+        if (event.status != Connection::MessageTxStatus::FAILED) continue;
+        failed_a += event.text == "fifo-A" ? 1 : 0;
+        failed_b += event.text == "fifo-B" ? 1 : 0;
+        failed_c += event.text == "fifo-C" ? 1 : 0;
+    }
+    CHECK(failed_a == 1 && failed_b == 1 && failed_c == 1,
+          "every accepted FIFO item must receive exactly one terminal result");
+}
+
+void test_midwindow_message_geometry_change_fails_closed_and_link_recovers() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    std::vector<bool> legacy_results;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { legacy_results.push_back(success); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+
+    const size_t old_capacity =
+        ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
+    const std::string long_message(old_capacity + 17, 'G');
+    CHECK(c.sendMessage(long_message) &&
+              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "geometry-change fixture must own a live multi-frame message");
+    const uint8_t epoch_before =
+        ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
+
+    // Model an unavoidable receiver-commanded/stuck-frame demotion while old
+    // message slots are live. It must fail the complete logical object instead
+    // of letting old oversized chunks reach the smaller frame builder.
+    ConnectionAdaptiveTestAccess::applyDataMode(
+        c, Modulation::QPSK, CodeRate::R1_3, /*cw_count=*/1);
+    CHECK(!ConnectionAdaptiveTestAccess::fragmentedMessagePending(c) &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0 &&
+              statuses.size() == 2 &&
+              statuses.front().status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses.back().status == Connection::MessageTxStatus::FAILED &&
+              statuses.back().text == long_message &&
+              statuses.back().remote_call == "K2DEF" &&
+              legacy_results.size() == 1 && !legacy_results.front(),
+          "mid-window regrid must publish one attributed terminal failure and clear old fragments");
+    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) != epoch_before,
+          "abandoning a partial logical object must enter a fresh move epoch");
+    CHECK(ConnectionAdaptiveTestAccess::currentPayloadCapacity(c) == 8,
+          "forced demotion fixture must establish the smaller eight-byte capacity");
+
+    const size_t wire_before_recovery = transmitted.size();
+    CHECK(!ConnectionAdaptiveTestAccess::sendFixedData(
+              c, Bytes(9, 0xA5), v2::Flags::FINAL) &&
+              transmitted.size() == wire_before_recovery,
+          "production ARQ must refuse an oversized stale-geometry chunk before wire serialization");
+    CHECK(c.sendMessage("RECOVER"),
+          "the first post-regrid message must be accepted on the same connection");
+    CHECK(transmitted.size() == wire_before_recovery + 1,
+          "post-regrid message must produce one new bounded frame");
+    const auto recovery = v2::DataFrame::deserialize(transmitted.back());
+    CHECK(recovery && recovery->payload == Bytes({'R','E','C','O','V','E','R'}),
+          "post-regrid payload must be exact, never silently truncated");
+
+    ToneBurstAckDetection ack;
+    ack.payload.group_seq = static_cast<uint8_t>(recovery->seq & 0x3F);
+    ack.payload.frame_mask = 0;
+    ack.payload.rate_hint = 7;
+    ack.payload.type = AckType::Ack;
+    ack.payload.move_epoch = ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
+    ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(ack),
+          "post-regrid exact message ACK must be accepted");
+    CHECK(statuses.size() == 4 &&
+              statuses[2].status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses[2].text == "RECOVER" &&
+              statuses[3].status == Connection::MessageTxStatus::DELIVERED &&
+              statuses[3].text == "RECOVER" &&
+              legacy_results.size() == 2 && legacy_results.back(),
+          "the same link must deliver the next exact message after the failed regrid object");
+}
+
+void test_ordinary_adaptation_holds_geometry_for_complete_message() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QAM16, CodeRate::R2_3, /*logical_cw=*/4);
+
+    const size_t capacity =
+        ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
+    CHECK(c.sendMessage(std::string(capacity + 11, 'A')) &&
+              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "adaptive hold fixture must start one multi-frame message");
+    const size_t wire_before_feedback = transmitted.size();
+    ConnectionAdaptiveTestAccess::applyFeedback(c, 0.0f);
+    CHECK(c.getDataModulation() == Modulation::QAM16 &&
+              c.getDataCodeRate() == CodeRate::R2_3 &&
+              transmitted.size() == wire_before_feedback &&
+              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "ordinary quality adaptation must hold one geometry until the complete message retires");
+    CHECK(statuses.size() == 1 &&
+              statuses.front().status == Connection::MessageTxStatus::SUBMITTED,
+          "an avoidable adaptive decision must not fail an accepted message");
+    c.abortTxNow();
+}
+
+void test_runtime_forced_cw_override_cannot_regrid_active_message() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+
+    const size_t capacity =
+        ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
+    CHECK(c.sendMessage(std::string(capacity + 9, 'F')) &&
+              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "forced-CW guard fixture must start a geometry-bound message");
+    const size_t wire_before_override = transmitted.size();
+
+    c.setForcedFrameCodewords(/*cw_count=*/1, /*forced=*/true);
+    CHECK(c.getForcedFrameCodewords() == 4 &&
+              ConnectionAdaptiveTestAccess::configuredForcedCWCount(c) == 0 &&
+              ConnectionAdaptiveTestAccess::currentPayloadCapacity(c) == capacity &&
+              transmitted.size() == wire_before_override &&
+              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "public forced-CW API must reject a runtime regrid without partially mutating policy");
+
+    c.abortTxNow();
+    c.setForcedFrameCodewords(/*cw_count=*/1, /*forced=*/true);
+    CHECK(c.getForcedFrameCodewords() == 1 &&
+              ConnectionAdaptiveTestAccess::configuredForcedCWCount(c) == 1,
+          "forced-CW override must remain available after the geometry owner retires");
+}
+
+void test_submitted_status_reset_runs_after_physical_handoff() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    bool reset_from_submitted = false;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+            if (!reset_from_submitted &&
+                event.status == Connection::MessageTxStatus::SUBMITTED) {
+                reset_from_submitted = true;
+                c.reset();
+            }
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    CHECK(c.sendMessage("reset-after-handoff"),
+          "message admission should complete before SUBMITTED callback reset");
+    CHECK(transmitted.size() == 1 &&
+              v2::DataFrame::deserialize(transmitted.front()).has_value(),
+          "SUBMITTED callback reset must not clear the ARQ slot before physical handoff");
+    CHECK(reset_from_submitted && c.getState() == ConnectionState::DISCONNECTED &&
+              ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0 &&
+              !ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "reentrant reset must leave the connection fully reset after sendMessage returns");
+    CHECK(statuses.size() == 2 &&
+              statuses[0].status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses[0].sequence_valid &&
+              statuses[1].status == Connection::MessageTxStatus::FAILED &&
+              statuses[1].sequence_valid &&
+              statuses[0].text == "reset-after-handoff" &&
+              statuses[1].text == "reset-after-handoff",
+          "status FIFO must publish SUBMITTED then attributed FAILED under reentrant reset");
+}
+
+void test_failure_batch_precedes_reentrant_replacement_submission() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    bool replacement_started = false;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+            if (!replacement_started &&
+                event.status == Connection::MessageTxStatus::FAILED &&
+                event.text == "abort-batch-A") {
+                replacement_started = c.sendMessage("abort-batch-replacement");
+            }
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    CHECK(c.sendMessages({"abort-batch-A", "abort-batch-B"}),
+          "failure-order fixture must admit the original two-message batch");
+    CHECK(statuses.size() == 2 &&
+              statuses[0].status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses[1].status == Connection::MessageTxStatus::SUBMITTED,
+          "original batch must publish two submissions before abort");
+
+    c.abortTxNow();
+    CHECK(replacement_started && statuses.size() == 5 &&
+              statuses[2].status == Connection::MessageTxStatus::FAILED &&
+              statuses[2].text == "abort-batch-A" &&
+              statuses[3].status == Connection::MessageTxStatus::FAILED &&
+              statuses[3].text == "abort-batch-B" &&
+              statuses[4].status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses[4].text == "abort-batch-replacement",
+          "detached old failures must drain before a reentrant replacement submission");
+    c.abortTxNow();
+}
+
+void test_delivered_status_reset_runs_after_ack_unwind() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    bool reset_from_delivered = false;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+            if (!reset_from_delivered &&
+                event.status == Connection::MessageTxStatus::DELIVERED) {
+                reset_from_delivered = true;
+                c.reset();
+            }
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+
+    CHECK(c.sendMessage("reset-after-delivery") && transmitted.size() == 1,
+          "delivery-reset fixture must submit one DATA frame");
+    const auto frame = v2::DataFrame::deserialize(transmitted.front());
+    CHECK(frame.has_value(), "delivery-reset fixture must put a valid frame on wire");
+
+    ToneBurstAckDetection ack;
+    ack.payload.group_seq = static_cast<uint8_t>(frame->seq & 0x3F);
+    ack.payload.frame_mask = 0;
+    ack.payload.rate_hint = 7;
+    ack.payload.type = AckType::Ack;
+    ack.payload.move_epoch = ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
+    ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(ack),
+          "terminal tone ACK should be consumed before DELIVERED callback reset");
+    CHECK(reset_from_delivered && c.getState() == ConnectionState::DISCONNECTED &&
+              ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0,
+          "DELIVERED callback reset must run after the complete ACK transaction unwinds");
+    CHECK(statuses.size() == 2 &&
+              statuses[0].status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses[1].status == Connection::MessageTxStatus::DELIVERED,
+          "terminal callback reset must retain exactly one ordered SUBMITTED/DELIVERED pair");
+}
+
+void test_midwindow_geometry_change_disconnects_without_move_epoch() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "0", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    c.setTransmitCallback([](const Bytes&) {});
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+    const size_t capacity =
+        ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
+    CHECK(c.sendMessage(std::string(capacity + 5, 'E')),
+          "disabled-epoch geometry fixture must start a fragmented message");
+
+    ConnectionAdaptiveTestAccess::applyDataMode(
+        c, Modulation::QPSK, CodeRate::R1_3, /*cw_count=*/1);
+    CHECK(c.getState() == ConnectionState::DISCONNECTING &&
+              statuses.size() == 2 &&
+              statuses.front().status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses.back().status == Connection::MessageTxStatus::FAILED &&
+              statuses.back().remote_call == "K2DEF",
+          "without move-epoch, abandoning live DATA must fail the message and close the unusable sequence grid");
+    CHECK(!c.sendMessage("must-not-enter-wedged-grid"),
+          "application retry must be rejected while the no-epoch session resets");
+}
+
+void test_file_and_payload_queues_preserve_cross_class_fifo() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::disableAdaptiveRate(c);
+    ConnectionAdaptiveTestAccess::makeRemoteDataTurn(c);
+
+    const Bytes short_binary{0x42, 0x32, 0x46};
+    TempPayloadFile payload("message_file_fifo", 64);
+    CHECK(!payload.path.empty(), "cross-class FIFO source file must be created");
+    CHECK(c.sendBinary(short_binary),
+          "short binary operation must queue while the peer owns the turn");
+    CHECK(c.sendFile(payload.path),
+          "later bulk file operation must be accepted behind the short payload");
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 1 &&
+              ConnectionAdaptiveTestAccess::queuedFile(c) &&
+              !ConnectionAdaptiveTestAccess::fileControllerSending(c),
+          "both logical operations must remain queued before turn acquisition");
+
+    transmitted.clear();  // discard the standalone TURN_REQUEST control
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    ConnectionAdaptiveTestAccess::pumpQueuedOperation(c);
+    CHECK(!transmitted.empty() &&
+              !ConnectionAdaptiveTestAccess::fileControllerSending(c),
+          "the earlier short payload, not the queued file, must own the first ARQ slot");
+    const auto first = v2::DataFrame::deserialize(transmitted.front());
+    CHECK(first && first->type == v2::FrameType::DATA_END &&
+              first->payload == short_binary,
+          "cross-class FIFO must preserve the exact earlier binary payload");
+
+    ToneBurstAckDetection ack;
+    ack.payload.group_seq = static_cast<uint8_t>(first->seq & 0x3F);
+    ack.payload.frame_mask = 0;
+    ack.payload.rate_hint = 7;
+    ack.payload.type = AckType::Ack;
+    ack.payload.move_epoch = 0;
+    ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(ack), "short-payload completion ACK must be consumed");
+    CHECK(ConnectionAdaptiveTestAccess::fileControllerSending(c),
+          "the file may start only after the earlier short payload retires");
+}
+
+void test_file_start_respects_reversed_data_turn_without_prior_local_backlog() {
+    Connection c;
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::makeRemoteDataTurn(c);
+
+    TempPayloadFile payload("reversed_turn_file", 64);
+    CHECK(!payload.path.empty(), "reversed-turn source file must be created");
+    CHECK(c.sendFile(payload.path),
+          "file request must be accepted into the ISS queue while the peer owns DATA");
+    CHECK(ConnectionAdaptiveTestAccess::queuedFile(c) &&
+              !ConnectionAdaptiveTestAccess::fileControllerSending(c),
+          "non-interactive burst mode must not bypass a legitimately reversed DATA turn");
+    CHECK(transmitted.size() == 1 &&
+              v2::parseHeader(transmitted.front()).type == v2::FrameType::TURN_REQUEST,
+          "remote-turn file request must emit only TURN_REQUEST, never FILE DATA");
+
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    ConnectionAdaptiveTestAccess::pumpQueuedOperation(c);
+    CHECK(ConnectionAdaptiveTestAccess::fileControllerSending(c),
+          "queued file must start after TURNOVER grants the local DATA turn");
+}
+
+void test_same_epoch_rebase_preserves_multiwindow_message_prefix() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection receiver;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        receiver, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    std::vector<std::string> messages;
+    receiver.setMessageReceivedCallback(
+        [&](const std::string& text) { messages.push_back(text); });
+    receiver.setTransmitCallback([](const Bytes&) {});
+
+    auto inject = [&](uint16_t seq, char value, bool more) {
+        auto frame = v2::makeFixedDataFrame(
+            "K2DEF", "W1ABC", seq, Bytes{static_cast<uint8_t>(value)},
+            CodeRate::R2_3);
+        frame.flags = static_cast<uint8_t>(
+            frame.flags | v2::Flags::EPOCH_REBASE | v2::epochToFlags(0) |
+            (more ? v2::Flags::MORE_FRAG : v2::Flags::FINAL));
+        receiver.onFrameReceived(frame.serialize());
+    };
+
+    // Stop-and-wait/window-drain traffic can create each next fragment at the
+    // current TX base, so every fragment legitimately carries EPOCH_REBASE in
+    // the SAME epoch. None of those window boundaries is a logical-message reset.
+    inject(0, 'A', true);
+    inject(1, 'B', true);
+    inject(2, 'C', false);
+    CHECK(messages.size() == 1 && messages.front() == "ABC" &&
+              ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 0,
+          "same-epoch rebase boundaries must preserve the complete message prefix");
+}
+
+void test_move_epoch_rebase_drops_stale_message_prefix() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection receiver;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        receiver, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    std::vector<std::string> messages;
+    receiver.setMessageReceivedCallback(
+        [&](const std::string& text) { messages.push_back(text); });
+    receiver.setTransmitCallback([](const Bytes&) {});
+
+    auto old_fragment = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 0, Bytes{'O', 'L', 'D', '-'}, CodeRate::R2_3);
+    old_fragment.flags = static_cast<uint8_t>(
+        old_fragment.flags | v2::Flags::EPOCH_REBASE | v2::Flags::MORE_FRAG |
+        v2::epochToFlags(0));
+    receiver.onFrameReceived(old_fragment.serialize());
+    CHECK(messages.empty() &&
+              ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 4,
+          "old-era prefix must be buffered but not delivered");
+
+    auto new_message = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 1, Bytes{'N', 'E', 'W'}, CodeRate::R2_3);
+    new_message.flags = static_cast<uint8_t>(
+        new_message.flags | v2::Flags::EPOCH_REBASE | v2::Flags::FINAL |
+        v2::epochToFlags(1));
+    receiver.onFrameReceived(new_message.serialize());
+
+    CHECK(messages.size() == 1 && messages.front() == "NEW" &&
+              ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 0,
+          "new-era message must deliver without contamination from the abandoned prefix");
 }
 
 void test_authority_climb_prices_the_real_file_tail() {
@@ -4901,6 +5589,43 @@ void test_normal_ofdm_ack_arms_full_anchor_expectation() {
           "non-OFDM ACK must not arm full-anchor expectation");
 }
 
+void test_normal_message_turn_yield_periodically_rearms_full_anchor() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    int full_anchor_expectations = 0;
+    c.setTransmitCallback([&](const Bytes& data) {
+        tx_frames.push_back(data);
+    });
+    c.setFullOFDMAnchorExpectedCallback([&]() {
+        ++full_anchor_expectations;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    // Normal GUI messages do not enable the stronger half-duplex-interactive
+    // B2F policy. A peer request must still yield the ordinary DATA turn.
+    auto request = v2::ControlFrame::makeTurnRequest("K2DEF", "W1ABC");
+    c.onFrameReceived(request.serialize());
+    CHECK(tx_frames.size() == 1 &&
+              v2::parseHeader(tx_frames.front()).type == v2::FrameType::TURNOVER,
+          "an idle normal GUI sender must yield the DATA turn on peer request");
+    CHECK(full_anchor_expectations == 1,
+          "TURNOVER transmission must arm the first cold-acquire expectation");
+
+    // The first one-shot may be consumed by a stray detect in the turnaround
+    // gap. Periodic rearming must follow the yielded-turn state even though
+    // half-duplex-interactive remains disabled.
+    c.tick(1);
+    CHECK(full_anchor_expectations == 2,
+          "normal message turn reversal must immediately refresh cold acquisition");
+    c.tick(399);
+    CHECK(full_anchor_expectations == 2,
+          "cold-acquire refresh must retain its 400 ms cadence");
+    c.tick(1);
+    CHECK(full_anchor_expectations == 3,
+          "normal message turn reversal must keep rearming until peer DATA arrives");
+}
+
 void test_tone_ack_callback_marks_only_group_boundary_as_physically_complete() {
     Connection c;
     std::vector<bool> group_complete_contexts;
@@ -5547,20 +6272,25 @@ void test_8psk_long_ldpc_file_geometry_and_tail_safety() {
           "ordinary cw4/Z81 ARQ DATA must preserve the 629-byte serialized payload; "
           "a Z=27 default would truncate it to 216 bytes");
 
-    // The force-policy bit is part of the experimental predicate. Forcing the
-    // already-logical cw12 value must still reconfigure the physical ARQ tuple;
-    // a same-value early return would strand it at cw4/Z81 while the descriptor
-    // and encoder revert to cw12/Z27.
+    // The force-policy bit is part of the experimental predicate, but a public
+    // runtime override may no longer tear down an active geometry owner. The
+    // existing cw4/Z81 file must remain internally consistent until cancellation.
     partial_tx.setForcedFrameCodewords(kShortCW, /*forced=*/true);
-    CHECK(!ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(partial_tx) &&
-              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(partial_tx) == kShortCW &&
-              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(partial_tx) == 27,
-          "same-CW force-policy change must atomically restore cw12/Z27");
+    CHECK(ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(partial_tx) &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(partial_tx) == kLongCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(partial_tx) == 81 &&
+              ConnectionAdaptiveTestAccess::configuredForcedCWCount(partial_tx) == 0,
+          "same-CW force-policy change must be rejected while the file owns cw4/Z81");
     partial_tx.cancelFileTransfer();
     CHECK(!ConnectionAdaptiveTestAccess::experimental8PSKLongLDPCActive(partial_tx) &&
               partial_tx.selectBurstLiftingZ() == 27 &&
               ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(partial_tx) == 27,
           "explicit cancel must restore the negotiated short geometry");
+    partial_tx.setForcedFrameCodewords(kShortCW, /*forced=*/true);
+    CHECK(ConnectionAdaptiveTestAccess::configuredForcedCWCount(partial_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(partial_tx) == kShortCW &&
+              ConnectionAdaptiveTestAccess::arqFixedFrameLiftingZ(partial_tx) == 27,
+          "same-CW force-policy change must apply atomically after the file retires");
 
     // ARQ reset intentionally retains its configuration, so Connection's QSO
     // boundaries must explicitly strip the transfer-scoped lifting value.
@@ -5980,6 +6710,22 @@ int main() {
     test_authority_climb_prices_the_real_file_tail();
     test_forced_r1_3_cw1_rejects_file_before_wire_tx();
     test_queued_file_geometry_shrink_reports_terminal_start_failure();
+    test_empty_message_requests_are_rejected_atomically();
+    test_deferred_queue_refuses_newest_and_abort_fails_every_accepted_message();
+    test_reset_terminal_fails_accepted_queued_message();
+    test_accepted_queued_start_failure_reports_terminal_status();
+    test_deferred_payload_fifo_survives_failed_head_and_new_submission();
+    test_midwindow_message_geometry_change_fails_closed_and_link_recovers();
+    test_ordinary_adaptation_holds_geometry_for_complete_message();
+    test_runtime_forced_cw_override_cannot_regrid_active_message();
+    test_submitted_status_reset_runs_after_physical_handoff();
+    test_failure_batch_precedes_reentrant_replacement_submission();
+    test_delivered_status_reset_runs_after_ack_unwind();
+    test_midwindow_geometry_change_disconnects_without_move_epoch();
+    test_file_and_payload_queues_preserve_cross_class_fifo();
+    test_file_start_respects_reversed_data_turn_without_prior_local_backlog();
+    test_same_epoch_rebase_preserves_multiwindow_message_prefix();
+    test_move_epoch_rebase_drops_stale_message_prefix();
     test_timeout_batch_waits_for_post_tick_flush_and_discards_obsolete_geometry();
     test_timeout_repair_batch_is_capped_before_retry_commit();
     test_arq_control_feedback_does_not_arm_data_ack_monitor();
@@ -6009,6 +6755,7 @@ int main() {
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_interactive_bootstrap_yield_stops_after_initiator_starts_data();
     test_normal_ofdm_ack_arms_full_anchor_expectation();
+    test_normal_message_turn_yield_periodically_rearms_full_anchor();
     test_tone_ack_callback_marks_only_group_boundary_as_physically_complete();
     test_software_alc_uses_current_partial_group_delivery_provenance();
     test_partial_sack_provenance_marks_only_exact_group_geometry();

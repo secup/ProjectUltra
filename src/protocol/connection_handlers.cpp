@@ -1141,9 +1141,27 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
 // DATA PAYLOAD HANDLING
 // =============================================================================
 
-void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::FrameType frame_type) {
+void Connection::handleDataPayload(const Bytes& payload, bool more_data,
+                                   v2::FrameType frame_type, uint8_t flags) {
     if (payload.empty()) {
         return;
+    }
+
+    // EPOCH_REBASE also appears at ordinary same-epoch window boundaries, so the
+    // bit alone is not an application-object reset. Only a changed epoch plus a
+    // rebase proves the sender abandoned older unresolved DATA identities. ARQ
+    // discards its slots at that adoption; application reassembly must follow.
+    const uint8_t frame_epoch = v2::epochFromFlags(flags);
+    if ((flags & v2::Flags::EPOCH_REBASE) != 0 &&
+        rx_reassembly_active_ && frame_epoch != rx_reassembly_epoch_) {
+        LOG_MODEM(WARN,
+                  "Connection: Dropping %zu-byte stale RX fragment prefix at move-epoch change %u -> %u",
+                  rx_reassembly_buffer_.size(),
+                  static_cast<unsigned>(rx_reassembly_epoch_),
+                  static_cast<unsigned>(frame_epoch));
+        rx_reassembly_buffer_.clear();
+        rx_reassembly_active_ = false;
+        rx_reassembly_binary_ = false;
     }
     received_peer_data_since_connect_ = true;
     yielded_data_turn_waiting_for_peer_data_ = false;
@@ -1161,6 +1179,19 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
     }
 
     if (more_data) {
+        if (rx_reassembly_active_ &&
+            rx_reassembly_binary_ != binary_payload) {
+            LOG_MODEM(WARN,
+                      "Connection: RX fragment kind changed mid-object; discarding %zu stale bytes",
+                      rx_reassembly_buffer_.size());
+            rx_reassembly_buffer_.clear();
+            rx_reassembly_active_ = false;
+        }
+        if (!rx_reassembly_active_) {
+            rx_reassembly_active_ = true;
+            rx_reassembly_binary_ = binary_payload;
+            rx_reassembly_epoch_ = frame_epoch;
+        }
         // Fragment with MORE_FRAG - accumulate
         rx_reassembly_buffer_.insert(rx_reassembly_buffer_.end(), payload.begin(), payload.end());
         LOG_MODEM(DEBUG, "Connection: Accumulated fragment (%zu bytes, buffer now %zu bytes)",
@@ -1178,6 +1209,13 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
 
     // Final or single frame
     Bytes complete_payload;
+    if (rx_reassembly_active_ && rx_reassembly_binary_ != binary_payload) {
+        LOG_MODEM(WARN,
+                  "Connection: RX final kind does not match buffered fragments; discarding %zu stale bytes",
+                  rx_reassembly_buffer_.size());
+        rx_reassembly_buffer_.clear();
+        rx_reassembly_active_ = false;
+    }
     if (!rx_reassembly_buffer_.empty()) {
         // Last fragment - stitch into a fresh buffer to avoid aliasing/overflow false positives.
         complete_payload.reserve(rx_reassembly_buffer_.size() + payload.size());
@@ -1186,12 +1224,16 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data, v2::Fra
                                 rx_reassembly_buffer_.end());
         complete_payload.insert(complete_payload.end(), payload.begin(), payload.end());
         rx_reassembly_buffer_.clear();
+        rx_reassembly_active_ = false;
         LOG_MODEM(INFO, "Connection: Reassembled %zu-byte %s from fragments",
                   complete_payload.size(), binary_payload ? "binary payload" : "message");
     } else {
         // Single-frame message (backwards compatible)
+        rx_reassembly_active_ = false;
         complete_payload = payload;
     }
+    rx_reassembly_binary_ = false;
+    rx_reassembly_epoch_ = 0;
 
     // Strip TEXT_MESSAGE type prefix if present
     size_t start = 0;

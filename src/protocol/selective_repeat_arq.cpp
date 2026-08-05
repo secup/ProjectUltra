@@ -454,6 +454,23 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
         return false;
     }
 
+    const size_t capacity = fixed_frame_lifting_z_ == 81
+        ? v2::getFixedFramePayloadCapacityZ(
+              code_rate_, fixed_frame_codewords_, 81)
+        : v2::getFixedFramePayloadCapacity(
+              code_rate_, fixed_frame_codewords_);
+    if (data.size() > capacity) {
+        // makeFixedDataFrame() is a general helper with legacy truncation
+        // semantics. Production ARQ must never inherit that behavior: accepting
+        // an old-geometry chunk after a rate/CW shrink would report delivery for
+        // bytes that were never put on wire.
+        LOG_MODEM(ERROR,
+                  "SR-ARQ: Refusing oversized fixed payload (%zu > %zu bytes, %s cw=%d z=%d)",
+                  data.size(), capacity, codeRateToString(code_rate_),
+                  fixed_frame_codewords_, fixed_frame_lifting_z_);
+        return false;
+    }
+
     const uint16_t seq = tx_next_seq_;
     size_t slot = seqToSlot(seq);
 

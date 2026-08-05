@@ -8,6 +8,62 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-MESSAGE-LOST-ON-FORCED-DEMOTE (open, 2026-08-05) — P2, SAFE BUT LOSSY
+
+**Symptom.** An application message in flight is destroyed when a MANDATORY geometry
+escape (receiver-commanded or stuck-frame demote) changes the data geometry. The operator
+sees `FAIL #N failed`; the payload is never delivered.
+
+```
+[103.868][WARN] Connection: Abandoning active message/binary operation before geometry
+                change QPSK R1/2 -> QPSK R1/4
+[103.868][INFO] SR-ARQ: Aborted pending TX state
+[103.930][INFO] [GUI] FAIL #1 failed
+```
+
+**Reproduce.** `tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 23
+--message-only --message ProjectUltra --message-count 3 --message-vary-len
+--reply-message "roger" --exit-after 400` (and `--channel poor --snr-db 20 --seed 3
+--message Relay --message-count 3`). NOTE: these are NOT deterministic — a code change
+shifts the timeline enough that the same seed may not meet the same fade, so absence of
+the failure in one run proves nothing.
+
+**Frequency.** 2 of 10 GUI scenarios in the 2026-08-05 matrix, including on **Good@20 —
+a clean channel**. Adaptive demotes are routine on HF, so this is not an edge case.
+
+**Why it is deliberate, and why it is still safe.** `applyDataMode()` fails the object
+rather than serializing an old-sized fragment at the new capacity, because the fixed-frame
+helper would silently TRUNCATE it and the sender would report delivery for bytes never
+placed on wire. Explicit failure is strictly better than that. Ordinary adaptive moves are
+already held by `hasGeometryBoundDataOperation()`; only mandatory escapes reach this path.
+
+### DO NOT re-attempt these two fixes — both were tried and measured 2026-08-05
+
+1. **Sender-side resume (re-fragment at the new geometry) DUPLICATES MESSAGES.** The record
+   is still "active" in two different situations — mid-flight, AND fully on the wire awaiting
+   ACK. In the second case the peer has already reassembled and delivered the object, so a
+   resend puts the same report on the operator screen twice. MEASURED: matrix rows m3 and m4
+   produced `msg_rx > msg_tx`, with message `#2` delivered twice, both copies complete:
+   `rx = #1 / #2 / #2 / #3`. A duplicate delivered message is a corrupt message stream —
+   worse than the loss this was meant to fix.
+2. **Narrowing the resume to "fragments still unsent" does not work either.** That gate stops
+   the duplicate but also stops firing in the case that matters, because *submitted-but-
+   unacked* IS the ambiguous state and it is the common one. Unacked does not mean unreceived:
+   in m4 the ACK was simply still in flight.
+
+**The real constraint.** This is the classic ARQ ambiguity — the sender cannot determine
+whether the receiver holds the object. No sender-side heuristic resolves it.
+
+**Correct fix (not yet implemented).** Receiver-side duplicate suppression keyed on logical
+object identity, so a resend is idempotent. `Connection` RX reassembly currently tracks only
+`rx_reassembly_buffer_ / _active_ / _binary_ / _epoch_` — there is no object identity and no
+delivered-set, so this needs an identity on the wire. That also closes the residual
+"submitted-but-unacked" ambiguity generally, not just for this escape.
+
+**Interim behaviour: keep the explicit failure.** It loses a message but does not corrupt the
+stream. Do not trade it for a duplicate.
+
+
 ### BUG-GUI-RX-CONSUMER-STALL-OVERRUN (open, 2026-08-04) — P2, APPARATUS/REAL-TIME
 
 **Observed.** During immutable IONOS A/B pair 1 OFF, the Pi SDL capture callback kept
@@ -1275,27 +1331,30 @@ load-bearing file:line claims were re-verified by hand before acting.
 - Standardized MC-DPSK on sps=1024 + routed handshake-negotiation frames through the DBPSK control profile. Forced rungs now CONNECT; no regression. See CHANGELOG.
 
 ### BUG-FILE-ACK-IDENTITY: ARQ send-complete dispatch is identity-blind — a non-file frame retiring while a file is SENDING pops a file-chunk ledger entry / inflates chunks_acked_
-- **Found 2026-07-02** by adversarial review of the requeue-ledger fix; **pre-existing in kind**
-  (the same blindness inflated the old count arithmetic). `Connection::setSendCompleteCallback`
-  (connection.cpp:~285) routes EVERY successful DATA-frame retirement to
-  `file_transfer_.onChunkAcked()` while FileTransferState==SENDING — frame identity is never
-  checked. Mixed windows are reachable because the burst-transport `sendFile` bypass
-  (connection.cpp:~1407) skips the fragment-in-flight guards its sibling paths enforce, so a
-  message/binary fragment already in flight shares the window with file chunks; its retirement
-  mis-pops the ledger → a later requeue resumes one chunk forward (silent skip) and
-  chunks_acked_ over-count can declare COMPLETE with a chunk still in flight.
-- **Not exercised by any shipped flow today:** GUI operator messaging is a stub, the sim
-  scenario driver drains messages before the file phase, and ultra_tnc sets
-  half_duplex_interactive_=true (takes the guarded path). Triggerable via the public API
-  (sendMessage/sendBinary then sendFile within the ACK RTT) or scenario configs combining
-  auto-reply-message with auto-send-file.
-- **Fix (structural, deferred):** identity-aware retirement — tag each ARQ TX submission with
-  its origin (FILE_CHUNK / MESSAGE_FRAGMENT / OTHER) in the slot and pass it through
-  `on_send_complete_(success, origin)`; dispatch by origin, not by FileTransferState. This also
-  fixes the mirror fragment-starvation bug. NOTE: the tempting "guard parity" patch (queue the
-  file when fragments are in flight) is STRAND-PRONE on the burst path — the queued-file pump
-  (`tryStartQueuedFileIfReady`) requires `local_data_turn_`, which burst transport deliberately
-  bypasses; don't take that shortcut.
+- **Status: CONTAINED by strict logical-operation serialization (2026-08-04); ideal ARQ
+  origin tagging remains deferred.** Found 2026-07-02 by adversarial review of the
+  requeue-ledger fix; pre-existing in kind (the same blindness inflated the old count
+  arithmetic). `Connection::setSendCompleteCallback` still dispatches a successful DATA
+  retirement by current `FileTransferState`, not by the retired slot's application origin.
+  If a non-file slot could retire while the controller was `SENDING`, it could still pop the
+  file ledger, resume a later requeue one chunk forward, and over-count completion.
+- **Public trigger closed:** message, binary, and file requests now share one enqueue order and
+  one logical application operation owns ARQ retirement at a time. A queued file starts only
+  after older payloads retire and the real local DATA turn is held. The non-interactive burst
+  bypass starts a file only at a genuinely empty logical boundary; it no longer skips live or
+  queued message/binary work. A newer payload cannot bypass queued survivors after a failure,
+  and queue overflow refuses the newest operation instead of evicting accepted work. GUI
+  messaging is restored, but its manual and automated paths consume this same serialization.
+- **Why this is containment, not closure:** the callback's type contract is unchanged. Future
+  work must not permit mixed logical operations in one ARQ window until each TX slot carries an
+  origin such as `FILE_CHUNK` / `MESSAGE_FRAGMENT` / `BINARY_FRAGMENT` and completion reports
+  that origin. The longer-term structural fix is still `on_send_complete_(success, origin)`
+  dispatch rather than state inference. The current one-operation boundary deliberately trades
+  cross-class pipelining for integrity and half-duplex predictability.
+- **Regression evidence:** focused `ConnectionAdaptive` cases require binary-before-file FIFO,
+  queued files to wait for the actual DATA turn, queue-survivor order after a head failure, and
+  exactly one terminal result per accepted message. See the 2026-08-04 CHANGELOG entry for the
+  complete message/turn/geometry verification boundary.
 
 ### BUG-HANDSHAKE-PING-FLOOR: low-SNR PING/CONNECT classifier starves → handshake never connects below ~15 dB Good (caps ALL operation) — **FIXED, DEFAULT-ON (2026-07-01) — RE-OPENED for the mid-SNR SIM window (see re-open note)**
 - **RE-OPEN NOTE (2026-07-01 evening, found by the #58 Good@12 boundary probe):** at SIM
@@ -1905,7 +1964,8 @@ Current blockers:
   tail forever), and the buffered-chunk drain is overlap-aware (covered entries drop, straddlers
   tail-append; the old exact-offset drain stranded covered entries and permanently blocked
   compressed finalization). `startSend` clears the ledger (SENDING→RECEIVING trample). Deferred
-  structural sibling: BUG-FILE-ACK-IDENTITY (active, above). Proof: new
+  structural sibling: BUG-FILE-ACK-IDENTITY (mixed-retirement trigger contained by
+  one-logical-operation serialization; origin-tagged ARQ slots remain deferred, above). Proof: new
   test_file_transfer_controller cases (requeue-across-size-change reproduces 44064-vs-40 exactly;
   straddle-merge + covered-drain byte-exact CRC) + full 5-cell sequential gate PASS incl. the
   first-ever Moderate@20 pass (CRC-clean ×2, 1150 bps, 4 moves). See CHANGELOG 2026-07-02.

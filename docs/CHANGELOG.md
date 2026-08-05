@@ -10,6 +10,185 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-05 — VERIFY: GUI message matrix; two message-resume fixes measured UNSOUND and reverted
+
+### What was done
+
+Independent review + automated GUI verification of `feature/restore-data-messages`.
+Built clean, `ctest` 101/101. A 10-scenario matrix of two real `ultra_gui -sim` stations
+over `ota_simulator` (byte-exact application text via `cmp`, plus terminal DELIVERED
+status) returned **8/10**, with both file-path regressions CRC-clean — so ~505 lines of
+`connection.cpp` churn did not disturb file transfer. Byte-exact message delivery was
+confirmed down to **AWGN@8 and Good@10**, including DATA-turn reversal.
+
+The two failures share one cause, now filed as **BUG-MESSAGE-LOST-ON-FORCED-DEMOTE**: a
+mandatory geometry escape destroys an in-flight message. It fired on Good@20 — a clean
+channel — so it is not an edge case.
+
+### Two fixes attempted, both measured unsound, both reverted
+
+1. **Sender-side resume** (re-fragment the object at the new geometry, gated on move-epoch,
+   bounded at 2 attempts, FIFO-ordered). Passed 101/101 — and **duplicated a delivered
+   message**: matrix rows m3/m4 produced `msg_rx > msg_tx`, `rx = #1 / #2 / #2 / #3`. The
+   "record still active" test cannot separate mid-flight from fully-sent-awaiting-ACK.
+2. **Narrowing to "fragments still unsent"** removed the duplicate but stopped firing in the
+   case that matters: submitted-but-unacked is the ambiguous state AND the common one.
+
+Root constraint: the classic ARQ ambiguity — a sender cannot know whether the receiver holds
+the object. The correct fix is receiver-side identity dedup; RX reassembly has no object
+identity today, so it needs a wire change. Interim behaviour (explicit FAILED) is retained
+because it loses a message without corrupting the stream.
+
+### What landed
+
+- `docs/KNOWN_BUGS.md`: BUG-MESSAGE-LOST-ON-FORCED-DEMOTE, including an explicit
+  do-not-re-attempt record of both measured-unsound approaches.
+- `tools/message_gui_matrix.sh`: the 10-scenario matrix, promoted from scratch into the repo.
+  It exists because a change that passed all 101 unit tests shipped a duplicate-delivery bug
+  that only this matrix caught. Run it before touching message/ARQ/geometry paths.
+
+**Caveat on the matrix:** rows m3/m4 are NOT deterministic. A code change shifts the timeline
+enough that the same seed may not meet the same fade, so a green run does not prove the defect
+is gone. A deterministic forced-demote regression is still owed.
+
+---
+
+## 2026-08-04 — RESTORE/FIX: GUI application messages are safe across fragmentation, DATA-turn reversal, and automation
+
+### What was broken
+
+The protocol and TNC still depended on application messages, but the GUI compose row had
+been removed and its `sendMessage()` handler was a stub. Restoring only that UI would have
+made several pre-existing protocol defects operator-reachable again:
+
+- Message, binary, and file submissions did not share a strict logical-operation order.
+  The non-interactive file fast path could enter `FileTransferState::SENDING` while an older
+  message/binary ARQ slot was still live; the identity-blind send-complete callback would
+  then retire that older slot as a file chunk (BUG-FILE-ACK-IDENTITY). Deferred queues also
+  evicted an already-accepted oldest payload when full, and a newer submission could bypass
+  survivors after a queued start failure.
+- A message was fragmented once at its admission geometry, but an adaptive rate/modulation/
+  codeword move could later serialize a remaining old-sized fragment at the new capacity.
+  The general fixed-frame helper silently truncates oversized input, so the sender could
+  report delivery for bytes never placed on wire. A receiver could then stitch a stale
+  prefix to the next object after an epoch change, or mix text and binary fragments.
+- Fragment submission advanced state after entering the transport callback. A synchronous
+  ACK/re-entry could refill or clear the fragment vectors underneath the outer submission.
+  Accepted operations also lacked a complete terminal-failure lifecycle on queue-start
+  failure, abort, reset, disconnect, or forced geometry abandonment.
+- `ProtocolEngine` invoked the binary-data callback while holding its protocol mutex. A TNC
+  callback that re-entered an engine getter could deadlock. GUI message/status events used a
+  best-effort queue that could drop the exact receive or terminal-delivery event automation
+  was waiting for.
+- Scripted GUI sends/replies latched success before `Connection` accepted the payload and
+  teardown waited on elapsed time rather than terminal delivery plus an empty protocol
+  backlog. The responder could reply after the first of several messages, racing the
+  initiator's remaining sends. Ordinary GUI message turn reversals also did not continuously
+  re-arm cold acquisition unless the stronger TNC/B2F half-duplex policy was enabled.
+
+### What changed
+
+- `Connection` now serializes message, binary, and file requests in one cross-class FIFO.
+  One logical application operation owns the ARQ retirement stream at a time. A queued file
+  starts only on the real local DATA turn; the non-interactive burst bypass remains available
+  only at a genuinely empty logical-operation boundary. Queue overflow refuses the newest
+  request (whole message batches are preflighted atomically) instead of deleting accepted
+  work, and empty payloads/batches are rejected.
+- Text-message status is explicit and attributed: `SUBMITTED`, `DELIVERED`, or `FAILED`, with
+  the remote callsign snapshotted at admission. Every accepted record gets one terminal result
+  through normal ACK retirement or lifecycle failure, including abort/reset/disconnect and a
+  queued operation that can no longer start. Fragment indices advance before the transport
+  callback, nested refill is deferred until submission state is coherent, and refusal does
+  not consume the fragment. Status callbacks are held across the complete physical-submit and
+  ACK transaction, then drained through one re-entrant FIFO; a callback may reset/abort without
+  clearing an ARQ slot before handoff, resurrecting reset state, or reversing SUBMITTED and its
+  terminal result. Failures no longer claim "max retries" when the actual cause was queue-start,
+  abort, reset, disconnect, or re-grid failure, and a never-submitted record does not print a
+  fake sequence zero.
+- A complete message/binary object owns one data geometry. Ordinary adaptive moves wait for
+  that object to retire. If a mandatory escape must change geometry, the old operation is
+  failed explicitly, its ARQ identities are aborted with a move-epoch rebase, and the receiver
+  discards only a stale cross-epoch prefix. Without move-epoch support the connection closes,
+  because continuing would leave an unfillable peer sequence hole. Production fixed-frame
+  ARQ now rejects an oversized payload rather than inheriting the helper's truncation behavior;
+  RX reassembly also tracks object kind and preserves legitimate same-epoch rebase fragments.
+  The public fixed-codeword override rejects a change while any DATA operation owns the current
+  geometry, without partially changing the advertised force policy; it remains available after
+  that operation retires.
+- Message, status, and binary callbacks are kept in one ordered pending-event stream and are
+  emitted after `ProtocolEngine` releases its mutex. The GUI queue treats application receive
+  and TX-status events as lossless critical events relative to disposable log lines.
+- The Operate tab again has a 255-byte, single-line compose field with Enter/Send submission.
+  The draft clears only after protocol acceptance. Connection/accept/exit automation no longer
+  disables manual payload controls; only automation that can itself submit or cancel payloads
+  owns them.
+- GUI automation counts a send only after acceptance, retries a pending auto-reply until it is
+  accepted, can wait for all `N` inbound messages before replying once, and disconnects only
+  after required terminal `DELIVERED` events and `getTxBacklogBytes()==0`. In a bidirectional
+  scenario the final sender owns teardown. DATA-turn-acquired/full-anchor callbacks are wired
+  for ordinary GUI messaging, while the stronger file/B2F scheduling policy stays opt-in; the
+  yielded receiver periodically re-arms cold acquisition until peer DATA actually arrives.
+- `tools/gui_qso_scenario.sh` retains its file-transfer default and adds an intentionally
+  separate `--message-only` mode with count/interval/variable-length sends and an optional
+  post-`N` reply. Its verdict compares ordered application TX and RX text byte-for-byte,
+  requires one matching terminal delivery per send, checks reply ordering and payload-drain
+  markers, and records exact artifacts/hashes in `summary.env`. File and message payload modes
+  cannot be mixed in one scenario, preserving the serialization invariant under test.
+
+### Why this is the proper containment
+
+The ARQ send-complete callback still does not carry an origin tag. This change therefore does
+not claim that BUG-FILE-ACK-IDENTITY has received its ideal structural repair. Instead it closes
+every supported mixed-retirement path by construction: file state cannot become `SENDING`
+until older non-file slots have retired, and later work cannot jump ahead. Origin-tagged ARQ
+slots remain the prerequisite for any future relaxation that allows mixed logical operations
+inside one window.
+
+The geometry rule is similarly fail-closed: delivery is never inferred after serialization
+changed or dropped bytes. On a half-duplex link, the reply is a real DATA-turn reversal, so
+the sender's full first anchor and the receiver's repeated cold-acquire expectation are part
+of message correctness rather than a GUI-only convenience.
+
+### Verification
+
+- Focused protocol regressions passed: `ConnectionAdaptive` **818/818** and
+  `SelectiveRepeatARQ` **64/64**. They cover tiny-capacity long-text fragmentation, empty and
+  full-queue refusal, atomic batches, exactly-once terminal failure, binary-before-file FIFO,
+  reversed-turn file admission, same/cross-epoch reassembly, periodic turn-anchor re-arm,
+  geometry-hold/fail/recovery behavior, the no-move-epoch disconnect policy, runtime-CW guard,
+  and reset re-entry after physical submit/ACK unwind.
+- A detached two-message failure batch also stays atomic to observers: a replacement submitted
+  re-entrantly from the first FAILED callback is published only after every older FAILED result.
+- `Protocol` passed **24/24**, including a byte-exact 255-byte text round trip at forced QPSK
+  R1/3, cw1 (eight-byte payload capacity), ordered SUBMITTED/DELIVERED attribution, binary
+  callback re-entry, and re-entrant ProtocolEngine reset with SUBMITTED-before-FAILED ordering.
+  `TNCServer`, `TNCBridge`, and the complete build (including `ultra_gui` and `ultra_tnc`) passed.
+- Final-tree non-socket gate:
+  `ctest --test-dir build --output-on-failure -j4 -E "^(GrpcServiceSmoke|OtasimServeSmoke|UltraGuiOtaClient|UltraTncSimAudio)$"`
+  passed **97/97**; `TNCSession` remained intentionally disabled. The unfiltered run had
+  **97/101 executed tests pass** and only those four excluded environment failures:
+  `GrpcServiceSmoke` could not start its loopback UDP service, while `OtasimServeSmoke`,
+  `UltraGuiOtaClient`, and `UltraTncSimAudio` each reported
+  `ota_simulator: failed to bind UDP socket`.
+- `bash -n tools/gui_qso_scenario.sh`, GUI help/argument parsing (including invalid mixed-mode,
+  reply-count, count/interval, and drain cases), generic failure-marker matching, and
+  `git diff --check` passed on the final tree.
+- One faithful two-GUI OTASim run completed:
+  `tools/gui_qso_scenario.sh --channel awgn --snr-db 20 --seed 42 --message-only --message hello --out /tmp/projectultra_msg_oneway_awgn20_b`.
+  `/tmp/projectultra_msg_oneway_awgn20_b/summary.env` records **RESULT=PASS** in 39 seconds,
+  actual data mode **QPSK R1/2**, one accepted TX, one byte-exact ordered RX, one terminal
+  `DELIVERED`, a payload-drained marker, and zero retransmissions/decode failures.
+
+### External validation boundary
+
+The larger 255-byte faithful run, bidirectional multi-message/reply turn test, and real IONOS
+MPG@20 run were **not executed** after that smoke test because the external execution approval
+quota was exhausted. That is an environment/authorization boundary, not a modem PASS or FAIL
+and not evidence about those scenarios. They remain required before claiming bidirectional or
+IONOS message validation.
+
+---
+
 ## 2026-08-04 — MEASURED WASH: exact partial-SACK descriptor repair stays default-OFF
 
 ### What was measured

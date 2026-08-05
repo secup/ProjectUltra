@@ -134,24 +134,26 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
   → re-gate. Doing the delete before (1) is the "single-cell pass ≠ proof" trap.
 - **Design:** `docs/TRANSPORT_MERGE_DESIGN_2026_06_06.md`.
 
-### R2. Operator chat-message (free-text) feature — `IN-PROGRESS` (tests removed 2026-06-02; API removal remaining)
-- **What:** interactive operator chat / free-text message sending.
-- **Why dead:** long LDPC (n=1944) + the burst interleaver make short interactive chat
-  impractical; the modem is specializing for **file transfer**. Decision 2026-05-30.
-- **Done so far (2026-06-02, commits `95982c0` + `b3835a9`):** removed all chat-message
-  test cases from `test_protocol.cpp` (the 7 pure chat tests + 3 file-vs-chat scheduling
-  scenarios; the "Long fragmented…" / "Post-cancel sender message…" reds went with them).
-  File-cancel tests kept with their chat tails excised. The `sendMessage()` **API still
-  exists** in `ProtocolEngine` — only the tests are gone.
-- **Scope (remaining — delete):** `ProtocolEngine::sendMessage` + `sendMessages` (batch),
-  `setMessageReceivedCallback` / the `MessageReceivedCallback` delivery path, message
-  fragmentation / reassembly, message-level ARQ, and any GUI/TNC wiring that calls them.
-- **⚠ KEEP:** control-frame text inside the protocol (callsign, status) is not chat —
-  don't remove protocol control plumbing. `sendBinary` (TNC binary/data path) and `sendFile`
-  STAY. The binary-fragment-reassembly test asserts binary does NOT route through the message
-  callback — verify the file/binary path shares nothing with the message fragmenter before cutting.
-- **Blocker:** none hard; sequence after CI is green + the test binary ships, so we don't
-  churn the shared frame plumbing on the release branch.
+### R2. Operator chat-message (free-text) feature — `RESCINDED / RESTORED 2026-08-04`
+- **What:** interactive operator free-text messaging remains a supported application path.
+  The GUI compose row, exact TX lifecycle reporting, fragmentation/reassembly regressions,
+  and faithful `gui_qso_scenario.sh --message-only` automation were restored on 2026-08-04.
+  `ProtocolEngine::sendMessage` / `sendMessages` and the message callbacks are KEEP, not
+  removal targets; the TNC also depends on the shared non-file payload machinery.
+- **Why the 2026-05-30 removal decision was reversed:** long-LDPC bulk framing made the old
+  chat UX unattractive, but that did not make short application messages dead. Low-throughput
+  profiles that are impractical for a file can still carry a useful message, and the protocol
+  must fragment longer text safely instead of deleting the use case. The restored design
+  serializes message/binary/file logical operations and keeps the GUI compose limit at 255
+  bytes, so message integrity no longer depends on fitting one LDPC/frame geometry.
+- **Historical action (2026-06-02, commits `95982c0` + `b3835a9`):** the old chat tests were
+  removed while R2 was considered dead. That history remains valid, but it is no longer a
+  forward plan. Current message/turn/geometry coverage is documented in the 2026-08-04
+  CHANGELOG entry and `tests/test_protocol.cpp` / `tests/test_connection_adaptive.cpp`.
+- **⚠ KEEP:** application-message APIs and callbacks, text and binary fragmentation/
+  reassembly, message TX status, GUI/TNC wiring, and the separate file-transfer path. A future
+  cleanup may consolidate shared fragment code only with byte-exact text/binary/file and
+  half-duplex turn regressions in place; it must not revive this removal item.
 
 ### R3. Differential on the OFDM band — `DONE` (selection + RX demod/control code removal); TX-modulator differential is the remaining follow-up
 - **What:** retire differential modulation from the **wideband OFDM_CHIRP** band. SNR ≥ 10

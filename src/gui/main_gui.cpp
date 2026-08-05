@@ -206,8 +206,9 @@ void printGuiUsage(const char* prog) {
     std::printf("  --auto-message-vary-len       Randomize each auto-message length (mix short+long)\n");
     std::printf("  --auto-message-after-file     With file+message, send message after file completes/cancels\n");
     std::printf("  --auto-reply-message <text>   Responder: send this ONCE after a message is RECEIVED (bidi/turn test)\n");
+    std::printf("  --auto-reply-after-messages <N> Responder: wait for N inbound messages before its one reply (default 1)\n");
     std::printf("  --auto-cancel-file-after <s>  Cancel active file transfer N seconds after first observed\n");
-    std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after CONNECTED\n");
+    std::printf("  --auto-disconnect-after <s>   Disconnect N seconds after payload drain\n");
     std::printf("  --disconnect-on-file-done     Caller-sender disconnects after file ACK completion\n");
     std::printf("                                (instead of idling until --auto-disconnect-after)\n");
     std::printf("  --exit-after <s>              Quit N seconds after startup\n");
@@ -460,6 +461,7 @@ int main(int argc, char* argv[]) {
     bool log_categories_set = false;
     std::string log_categories;
     std::string log_file_path;
+    bool auto_reply_after_messages_set = false;
 #ifdef _WIN32
     bool force_software_renderer = true;   // Win default: conservative until the GL probe below
 #else
@@ -602,6 +604,24 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             opts.auto_reply_message = argv[++i];
+        } else if (arg == "--auto-reply-after-messages") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "Missing value for --auto-reply-after-messages\n");
+                closeStartupLog();
+                return 1;
+            }
+            const char* value = argv[++i];
+            char* end = nullptr;
+            const long parsed = std::strtol(value, &end, 10);
+            if (!value[0] || !end || *end != '\0' || parsed < 1 || parsed > 1000000L) {
+                std::fprintf(stderr,
+                             "Invalid --auto-reply-after-messages: %s (expected 1..1000000)\n",
+                             value);
+                closeStartupLog();
+                return 1;
+            }
+            opts.auto_reply_after_messages = static_cast<int>(parsed);
+            auto_reply_after_messages_set = true;
         } else if (arg == "--auto-message-start-delay") {
             if (i + 1 >= argc) {
                 std::fprintf(stderr, "Missing value for --auto-message-start-delay\n");
@@ -681,6 +701,13 @@ int main(int argc, char* argv[]) {
             }
             log_file_path = argv[++i];
         }
+    }
+
+    if (auto_reply_after_messages_set && opts.auto_reply_message.empty()) {
+        std::fprintf(stderr,
+                     "--auto-reply-after-messages requires --auto-reply-message\n");
+        closeStartupLog();
+        return 1;
     }
 
     ultra::setLogLevel(log_level);

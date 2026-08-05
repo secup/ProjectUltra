@@ -374,19 +374,36 @@ private:
         std::string from;
         std::string text;
     };
+    struct PendingDataReceived {
+        Bytes data;
+        bool more_data = false;
+    };
+    struct PendingCallbackEvent {
+        enum class Type {
+            MESSAGE_RECEIVED,
+            MESSAGE_TX_STATUS,
+            DATA_RECEIVED,
+        };
+
+        Type type = Type::MESSAGE_RECEIVED;
+        PendingMessageReceived message;
+        MessageTxStatusEvent tx_status;
+        PendingDataReceived data;
+    };
     struct PendingCallbackBatch {
         MessageReceivedCallback message_received;
         MessageTxStatusCallback message_tx_status;
-        std::vector<PendingMessageReceived> received_messages;
-        std::vector<MessageTxStatusEvent> tx_status_events;
+        DataReceivedCallback data_received;
+        std::vector<PendingCallbackEvent> events;
     };
-    std::vector<PendingMessageReceived> pending_message_received_;
-    std::vector<MessageTxStatusEvent> pending_message_tx_status_;
+    std::vector<PendingCallbackEvent> pending_callback_events_;
+    bool pending_callback_dispatch_active_ = false;
 
     void handleTxFrame(const Bytes& frame_data, bool expect_full_ofdm_anchor_after_tx);
     void processRxBuffer(bool input_physical_turn_complete = false);
     PendingCallbackBatch takePendingCallbacksLocked();
     static void emitPendingCallbacks(PendingCallbackBatch callbacks);
+    void dispatchPendingCallbacks();
 };
 
 } // namespace protocol

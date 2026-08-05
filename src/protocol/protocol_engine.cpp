@@ -59,20 +59,26 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     });
 
     connection_.setMessageReceivedCallback([this](const std::string& text) {
-        PendingMessageReceived event;
-        event.from = connection_.getRemoteCallsign();
-        event.text = text;
-        pending_message_received_.push_back(std::move(event));
+        PendingCallbackEvent event;
+        event.type = PendingCallbackEvent::Type::MESSAGE_RECEIVED;
+        event.message.from = connection_.getRemoteCallsign();
+        event.message.text = text;
+        pending_callback_events_.push_back(std::move(event));
     });
 
     connection_.setMessageTxStatusCallback([this](const Connection::MessageTxStatusEvent& event) {
-        pending_message_tx_status_.push_back(event);
+        PendingCallbackEvent pending;
+        pending.type = PendingCallbackEvent::Type::MESSAGE_TX_STATUS;
+        pending.tx_status = event;
+        pending_callback_events_.push_back(std::move(pending));
     });
 
     connection_.setDataReceivedCallback([this](const Bytes& data, bool more_data) {
-        if (on_data_received_) {
-            on_data_received_(data, more_data);
-        }
+        PendingCallbackEvent event;
+        event.type = PendingCallbackEvent::Type::DATA_RECEIVED;
+        event.data.data = data;
+        event.data.more_data = more_data;
+        pending_callback_events_.push_back(std::move(event));
     });
 
     connection_.setIncomingCallCallback([this](const std::string& from) {
@@ -178,23 +184,59 @@ ProtocolEngine::PendingCallbackBatch ProtocolEngine::takePendingCallbacksLocked(
     PendingCallbackBatch callbacks;
     callbacks.message_received = on_message_received_;
     callbacks.message_tx_status = on_message_tx_status_;
-    callbacks.received_messages = std::move(pending_message_received_);
-    callbacks.tx_status_events = std::move(pending_message_tx_status_);
-    pending_message_received_.clear();
-    pending_message_tx_status_.clear();
+    callbacks.data_received = on_data_received_;
+    callbacks.events = std::move(pending_callback_events_);
+    pending_callback_events_.clear();
     return callbacks;
 }
 
 void ProtocolEngine::emitPendingCallbacks(PendingCallbackBatch callbacks) {
-    if (callbacks.message_received) {
-        for (const auto& event : callbacks.received_messages) {
-            callbacks.message_received(event.from, event.text);
+    for (const auto& event : callbacks.events) {
+        switch (event.type) {
+        case PendingCallbackEvent::Type::MESSAGE_RECEIVED:
+            if (callbacks.message_received) {
+                callbacks.message_received(event.message.from, event.message.text);
+            }
+            break;
+        case PendingCallbackEvent::Type::MESSAGE_TX_STATUS:
+            if (callbacks.message_tx_status) {
+                callbacks.message_tx_status(event.tx_status);
+            }
+            break;
+        case PendingCallbackEvent::Type::DATA_RECEIVED:
+            if (callbacks.data_received) {
+                callbacks.data_received(event.data.data, event.data.more_data);
+            }
+            break;
         }
     }
-    if (callbacks.message_tx_status) {
-        for (const auto& event : callbacks.tx_status_events) {
-            callbacks.message_tx_status(event);
+}
+
+void ProtocolEngine::dispatchPendingCallbacks() {
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        if (pending_callback_dispatch_active_ ||
+            pending_callback_events_.empty()) {
+            return;
         }
+        pending_callback_dispatch_active_ = true;
+    }
+
+    // One dispatcher owns the FIFO across API calls and threads. Re-entrant or
+    // concurrent calls only append under mutex; this loop picks their events up
+    // after the current callback returns, so DELIVERED/FAILED cannot overtake an
+    // earlier SUBMITTED batch merely because another thread won a scheduling race.
+    while (true) {
+        PendingCallbackBatch callbacks;
+        {
+            std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+            if (pending_callback_events_.empty()) {
+                pending_callback_dispatch_active_ = false;
+                return;
+            }
+            callbacks = takePendingCallbacksLocked();
+        }
+        emitPendingCallbacks(std::move(callbacks));
     }
 }
 
@@ -219,57 +261,57 @@ void ProtocolEngine::rejectCall() {
 }
 
 void ProtocolEngine::disconnect() {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.disconnect();
-    // disconnect() can complete synchronously (or be a no-op while already
-    // disconnected). Never overwrite the terminal callback with a stale
-    // DISCONNECTING notification after Connection has returned.
-    if (connection_.getState() == ConnectionState::DISCONNECTING &&
-        on_connection_changed_) {
-        on_connection_changed_(ConnectionState::DISCONNECTING, "");
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.disconnect();
+        // disconnect() can complete synchronously (or be a no-op while already
+        // disconnected). Never overwrite the terminal callback with a stale
+        // DISCONNECTING notification after Connection has returned.
+        if (connection_.getState() == ConnectionState::DISCONNECTING &&
+            on_connection_changed_) {
+            on_connection_changed_(ConnectionState::DISCONNECTING, "");
+        }
     }
+    dispatchPendingCallbacks();
 }
 
 void ProtocolEngine::abortTxNow() {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.abortTxNow();
-    tx_queue_.clear();
-    defer_tx_ = false;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.abortTxNow();
+        tx_queue_.clear();
+        defer_tx_ = false;
+    }
+    dispatchPendingCallbacks();
 }
 
 bool ProtocolEngine::sendMessage(const std::string& text) {
     bool result = false;
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         result = connection_.sendMessage(text);
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
     return result;
 }
 
 bool ProtocolEngine::sendBinary(const Bytes& data) {
     bool result = false;
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         result = connection_.sendBinary(data);
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
     return result;
 }
 
 bool ProtocolEngine::sendMessages(const std::vector<std::string>& texts) {
     bool result = false;
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         result = connection_.sendMessages(texts);
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
     return result;
 }
 
@@ -287,13 +329,11 @@ size_t ProtocolEngine::getTxBacklogBytes() const {
 
 bool ProtocolEngine::sendFile(const std::string& filepath) {
     bool result = false;
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         result = connection_.sendFile(filepath);
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
     return result;
 }
 
@@ -303,13 +343,11 @@ void ProtocolEngine::setReceiveDirectory(const std::string& dir) {
 }
 
 void ProtocolEngine::cancelFileTransfer() {
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         connection_.cancelFileTransfer();
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
 }
 
 bool ProtocolEngine::isFileTransferInProgress() const {
@@ -343,7 +381,6 @@ void ProtocolEngine::setFileSentCallback(FileSentCallback cb) {
 }
 
 void ProtocolEngine::onRxData(const Bytes& data, bool physical_turn_complete) {
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
 
@@ -359,22 +396,19 @@ void ProtocolEngine::onRxData(const Bytes& data, bool physical_turn_complete) {
         // unrelated frame.
         processRxBuffer(physical_turn_complete);
         defer_tx_ = false;
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
 }
 
 void ProtocolEngine::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) {
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
 
         defer_tx_ = true;
         connection_.onMCDPSKPartialFrame(partial);
         defer_tx_ = false;
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
 }
 
 void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
@@ -384,8 +418,13 @@ void ProtocolEngine::onAcceptedOFDMDataSync(float sync_correlation) {
 
 bool ProtocolEngine::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    return connection_.onToneBurstAck(detection);
+    bool consumed = false;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        consumed = connection_.onToneBurstAck(detection);
+    }
+    dispatchPendingCallbacks();
+    return consumed;
 }
 
 bool ProtocolEngine::isToneBurstAckCandidatePlausible(
@@ -399,9 +438,12 @@ void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                           float quality, uint16_t frame_mask,
                                           bool interleaved, uint8_t group_size,
                                           bool geometry_proven) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
-                                     interleaved, group_size, geometry_proven);
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
+                                         interleaved, group_size, geometry_proven);
+    }
+    dispatchPendingCallbacks();
 }
 
 void ProtocolEngine::setBurstCarrierGammas(const std::vector<float>& gammas) {
@@ -421,8 +463,11 @@ void ProtocolEngine::onBurstOutcomeUnknown() {
 
 void ProtocolEngine::onDescriptorModeChange(Modulation mod, CodeRate rate,
                                             int cw_per_frame) {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.onDescriptorModeChange(mod, rate, cw_per_frame);
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.onDescriptorModeChange(mod, rate, cw_per_frame);
+    }
+    dispatchPendingCallbacks();
 }
 
 bool ProtocolEngine::adaptiveRateEnabled() const {
@@ -620,13 +665,11 @@ void ProtocolEngine::tick(uint32_t elapsed_ms) {
         }
     }
 
-    PendingCallbackBatch callbacks;
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);
         connection_.tick(elapsed_ms);
-        callbacks = takePendingCallbacksLocked();
     }
-    emitPendingCallbacks(std::move(callbacks));
+    dispatchPendingCallbacks();
 }
 
 ConnectionState ProtocolEngine::getState() const {
@@ -660,11 +703,14 @@ void ProtocolEngine::resetStats() {
 }
 
 void ProtocolEngine::reset() {
-    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.reset();
-    rx_buffer_.clear();
-    tx_queue_.clear();
-    defer_tx_ = false;
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.reset();
+        rx_buffer_.clear();
+        tx_queue_.clear();
+        defer_tx_ = false;
+    }
+    dispatchPendingCallbacks();
 }
 
 void ProtocolEngine::handleTxFrame(const Bytes& frame_data,

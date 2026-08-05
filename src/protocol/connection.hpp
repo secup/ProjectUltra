@@ -165,6 +165,7 @@ public:
         MessageTxStatus status = MessageTxStatus::SUBMITTED;
         uint16_t first_seq = 0;
         uint16_t last_seq = 0;
+        bool sequence_valid = false;
         std::string remote_call;
         std::string text;
         uint32_t elapsed_ms = 0;
@@ -943,12 +944,15 @@ private:
     // File transfer controller
     FileTransferController file_transfer_;
     std::optional<std::string> queued_file_path_;
+    uint64_t queued_file_order_ = 0;
+    uint64_t next_queued_operation_order_ = 1;
 
     // Message fragmentation (TX) - splits long messages across multiple ARQ frames
     struct QueuedPayload {
         Bytes data;
         bool binary_payload = false;
         uint64_t message_token = 0;
+        uint64_t enqueue_order = 0;
     };
     std::deque<QueuedPayload> queued_payloads_;
     std::vector<Bytes> pending_tx_fragments_;
@@ -960,6 +964,7 @@ private:
     struct OutboundMessageTxRecord {
         uint64_t token = 0;
         std::string text;
+        std::string remote_call;
         size_t expected_fragments = 0;
         size_t assigned_fragments = 0;
         uint16_t first_seq = 0;
@@ -972,9 +977,38 @@ private:
     std::deque<OutboundMessageTxRecord> outbound_message_tx_records_;
     uint64_t next_outbound_message_token_ = 1;
     uint64_t arq_submit_message_token_ = 0;
+    std::deque<MessageTxStatusEvent> pending_message_tx_status_events_;
+    size_t message_tx_status_deferral_depth_ = 0;
+    bool message_tx_status_dispatch_active_ = false;
+
+    // ARQ records a sequence before invoking the physical transport. Hold
+    // application-visible status callbacks until the complete logical submit
+    // stack has unwound, so a SUBMITTED callback may safely abort/reset/re-enter.
+    class MessageTxStatusDeferralGuard {
+    public:
+        explicit MessageTxStatusDeferralGuard(Connection& owner)
+            : owner_(owner) {
+            ++owner_.message_tx_status_deferral_depth_;
+        }
+        ~MessageTxStatusDeferralGuard() {
+            if (owner_.message_tx_status_deferral_depth_ > 0) {
+                --owner_.message_tx_status_deferral_depth_;
+            }
+            owner_.drainMessageTxStatusEvents();
+        }
+        MessageTxStatusDeferralGuard(const MessageTxStatusDeferralGuard&) = delete;
+        MessageTxStatusDeferralGuard& operator=(
+            const MessageTxStatusDeferralGuard&) = delete;
+
+    private:
+        Connection& owner_;
+    };
 
     // Message reassembly (RX) - accumulates fragments into complete messages
     Bytes rx_reassembly_buffer_;
+    bool rx_reassembly_active_ = false;
+    bool rx_reassembly_binary_ = false;
+    uint8_t rx_reassembly_epoch_ = 0;
 
     // Connection timing
     uint32_t timeout_remaining_ms_ = 0;
@@ -1689,7 +1723,12 @@ private:
     uint64_t createOutboundMessageRecord(const Bytes& data);
     void setOutboundMessageExpectedFragments(uint64_t token, size_t fragments);
     void dropOutboundMessageRecord(uint64_t token);
+    void failOutboundMessageRecord(uint64_t token);
+    std::vector<OutboundMessageTxRecord> detachOutboundMessageRecords();
+    void emitFailedMessageRecords(
+        const std::vector<OutboundMessageTxRecord>& records);
     void clearOutboundMessageTracking();
+    uint64_t allocateQueuedOperationOrder();
     bool sendArqPayloadFrame(const Bytes& chunk, v2::FrameType frame_type, uint8_t flags,
                              bool fixed_frame, uint64_t message_token);
     void handleArqFrameSubmitted(uint16_t seq);
@@ -1697,7 +1736,9 @@ private:
     void handleArqFrameFailed(uint16_t seq);
     void emitMessageTxStatus(const OutboundMessageTxRecord& record,
                              MessageTxStatus status);
+    void drainMessageTxStatusEvents();
     bool shouldQueuePayloadForLinkTurn() const;
+    bool hasGeometryBoundDataOperation() const;
     bool hasLocalOutboundDataTurn() const;
     bool hasLocalInFlightDataTurn() const;
     bool hasLocalDataWaitingForTurn() const;
@@ -1718,7 +1759,8 @@ private:
     bool tryStartQueuedFileIfReady();
     void sendNextQueuedPayloadIfReady();
     void clearFileTransferArqState();
-    void handleDataPayload(const Bytes& payload, bool more_data, v2::FrameType frame_type);
+    void handleDataPayload(const Bytes& payload, bool more_data,
+                           v2::FrameType frame_type, uint8_t flags);
     void handleTurnover(const v2::ControlFrame& frame, const std::string& src_call);
     void handleTurnRequest(const v2::ControlFrame& frame, const std::string& src_call);
     void handleFileCancel(const v2::ControlFrame& frame, const std::string& src_call);
@@ -1732,7 +1774,7 @@ private:
 
     WaveformMode negotiateMode(uint8_t remote_caps, WaveformMode remote_pref);
     void sendNextFileChunk();
-    void sendNextFragment();
+    size_t sendNextFragment();
 };
 
 } // namespace protocol

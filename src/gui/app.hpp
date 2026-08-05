@@ -73,10 +73,11 @@ public:
         int auto_message_interval_sec = 8;    // gap between sequential auto-messages
         bool auto_message_vary_len = false;   // randomize each auto-message length (mix short+long)
         bool auto_message_after_file = false; // if file+message are set, send message after file clears
-        std::string auto_reply_message;       // responder: send this ONCE after a message is RECEIVED
+        std::string auto_reply_message;       // responder: send this ONCE after expected inbound messages
                                               // (tests bidirectional reply + half-duplex turn reversal)
+        int auto_reply_after_messages = 1;    // wait for N inbound messages before the one reply
         int auto_cancel_file_after_sec = 0;   // cancel active file N s after first observing it
-        int auto_disconnect_after_sec = 0;    // 0 = never; else disconnect N s after CONNECTED
+        int auto_disconnect_after_sec = 0;    // 0 = never; else grace after payload drain
         // --disconnect-on-file-done: in a one-way caller-as-sender scenario, let the scripted
         // connection initiator end the session as soon as successful sender completion proves
         // the final file ACK was consumed. The responder may also receive this option, but
@@ -236,9 +237,15 @@ private:
     bool scenario_connect_issued_ = false;  // connect() fired once
     bool scenario_payload_sent_ = false;    // full payload sequence dispatched
     bool scenario_message_sent_ = false;    // chat-message phase fired (if any)
-    bool scenario_reply_sent_ = false;      // auto-reply-on-receive fired (if any)
+    bool scenario_reply_pending_ = false;   // RX observed; retry submission until accepted
+    bool scenario_reply_sent_ = false;      // auto-reply submission accepted (if any)
+    int scenario_reply_inbound_received_ = 0; // inbound application messages counted toward reply
     int scenario_messages_sent_ = 0;        // count of sequential auto-messages sent
-    int scenario_messages_delivered_ = 0;   // scripted local messages ACKed by ARQ
+    // Protocol callbacks may run off the GUI thread. Delivery state is published
+    // before the bounded operator-event queue, so dropped display events cannot
+    // make scenario completion bookkeeping stale.
+    std::atomic<int> scenario_messages_delivered_{0}; // scripted local messages ACKed by ARQ
+    std::atomic<bool> scenario_reply_delivered_{false}; // scripted auto-reply ACKed by ARQ
     bool scenario_file_started_ = false;    // file phase started (if any)
     bool scenario_file_done_seen_ = false;  // file phase left in-progress (complete/cancel)
     bool scenario_connected_seen_ = false;
@@ -431,6 +438,7 @@ private:
     bool send_btn_log_file_busy_ = false;
     bool send_btn_log_tx_inprog_ = false;
     size_t send_btn_log_textlen_ = 0;
+    size_t send_btn_log_backlog_bytes_ = 0;
     bool send_btn_log_connected_ = false;
     bool send_btn_log_would_enable_ = false;
 

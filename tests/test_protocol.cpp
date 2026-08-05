@@ -1171,6 +1171,175 @@ bool test_send_binary_roundtrip_arbitrary_bytes() {
     return true;
 }
 
+bool test_forced_tiny_capacity_text_message_roundtrip_and_status() {
+    TEST("255-byte text message fragments exactly at tiny negotiated capacity");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.mode_capabilities = ModeCapabilities::OFDM_CHIRP;
+    config.preferred_mode = WaveformMode::OFDM_CHIRP;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+    stationA.setForcedModulation(Modulation::QPSK);
+    stationA.setForcedCodeRate(CodeRate::R1_3);
+    stationA.setForcedFrameCodewords(1, true);
+
+    std::vector<std::pair<std::string, std::string>> received;
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    stationB.setMessageReceivedCallback(
+        [&](const std::string& from, const std::string& text) {
+            received.emplace_back(from, text);
+        });
+    stationA.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(80, 100);
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Connection not established");
+    }
+    if (stationA.getDataCodeRate() != CodeRate::R1_3 ||
+        stationA.getForcedFrameCodewords() != 1) {
+        FAIL("Tiny forced data geometry was not negotiated");
+    }
+
+    const std::string payload(255, 'M');
+    if (!stationA.sendMessage(payload)) FAIL("sendMessage() returned false");
+    for (int i = 0; i < 1500 && received.empty(); ++i) {
+        channel.run(1, 25);
+    }
+    channel.run(20, 25);
+
+    if (received.size() != 1 || received.front().first != "W1ABC" ||
+        received.front().second != payload) {
+        FAIL("Fragmented 255-byte text message was not delivered exactly once and byte-exact");
+    }
+    int submitted = 0;
+    int delivered = 0;
+    for (const auto& event : statuses) {
+        if (event.text != payload || event.remote_call != "K2DEF") continue;
+        submitted += event.status == Connection::MessageTxStatus::SUBMITTED ? 1 : 0;
+        delivered += event.status == Connection::MessageTxStatus::DELIVERED ? 1 : 0;
+    }
+    if (submitted != 1 || delivered != 1) {
+        FAIL("Fragmented text message did not publish one SUBMITTED and one DELIVERED result");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_message_status_dispatch_allows_ordered_reentrant_reset() {
+    TEST("Message status FIFO survives reentrant ProtocolEngine reset");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(80, 100);
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Connection not established");
+    }
+
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    bool reset_from_submitted = false;
+    stationA.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+            if (!reset_from_submitted &&
+                event.status == Connection::MessageTxStatus::SUBMITTED) {
+                reset_from_submitted = true;
+                // This re-enters the engine while its callback dispatcher is
+                // active. FAILED must append behind SUBMITTED, never overtake it
+                // or deadlock on the non-recursive state mutex.
+                stationA.reset();
+            }
+        });
+
+    const int tx_before = channel.getTxCountA();
+    if (!stationA.sendMessage("engine-reset-after-submit")) {
+        FAIL("sendMessage() returned false");
+    }
+    if (channel.getTxCountA() != tx_before + 1) {
+        FAIL("Physical DATA handoff did not complete before SUBMITTED callback");
+    }
+    if (!reset_from_submitted || stationA.getState() != ConnectionState::DISCONNECTED) {
+        FAIL("Reentrant reset did not leave ProtocolEngine disconnected");
+    }
+    if (statuses.size() != 2 ||
+        statuses[0].status != Connection::MessageTxStatus::SUBMITTED ||
+        statuses[1].status != Connection::MessageTxStatus::FAILED ||
+        !statuses[0].sequence_valid || !statuses[1].sequence_valid ||
+        statuses[0].text != "engine-reset-after-submit" ||
+        statuses[1].text != "engine-reset-after-submit") {
+        FAIL("Status dispatcher did not preserve SUBMITTED then FAILED ordering");
+    }
+
+    PASS();
+    return true;
+}
+
+bool test_binary_delivery_callback_can_reenter_protocol_engine() {
+    TEST("Binary delivery callback can re-enter ProtocolEngine");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+
+    ProtocolEngine stationA(config);
+    ProtocolEngine stationB(config);
+    stationA.setLocalCallsign("W1ABC");
+    stationB.setLocalCallsign("K2DEF");
+    stationB.setMeasuredSNR(25.0f);  // Keep this callback-contract test on OFDM.
+
+    bool callback_entered = false;
+    bool callback_saw_connected = false;
+    size_t callback_backlog = 0;
+    Bytes received;
+    stationB.setDataReceivedCallback([&](const Bytes& data, bool more_data) {
+        if (more_data) {
+            return;
+        }
+        callback_entered = true;
+        received = data;
+        // Public callbacks run outside ProtocolEngine's non-recursive mutex.
+        // Before the pending-data queue, either getter deadlocked here.
+        callback_saw_connected = stationB.isConnected();
+        callback_backlog = stationB.getTxBacklogBytes();
+    });
+
+    SimulatedChannel channel(stationA, stationB);
+    stationA.connect("K2DEF");
+    channel.run(50, 100);
+    if (!stationA.isConnected() || !stationB.isConnected()) {
+        FAIL("Connection not established");
+    }
+
+    const Bytes payload{0x00, 0x42, 0xFF, 0x17};
+    if (!stationA.sendBinary(payload)) FAIL("sendBinary() returned false");
+    for (int i = 0; i < 300 && !callback_entered; ++i) {
+        channel.run(1, 50);
+    }
+
+    if (!callback_entered) FAIL("Binary callback did not run");
+    if (!callback_saw_connected) FAIL("Re-entrant state getter returned stale state");
+    if (callback_backlog != 0) FAIL("Receiver unexpectedly had TX backlog");
+    if (received != payload) FAIL("Re-entrant callback payload mismatch");
+
+    PASS();
+    return true;
+}
+
 std::string createPseudoRandomTestFile(const std::filesystem::path& dir,
                                        const std::string& name,
                                        size_t size) {
@@ -1386,6 +1555,9 @@ int main() {
     test_physical_turn_provenance_stays_on_input_boundary();
     test_binary_fragment_reassembly_single_callback();
     test_send_binary_roundtrip_arbitrary_bytes();
+    test_forced_tiny_capacity_text_message_roundtrip_and_status();
+    test_message_status_dispatch_allows_ordered_reentrant_reset();
+    test_binary_delivery_callback_can_reenter_protocol_engine();
 
     std::cout << "\nFile Transfer Tests:\n";
     // NOTE (TRANSPORT MERGE 2026-06-06): the in-process SimulatedChannel file/binary-send

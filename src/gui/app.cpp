@@ -401,7 +401,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     scenario_active_ = !options_.auto_connect.empty() || options_.auto_accept ||
                        !options_.auto_send_file.empty() ||
                        !options_.auto_send_message.empty() ||
+                       !options_.auto_reply_message.empty() ||
                        options_.auto_cancel_file_after_sec > 0 ||
+                       options_.auto_disconnect_after_sec > 0 ||
                        options_.exit_after_sec > 0;
     if (scenario_active_) {
         if (!options_.auto_send_message.empty() || !options_.auto_send_file.empty()) {
@@ -859,17 +861,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             handleDriveAdvisory(advisory, group_seq);
         });
 
-    // Half-duplex INTERACTIVE (bidirectional file / B2F role-swap): the same three
-    // callbacks ultra_tnc wires. setHalfDuplexInteractive keeps the ISS/IRS turn gate on
-    // burst sends so the two directions serialize (A->B then B->A) instead of colliding;
-    // setDataTurnAcquiredCallback forces a full chirp+LTS anchor on our first frame after
-    // we acquire the turn (so the peer re-acquires across the swap); setFullOFDMAnchor-
-    // ExpectedCallback arms our decoder to cold-acquire the peer's full anchor after we
-    // yield. Default OFF — the GUI is one-way (A->B) unless --half-duplex is passed.
+    // Message turn reversals use these anchor callbacks even when the stronger
+    // half-duplex-interactive burst gate is not requested. The first frame after
+    // acquiring the DATA turn must carry a full chirp+LTS anchor, and the yielding
+    // peer must cold-acquire it. Keep setHalfDuplexInteractive opt-in because it also
+    // changes file/B2F burst scheduling semantics.
+    protocol_.setDataTurnAcquiredCallback([this]() { modem_.forceNextFrameFullPreamble(); });
+    protocol_.setFullOFDMAnchorExpectedCallback([this]() { modem_.expectFullOFDMAnchorOnce(); });
     if (options_.half_duplex_interactive) {
         protocol_.setHalfDuplexInteractive(true);
-        protocol_.setDataTurnAcquiredCallback([this]() { modem_.forceNextFrameFullPreamble(); });
-        protocol_.setFullOFDMAnchorExpectedCallback([this]() { modem_.expectFullOFDMAnchorOnce(); });
         guiLog("[scenario] half-duplex interactive enabled (bidirectional role-swap)");
     }
 
@@ -1817,15 +1817,38 @@ void App::initAudio() {
 }
 
 void App::enqueueOperatorEvent(OperatorEvent event) {
-    std::unique_lock<std::mutex> lock(operator_event_mutex_, std::try_to_lock);
-    if (!lock.owns_lock()) {
-        operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
-        return;
+    const bool critical = event.kind != OperatorEventKind::LogLine;
+    std::unique_lock<std::mutex> lock(operator_event_mutex_, std::defer_lock);
+    if (critical) {
+        // Protocol callbacks are emitted after ProtocolEngine releases its mutex.
+        // A received application message or terminal TX result can therefore wait
+        // briefly for the GUI queue without deadlocking the modem. Never lose an
+        // ACKed message merely because the render thread was draining events.
+        lock.lock();
+    } else {
+        lock.try_lock();
+        if (!lock.owns_lock()) {
+            operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
     }
 
     if (operator_event_queue_.size() >= operator_event_queue_limit_) {
-        operator_event_queue_.pop_front();
-        operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+        const auto disposable = std::find_if(
+            operator_event_queue_.begin(), operator_event_queue_.end(),
+            [](const OperatorEvent& queued) {
+                return queued.kind == OperatorEventKind::LogLine;
+            });
+        if (disposable != operator_event_queue_.end()) {
+            operator_event_queue_.erase(disposable);
+            operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+        } else if (!critical) {
+            // A diagnostic line must never evict a message/status event. Critical
+            // bursts are intentionally allowed to exceed the soft display limit
+            // until the next GUI drain; their volume is protocol-bounded.
+            operator_events_dropped_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
     }
     operator_event_queue_.push_back(std::move(event));
 }
@@ -1854,9 +1877,13 @@ void App::enqueueMessageTxStatus(protocol::ProtocolEngine::MessageTxStatusEvent 
             break;
         case protocol::ProtocolEngine::MessageTxStatus::DELIVERED:
             operator_events_tx_delivered_.fetch_add(1, std::memory_order_relaxed);
-            if (scenario_active_ && !options_.auto_send_message.empty() &&
+            if (!options_.auto_send_message.empty() &&
                 event_status.text.rfind(options_.auto_send_message, 0) == 0) {
-                ++scenario_messages_delivered_;
+                scenario_messages_delivered_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (!options_.auto_reply_message.empty() &&
+                event_status.text == options_.auto_reply_message) {
+                scenario_reply_delivered_.store(true, std::memory_order_relaxed);
             }
             break;
         case protocol::ProtocolEngine::MessageTxStatus::FAILED:
@@ -1917,19 +1944,27 @@ void App::drainOperatorEvents(bool flush_all) {
             case OperatorEventKind::MessageReceived:
                 appendRxLogLineNow("[RX " + event.from + "] " + event.text);
                 // Scripted bidirectional test: a responder configured with
-                // --auto-reply-message sends ONE reply after it receives a message.
-                // sendMessage() queues + TURN_REQUESTs if we don't hold the DATA turn,
-                // so this also exercises the half-duplex turn reversal (the peer must
-                // yield TURNOVER). Fires once per run (scenario_reply_sent_ latch).
+                // --auto-reply-message sends ONE reply after the configured number
+                // of application messages. The default threshold remains one.
+                // Submission is retried from tickScenario() until Connection accepts it;
+                // only then is scenario_reply_sent_ latched. This also exercises the
+                // half-duplex turn reversal (the peer must yield TURNOVER).
                 if (scenario_active_ && !options_.auto_reply_message.empty() &&
                     !scenario_reply_sent_) {
-                    scenario_reply_sent_ = true;
-                    guiLog("[scenario] auto-reply: sending %zu-byte reply after receiving a message",
-                           options_.auto_reply_message.size());
-                    if (protocol_.sendMessage(options_.auto_reply_message)) {
-                        if (!protocol_.isReadyToSend()) {
-                            appendRxLogLineNow("[INFO] Auto-reply queued - waiting for DATA turn.");
-                        }
+                    ++scenario_reply_inbound_received_;
+                    const int expected = std::max(1, options_.auto_reply_after_messages);
+                    guiLog("[scenario] auto-reply inbound %d/%d from %s",
+                           scenario_reply_inbound_received_, expected,
+                           event.from.empty() ? "peer" : event.from.c_str());
+                    if (scenario_reply_inbound_received_ == expected &&
+                        !scenario_reply_pending_) {
+                        scenario_reply_pending_ = true;
+                        guiLog("[scenario] auto-reply threshold reached (%d/%d); scheduling %zu-byte reply",
+                               scenario_reply_inbound_received_, expected,
+                               options_.auto_reply_message.size());
+                    } else if (scenario_reply_inbound_received_ > expected) {
+                        guiLog("[scenario] auto-reply received unexpected extra inbound message (%d > %d) before reply submission",
+                               scenario_reply_inbound_received_, expected);
                     }
                 }
                 break;
@@ -1952,10 +1987,14 @@ void App::drainOperatorEvents(bool flush_all) {
                         break;
                     }
                     case protocol::ProtocolEngine::MessageTxStatus::FAILED: {
-                        char line[96];
-                        snprintf(line, sizeof(line), "FAIL #%u failed (max retries)",
-                                 event.tx_status.first_seq);
-                        appendRxLogLineNow(line);
+                        if (event.tx_status.sequence_valid) {
+                            appendRxLogLineNow(
+                                "FAIL #" + std::to_string(event.tx_status.first_seq) +
+                                " failed");
+                        } else {
+                            appendRxLogLineNow(
+                                "FAIL before wire submission");
+                        }
                         break;
                     }
                 }
@@ -2286,7 +2325,28 @@ void App::renderDiagnosticsDialogs() {
 }
 
 void App::sendMessage() {
-    // Not used in current implementation - messages sent via protocol
+    const size_t text_len = boundedCStringLen(tx_text_buffer_);
+    const bool scenario_drives_payload =
+        !options_.auto_send_file.empty() ||
+        !options_.auto_send_message.empty() ||
+        !options_.auto_reply_message.empty() ||
+        options_.auto_cancel_file_after_sec > 0;
+    if (scenario_drives_payload || text_len == 0 || !protocol_.isConnected() ||
+        protocol_.isFileTransferInProgress() || tx_in_progress_.load() ||
+        protocol_.getTxBacklogBytes() != 0) {
+        return;
+    }
+
+    const bool ready_now = protocol_.isReadyToSend();
+    const std::string text(tx_text_buffer_, text_len);
+    if (protocol_.sendMessage(text)) {
+        if (!ready_now) {
+            appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
+        }
+        // Preserve the operator's draft when submission is rejected. Clear it
+        // only after Connection has accepted ownership of the message.
+        tx_text_buffer_[0] = '\0';
+    }
 }
 
 void App::onDataReceived(const std::string& text) {
@@ -3300,6 +3360,22 @@ void App::tickScenario() {
             guiLog("[scenario] file phase cleared; auto-message-after-file may proceed");
         }
 
+        // A received message arms one scripted reply. Connection may temporarily
+        // reject submission (for example while its outbound queue is full), so do
+        // not latch completion until it accepts the payload; retry on later ticks.
+        if (scenario_reply_pending_ && !scenario_reply_sent_) {
+            const bool ready_now = protocol_.isReadyToSend();
+            if (protocol_.sendMessage(options_.auto_reply_message)) {
+                scenario_reply_pending_ = false;
+                scenario_reply_sent_ = true;
+                guiLog("[scenario] auto-reply accepted (%zu bytes)",
+                       options_.auto_reply_message.size());
+                if (!ready_now) {
+                    appendRxLogLine("[INFO] Auto-reply queued - waiting for DATA turn.");
+                }
+            }
+        }
+
         // Phase 1: chat message(s) — send the first on connect, then optional
         // repeats at a fixed interval (a test harness for sequential interactive
         // messaging). Each repeat is numbered so RX-side delivery is unambiguous.
@@ -3332,25 +3408,31 @@ void App::tickScenario() {
                     // Span really-short (a few chars, single tiny frame) to long
                     // (multi-frame) to maximize frame-count/timing diversity.
                     std::uniform_int_distribution<size_t> dist(2, pool.size());
-                    msg = pool.substr(0, dist(rng));
+                    // Keep the caller-supplied base as a stable scenario identity.
+                    // Delivery accounting runs on the protocol callback thread and
+                    // matches this prefix; replacing it with the random pool made a
+                    // varied-length run deliver successfully but wait forever to drain.
+                    msg = options_.auto_send_message;
+                    msg += " ";
+                    msg += pool.substr(0, dist(rng));
                 } else {
                     msg = options_.auto_send_message;
                 }
                 msg += " #" + std::to_string(scenario_messages_sent_ + 1);
-                guiLog("[scenario] sending message %d/%d (%zu bytes)",
-                       scenario_messages_sent_ + 1, message_target, msg.size());
                 const bool file_busy = protocol_.isFileTransferInProgress();
                 const bool ready_now = protocol_.isReadyToSend();
                 if (protocol_.sendMessage(msg)) {
+                    guiLog("[scenario] message %d/%d accepted (%zu bytes)",
+                           scenario_messages_sent_ + 1, message_target, msg.size());
                     if (file_busy) {
                         appendRxLogLine("[INFO] Message queued - file transfer in progress, will send after.");
                     } else if (!ready_now) {
                         appendRxLogLine("[INFO] Message queued - waiting for DATA turn.");
                     }
+                    scenario_message_sent_ = true;
+                    scenario_message_sent_at_ = now;
+                    ++scenario_messages_sent_;
                 }
-                scenario_message_sent_ = true;
-                scenario_message_sent_at_ = now;
-                ++scenario_messages_sent_;
             }
         }
         // Phase 2: file, but only after ALL messages have finished transmitting
@@ -3362,7 +3444,7 @@ void App::tickScenario() {
             message_after_file ||
             options_.auto_send_message.empty() ||
             (scenario_messages_sent_ >= message_target &&
-             scenario_messages_delivered_ >= message_target &&
+             scenario_messages_delivered_.load(std::memory_order_relaxed) >= message_target &&
              protocol_.getTxBacklogBytes() == 0 &&
              !tx_in_progress_ &&
              now - scenario_message_sent_at_ >= std::chrono::milliseconds(2000));
@@ -3394,6 +3476,7 @@ void App::tickScenario() {
         // Mark the whole sequence dispatched once every requested phase fired.
         if (!scenario_payload_sent_ &&
             (options_.auto_send_message.empty() || scenario_messages_sent_ >= message_target) &&
+            (options_.auto_reply_message.empty() || scenario_reply_sent_) &&
             (options_.auto_send_file.empty() || scenario_file_started_)) {
             scenario_payload_sent_ = true;
             scenario_connected_at_ = now;
@@ -3410,10 +3493,17 @@ void App::tickScenario() {
         const bool file_drained =
             options_.auto_send_file.empty() ||
             (scenario_file_started_ && !protocol_.isFileTransferInProgress());
+        const bool outbound_messages_delivered =
+            (options_.auto_send_message.empty() ||
+             scenario_messages_delivered_.load(std::memory_order_relaxed) >= message_target) &&
+            (options_.auto_reply_message.empty() ||
+             scenario_reply_delivered_.load(std::memory_order_relaxed));
+        const bool message_backlog_drained = protocol_.getTxBacklogBytes() == 0;
         const bool hold_elapsed =
             now - scenario_connected_at_ >=
             std::chrono::seconds(options_.auto_disconnect_after_sec);
-        if (file_drained && hold_elapsed) {
+        if (file_drained && outbound_messages_delivered &&
+            message_backlog_drained && hold_elapsed) {
             guiLog("[scenario] auto-disconnect (payload drained, %ds grace)",
                    options_.auto_disconnect_after_sec);
             scenario_disconnect_issued_ = true;
@@ -4847,7 +4937,7 @@ void App::renderOperateTab() {
             color = ImVec4(0.35f, 0.95f, 0.45f, 1.0f);
         } else if (operatorLineStartsWith(msg, "OK #")) {
             color = ImVec4(0.35f, 0.65f, 1.0f, 1.0f);
-        } else if (operatorLineStartsWith(msg, "FAIL #")) {
+        } else if (operatorLineStartsWith(msg, "FAIL ")) {
             color = ImVec4(1.0f, 0.35f, 0.2f, 1.0f);
         } else if (operatorLineStartsWith(msg, "[RX")) {
             color = ImVec4(0.35f, 0.95f, 0.95f, 1.0f);
@@ -4902,16 +4992,22 @@ void App::renderOperateTab() {
         }
     }
 
+    // Connection/accept/exit conveniences do not own the payload plane. Keep
+    // manual message/file controls available unless automation can itself submit
+    // or cancel application data.
     const bool scenario_drives_payload =
         !options_.auto_send_file.empty() ||
         !options_.auto_send_message.empty() ||
+        !options_.auto_reply_message.empty() ||
         options_.auto_cancel_file_after_sec > 0;
     const bool file_transfer_busy = protocol_.isFileTransferInProgress();
     const bool tx_inprog = tx_in_progress_.load();
     const size_t tx_text_len = boundedCStringLen(tx_text_buffer_);
+    const size_t tx_backlog_bytes = protocol_.getTxBacklogBytes();
     const bool connected_now = protocol_.isConnected();
     const bool would_enable_send =
-        !file_transfer_busy && !tx_inprog && tx_text_len > 0 && connected_now;
+        !file_transfer_busy && !tx_inprog && tx_text_len > 0 && connected_now &&
+        tx_backlog_bytes == 0;
     const bool can_send = !scenario_drives_payload && would_enable_send;
 
     if (!send_btn_log_valid_ ||
@@ -4920,14 +5016,16 @@ void App::renderOperateTab() {
         send_btn_log_file_busy_ != file_transfer_busy ||
         send_btn_log_tx_inprog_ != tx_inprog ||
         send_btn_log_textlen_ != tx_text_len ||
+        send_btn_log_backlog_bytes_ != tx_backlog_bytes ||
         send_btn_log_connected_ != connected_now ||
         send_btn_log_would_enable_ != would_enable_send) {
-        guiLog("SEND_BTN enabled=%d scenario=%d file_busy=%d tx_inprog=%d textlen=%zu connected=%d would_enable=%d",
+        guiLog("SEND_BTN enabled=%d scenario=%d file_busy=%d tx_inprog=%d textlen=%zu backlog=%zu connected=%d would_enable=%d",
                can_send ? 1 : 0,
                scenario_drives_payload ? 1 : 0,
                file_transfer_busy ? 1 : 0,
                tx_inprog ? 1 : 0,
                tx_text_len,
+               tx_backlog_bytes,
                connected_now ? 1 : 0,
                would_enable_send ? 1 : 0);
         send_btn_log_valid_ = true;
@@ -4936,18 +5034,41 @@ void App::renderOperateTab() {
         send_btn_log_file_busy_ = file_transfer_busy;
         send_btn_log_tx_inprog_ = tx_inprog;
         send_btn_log_textlen_ = tx_text_len;
+        send_btn_log_backlog_bytes_ = tx_backlog_bytes;
         send_btn_log_connected_ = connected_now;
         send_btn_log_would_enable_ = would_enable_send;
     }
 
-    // Chat compose REMOVED (leader-style rework, design §14): the station is a
-    // one-way FILE SENDER — no interactive text messaging. The protocol-level
-    // sendMessage path remains for now but is no longer reachable from the GUI;
-    // it is removed in the protocol cleanup pass. (void) the chat-only locals so
-    // the build stays warning-clean now that the Send-message button is gone.
-    (void)can_send;
-    (void)tx_inprog;
-    (void)would_enable_send;
+    // Operator text messages are intentionally capped at 255 bytes by the
+    // 256-byte NUL-terminated compose buffer. Keep one payload outstanding at a
+    // time so a message and file cannot share ambiguous ARQ completion state.
+    ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 90);
+    const bool send_on_enter =
+        ImGui::InputText("##txinput", tx_text_buffer_, sizeof(tx_text_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+
+    const ImVec4 send_color = can_send
+        ? ImVec4(0.3f, 0.6f, 0.3f, 1.0f)
+        : ImVec4(0.4f, 0.4f, 0.4f, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, send_color);
+    ImGui::BeginDisabled(!can_send);
+    const bool send_clicked = ImGui::Button("Send##msg", ImVec2(80, 0));
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (file_transfer_busy) {
+            ImGui::SetTooltip("File transfer in progress - cancel it before sending a message.");
+        } else if (tx_backlog_bytes != 0 || tx_inprog) {
+            ImGui::SetTooltip("Wait for the current transmission to finish.");
+        }
+    }
+    // InputText mutates the buffer after can_send was sampled above. Let the
+    // handler re-check current state so Enter on a previously empty composer
+    // submits immediately instead of requiring a second key press.
+    if (send_clicked || send_on_enter) {
+        sendMessage();
+    }
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor();
 
     // File Transfer (compact row)
     if (protocol_.isFileTransferInProgress()) {
@@ -5022,6 +5143,7 @@ void App::renderOperateTab() {
         ImGui::SameLine();
         bool can_send_file = !scenario_drives_payload &&
                              protocol_.isConnected() &&
+                             protocol_.getTxBacklogBytes() == 0 &&
                              boundedCStringLen(file_path_buffer_) > 0;
         ImGui::BeginDisabled(!can_send_file);
         if (ImGui::Button("Send##file", ImVec2(60, 0))) {

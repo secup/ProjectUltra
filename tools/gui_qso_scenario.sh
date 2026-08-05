@@ -5,16 +5,22 @@
 #  QAM16- or ladder-specific.)
 #
 # Drives two real `ultra_gui -sim` instances (ALPHA, BRAVO) through a live
-# `ota_simulator serve` channel for a full connected one-way file transfer:
+# `ota_simulator serve` channel. The default remains the full connected one-way
+# file-transfer scenario:
 # PING/PONG -> CONNECT -> MODE_CHANGE -> ALPHA->BRAVO file transfer -> DISCONNECT.
-# (Chat messaging was removed 2026-05-29 — the GUI is a one-way FILE SENDER per
-# design §14; this harness is file-transfer-only.) This is the real-time path
-# (audio-clock paced), so it is the trustworthy reliability/throughput gate —
-# unlike cli_simulator, which is CPU-paced and not faithful for fade reliability.
+# `--message-only` selects the interactive-message scenario instead: ALPHA sends
+# one or more numbered messages, BRAVO optionally replies once, and PASS requires
+# exact application-text delivery plus terminal DELIVERED status on each sender.
+# This is the real-time path (audio-clock paced), so it is the trustworthy
+# reliability/throughput gate — unlike cli_simulator, which is CPU-paced and not
+# faithful for fade reliability.
 #
 # Goodput reported (summary.env GOODPUT_BPS) is ALPHA's (sender) on-air goodput
 # only — the honest full-transfer number. BRAVO's "Received OK kbps" is NOT used
 # (it spans only first->last decode and over-reports; see the goodput block).
+# Message-only runs leave GOODPUT_BPS=0 and report exact application delivery,
+# terminal status and TX-airtime counters instead; they are latency/reliability
+# scenarios, not file-goodput measurements.
 #
 # The warm-handoff burst-transport config is BAKED IN below (overridable
 # defaults) — a bare run is the warm test, no env exports needed:
@@ -38,10 +44,46 @@ EXIT_AFTER=""
 FILE_KB=10
 OUT=""
 PAYLOAD_SEED=""
+SCENARIO_KIND="file"
+MESSAGE_TEXT="ProjectUltra"
+MESSAGE_COUNT=1
+MESSAGE_INTERVAL=8
+MESSAGE_VARY_LEN=0
+REPLY_MESSAGE=""
+DISCONNECT_AFTER_SET=0
+MESSAGE_ARGS_USED=0
+FILE_KB_SET=0
+REPLY_MESSAGE_SET=0
 
 usage() {
-  printf 'Usage: %s [--channel awgn] [--snr-db 20] [--seed 42] [--expect-rate R1/4] [--expect-mod 16QAM] [--out DIR]\n' "$0"
-  printf '       [--exit-after SEC] [--auto-disconnect-after SEC] [--file-kb KB]\n'
+  printf 'Usage: %s [channel/options] [file scenario options]\n' "$0"
+  printf '       %s [channel/options] --message-only [message scenario options]\n' "$0"
+  printf '\n'
+  printf 'Channel/options:\n'
+  printf '  --channel NAME                 OTASim channel (default: awgn)\n'
+  printf '  --snr-db DB                    OTASim SNR (default: 20)\n'
+  printf '  --seed N                       Deterministic channel seed (default: 42)\n'
+  printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
+  printf '  --expect-mod MOD               Expected/locked modulation (default: 16QAM)\n'
+  printf '  --out DIR                      Result directory\n'
+  printf '  --exit-after SEC               Hard wall-clock deadline\n'
+  printf '  --auto-disconnect-after SEC    Grace after payload drain (file default: 20; message default: 2)\n'
+  printf '\n'
+  printf 'Default file scenario:\n'
+  printf '  --file-kb KB                   Deterministic file size (default: 10)\n'
+  printf '\n'
+  printf 'Message scenario (never mixed with a file):\n'
+  printf '  --message-only                 Select interactive-message testing\n'
+  printf '  --message TEXT                 Initiator text before the automatic " #N" suffix\n'
+  printf '  --message-count N              Number of sequential messages (default: 1)\n'
+  printf '  --message-interval SEC         Minimum gap between messages (default: 8)\n'
+  printf '  --message-vary-len             Let ultra_gui vary message lengths; TX and RX are compared exactly\n'
+  printf '  --reply-message TEXT           BRAVO sends this exact reply once after all N messages arrive\n'
+  printf '\n'
+  printf 'Examples:\n'
+  printf '  %s --channel good --snr-db 20 --seed 7 --file-kb 21 --out /tmp/file_qso\n' "$0"
+  printf '  %s --channel awgn --snr-db 20 --message-only --message "hello" --out /tmp/msg_qso\n' "$0"
+  printf '  %s --channel good --snr-db 20 --message-only --message ProjectUltra --message-count 3 --message-vary-len --reply-message "roger" --out /tmp/bidi_msg_qso\n' "$0"
 }
 
 modulation_bits() {
@@ -84,6 +126,9 @@ estimate_exit_after() {
   pilot_spacing="$(rate_descriptor "$EXPECT_RATE" pilot_spacing)"
   bits_per_carrier="$(modulation_bits "$EXPECT_MOD")"
   awk -v file_bytes="$FILE_BYTES" \
+      -v scenario_kind="$SCENARIO_KIND" \
+      -v message_bytes="$MESSAGE_BYTES_ESTIMATE" \
+      -v message_count="$MESSAGE_COUNT" \
       -v disconnect_after="$DISCONNECT_AFTER" \
       -v code_rate="$code_rate" \
       -v pilot_spacing="$pilot_spacing" \
@@ -101,14 +146,25 @@ estimate_exit_after() {
       # Budget conservatively: the deadline only has to NOT false-FAIL a run that
       # does deliver; a too-long ceiling costs nothing because a PASS ends early
       # on the success poll. (Dead-air on R1/2 itself is a separate pacing issue.)
-      expected_payload_bps = raw_info_bps * 0.15
-      if (expected_payload_bps < 250.0) expected_payload_bps = 250.0
       handshake = 25.0
-      payload = (file_bytes * 8.0) / expected_payload_bps
+      if (scenario_kind == "message") {
+        # Interactive payloads pay per-message framing/ACK/turn latency. Keep a
+        # deliberately loose ceiling (PASS polling still exits immediately) so
+        # low-MPG MC-DPSK and fragmented messages do not false-timeout.
+        expected_payload_bps = raw_info_bps * 0.08
+        if (expected_payload_bps < 80.0) expected_payload_bps = 80.0
+        payload = (message_bytes * message_count * 8.0) / expected_payload_bps
+        payload += message_count * 8.0
+      } else {
+        expected_payload_bps = raw_info_bps * 0.15
+        if (expected_payload_bps < 250.0) expected_payload_bps = 250.0
+        payload = (file_bytes * 8.0) / expected_payload_bps
+      }
       margin = 20.0
       expected = handshake + payload + disconnect_after + margin
       ceiling = int(expected * 1.8 + 0.999)
-      if (ceiling < 90) ceiling = 90
+      minimum = (scenario_kind == "message" ? 120 : 90)
+      if (ceiling < minimum) ceiling = minimum
       print ceiling
     }'
 }
@@ -122,12 +178,58 @@ while [[ $# -gt 0 ]]; do
     --expect-mod) EXPECT_MOD="${2:?}"; shift 2 ;;
     --out) OUT="${2:?}"; shift 2 ;;
     --exit-after) EXIT_AFTER="${2:?}"; shift 2 ;;
-    --auto-disconnect-after) DISCONNECT_AFTER="${2:?}"; shift 2 ;;
-    --file-kb) FILE_KB="${2:?}"; shift 2 ;;
+    --auto-disconnect-after) DISCONNECT_AFTER="${2:?}"; DISCONNECT_AFTER_SET=1; shift 2 ;;
+    --file-kb) FILE_KB="${2:?}"; FILE_KB_SET=1; shift 2 ;;
+    --message-only) SCENARIO_KIND="message"; shift ;;
+    --message) MESSAGE_TEXT="${2:?}"; MESSAGE_ARGS_USED=1; shift 2 ;;
+    --message-count) MESSAGE_COUNT="${2:?}"; MESSAGE_ARGS_USED=1; shift 2 ;;
+    --message-interval) MESSAGE_INTERVAL="${2:?}"; MESSAGE_ARGS_USED=1; shift 2 ;;
+    --message-vary-len) MESSAGE_VARY_LEN=1; MESSAGE_ARGS_USED=1; shift ;;
+    --reply-message) REPLY_MESSAGE="${2:?}"; REPLY_MESSAGE_SET=1; MESSAGE_ARGS_USED=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ "$SCENARIO_KIND" == "file" && "$MESSAGE_ARGS_USED" -ne 0 ]]; then
+  echo "Message options require --message-only; file and message payloads are intentionally not mixed." >&2
+  exit 2
+fi
+if [[ "$SCENARIO_KIND" == "message" && "$FILE_KB_SET" -ne 0 ]]; then
+  echo "--file-kb cannot be combined with --message-only." >&2
+  exit 2
+fi
+if [[ ! "$MESSAGE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--message-count must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "$MESSAGE_INTERVAL" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--message-interval must be a positive integer." >&2
+  exit 2
+fi
+MESSAGE_COUNT=$((10#$MESSAGE_COUNT))
+MESSAGE_INTERVAL=$((10#$MESSAGE_INTERVAL))
+if [[ "$SCENARIO_KIND" == "message" && -z "$MESSAGE_TEXT" ]]; then
+  echo "--message text must not be empty." >&2
+  exit 2
+fi
+if [[ "$REPLY_MESSAGE_SET" -ne 0 && -z "$REPLY_MESSAGE" ]]; then
+  echo "--reply-message text must not be empty." >&2
+  exit 2
+fi
+if [[ "$MESSAGE_TEXT" == *$'\n'* || "$MESSAGE_TEXT" == *$'\r'* ||
+      "$REPLY_MESSAGE" == *$'\n'* || "$REPLY_MESSAGE" == *$'\r'* ]]; then
+  echo "Message text must be a single log-safe line (no CR/LF)." >&2
+  exit 2
+fi
+if [[ "$SCENARIO_KIND" == "message" && "$DISCONNECT_AFTER_SET" -eq 0 ]]; then
+  DISCONNECT_AFTER=2
+fi
+if [[ "$SCENARIO_KIND" == "message" ]] &&
+   [[ ! "$DISCONNECT_AFTER" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--message-only requires --auto-disconnect-after > 0 so the harness can prove the TX backlog drained." >&2
+  exit 2
+fi
 
 # ---------------------------------------------------------------------------
 # Warm-handoff burst-transport config — the "warm thing" this harness exists to
@@ -147,17 +249,42 @@ done
 #   ULTRA_LDPC_Z           -> retired unsafe raw override (ignored by Connection)
 #   ULTRA_BURST_GROUP_FRAMES -> default 6 (mask-width-matched)
 # All three remain overridable via env (=0 / value); shown in the echo only when set.
-echo "config: ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE${ULTRA_BURST_TRANSPORT:+ BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT}${ULTRA_LDPC_Z:+ LDPC_Z=$ULTRA_LDPC_Z}${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
+echo "config: SCENARIO=$SCENARIO_KIND ADAPTIVE_RATE=$ULTRA_ADAPTIVE_RATE LOCK_RATE=$ULTRA_LOCK_RATE${ULTRA_BURST_TRANSPORT:+ BURST_TRANSPORT=$ULTRA_BURST_TRANSPORT}${ULTRA_LDPC_Z:+ LDPC_Z=$ULTRA_LDPC_Z}${ULTRA_BURST_GROUP_FRAMES:+ GROUP_FRAMES=$ULTRA_BURST_GROUP_FRAMES}${ULTRA_FORCE_DATA_MOD:+ FORCE_MOD=$ULTRA_FORCE_DATA_MOD}${ULTRA_FORCE_DATA_RATE:+ FORCE_RATE=$ULTRA_FORCE_DATA_RATE}"
 
 if [[ -z "$OUT" ]]; then
   stamp="$(date +%Y%m%d_%H%M%S)"
-  OUT="/tmp/qam16_ladder_${CHANNEL}_snr${SNR_DB}_seed${SEED}_${stamp}"
+  if [[ "$SCENARIO_KIND" == "file" ]]; then
+    OUT="/tmp/qam16_ladder_${CHANNEL}_snr${SNR_DB}_seed${SEED}_${stamp}"
+  else
+    OUT="/tmp/gui_qso_message_${CHANNEL}_snr${SNR_DB}_seed${SEED}_${stamp}"
+  fi
 fi
 
 mkdir -p "$OUT"
 TOKENS="$OUT/tokens.conf"
 PAYLOAD="$OUT/qam16_${FILE_KB}KB.bin"
-FILE_BYTES=$((FILE_KB * 1024))
+MESSAGE_TX_CAPTURE="$OUT/message_alpha_tx.txt"
+MESSAGE_RX_CAPTURE="$OUT/message_bravo_rx.txt"
+MESSAGE_EXPECTED="$OUT/message_expected.txt"
+REPLY_TX_CAPTURE="$OUT/reply_bravo_tx.txt"
+REPLY_RX_CAPTURE="$OUT/reply_alpha_rx.txt"
+REPLY_EXPECTED="$OUT/reply_expected.txt"
+MESSAGE_TEXT_BYTES="$(LC_ALL=C printf '%s' "$MESSAGE_TEXT" | wc -c | tr -d '[:space:]')"
+REPLY_MESSAGE_BYTES="$(LC_ALL=C printf '%s' "$REPLY_MESSAGE" | wc -c | tr -d '[:space:]')"
+if [[ "$SCENARIO_KIND" == "message" ]]; then
+  FILE_BYTES=0
+  # Vary-length currently draws from a roughly 360-byte built-in corpus. Use
+  # its conservative upper bound for deadline sizing; exact transmitted bytes
+  # are recovered from ALPHA's operator log for the verdict.
+  if [[ "$MESSAGE_VARY_LEN" -eq 1 ]]; then
+    MESSAGE_BYTES_ESTIMATE=400
+  else
+    MESSAGE_BYTES_ESTIMATE=$((MESSAGE_TEXT_BYTES + 2 + ${#MESSAGE_COUNT}))
+  fi
+else
+  FILE_BYTES=$((FILE_KB * 1024))
+  MESSAGE_BYTES_ESTIMATE=0
+fi
 # A/B runs at the same channel seed must also transmit the same bits. The old
 # /dev/urandom fixture changed both the code and payload between arms, weakening
 # a paired FEC comparison. Override separately when desired, otherwise bind the
@@ -178,6 +305,62 @@ count_pattern() {
   local pattern="$1"
   local file="$2"
   grep -Ec "$pattern" "$file" 2>/dev/null || true
+}
+
+count_lines() {
+  local file="$1"
+  if [[ ! -f "$file" ]]; then
+    printf '0\n'
+    return
+  fi
+  wc -l < "$file" | tr -d '[:space:]'
+}
+
+first_line_number() {
+  local pattern="$1"
+  local file="$2"
+  grep -nE "$pattern" "$file" 2>/dev/null | head -1 | cut -d: -f1 || true
+}
+
+last_line_number() {
+  local pattern="$1"
+  local file="$2"
+  grep -nE "$pattern" "$file" 2>/dev/null | tail -1 | cut -d: -f1 || true
+}
+
+extract_message_texts() {
+  # Operator-event log lines are the application boundary: TX contains exactly
+  # what Connection accepted; RX contains exactly what the peer reassembled.
+  # Comparing these ordered files catches loss, duplication, reordering, silent
+  # truncation and payload corruption without relying on regex-safe user text.
+  sed -nE 's/.*TX #[0-9]+ -> [^:]+: //p' "$ALPHA_LOG" 2>/dev/null \
+    > "$MESSAGE_TX_CAPTURE" || true
+  sed -nE 's/.*\[RX ALPHA\] //p' "$BRAVO_LOG" 2>/dev/null \
+    > "$MESSAGE_RX_CAPTURE" || true
+  sed -nE 's/.*TX #[0-9]+ -> [^:]+: //p' "$BRAVO_LOG" 2>/dev/null \
+    > "$REPLY_TX_CAPTURE" || true
+  sed -nE 's/.*\[RX BRAVO\] //p' "$ALPHA_LOG" 2>/dev/null \
+    > "$REPLY_RX_CAPTURE" || true
+}
+
+write_fixed_message_expectation() {
+  : > "$MESSAGE_EXPECTED"
+  local i
+  for ((i = 1; i <= MESSAGE_COUNT; ++i)); do
+    printf '%s #%d\n' "$MESSAGE_TEXT" "$i" >> "$MESSAGE_EXPECTED"
+  done
+}
+
+message_numbers_are_ordered() {
+  local file="$1"
+  awk -v expected_count="$MESSAGE_COUNT" '
+    {
+      suffix = " #" NR
+      if (length($0) < length(suffix) ||
+          substr($0, length($0) - length(suffix) + 1) != suffix) bad = 1
+    }
+    END { print (NR == expected_count && !bad) ? 1 : 0 }
+  ' "$file" 2>/dev/null
 }
 
 sum_cw_fail() {
@@ -311,6 +494,70 @@ collect_metrics() {
   alpha_tx_samples="$(sum_tx_samples "$ALPHA_LOG")"
   bravo_tx_samples="$(sum_tx_samples "$BRAVO_LOG")"
 
+  message_tx_count=0
+  message_rx_count=0
+  message_delivered_count=0
+  message_exact_match=0
+  message_numbers_ordered=0
+  reply_tx_count=0
+  reply_rx_count=0
+  reply_delivered_count=0
+  reply_exact_match=0
+  reply_threshold_count=0
+  reply_after_all_messages=0
+  alpha_payload_drained_count=0
+  bravo_payload_drained_count=0
+  message_payload_drained_count=0
+  if [[ "$SCENARIO_KIND" == "message" ]]; then
+    extract_message_texts
+    if [[ "$MESSAGE_VARY_LEN" -eq 1 ]]; then
+      cp "$MESSAGE_TX_CAPTURE" "$MESSAGE_EXPECTED"
+    else
+      write_fixed_message_expectation
+    fi
+    printf '%s\n' "$REPLY_MESSAGE" > "$REPLY_EXPECTED"
+
+    message_tx_count="$(count_lines "$MESSAGE_TX_CAPTURE")"
+    message_rx_count="$(count_lines "$MESSAGE_RX_CAPTURE")"
+    message_delivered_count="$(count_pattern 'OK #[0-9]+ delivered' "$ALPHA_LOG")"
+    message_numbers_ordered="$(message_numbers_are_ordered "$MESSAGE_TX_CAPTURE")"
+    if [[ "$message_tx_count" -eq "$MESSAGE_COUNT" &&
+          "$message_rx_count" -eq "$MESSAGE_COUNT" ]] &&
+       cmp -s "$MESSAGE_EXPECTED" "$MESSAGE_TX_CAPTURE" &&
+       cmp -s "$MESSAGE_TX_CAPTURE" "$MESSAGE_RX_CAPTURE"; then
+      message_exact_match=1
+    fi
+
+    reply_tx_count="$(count_lines "$REPLY_TX_CAPTURE")"
+    reply_rx_count="$(count_lines "$REPLY_RX_CAPTURE")"
+    reply_delivered_count="$(count_pattern 'OK #[0-9]+ delivered' "$BRAVO_LOG")"
+    reply_threshold_count="$(count_pattern "auto-reply threshold reached \(${MESSAGE_COUNT}/${MESSAGE_COUNT}\)" "$BRAVO_LOG")"
+    if [[ "$REPLY_MESSAGE_SET" -eq 0 ]]; then
+      if [[ "$reply_tx_count" -eq 0 && "$reply_rx_count" -eq 0 ]]; then
+        reply_exact_match=1
+        reply_after_all_messages=1
+      fi
+    elif [[ "$reply_tx_count" -eq 1 && "$reply_rx_count" -eq 1 ]] &&
+         cmp -s "$REPLY_EXPECTED" "$REPLY_TX_CAPTURE" &&
+         cmp -s "$REPLY_TX_CAPTURE" "$REPLY_RX_CAPTURE"; then
+      reply_exact_match=1
+    fi
+    if [[ "$REPLY_MESSAGE_SET" -eq 1 ]]; then
+      last_message_rx_line="$(last_line_number '\[RX ALPHA\] ' "$BRAVO_LOG")"
+      reply_threshold_line="$(first_line_number "auto-reply threshold reached \(${MESSAGE_COUNT}/${MESSAGE_COUNT}\)" "$BRAVO_LOG")"
+      reply_tx_line="$(first_line_number 'TX #[0-9]+ -> [^:]+: ' "$BRAVO_LOG")"
+      if [[ "$reply_threshold_count" -eq 1 &&
+            -n "$last_message_rx_line" && -n "$reply_threshold_line" && -n "$reply_tx_line" &&
+            "$reply_threshold_line" -gt "$last_message_rx_line" &&
+            "$reply_tx_line" -gt "$reply_threshold_line" ]]; then
+        reply_after_all_messages=1
+      fi
+    fi
+    alpha_payload_drained_count="$(count_pattern '\[scenario\] auto-disconnect \(payload drained,' "$ALPHA_LOG")"
+    bravo_payload_drained_count="$(count_pattern '\[scenario\] auto-disconnect \(payload drained,' "$BRAVO_LOG")"
+    message_payload_drained_count=$((alpha_payload_drained_count + bravo_payload_drained_count))
+  fi
+
   # ALPHA (sender) goodput ONLY — this is the honest on-air throughput. ALPHA's
   # "Transfer complete" timer spans the entire transfer (TX start -> done),
   # including every resend, escalation, and turnaround. BRAVO's "Received OK"
@@ -331,6 +578,36 @@ collect_metrics() {
 }
 
 scenario_passed() {
+  if [[ "$SCENARIO_KIND" == "message" ]]; then
+    if ! [[ "$alpha_unexpected_modes" -eq 0 &&
+            "$bravo_unexpected_modes" -eq 0 &&
+            "$alpha_unexpected_rates" -eq 0 &&
+            "$bravo_unexpected_rates" -eq 0 &&
+            "$message_tx_count" -eq "$MESSAGE_COUNT" &&
+            "$message_rx_count" -eq "$MESSAGE_COUNT" &&
+            "$message_delivered_count" -eq "$MESSAGE_COUNT" &&
+            "$message_exact_match" -eq 1 &&
+            "$message_numbers_ordered" -eq 1 &&
+            "$message_payload_drained_count" -gt 0 ]]; then
+      return 1
+    fi
+    if [[ "$REPLY_MESSAGE_SET" -eq 1 ]]; then
+      [[ "$reply_tx_count" -eq 1 ]] &&
+      [[ "$reply_rx_count" -eq 1 ]] &&
+      [[ "$reply_delivered_count" -eq 1 ]] &&
+      [[ "$reply_exact_match" -eq 1 ]] &&
+      [[ "$reply_after_all_messages" -eq 1 ]] &&
+      [[ "$bravo_payload_drained_count" -gt 0 ]]
+    else
+      [[ "$reply_tx_count" -eq 0 ]] &&
+      [[ "$reply_rx_count" -eq 0 ]] &&
+      [[ "$reply_delivered_count" -eq 0 ]] &&
+      [[ "$reply_exact_match" -eq 1 ]] &&
+      [[ "$alpha_payload_drained_count" -gt 0 ]]
+    fi
+    return
+  fi
+
   # PASS = the file delivered CRC-clean (BRAVO verified the file + ALPHA finalized the
   # transfer). DELIVERY is the verdict.
   #
@@ -363,7 +640,7 @@ scenario_passed() {
 }
 
 hard_failure_reason() {
-  local pattern='max retries exceeded|maximum retries exceeded|transfer failed|Transfer failed|FileTransfer: .*failed|FILE.*failed|SR-ARQ:.*retries exhausted|Connection: Connect failed|Connect failed after|giving up'
+  local pattern='max retries exceeded|maximum retries exceeded|transfer failed|Transfer failed|FileTransfer: .*failed|FILE.*failed|FAIL .*failed|FAIL before wire submission|SR-ARQ:.*retries exhausted|Connection: Connect failed|Connect failed after|giving up'
   if [[ "${alpha_unexpected_modes:-0}" -gt 0 || "${bravo_unexpected_modes:-0}" -gt 0 \
         || "${alpha_unexpected_rates:-0}" -gt 0 || "${bravo_unexpected_rates:-0}" -gt 0 ]]; then
     echo "unexpected_data_mode"
@@ -396,6 +673,7 @@ write_summary() {
   )"
   {
     echo "OUT=$OUT"
+    echo "SCENARIO_KIND=$SCENARIO_KIND"
     echo "CHANNEL=$CHANNEL"
     echo "SNR_DB=$SNR_DB"
     echo "SEED=$SEED"
@@ -415,6 +693,35 @@ write_summary() {
     echo "BRAVO_UNEXPECTED_RATE_COUNT=$bravo_unexpected_rates"
     echo "FILE_CRC_OK_COUNT=$file_crc_ok"
     echo "ALPHA_FILE_DONE_COUNT=$alpha_file_done"
+    echo "MESSAGE_COUNT=$MESSAGE_COUNT"
+    echo "MESSAGE_INTERVAL_SEC=$MESSAGE_INTERVAL"
+    echo "MESSAGE_VARY_LEN=$MESSAGE_VARY_LEN"
+    echo "MESSAGE_TEXT_BYTES=$MESSAGE_TEXT_BYTES"
+    echo "MESSAGE_TEXT_SHA256=$MESSAGE_TEXT_SHA256"
+    echo "MESSAGE_TX_COUNT=$message_tx_count"
+    echo "MESSAGE_RX_COUNT=$message_rx_count"
+    echo "MESSAGE_DELIVERED_COUNT=$message_delivered_count"
+    echo "MESSAGE_EXACT_MATCH=$message_exact_match"
+    echo "MESSAGE_NUMBERS_ORDERED=$message_numbers_ordered"
+    echo "MESSAGE_EXPECTED_FILE=$MESSAGE_EXPECTED"
+    echo "MESSAGE_TX_FILE=$MESSAGE_TX_CAPTURE"
+    echo "MESSAGE_RX_FILE=$MESSAGE_RX_CAPTURE"
+    echo "REPLY_ENABLED=$REPLY_MESSAGE_SET"
+    echo "REPLY_EXPECTED_INBOUND_COUNT=$MESSAGE_COUNT"
+    echo "REPLY_MESSAGE_BYTES=$REPLY_MESSAGE_BYTES"
+    echo "REPLY_MESSAGE_SHA256=$REPLY_MESSAGE_SHA256"
+    echo "REPLY_TX_COUNT=$reply_tx_count"
+    echo "REPLY_RX_COUNT=$reply_rx_count"
+    echo "REPLY_DELIVERED_COUNT=$reply_delivered_count"
+    echo "REPLY_EXACT_MATCH=$reply_exact_match"
+    echo "REPLY_THRESHOLD_COUNT=$reply_threshold_count"
+    echo "REPLY_AFTER_ALL_MESSAGES=$reply_after_all_messages"
+    echo "REPLY_EXPECTED_FILE=$REPLY_EXPECTED"
+    echo "REPLY_TX_FILE=$REPLY_TX_CAPTURE"
+    echo "REPLY_RX_FILE=$REPLY_RX_CAPTURE"
+    echo "ALPHA_PAYLOAD_DRAINED_COUNT=$alpha_payload_drained_count"
+    echo "BRAVO_PAYLOAD_DRAINED_COUNT=$bravo_payload_drained_count"
+    echo "MESSAGE_PAYLOAD_DRAINED_COUNT=$message_payload_drained_count"
     echo "ALPHA_DISCONNECTED_COUNT=$alpha_disconnected"
     echo "BRAVO_DISCONNECTED_COUNT=$bravo_disconnected"
     echo "GOODPUT_BPS=$goodput_bps"
@@ -472,7 +779,10 @@ pkill -f "$ROOT/build/ultra_gui" 2>/dev/null || true
 pkill -f "$ROOT/build/ota_simulator serve" 2>/dev/null || true
 sleep 2
 
-python3 - "$PAYLOAD" "$FILE_BYTES" "$PAYLOAD_SEED" <<'PY'
+MESSAGE_TEXT_SHA256="$(printf '%s' "$MESSAGE_TEXT" | shasum -a 256 | awk '{print $1}')"
+REPLY_MESSAGE_SHA256="$(printf '%s' "$REPLY_MESSAGE" | shasum -a 256 | awk '{print $1}')"
+if [[ "$SCENARIO_KIND" == "file" ]]; then
+  python3 - "$PAYLOAD" "$FILE_BYTES" "$PAYLOAD_SEED" <<'PY'
 import random
 import sys
 
@@ -485,7 +795,11 @@ with open(path, "wb") as out:
         out.write(bytes(rng.randrange(256) for _ in range(block)))
         remaining -= block
 PY
-PAYLOAD_SHA256="$(shasum -a 256 "$PAYLOAD" | awk '{print $1}')"
+  PAYLOAD_SHA256="$(shasum -a 256 "$PAYLOAD" | awk '{print $1}')"
+else
+  PAYLOAD_SEED="none"
+  PAYLOAD_SHA256="none"
+fi
 printf 'alpha_tok:ALPHA:alpha\nbravo_tok:BRAVO:bravo\n' > "$TOKENS"
 
 ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
@@ -509,23 +823,55 @@ if [[ -z "$GRPC" ]]; then
   exit 1
 fi
 
-# One-way FILE SENDER (design §14): BRAVO auto-accepts and receives; ALPHA
-# connects and sends the file. No chat messaging (removed 2026-05-29).
-ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO \
-  --session-id lobby \
-  --auto-accept \
-  --exit-after "$EXIT_AFTER" \
-  --log-level debug --log-category all --log-file "$BRAVO_LOG" >/dev/null 2>&1 &
+# BRAVO always auto-accepts. In the bidirectional message scenario it sends one
+# exact reply only after every expected application message is delivered.
+BRAVO_ARGS=(
+  -sim --ota-host "$GRPC" --token bravo_tok --station-id BRAVO
+  --session-id lobby
+  --auto-accept
+  --exit-after "$EXIT_AFTER"
+  --log-level debug --log-category all --log-file "$BRAVO_LOG"
+)
+if [[ "$SCENARIO_KIND" == "message" && "$REPLY_MESSAGE_SET" -eq 1 ]]; then
+  # The final sender owns teardown. Waiting on BRAVO's payload-drained marker
+  # proves its reply reached terminal DELIVERED state and its protocol backlog
+  # is zero before either process can close the link.
+  BRAVO_ARGS+=(
+    --auto-reply-message "$REPLY_MESSAGE"
+    --auto-reply-after-messages "$MESSAGE_COUNT"
+    --auto-disconnect-after "$DISCONNECT_AFTER"
+  )
+fi
+ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" "${BRAVO_ARGS[@]}" >/dev/null 2>&1 &
 BRAVO_PID=$!
 
-ULTRA_E2E_DEBUG_LOG="$E2E_ALPHA_LOG" "$ROOT/build/ultra_gui" -sim --ota-host "$GRPC" --token alpha_tok --station-id ALPHA \
-  --session-id lobby \
-  --auto-connect BRAVO \
-  --connect-delay "$CONNECT_DELAY" \
-  --auto-send-file "$PAYLOAD" \
-  --auto-disconnect-after "$DISCONNECT_AFTER" \
-  --exit-after "$EXIT_AFTER" \
-  --log-level debug --log-category all --log-file "$ALPHA_LOG" >/dev/null 2>&1 &
+ALPHA_ARGS=(
+  -sim --ota-host "$GRPC" --token alpha_tok --station-id ALPHA
+  --session-id lobby
+  --auto-connect BRAVO
+  --connect-delay "$CONNECT_DELAY"
+  --exit-after "$EXIT_AFTER"
+  --log-level debug --log-category all --log-file "$ALPHA_LOG"
+)
+if [[ "$SCENARIO_KIND" == "message" ]]; then
+  ALPHA_ARGS+=(
+    --auto-send-message "$MESSAGE_TEXT"
+    --auto-message-count "$MESSAGE_COUNT"
+    --auto-message-interval "$MESSAGE_INTERVAL"
+  )
+  if [[ "$MESSAGE_VARY_LEN" -eq 1 ]]; then
+    ALPHA_ARGS+=(--auto-message-vary-len)
+  fi
+  if [[ "$REPLY_MESSAGE_SET" -eq 0 ]]; then
+    ALPHA_ARGS+=(--auto-disconnect-after "$DISCONNECT_AFTER")
+  fi
+else
+  ALPHA_ARGS+=(
+    --auto-send-file "$PAYLOAD"
+    --auto-disconnect-after "$DISCONNECT_AFTER"
+  )
+fi
+ULTRA_E2E_DEBUG_LOG="$E2E_ALPHA_LOG" "$ROOT/build/ultra_gui" "${ALPHA_ARGS[@]}" >/dev/null 2>&1 &
 ALPHA_PID=$!
 
 sleep 12

@@ -399,7 +399,8 @@ Connection::Connection(const ConnectionConfig& config)
     });
 
     arq_.setDataReceivedCallback([this](const Bytes& data) {
-        handleDataPayload(data, arq_.lastRxHadMoreData(), arq_.lastRxFrameType());
+        handleDataPayload(data, arq_.lastRxHadMoreData(), arq_.lastRxFrameType(),
+                          arq_.lastRxFlags());
     });
 
     arq_.setReceiveWindowAdvancedCallback([this](uint16_t base_seq, size_t window_size) {
@@ -1114,20 +1115,23 @@ void Connection::disconnect() {
 
 void Connection::abortTxNow() {
     const bool aborting_disconnect_teardown = disconnect_teardown_active_;
+    const bool had_pending_payload =
+        !queued_payloads_.empty() || !pending_tx_fragments_.empty() ||
+        !outbound_message_tx_records_.empty() || arq_.getTxInFlightBytes() > 0;
+    auto failed_message_records = detachOutboundMessageRecords();
 
     // Cancel all outbound ARQ activity (data retransmit timers, delayed ACK repeats,
     // delayed SACK, in-flight TX slots) while preserving RX reassembly state.
     arq_.abortPendingTx();
 
     // Cancel pending local TX assembly/burst state.
-    bool had_pending_message = !pending_tx_fragments_.empty();
+    queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
     pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
-    clearOutboundMessageTracking();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     arq_callback_defer_refill_ = false;
@@ -1140,6 +1144,8 @@ void Connection::abortTxNow() {
 
     // Cancel file TX if active. Keep RX file state untouched.
     queued_file_path_.reset();
+    queued_file_order_ = 0;
+    next_queued_operation_order_ = 1;
     if (file_transfer_.getState() == FileTransferState::SENDING) {
         file_transfer_.cancel();
     }
@@ -1169,13 +1175,20 @@ void Connection::abortTxNow() {
         state_ == ConnectionState::PROBING ||
         state_ == ConnectionState::CONNECTING ||
         state_ == ConnectionState::DISCONNECTING) {
+        emitFailedMessageRecords(failed_message_records);
+        if (had_pending_payload && on_message_sent_) {
+            on_message_sent_(false);
+        }
         enterDisconnected("TX aborted");
         return;
     }
 
     // Connected state remains established; only outbound transfer is aborted.
-    if (state_ == ConnectionState::CONNECTED && had_pending_message && on_message_sent_) {
-        on_message_sent_(false);
+    if (state_ == ConnectionState::CONNECTED) {
+        emitFailedMessageRecords(failed_message_records);
+        if (had_pending_payload && on_message_sent_) {
+            on_message_sent_(false);
+        }
     }
 
     LOG_MODEM(INFO, "Connection: TX abort applied (state=%s)",
@@ -1185,6 +1198,24 @@ void Connection::abortTxNow() {
 void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
     const uint8_t previous_forced_cw = config_.forced_cw_count;
+    const bool logical_cw_changed = cw_count != data_frame_cw_count_;
+    const bool force_policy_changed =
+        forced && static_cast<uint8_t>(cw_count) != previous_forced_cw;
+    if (!logical_cw_changed && !force_policy_changed) {
+        return;
+    }
+
+    // This public operator/configuration API used to bypass applyDataMode() and
+    // re-grid the ARQ window underneath a fragmented message. Reject the runtime
+    // change while any DATA operation owns the current geometry. Startup calls
+    // and clean file-group boundaries remain admissible.
+    if (hasGeometryBoundDataOperation()) {
+        LOG_MODEM(WARN,
+                  "Connection: Refusing fixed-CW override %d while a DATA operation owns the current geometry",
+                  cw_count);
+        return;
+    }
+
     if (forced) {
         // Operator override: initiator embeds in CONNECT.data_frame_cw_count
         // so responder honors and echoes via CONNECT_ACK. One-sided
@@ -1195,13 +1226,6 @@ void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
     // decoder before connection). It MUST NOT touch config_.forced_cw_count
     // or every connect would advertise the default as a forced override
     // and bypass auto-pick on the responder.
-
-    const bool logical_cw_changed = cw_count != data_frame_cw_count_;
-    const bool force_policy_changed =
-        forced && config_.forced_cw_count != previous_forced_cw;
-    if (!logical_cw_changed && !force_policy_changed) {
-        return;
-    }
 
     if (logical_cw_changed) {
         data_frame_cw_count_ = cw_count;
@@ -1225,6 +1249,10 @@ void Connection::setForcedFrameCodewords(int cw_count, bool forced) {
 // =============================================================================
 
 bool Connection::sendMessage(const std::string& text) {
+    if (text.empty()) {
+        LOG_MODEM(WARN, "Connection: Refusing empty operator message");
+        return false;
+    }
     Bytes data(text.begin(), text.end());
     return sendPayload(data, false);
 }
@@ -1244,6 +1272,7 @@ uint64_t Connection::createOutboundMessageRecord(const Bytes& data) {
         next_outbound_message_token_ = 1;
     }
     record.text.assign(data.begin(), data.end());
+    record.remote_call = remote_call_;
     outbound_message_tx_records_.push_back(std::move(record));
     return outbound_message_tx_records_.back().token;
 }
@@ -1273,10 +1302,60 @@ void Connection::dropOutboundMessageRecord(uint64_t token) {
         outbound_message_tx_records_.end());
 }
 
+void Connection::failOutboundMessageRecord(uint64_t token) {
+    if (token == 0) {
+        return;
+    }
+    std::optional<OutboundMessageTxRecord> failed;
+    for (auto it = outbound_message_tx_records_.begin();
+         it != outbound_message_tx_records_.end(); ++it) {
+        if (it->token != token) {
+            continue;
+        }
+        it->terminal_reported = true;
+        failed = *it;
+        outbound_message_tx_records_.erase(it);
+        break;
+    }
+    if (failed) {
+        emitMessageTxStatus(*failed, MessageTxStatus::FAILED);
+    }
+}
+
+std::vector<Connection::OutboundMessageTxRecord>
+Connection::detachOutboundMessageRecords() {
+    std::vector<OutboundMessageTxRecord> records;
+    records.reserve(outbound_message_tx_records_.size());
+    for (auto& record : outbound_message_tx_records_) {
+        if (!record.terminal_reported) {
+            record.terminal_reported = true;
+            records.push_back(record);
+        }
+    }
+    clearOutboundMessageTracking();
+    return records;
+}
+
+void Connection::emitFailedMessageRecords(
+    const std::vector<OutboundMessageTxRecord>& records) {
+    MessageTxStatusDeferralGuard status_guard(*this);
+    for (const auto& record : records) {
+        emitMessageTxStatus(record, MessageTxStatus::FAILED);
+    }
+}
+
 void Connection::clearOutboundMessageTracking() {
     outbound_message_tx_records_.clear();
     pending_tx_fragment_message_tokens_.clear();
     arq_submit_message_token_ = 0;
+}
+
+uint64_t Connection::allocateQueuedOperationOrder() {
+    const uint64_t order = next_queued_operation_order_++;
+    if (next_queued_operation_order_ == 0) {
+        next_queued_operation_order_ = 1;
+    }
+    return order;
 }
 
 bool Connection::sendArqPayloadFrame(const Bytes& chunk,
@@ -1302,7 +1381,8 @@ void Connection::emitMessageTxStatus(const OutboundMessageTxRecord& record,
     event.status = status;
     event.first_seq = record.first_seq;
     event.last_seq = record.last_seq;
-    event.remote_call = remote_call_;
+    event.sequence_valid = record.first_seq_valid;
+    event.remote_call = record.remote_call;
     event.text = record.text;
     if (record.first_seq_valid) {
         const auto now = std::chrono::steady_clock::now();
@@ -1310,7 +1390,30 @@ void Connection::emitMessageTxStatus(const OutboundMessageTxRecord& record,
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - record.submitted_at).count());
     }
-    on_message_tx_status_(event);
+    pending_message_tx_status_events_.push_back(std::move(event));
+    drainMessageTxStatusEvents();
+}
+
+void Connection::drainMessageTxStatusEvents() {
+    if (message_tx_status_deferral_depth_ != 0 ||
+        message_tx_status_dispatch_active_ || !on_message_tx_status_) {
+        return;
+    }
+
+    // A callback may synchronously submit/reset/abort. Those operations append
+    // to this same FIFO and the active dispatcher consumes them only after the
+    // current callback returns, preserving SUBMITTED-before-terminal ordering.
+    message_tx_status_dispatch_active_ = true;
+    while (!pending_message_tx_status_events_.empty()) {
+        MessageTxStatusEvent event =
+            std::move(pending_message_tx_status_events_.front());
+        pending_message_tx_status_events_.pop_front();
+        auto callback = on_message_tx_status_;
+        if (callback) {
+            callback(event);
+        }
+    }
+    message_tx_status_dispatch_active_ = false;
 }
 
 void Connection::handleArqFrameSubmitted(uint16_t seq) {
@@ -1405,6 +1508,11 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         LOG_MODEM(WARN, "Connection: Cannot send, link is not data-ready");
         return false;
     }
+    if (data.empty()) {
+        LOG_MODEM(WARN, "Connection: Refusing empty %s payload",
+                  binary_payload ? "binary" : "text");
+        return false;
+    }
 
     const uint64_t message_token = binary_payload ? 0 : createOutboundMessageRecord(data);
     LOG_MODEM(DEBUG, "Connection: B2F-DBG sendPayload %zuB queue=%d (local_turn=%d is_init=%d hs_conf=%d yield_pend=%d peer_req=%d guard=%u)",
@@ -1413,11 +1521,13 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
               data_turn_yield_pending_ ? 1 : 0, peer_data_turn_requested_ ? 1 : 0, data_turn_tx_guard_ms_);
     if (shouldQueuePayloadForLinkTurn()) {
         if (queued_payloads_.size() >= kMaxQueuedPayloads) {
-            dropOutboundMessageRecord(queued_payloads_.front().message_token);
-            queued_payloads_.pop_front();
-            LOG_MODEM(WARN, "Connection: Queued payload limit reached, dropping oldest deferred payload");
+            dropOutboundMessageRecord(message_token);
+            LOG_MODEM(WARN,
+                      "Connection: Queued payload limit reached; refusing newest payload");
+            return false;
         }
-        queued_payloads_.push_back(QueuedPayload{data, binary_payload, message_token});
+        queued_payloads_.push_back(QueuedPayload{
+            data, binary_payload, message_token, allocateQueuedOperationOrder()});
         LOG_MODEM(INFO,
                   "Connection: Queued %zu byte %s until local ISS DATA turn (depth=%zu, local_turn=%d, peer_request=%d)",
                   data.size(), binary_payload ? "binary payload" : "message",
@@ -1440,6 +1550,26 @@ bool Connection::hasLocalOutboundDataTurn() const {
            mode_change_pending_ ||
            !pending_tx_fragments_.empty() ||
            arq_.getTxInFlightBytes() > 0;
+}
+
+bool Connection::hasGeometryBoundDataOperation() const {
+    // File chunks are rebuilt at a clean ARQ-window boundary, so a file may move
+    // between groups. A message/binary operation is different: its complete flat
+    // fragment vector was cut using one capacity and must own that geometry until
+    // the whole logical object retires. Otherwise a clean first group could demote
+    // before the remaining chunks and silently resize their wire representation.
+    const bool file_window_busy =
+        file_transfer_.getState() == FileTransferState::SENDING &&
+        (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+    const bool nonfile_operation_busy =
+        file_transfer_.getState() != FileTransferState::SENDING &&
+        (!pending_tx_fragments_.empty() || arq_.getTxInFlightBytes() > 0 ||
+         std::any_of(outbound_message_tx_records_.begin(),
+                     outbound_message_tx_records_.end(),
+                     [](const OutboundMessageTxRecord& record) {
+                         return record.first_seq_valid && !record.terminal_reported;
+                     }));
+    return file_window_busy || nonfile_operation_busy;
 }
 
 bool Connection::hasLocalInFlightDataTurn() const {
@@ -1506,6 +1636,8 @@ bool Connection::shouldQueuePayloadForLinkTurn() const {
            peer_data_turn_requested_ ||
            file_cancel_confirm_pending_ ||
            data_turn_tx_guard_ms_ > 0 ||
+           queued_file_path_.has_value() ||
+           !queued_payloads_.empty() ||
            hasLocalOutboundDataTurn();
 }
 
@@ -1633,6 +1765,7 @@ bool Connection::maybeYieldDataTurn() {
 }
 
 bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_t message_token) {
+    MessageTxStatusDeferralGuard status_guard(*this);
     if (state_ != ConnectionState::CONNECTED) {
         LOG_MODEM(WARN, "Connection: Cannot send, not connected");
         return false;
@@ -1710,7 +1843,14 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_
 
     LOG_MODEM(INFO, "Connection: Split into %zu fragments", pending_tx_fragments_.size());
 
-    sendNextFragment();
+    if (sendNextFragment() == 0) {
+        pending_tx_fragments_.clear();
+        pending_tx_fragment_flags_.clear();
+        pending_tx_fragment_types_.clear();
+        pending_tx_fragment_message_tokens_.clear();
+        acked_fragment_count_ = 0;
+        return false;
+    }
     return true;
 }
 
@@ -1753,6 +1893,10 @@ bool Connection::tryStartQueuedFileIfReady() {
     if (state_ != ConnectionState::CONNECTED) {
         return false;
     }
+    if (!queued_payloads_.empty() &&
+        queued_payloads_.front().enqueue_order < queued_file_order_) {
+        return false;
+    }
     if (!local_data_turn_) {
         sendTurnRequestIfNeeded();
         return false;
@@ -1773,11 +1917,7 @@ bool Connection::tryStartQueuedFileIfReady() {
 
     const std::string path = *queued_file_path_;
     queued_file_path_.reset();
-    if (!queued_payloads_.empty()) {
-        LOG_MODEM(INFO,
-                  "Connection: Starting queued file ahead of %zu deferred chat payload(s) after current DATA turn drained",
-                  queued_payloads_.size());
-    }
+    queued_file_order_ = 0;
     LOG_MODEM(INFO, "Connection: Starting queued file transfer on local ISS DATA turn: %s",
               path.c_str());
     if (!startFileTransferNow(path)) {
@@ -1797,7 +1937,11 @@ bool Connection::tryStartQueuedFileIfReady() {
 }
 
 void Connection::sendNextQueuedPayloadIfReady() {
-    if (queued_file_path_) {
+    const bool file_is_next =
+        queued_file_path_ &&
+        (queued_payloads_.empty() ||
+         queued_file_order_ < queued_payloads_.front().enqueue_order);
+    if (file_is_next) {
         tryStartQueuedFileIfReady();
         return;
     }
@@ -1837,24 +1981,43 @@ void Connection::sendNextQueuedPayloadIfReady() {
     LOG_MODEM(INFO,
               "Connection: Sending deferred half-duplex payload (%zu bytes, remaining=%zu)",
               payload.data.size(), queued_payloads_.size());
-    startPayloadNow(payload.data, payload.binary_payload, payload.message_token);
+    if (!startPayloadNow(payload.data, payload.binary_payload,
+                         payload.message_token)) {
+        LOG_MODEM(ERROR,
+                  "Connection: Accepted queued %s failed to start; reporting terminal failure",
+                  payload.binary_payload ? "binary payload" : "message");
+        failOutboundMessageRecord(payload.message_token);
+        if (on_message_sent_) {
+            on_message_sent_(false);
+        }
+    }
 }
 
 bool Connection::sendMessages(const std::vector<std::string>& texts) {
+    MessageTxStatusDeferralGuard status_guard(*this);
     if (state_ != ConnectionState::CONNECTED || disconnect_teardown_active_) {
         LOG_MODEM(WARN, "Connection: Cannot send, link is not data-ready");
         return false;
     }
+    if (texts.empty() ||
+        std::any_of(texts.begin(), texts.end(),
+                    [](const std::string& text) { return text.empty(); })) {
+        LOG_MODEM(WARN,
+                  "Connection: Refusing empty message or empty message batch");
+        return false;
+    }
     if (shouldQueuePayloadForLinkTurn()) {
+        if (texts.size() > kMaxQueuedPayloads - queued_payloads_.size()) {
+            LOG_MODEM(WARN,
+                      "Connection: Queued payload limit reached; refusing %zu-message batch",
+                      texts.size());
+            return false;
+        }
         for (const auto& text : texts) {
             Bytes data(text.begin(), text.end());
             const uint64_t message_token = createOutboundMessageRecord(data);
-            if (queued_payloads_.size() >= kMaxQueuedPayloads) {
-                dropOutboundMessageRecord(queued_payloads_.front().message_token);
-                queued_payloads_.pop_front();
-                LOG_MODEM(WARN, "Connection: Queued payload limit reached, dropping oldest deferred message");
-            }
-            queued_payloads_.push_back(QueuedPayload{data, false, message_token});
+            queued_payloads_.push_back(QueuedPayload{
+                data, false, message_token, allocateQueuedOperationOrder()});
         }
         LOG_MODEM(INFO,
                   "Connection: Queued %zu-message batch until local ISS DATA turn (depth=%zu)",
@@ -1866,6 +2029,11 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     bool is_ofdm = isOFDMMode(negotiated_mode_);
     const bool bounded_variable_mc_dpsk = usesBoundedVariableMCDPSKFrames();
     size_t capacity = (is_ofdm || bounded_variable_mc_dpsk) ? currentDataPayloadCapacity() : SIZE_MAX;
+    if (capacity == 0) {
+        LOG_MODEM(ERROR,
+                  "Connection: Cannot send message batch with zero payload capacity");
+        return false;
+    }
 
     // Pre-fragment all messages into a flat list of frame payloads with flags
     pending_tx_fragments_.clear();
@@ -1910,8 +2078,17 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
               texts.size(), pending_tx_fragments_.size());
 
     // Send first window-worth via sendNextFragment() (handles burst buffering)
-    sendNextFragment();
-    return !pending_tx_fragments_.empty();
+    if (sendNextFragment() == 0) {
+        for (const uint64_t token : pending_tx_fragment_message_tokens_) {
+            dropOutboundMessageRecord(token);
+        }
+        pending_tx_fragments_.clear();
+        pending_tx_fragment_flags_.clear();
+        pending_tx_fragment_types_.clear();
+        pending_tx_fragment_message_tokens_.clear();
+        return false;
+    }
+    return true;
 }
 
 bool Connection::isReadyToSend() const {
@@ -1920,7 +2097,7 @@ bool Connection::isReadyToSend() const {
            local_data_turn_ && !peer_data_turn_requested_ &&
            !file_cancel_confirm_pending_ &&
            data_turn_tx_guard_ms_ == 0 && !file_transfer_.isBusy() &&
-           !queued_file_path_.has_value();
+           !queued_file_path_.has_value() && queued_payloads_.empty();
 }
 
 size_t Connection::getTxBacklogBytes() const {
@@ -1982,14 +2159,23 @@ bool Connection::sendFile(const std::string& filepath) {
         }
     }
 
-    // 2026-05-28: bypass the legacy ISS-turn-taking gate when burst transport
-    // is active. Burst transport is one-way sender-driven (design §14.27).
-    // 2026-06-03: but NOT in half-duplex INTERACTIVE mode (TNC / Winlink B2F).
-    // There BOTH stations alternately transmit; the bypass would let them key up
-    // uncoordinated and collide. Keep the turn gate below so the burst only starts
-    // when this station holds the DATA turn (else queue + TURN_REQUEST; the peer
-    // yields TURNOVER and the directions serialize).
-    if (use_burst_transport_ && isOFDMMode(negotiated_mode_) && !half_duplex_interactive_) {
+    // Non-interactive burst files retain their sender-driven ISS bypass, but only
+    // at a genuinely empty logical-operation boundary. The ARQ completion callback
+    // is state-dispatched, so allowing a file to enter SENDING over message/binary
+    // slots makes those older ACKs pop the file ledger (BUG-FILE-ACK-IDENTITY).
+    const bool noninteractive_burst_bypass =
+        use_burst_transport_ && isOFDMMode(negotiated_mode_) &&
+        !half_duplex_interactive_;
+    const bool logical_operation_active =
+        hasLocalOutboundDataTurn() || !pending_tx_fragments_.empty() ||
+        !queued_payloads_.empty() || !outbound_message_tx_records_.empty() ||
+        !arq_.isReadyToSend();
+    const bool owns_clear_data_turn =
+        local_data_turn_ && !peer_data_turn_requested_ &&
+        !file_cancel_confirm_pending_ && data_turn_tx_guard_ms_ == 0 &&
+        !data_turn_yield_pending_;
+    if (noninteractive_burst_bypass && owns_clear_data_turn &&
+        !logical_operation_active) {
         return startFileTransferNow(filepath);
     }
 
@@ -2002,6 +2188,7 @@ bool Connection::sendFile(const std::string& filepath) {
         !queued_payloads_.empty() ||
         !arq_.isReadyToSend()) {
         queued_file_path_ = filepath;
+        queued_file_order_ = allocateQueuedOperationOrder();
         LOG_MODEM(INFO,
                   "Connection: Queued file transfer until local ISS DATA turn is clear (path=%s, local_turn=%d, peer_request=%d, guard_ms=%u)",
                   filepath.c_str(), local_data_turn_ ? 1 : 0,
@@ -2121,6 +2308,7 @@ void Connection::cancelFileTransfer() {
     }
 
     queued_file_path_.reset();
+    queued_file_order_ = 0;
     if (had_active_transfer) {
         file_transfer_.cancel("Transfer cancelled");
         clearFileTransferArqState();
@@ -2301,6 +2489,7 @@ bool Connection::isToneBurstAckCandidatePlausible(
 
 bool Connection::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
+    MessageTxStatusDeferralGuard status_guard(*this);
     if (disconnect_teardown_active_) {
         return false;
     }
@@ -4233,10 +4422,7 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx,
         tx_latent_startup_probe_base_rung_ = kRungIdxNone;
     }
     const bool faster = isFasterMode(mod, rate, data_modulation_, data_code_rate_);
-    const bool busy =
-        arq_.getTxInFlightBytes() > 0 ||
-        (file_transfer_.getState() == FileTransferState::SENDING &&
-         file_transfer_.hasPendingChunks());
+    const bool busy = hasGeometryBoundDataOperation();
     if (faster) {
         // UP-commands defer to a CLEAN send boundary (F122): a mid-window switch
         // discards the receiver's buffered frames and rewinds the file cursor by
@@ -4382,9 +4568,7 @@ void Connection::maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
     // nothing to abort). tryDescriptorModeSwitch re-checks the Phase-1 knob and
     // scope (incl. the descriptor-bearing >1-frame-remaining guard) and returns
     // false out of scope — the guards compose, never duplicate.
-    const bool busy =
-        file_transfer_.getState() == FileTransferState::SENDING &&
-        (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+    const bool busy = hasGeometryBoundDataOperation();
     bool desc_committed = false;
     if (!busy || arq_.moveEpochEnabled()) {
         desc_committed = tryDescriptorModeSwitch(
@@ -4709,6 +4893,13 @@ void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
     if (state_ != ConnectionState::CONNECTED) return;
     if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
     if (!rateAdaptationActive() || mode_change_pending_) return;
+    if (file_transfer_.getState() != FileTransferState::SENDING &&
+        hasGeometryBoundDataOperation()) {
+        // Amnesty is an opportunistic up-move. A message/binary object owns one
+        // geometry for its complete lifetime; never fail it merely to restore a
+        // pre-trough rung. The next transfer can re-evaluate normally.
+        return;
+    }
     if (coherentRungOrdinal(data_modulation_, data_code_rate_) >=
         coherentRungOrdinal(pre_episode_mod_, pre_episode_rate_)) {
         return;  // nothing was lost to the trough
@@ -4721,9 +4912,7 @@ void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
     // Same commit envelope as maybeApplyRxRateCommand (we are inside the ack's
     // defer-refill bracket): descriptor commit when era-safe, legacy exchange fallback.
     bool desc_committed = false;
-    const bool busy =
-        file_transfer_.getState() == FileTransferState::SENDING &&
-        (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+    const bool busy = hasGeometryBoundDataOperation();
     if (!busy || arq_.moveEpochEnabled()) {
         desc_committed = tryDescriptorModeSwitch(
             pre_episode_mod_, pre_episode_rate_, wireSnrDb(),
@@ -4911,9 +5100,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             const bool r34_step_down =
                 (is_qam16 ? qam16R34Enabled() : true) &&
                 data_code_rate_ == CodeRate::R3_4;
-            const bool busy =
-                file_transfer_.getState() == FileTransferState::SENDING &&
-                (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+            const bool busy = hasGeometryBoundDataOperation();
             if (busy) {
                 std::snprintf(buf, sizeof(buf),
                               "hold %s %s (demote->%s at clean boundary, q=%.2f)",
@@ -5002,9 +5189,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
                 connection_policy::coherenceAdjustedFadingIndex(
                     fading_index_, coherence_score_, coherence_valid_) <= kR34CalmFading;
             if (calm_gate_ok && qam16_r34_clean_streak_ >= walk_streak_needed) {
-                const bool busy =
-                    file_transfer_.getState() == FileTransferState::SENDING &&
-                    (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+                const bool busy = hasGeometryBoundDataOperation();
                 if (busy) {
                     std::snprintf(buf, sizeof(buf),
                                   "hold QAM16 R2/3 for clean boundary (want QAM16 R3/4, q=%.2f)",
@@ -5042,9 +5227,7 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
             else qam16_r34_clean_streak_ = 0;
             if (qam16_r34_clean_streak_ >= qam16ClimbStreak() &&
                 qam16_reclimb_cooldown_ == 0) {
-                const bool busy =
-                    file_transfer_.getState() == FileTransferState::SENDING &&
-                    (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
+                const bool busy = hasGeometryBoundDataOperation();
                 if (busy) {
                     std::snprintf(buf, sizeof(buf),
                                   "hold QAM8 R2/3 for clean boundary (want QAM16 R2/3, q=%.2f)",
@@ -5186,10 +5369,8 @@ void Connection::applyAdaptiveRateFeedback(float quality) {
         // HOLD: applyAdaptiveRateFeedback runs on every group ack, and the EMA controller
         // re-asserts the decision on a later ack that lands at a clean boundary (a full-ack tick).
         // This also correctly THROTTLES rate churn during a fade (partial acks keep us busy).
-        const bool file_send_window_busy =
-            file_transfer_.getState() == FileTransferState::SENDING &&
-            (file_transfer_.hasPendingChunks() || arq_.getTxInFlightBytes() > 0);
-        if (file_send_window_busy) {
+        const bool geometry_owner_busy = hasGeometryBoundDataOperation();
+        if (geometry_owner_busy) {
             std::snprintf(buf, sizeof(buf), "hold %s %s for clean boundary (want %s %s, q=%.2f)",
                           modulationToString(data_modulation_), codeRateToString(prev),
                           modulationToString(target_mod), codeRateToString(target_rate), quality);
@@ -5493,12 +5674,29 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
     }
 }
 
-void Connection::sendNextFragment() {
+size_t Connection::sendNextFragment() {
+    MessageTxStatusDeferralGuard status_guard(*this);
     if (disconnect_teardown_active_) {
         burst_mode_active_ = false;
         burst_tx_buffer_.clear();
-        return;
+        return 0;
     }
+    // A host transport is allowed to loop an ACK back synchronously from the
+    // transmit callback. Defer that ACK's refill until this submission loop has
+    // advanced its own indices; otherwise the nested refill can clear/reuse the
+    // fragment vectors under the outer frame's references.
+    const bool owns_refill_defer = !arq_callback_defer_refill_;
+    if (owns_refill_defer) {
+        arq_callback_defer_refill_ = true;
+    }
+    size_t new_fragments_submitted = 0;
+    auto finish = [this, owns_refill_defer, &new_fragments_submitted]() {
+        if (owns_refill_defer) {
+            arq_callback_defer_refill_ = false;
+            runDeferredArqRefill();
+        }
+        return new_fragments_submitted;
+    };
     bool is_ofdm = isOFDMMode(negotiated_mode_);
     const bool pipeline_fragments = is_ofdm;
 
@@ -5534,44 +5732,58 @@ void Connection::sendNextFragment() {
         if (deferred_arq_failure_abort_) {
             burst_mode_active_ = false;
             burst_tx_buffer_.clear();
-            return;
+            return finish();
         }
     }
     while (arq_.isReadyToSend() && next_fragment_idx_ < pending_tx_fragments_.size()) {
         if (submitted_this_call >= burst_frame_cap) {
             break;  // one budget-sized group per burst (unified path)
         }
-        const Bytes& chunk = pending_tx_fragments_[next_fragment_idx_];
+        const size_t fragment_index = next_fragment_idx_;
+        const Bytes& chunk = pending_tx_fragments_[fragment_index];
+        const size_t chunk_size = chunk.size();
 
         // Use pre-computed flags if available (from sendMessages batch),
         // otherwise derive from position (single-message fragmentation)
         uint8_t flags;
-        if (next_fragment_idx_ < pending_tx_fragment_flags_.size()) {
-            flags = pending_tx_fragment_flags_[next_fragment_idx_];
+        if (fragment_index < pending_tx_fragment_flags_.size()) {
+            flags = pending_tx_fragment_flags_[fragment_index];
         } else {
-            bool is_last = (next_fragment_idx_ + 1 == pending_tx_fragments_.size());
+            bool is_last = (fragment_index + 1 == pending_tx_fragments_.size());
             flags = is_last ? v2::Flags::NONE : v2::Flags::MORE_FRAG;
         }
         v2::FrameType frame_type = v2::FrameType::DATA;
-        if (next_fragment_idx_ < pending_tx_fragment_types_.size()) {
-            frame_type = pending_tx_fragment_types_[next_fragment_idx_];
+        if (fragment_index < pending_tx_fragment_types_.size()) {
+            frame_type = pending_tx_fragment_types_[fragment_index];
         }
         uint64_t message_token = 0;
-        if (next_fragment_idx_ < pending_tx_fragment_message_tokens_.size()) {
-            message_token = pending_tx_fragment_message_tokens_[next_fragment_idx_];
+        if (fragment_index < pending_tx_fragment_message_tokens_.size()) {
+            message_token = pending_tx_fragment_message_tokens_[fragment_index];
         }
 
         LOG_MODEM(DEBUG, "Connection: Sending fragment %zu/%zu (%zu bytes, type=%s, flags=0x%02X)",
-                  next_fragment_idx_ + 1, pending_tx_fragments_.size(), chunk.size(),
+                  fragment_index + 1, pending_tx_fragments_.size(), chunk_size,
                   v2::frameTypeToString(frame_type), flags);
 
-        bool sent = false;
-        sent = sendArqPayloadFrame(chunk, frame_type, flags, is_ofdm, message_token);
-        if (sent) {
-            noteDataTurnPayloadStarted(chunk.size());
+        // Advance before entering the transport callback. A synchronous ACK can
+        // legitimately complete and clear the whole batch before this call returns.
+        ++next_fragment_idx_;
+        ++submitted_this_call;
+        ++new_fragments_submitted;
+        const bool sent =
+            sendArqPayloadFrame(chunk, frame_type, flags, is_ofdm, message_token);
+        if (!sent) {
+            // No transport callback ran on refusal, so rolling the local indices
+            // back is safe and leaves this exact fragment for a later refill.
+            --next_fragment_idx_;
+            --submitted_this_call;
+            --new_fragments_submitted;
+            LOG_MODEM(WARN,
+                      "Connection: ARQ refused fragment %zu/%zu; retaining it for a later refill",
+                      fragment_index + 1, pending_tx_fragments_.size());
+            break;
         }
-        next_fragment_idx_++;
-        submitted_this_call++;
+        noteDataTurnPayloadStarted(chunk_size);
 
         // MC-DPSK bulk-file transfer uses sendNextFileChunk() and is safe to
         // pipeline. The message-fragment path still shares OFDM-oriented
@@ -5589,6 +5801,7 @@ void Connection::sendNextFragment() {
             retransmitted_frames > 0,
             descriptor_only_partial_repair && retransmitted_frames > 0);
     }
+    return finish();
 }
 
 // =============================================================================
@@ -5597,6 +5810,7 @@ void Connection::sendNextFragment() {
 
 void Connection::onFrameReceived(const Bytes& frame_data,
                                  bool physical_turn_complete) {
+    MessageTxStatusDeferralGuard status_guard(*this);
     if (frame_data.size() < 2) {
         return;
     }
@@ -6021,9 +6235,7 @@ bool Connection::drainDeferredArqFailureAbort() {
                   static_cast<unsigned>(arq_.txMoveEpoch()));
     }
 
-    for (auto& record : failed_message_records) {
-        emitMessageTxStatus(record, MessageTxStatus::FAILED);
-    }
+    emitFailedMessageRecords(failed_message_records);
 
     if (failed_file) {
         file_transfer_.onSendFailed();
@@ -6280,13 +6492,15 @@ void Connection::tick(uint32_t elapsed_ms) {
             if (local_data_turn_ && peer_data_turn_requested_) {
                 data_turn_contended_ms_ += elapsed_ms;
             }
-            // Half-duplex INTERACTIVE: while we've yielded and are waiting for the peer's
-            // first burst, keep the decoder armed to COLD-acquire its full chirp+LTS anchor.
+            // While we've yielded and are waiting for the peer's first DATA burst, keep
+            // the decoder armed to COLD-acquire its full chirp+LTS anchor. Ordinary GUI
+            // message replies reverse the DATA turn too; this is therefore driven by the
+            // actual turn state, not the stronger half-duplex-interactive B2F policy.
             // The one-shot armed on the yield-TURNOVER gets consumed in the gap (stray
             // detect / warm-sync DEGRADED), so re-arm periodically until the peer's data
             // actually arrives (yielded_data_turn_waiting_for_peer_data_ clears). The peer
             // force-fulls its first frame on turn-acquire, so this meets it (BUG-TNC-B2F-001).
-            if (half_duplex_interactive_ && yielded_data_turn_waiting_for_peer_data_ &&
+            if (yielded_data_turn_waiting_for_peer_data_ &&
                 !local_data_turn_ && on_full_ofdm_anchor_expected_) {
                 if (elapsed_ms >= interactive_anchor_rearm_ms_) {
                     interactive_anchor_rearm_ms_ = 400;
@@ -8023,15 +8237,79 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     const Modulation old_mod_for_streak = data_modulation_;
     const CodeRate old_rate_for_streak = data_code_rate_;
     const bool mod_changed = mod != data_modulation_;
+    const bool geometry_changed = rate_changed || cw_changed || mod_changed;
+
+    // A fragmented message/binary object is cut once using the geometry active
+    // at admission. Ordinary adaptive moves are held by
+    // hasGeometryBoundDataOperation(), but mandatory receiver-commanded or
+    // stuck-frame demotions must still be able to escape a window that will not
+    // drain. Fail that logical object explicitly before regridding: abandoning
+    // the old slots with a forced move-epoch bump makes the next object an
+    // unambiguous rebase, so the receiver discards any partial old prefix instead
+    // of stitching or accepting truncated bytes.
+    std::vector<OutboundMessageTxRecord> geometry_failed_message_records;
+    bool geometry_failed_nonfile_operation = false;
+    if (geometry_changed &&
+        file_transfer_.getState() != FileTransferState::SENDING) {
+        const bool fragment_batch_active = !pending_tx_fragments_.empty();
+        const bool arq_payload_active = arq_.getTxInFlightBytes() > 0;
+        const bool submitted_message_active =
+            std::any_of(outbound_message_tx_records_.begin(),
+                        outbound_message_tx_records_.end(),
+                        [](const OutboundMessageTxRecord& record) {
+                            return record.first_seq_valid &&
+                                   !record.terminal_reported;
+                        });
+        geometry_failed_nonfile_operation =
+            fragment_batch_active || arq_payload_active ||
+            submitted_message_active;
+        if (geometry_failed_nonfile_operation) {
+            for (auto it = outbound_message_tx_records_.begin();
+                 it != outbound_message_tx_records_.end();) {
+                const bool token_in_fragment_batch =
+                    std::find(pending_tx_fragment_message_tokens_.begin(),
+                              pending_tx_fragment_message_tokens_.end(),
+                              it->token) !=
+                    pending_tx_fragment_message_tokens_.end();
+                const bool active_record =
+                    !it->terminal_reported &&
+                    (it->first_seq_valid || token_in_fragment_batch);
+                if (!active_record) {
+                    ++it;
+                    continue;
+                }
+                it->terminal_reported = true;
+                geometry_failed_message_records.push_back(*it);
+                it = outbound_message_tx_records_.erase(it);
+            }
+
+            LOG_MODEM(WARN,
+                      "Connection: Abandoning active message/binary operation before geometry change %s %s -> %s %s",
+                      modulationToString(data_modulation_),
+                      codeRateToString(data_code_rate_),
+                      modulationToString(mod), codeRateToString(rate));
+            deferred_fragment_refill_ = false;
+            burst_mode_active_ = false;
+            burst_tx_buffer_.clear();
+            arq_.abortPendingTx(/*force_move_epoch_bump=*/true);
+            pending_tx_fragments_.clear();
+            pending_tx_fragment_flags_.clear();
+            pending_tx_fragment_types_.clear();
+            pending_tx_fragment_message_tokens_.clear();
+            next_fragment_idx_ = 0;
+            acked_fragment_count_ = 0;
+            arq_submit_message_token_ = 0;
+        }
+    }
     // Pending chunks must be re-encoded if rate OR CW OR modulation changed: the ARQ payload
     // capacity depends on all three, and chunks queued under the old geometry will
     // overflow / mis-align under the new one.
     const bool requeue_file =
-        (rate_changed || cw_changed || mod_changed) &&
+        geometry_changed &&
         file_transfer_.getState() == FileTransferState::SENDING &&
         file_transfer_.hasPendingChunks();
     const bool refill_file =
-        (rate_changed || cw_changed || mod_changed) &&
+        geometry_changed &&
         file_transfer_.getState() == FileTransferState::SENDING;
     if (requeue_file) {
         file_transfer_.requeuePendingChunks();
@@ -8081,7 +8359,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         // re-obeying that same target when the receiver re-commands it.
         tx_authority_last_obeyed_ = 0;
     }
-    if (rate_changed || cw_changed || mod_changed) {
+    if (geometry_changed) {
         soft_combine_harq_.clear();  // mod change => old-constellation LLRs would corrupt HARQ
         // 2026-05-28: recompute burst ack_timeout for the new mode (same
         // formula as startup / applyAdaptiveRateFeedback). MODE_CHANGE
@@ -8093,6 +8371,25 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
 
     if (refill_file) {
         deferred_file_refill_ = true;
+    }
+
+    // Publish only after the old ARQ identities are gone and the new geometry is
+    // fully installed. Reentrant application code can now submit its retry; while
+    // a MODE_CHANGE commit is still pending it will be queued and released by the
+    // caller's normal post-commit refill.
+    if (geometry_failed_nonfile_operation && !arq_.moveEpochEnabled() &&
+        state_ == ConnectionState::CONNECTED) {
+        // Without the negotiated epoch/rebase contract, abandoning any old DATA
+        // sequence leaves the peer waiting on an unfillable RX hole. Match the
+        // terminal-slot-failure policy: close the session before application code
+        // can enqueue a "next" message onto a structurally unusable sequence grid.
+        LOG_MODEM(ERROR,
+                  "Connection: Geometry change abandoned active DATA with MOVE-EPOCH disabled; disconnecting to reset peer sequence state");
+        disconnect();
+    }
+    emitFailedMessageRecords(geometry_failed_message_records);
+    if (geometry_failed_nonfile_operation && on_message_sent_) {
+        on_message_sent_(false);
     }
 }
 
@@ -8460,6 +8757,7 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
 }
 
 void Connection::enterDisconnected(const std::string& reason) {
+    auto failed_message_records = detachOutboundMessageRecords();
     state_ = ConnectionState::DISCONNECTED;
     experimental_8psk_long_ldpc_transfer_active_ = false;
     experimental_qpsk_r34_long_ldpc_transfer_active_ = false;
@@ -8553,6 +8851,8 @@ void Connection::enterDisconnected(const std::string& reason) {
     soft_combine_harq_.clear();
     file_transfer_.cancel();
     queued_file_path_.reset();
+    queued_file_order_ = 0;
+    next_queued_operation_order_ = 1;
     queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
@@ -8561,7 +8861,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
-    clearOutboundMessageTracking();
+    rx_reassembly_active_ = false;
+    rx_reassembly_binary_ = false;
+    rx_reassembly_epoch_ = 0;
     // #58 increment 3: session boundary — nothing in the connect-SNR pool may leak
     // into the next handshake's entry pick.
     connect_snr_pool_.clear();
@@ -8575,6 +8877,10 @@ void Connection::enterDisconnected(const std::string& reason) {
     LOG_MODEM(INFO, "Connection: Disconnected from %s (%s)",
               old_remote.c_str(), reason.c_str());
 
+    emitFailedMessageRecords(failed_message_records);
+    if (!failed_message_records.empty() && on_message_sent_) {
+        on_message_sent_(false);
+    }
     if (on_disconnected_) {
         on_disconnected_(reason);
     }
@@ -9118,6 +9424,7 @@ Connection::harqProvisionalContext() const {
 }
 
 void Connection::reset() {
+    auto failed_message_records = detachOutboundMessageRecords();
     state_ = ConnectionState::DISCONNECTED;
     experimental_8psk_long_ldpc_transfer_active_ = false;
     experimental_qpsk_r34_long_ldpc_transfer_active_ = false;
@@ -9185,6 +9492,8 @@ void Connection::reset() {
     soft_combine_harq_.clear();
     file_transfer_.cancel();
     queued_file_path_.reset();
+    queued_file_order_ = 0;
+    next_queued_operation_order_ = 1;
     queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
@@ -9193,7 +9502,9 @@ void Connection::reset() {
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
     rx_reassembly_buffer_.clear();
-    clearOutboundMessageTracking();
+    rx_reassembly_active_ = false;
+    rx_reassembly_binary_ = false;
+    rx_reassembly_epoch_ = 0;
     // Per-connection channel-coherence verdict (see setChannelCoherence hold-last-valid).
     coherence_score_ = 0.0f;
     coherence_doppler_hz_ = 0.0f;
@@ -9211,6 +9522,10 @@ void Connection::reset() {
     connect_snr_pool_.clear();
     connect_pick_deferred_once_ = false;
     setDisconnectTeardownActive(false);
+    emitFailedMessageRecords(failed_message_records);
+    if (!failed_message_records.empty() && on_message_sent_) {
+        on_message_sent_(false);
+    }
     LOG_MODEM(DEBUG, "Connection: Full reset");
 }
 
