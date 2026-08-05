@@ -63,6 +63,36 @@ delivered-set, so this needs an identity on the wire. That also closes the resid
 **Interim behaviour: keep the explicit failure.** It loses a message but does not corrupt the
 stream. Do not trade it for a duplicate.
 
+### Fix design (2026-08-05, ready to implement — no deployed peers, so the wire is free)
+
+Make the RESEND IDEMPOTENT so the sender no longer has to guess:
+
+1. Stamp each logical message object with a rolling **object ID**.
+2. Receiver keeps the last ~8 delivered IDs.
+3. On reassembly completion, drop an object whose ID was already delivered.
+4. Re-enable the sender-side resume (written and reverted 2026-08-05; the diff shape is in
+   that session's transcript). With dedup in place a wrong guess costs nothing, so the
+   ambiguity that blocks approach 1 above stops mattering.
+
+**Two design facts already established — do not re-derive:**
+
+- **Do NOT grow `DataFrame::HEADER_SIZE`.** It feeds `FIXED_FRAME_OVERHEAD`, CONNECT frame
+  sizing (`protocol_engine.cpp:530,561`) and the RX framer (`:577,581`), so a header byte
+  ripples into control frames and payload-capacity math for no benefit.
+- **A 1-bit generation toggle is NOT sufficient**, tempting as it looks. Rule "new object
+  toggles, resume keeps" handles resumes, but fails when an object is never delivered:
+  last delivered gen=0, message B (gen=1) is lost entirely, message C (gen=1->0) arrives and
+  is dropped as a duplicate. That is silent message loss — the original bug, reintroduced.
+
+**Therefore:** put a multi-bit ID (a byte is ample) in the **message-object payload prefix**,
+which only the message/binary reassembly path parses. Control frames, file transfer, and the
+fixed-frame capacity math stay untouched.
+
+**Verification required:** `ctest`; `tools/message_gui_matrix.sh` green with
+`msg_tx == msg_rx == msg_delivered` on every row (watch for `msg_rx > msg_tx`, the duplicate
+signature); plus a deterministic forced-demote regression, since the matrix's m3/m4 rows do
+not reproduce reliably.
+
 
 ### BUG-GUI-RX-CONSUMER-STALL-OVERRUN (open, 2026-08-04) — P2, APPARATUS/REAL-TIME
 
