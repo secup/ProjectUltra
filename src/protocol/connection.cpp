@@ -1271,10 +1271,62 @@ uint64_t Connection::createOutboundMessageRecord(const Bytes& data) {
     if (next_outbound_message_token_ == 0) {
         next_outbound_message_token_ = 1;
     }
+    record.object_id = allocateMessageObjectId();
+    // Rank at ADMISSION, not at queue-push: a re-gridded object has to rejoin the
+    // cross-class FIFO where it was accepted, ahead of work admitted after it.
+    record.enqueue_order = allocateQueuedOperationOrder();
     record.text.assign(data.begin(), data.end());
     record.remote_call = remote_call_;
     outbound_message_tx_records_.push_back(std::move(record));
     return outbound_message_tx_records_.back().token;
+}
+
+uint8_t Connection::allocateMessageObjectId() {
+    const uint8_t id = next_outbound_message_object_id_++;
+    if (next_outbound_message_object_id_ == 0) {
+        next_outbound_message_object_id_ = 1;  // 0 is reserved for "no identity"
+    }
+    return id;
+}
+
+Bytes Connection::outboundMessageWireBytes(uint64_t token) const {
+    if (token == 0) {
+        return {};
+    }
+    for (const auto& record : outbound_message_tx_records_) {
+        if (record.token != token) {
+            continue;
+        }
+        Bytes wire;
+        wire.reserve(kMessageObjectPrefixBytes + record.text.size());
+        wire.push_back(static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT));
+        wire.push_back(record.object_id);
+        wire.insert(wire.end(), record.text.begin(), record.text.end());
+        return wire;
+    }
+    return {};
+}
+
+uint64_t Connection::outboundMessageEnqueueOrder(uint64_t token) const {
+    for (const auto& record : outbound_message_tx_records_) {
+        if (record.token == token) {
+            return record.enqueue_order;
+        }
+    }
+    return 0;
+}
+
+bool Connection::messageObjectAlreadyDelivered(uint8_t object_id) const {
+    return std::find(delivered_message_object_ids_.begin(),
+                     delivered_message_object_ids_.end(),
+                     object_id) != delivered_message_object_ids_.end();
+}
+
+void Connection::noteMessageObjectDelivered(uint8_t object_id) {
+    delivered_message_object_ids_.push_back(object_id);
+    while (delivered_message_object_ids_.size() > kDeliveredMessageObjectIdHistory) {
+        delivered_message_object_ids_.pop_front();
+    }
 }
 
 void Connection::setOutboundMessageExpectedFragments(uint64_t token, size_t fragments) {
@@ -1430,7 +1482,12 @@ void Connection::handleArqFrameSubmitted(uint16_t seq) {
         if (!record.first_seq_valid) {
             record.first_seq = seq;
             record.first_seq_valid = true;
-            record.submitted_at = std::chrono::steady_clock::now();
+            // Stamp only the FIRST wire submission. A geometry re-grid clears
+            // first_seq_valid to re-cut the object, and restarting the clock there
+            // would under-report how long the operator actually waited.
+            if (!record.submitted_reported) {
+                record.submitted_at = std::chrono::steady_clock::now();
+            }
         }
         record.last_seq = seq;
         record.assigned_fragments++;
@@ -1515,6 +1572,15 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     }
 
     const uint64_t message_token = binary_payload ? 0 : createOutboundMessageRecord(data);
+    // Text objects go on the wire behind an identity prefix so the peer can suppress
+    // a duplicate resend. Binary payloads keep their bare framing: the TNC owns that
+    // wire format and does its own retry accounting above us.
+    const Bytes wire = binary_payload ? data : outboundMessageWireBytes(message_token);
+    if (wire.empty()) {
+        dropOutboundMessageRecord(message_token);
+        LOG_MODEM(ERROR, "Connection: Failed to serialize outbound message object");
+        return false;
+    }
     LOG_MODEM(DEBUG, "Connection: B2F-DBG sendPayload %zuB queue=%d (local_turn=%d is_init=%d hs_conf=%d yield_pend=%d peer_req=%d guard=%u)",
               data.size(), shouldQueuePayloadForLinkTurn() ? 1 : 0,
               local_data_turn_ ? 1 : 0, is_initiator_ ? 1 : 0, handshake_confirmed_ ? 1 : 0,
@@ -1527,7 +1593,9 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
             return false;
         }
         queued_payloads_.push_back(QueuedPayload{
-            data, binary_payload, message_token, allocateQueuedOperationOrder()});
+            wire, binary_payload, message_token,
+            binary_payload ? allocateQueuedOperationOrder()
+                           : outboundMessageEnqueueOrder(message_token)});
         LOG_MODEM(INFO,
                   "Connection: Queued %zu byte %s until local ISS DATA turn (depth=%zu, local_turn=%d, peer_request=%d)",
                   data.size(), binary_payload ? "binary payload" : "message",
@@ -1537,7 +1605,7 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         return true;
     }
 
-    const bool started = startPayloadNow(data, binary_payload, message_token);
+    const bool started = startPayloadNow(wire, binary_payload, message_token);
     if (!started) {
         dropOutboundMessageRecord(message_token);
     }
@@ -2017,7 +2085,8 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
             Bytes data(text.begin(), text.end());
             const uint64_t message_token = createOutboundMessageRecord(data);
             queued_payloads_.push_back(QueuedPayload{
-                data, false, message_token, allocateQueuedOperationOrder()});
+                outboundMessageWireBytes(message_token), false, message_token,
+                outboundMessageEnqueueOrder(message_token)});
         }
         LOG_MODEM(INFO,
                   "Connection: Queued %zu-message batch until local ISS DATA turn (depth=%zu)",
@@ -2044,8 +2113,9 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     acked_fragment_count_ = 0;
 
     for (const auto& text : texts) {
-        Bytes data(text.begin(), text.end());
-        const uint64_t message_token = createOutboundMessageRecord(data);
+        Bytes text_bytes(text.begin(), text.end());
+        const uint64_t message_token = createOutboundMessageRecord(text_bytes);
+        const Bytes data = outboundMessageWireBytes(message_token);
         size_t frames_for_message = 0;
 
         if (data.size() <= capacity) {
@@ -8243,11 +8313,23 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // at admission. Ordinary adaptive moves are held by
     // hasGeometryBoundDataOperation(), but mandatory receiver-commanded or
     // stuck-frame demotions must still be able to escape a window that will not
-    // drain. Fail that logical object explicitly before regridding: abandoning
-    // the old slots with a forced move-epoch bump makes the next object an
-    // unambiguous rebase, so the receiver discards any partial old prefix instead
-    // of stitching or accepting truncated bytes.
+    // drain. The old slots are always abandoned with a forced move-epoch bump, so
+    // the peer discards any partial old prefix instead of stitching or accepting
+    // truncated bytes; what differs is what happens to the LOGICAL OBJECT.
+    //
+    // Nothing in the physics requires the message to die here. A geometry change
+    // invalidates the object's FRAGMENTATION (fragment size is a function of the
+    // negotiated capacity), not the object — its information content is unchanged,
+    // and the payload is still in hand. So re-cut it at the new capacity and
+    // re-submit it. That is only safe because the receiver suppresses a duplicate
+    // by object id: the sender cannot tell "peer never got it" from "peer got it,
+    // ACK still in flight", and no sender-side heuristic resolves that (both were
+    // tried and measured — see BUG-MESSAGE-LOST-ON-FORCED-DEMOTE).
+    //
+    // A binary/TNC payload has no such identity on the wire and is NOT re-gridded:
+    // it still fails explicitly, and the TNC session layer above owns its retry.
     std::vector<OutboundMessageTxRecord> geometry_failed_message_records;
+    std::vector<OutboundMessageTxRecord> geometry_regridded_message_records;
     bool geometry_failed_nonfile_operation = false;
     if (geometry_changed &&
         file_transfer_.getState() != FileTransferState::SENDING) {
@@ -8264,6 +8346,11 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
             fragment_batch_active || arq_payload_active ||
             submitted_message_active;
         if (geometry_failed_nonfile_operation) {
+            // Without the negotiated epoch/rebase contract the peer cannot be told
+            // to drop the stale prefix, so a re-send would stitch onto it. That
+            // path fails closed (and disconnects, below) exactly as before.
+            const bool regrid_contract_available =
+                arq_.moveEpochEnabled() && state_ == ConnectionState::CONNECTED;
             for (auto it = outbound_message_tx_records_.begin();
                  it != outbound_message_tx_records_.end();) {
                 const bool token_in_fragment_batch =
@@ -8278,13 +8365,42 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
                     ++it;
                     continue;
                 }
+                // The queue depth check counts the re-grids decided SO FAR in this
+                // loop as well: a batch can hold several active objects, and
+                // checking only the live deque would let them overshoot the cap
+                // together.
+                const bool can_regrid =
+                    regrid_contract_available &&
+                    it->object_id != 0 &&
+                    it->geometry_regrid_attempts <
+                        kMaxMessageGeometryRegridAttempts &&
+                    queued_payloads_.size() +
+                            geometry_regridded_message_records.size() <
+                        kMaxQueuedPayloads;
+                if (can_regrid) {
+                    ++it->geometry_regrid_attempts;
+                    // Drop only the WIRE identity of the old attempt. token,
+                    // object_id, text, submitted_at and submitted_reported survive,
+                    // so the operator still sees exactly one SUBMITTED and, later,
+                    // exactly one terminal result for this object.
+                    it->first_seq = 0;
+                    it->last_seq = 0;
+                    it->first_seq_valid = false;
+                    it->expected_fragments = 0;
+                    it->assigned_fragments = 0;
+                    geometry_regridded_message_records.push_back(*it);
+                    ++it;
+                    continue;
+                }
                 it->terminal_reported = true;
                 geometry_failed_message_records.push_back(*it);
                 it = outbound_message_tx_records_.erase(it);
             }
 
             LOG_MODEM(WARN,
-                      "Connection: Abandoning active message/binary operation before geometry change %s %s -> %s %s",
+                      "Connection: Regridding %zu / abandoning %zu active message object(s) before geometry change %s %s -> %s %s",
+                      geometry_regridded_message_records.size(),
+                      geometry_failed_message_records.size(),
                       modulationToString(data_modulation_),
                       codeRateToString(data_code_rate_),
                       modulationToString(mod), codeRateToString(rate));
@@ -8373,6 +8489,39 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         deferred_file_refill_ = true;
     }
 
+    // Re-admit the re-gridded objects only now: the new geometry is installed, so
+    // whoever dispatches them next re-fragments at the CURRENT capacity. They go to
+    // the FRONT, in admission order, because they were accepted before anything
+    // already waiting — pushing them to the back would reorder the operator's
+    // messages. Dispatch is deliberately left to the caller's post-commit refill and
+    // the CONNECTED tick; sending from inside applyDataMode would re-enter ARQ from
+    // a geometry-change call stack.
+    if (!geometry_regridded_message_records.empty() &&
+        state_ == ConnectionState::CONNECTED) {
+        for (auto it = geometry_regridded_message_records.rbegin();
+             it != geometry_regridded_message_records.rend(); ++it) {
+            Bytes wire = outboundMessageWireBytes(it->token);
+            if (wire.empty()) {
+                // Unreachable: the record was deliberately kept above. Loud rather
+                // than silent — a stranded record would never reach a terminal
+                // status, and the operator would watch it hang forever.
+                LOG_MODEM(ERROR,
+                          "Connection: Re-gridded message token %llu has no wire bytes; failing it",
+                          static_cast<unsigned long long>(it->token));
+                failOutboundMessageRecord(it->token);
+                continue;
+            }
+            queued_payloads_.push_front(QueuedPayload{
+                std::move(wire), false, it->token, it->enqueue_order});
+        }
+        LOG_MODEM(INFO,
+                  "Connection: Re-queued %zu message object(s) for re-fragmentation at %s %s cw=%d (attempt limit %u; peer suppresses the duplicate by object id)",
+                  geometry_regridded_message_records.size(),
+                  modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_), data_frame_cw_count_,
+                  static_cast<unsigned>(kMaxMessageGeometryRegridAttempts));
+    }
+
     // Publish only after the old ARQ identities are gone and the new geometry is
     // fully installed. Reentrant application code can now submit its retry; while
     // a MODE_CHANGE commit is still pending it will be queued and released by the
@@ -8388,7 +8537,16 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         disconnect();
     }
     emitFailedMessageRecords(geometry_failed_message_records);
-    if (geometry_failed_nonfile_operation && on_message_sent_) {
+    // The legacy boolean callback carries no object identity, so it can only be
+    // honest about a batch. Fire it when something really died: a terminal message
+    // failure, or an abandoned operation with no identity to re-grid (binary/TNC).
+    // Firing it for a re-gridded object would contradict the attributed status
+    // stream, which still says SUBMITTED.
+    const bool reportable_terminal_failure =
+        !geometry_failed_message_records.empty() ||
+        (geometry_failed_nonfile_operation &&
+         geometry_regridded_message_records.empty());
+    if (reportable_terminal_failure && on_message_sent_) {
         on_message_sent_(false);
     }
 }
@@ -8644,6 +8802,13 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
     resetAdaptiveDecisionState();
+    // Message-object identity is scoped to ONE session, and the two ends do not
+    // necessarily observe a teardown together — a peer that missed the DISCONNECT
+    // would carry a stale delivered-set into the next session and suppress a real
+    // message whose id got recycled. Clearing on session ENTRY closes that: whoever
+    // saw the new handshake starts clean regardless of how the last one ended.
+    delivered_message_object_ids_.clear();
+    next_outbound_message_object_id_ = 1;
     latent_startup_probe_allowed_ = automatic_rate_allowed;
     staged_timeout_batch_.clear();
     arq_tick_in_progress_ = false;
@@ -8864,6 +9029,10 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_reassembly_active_ = false;
     rx_reassembly_binary_ = false;
     rx_reassembly_epoch_ = 0;
+    // Message-object identity is per-session: ids restart at 1 on the next
+    // connection, so a stale delivered-set would suppress a NEW message.
+    delivered_message_object_ids_.clear();
+    next_outbound_message_object_id_ = 1;
     // #58 increment 3: session boundary — nothing in the connect-SNR pool may leak
     // into the next handshake's entry pick.
     connect_snr_pool_.clear();
@@ -9505,6 +9674,10 @@ void Connection::reset() {
     rx_reassembly_active_ = false;
     rx_reassembly_binary_ = false;
     rx_reassembly_epoch_ = 0;
+    // Message-object identity is per-session: ids restart at 1 on the next
+    // connection, so a stale delivered-set would suppress a NEW message.
+    delivered_message_object_ids_.clear();
+    next_outbound_message_object_id_ = 1;
     // Per-connection channel-coherence verdict (see setChannelCoherence hold-last-valid).
     coherence_score_ = 0.0f;
     coherence_doppler_hz_ = 0.0f;

@@ -15,11 +15,26 @@ namespace protocol {
 
 // Payload type discriminator (first byte of DATA frame payload)
 enum class PayloadType : uint8_t {
-    TEXT_MESSAGE = 0x00,  // Regular text message (backward compatible)
+    TEXT_MESSAGE = 0x00,  // Legacy bare text object (no identity) — RX-only
     FILE_START   = 0x01,  // File metadata: flags, size, crc32, filename
     FILE_DATA    = 0x02,  // File chunk: offset + data
     FILE_BLOCK   = 0x03,  // Single-frame file block: metadata + full payload
+    // Text message object carrying a logical identity: {0x04, object_id, text...}.
+    // The id makes a re-send IDEMPOTENT, which is what lets a mandatory geometry
+    // escape re-fragment an in-flight message instead of destroying it
+    // (BUG-MESSAGE-LOST-ON-FORCED-DEMOTE). The sender cannot know whether the peer
+    // already holds the object — the classic ARQ ambiguity — so the receiver, which
+    // CAN know, drops the duplicate.
+    //
+    // Deliberately NOT in the fixed-frame header: HEADER_SIZE feeds
+    // FIXED_FRAME_OVERHEAD, CONNECT sizing and the RX framer, so a header byte would
+    // ripple into control frames and capacity math. This prefix is parsed only by the
+    // message reassembly path.
+    TEXT_MESSAGE_OBJECT = 0x04,
 };
+
+// {type, object_id} — see PayloadType::TEXT_MESSAGE_OBJECT.
+constexpr size_t kMessageObjectPrefixBytes = 2;
 
 // File transfer flags (in FILE_START payload)
 namespace FileFlags {

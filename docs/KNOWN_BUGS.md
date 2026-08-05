@@ -8,7 +8,7 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-MESSAGE-LOST-ON-FORCED-DEMOTE (open, 2026-08-05) — P2, SAFE BUT LOSSY
+### BUG-MESSAGE-LOST-ON-FORCED-DEMOTE — FIXED 2026-08-05 (see Fixed Bugs) — kept here for the two dead ends
 
 **Symptom.** An application message in flight is destroyed when a MANDATORY geometry
 escape (receiver-commanded or stuck-frame demote) changes the data geometry. The operator
@@ -92,6 +92,12 @@ fixed-frame capacity math stay untouched.
 `msg_tx == msg_rx == msg_delivered` on every row (watch for `msg_rx > msg_tx`, the duplicate
 signature); plus a deterministic forced-demote regression, since the matrix's m3/m4 rows do
 not reproduce reliably.
+
+**IMPLEMENTED 2026-08-05 exactly as designed above** — `PayloadType::TEXT_MESSAGE_OBJECT`
+(`0x04`), a per-session rolling object id, a depth-8 receiver delivered-set, and the
+re-enabled sender re-grid bounded at 2 attempts. Details and verification in Fixed Bugs.
+The two dead ends above are retained deliberately: they are the reason the fix is
+receiver-side, and re-deriving them costs a measured GUI matrix each.
 
 
 ### BUG-GUI-RX-CONSUMER-STALL-OVERRUN (open, 2026-08-04) — P2, APPARATUS/REAL-TIME
@@ -1953,6 +1959,56 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+- 2026-08-05: BUG-MESSAGE-LOST-ON-FORCED-DEMOTE fixed — an in-flight operator message was
+  destroyed by a MANDATORY geometry escape (receiver-commanded / stuck-frame demote), on
+  **Good@20, a clean channel**, 2 of 10 GUI matrix rows. **Root cause:** `applyDataMode()`
+  failed the logical object rather than serializing old-sized fragments through the smaller
+  frame builder — correct as far as it went (silent truncation is worse than loss), but it
+  treated a FRAGMENTATION problem as an OBJECT problem. A geometry change invalidates the cut,
+  not the content; the payload is still in hand and nothing physical requires it to die.
+  **Why the obvious fix fails:** simply re-sending duplicates the message, because "record
+  still active" covers both mid-flight AND fully-sent-awaiting-ACK — the classic ARQ ambiguity.
+  Both sender-side variants were built and MEASURED unsound (duplicate delivery `rx = #1/#2/#2/#3`;
+  then a narrowed gate that stopped firing). No sender-side heuristic resolves it: the sender
+  cannot know what the receiver holds. **Fix — make the resend IDEMPOTENT so the sender no
+  longer has to guess:** (1) new `PayloadType::TEXT_MESSAGE_OBJECT` = `0x04`, wire form
+  `{0x04, object_id, text…}` in the message-object payload prefix — NOT in `DataFrame::HEADER_SIZE`,
+  which feeds `FIXED_FRAME_OVERHEAD`/CONNECT sizing/the RX framer; (2) a rolling per-session
+  `object_id` allocated at admission and held CONSTANT across re-grids; (3) receiver keeps the
+  last 8 delivered ids (`delivered_message_object_ids_`) and drops a repeat in
+  `handleDataPayload` before any application callback; (4) the sender re-grid is re-enabled in
+  `applyDataMode()`, bounded at `kMaxMessageGeometryRegridAttempts` = 2, re-admitted at the
+  FRONT of `queued_payloads_` by admission rank so the cross-class FIFO holds, gated on
+  `arq_.moveEpochEnabled()` (the forced epoch bump is what makes the peer drop the stale
+  partial prefix — without it the path still fails closed and disconnects). A 1-bit generation
+  toggle was rejected with a counterexample: a fully lost object desynchronizes the toggle and
+  the NEXT message is dropped as a duplicate = silent loss, the original bug reintroduced.
+  **Also hardened:** a reassembled text object whose first byte is neither `0x04` nor the legacy
+  `0x00` is now discarded with a WARN instead of being handed to the operator as content —
+  that is exactly what a stitched stale-prefix object looks like. Status truthfulness holds:
+  one SUBMITTED and one terminal result per object across any number of re-grids, `submitted_at`
+  stamped only on the FIRST wire submission so elapsed_ms reports the operator's real wait, and
+  the legacy `on_message_sent_(false)` fires only when something actually died. Binary/TNC
+  payloads carry no identity and are NOT re-gridded — they still fail explicitly, and the TNC
+  session layer owns their retry. Per-session scope: id counter and delivered-set cleared in
+  `enterConnected()`, `enterDisconnected()` and `reset()`. Tests: 4 new deterministic
+  regressions in test_connection_adaptive (re-grid delivers exactly once end-to-end; re-cut
+  honours the NEW capacity on every resumed frame; the budget is bounded then fails closed with
+  one attributed FAILED; receiver suppresses a duplicate by identity, delivers a distinct id
+  with identical text, and handles the fragmented case) — the escape no longer depends on a
+  seeded channel happening to demote. **Verification:** ctest 101/101; `tools/message_gui_matrix.sh`
+  **10/10 PASS** (binary md5 `ccc7b4ed…`), every message row `msg_tx == msg_rx == msg_delivered`
+  with `MESSAGE_EXACT_MATCH=1`, both file regressions `FILE_CRC_OK_COUNT=2`, and **zero**
+  `msg_rx > msg_tx` (the attempt-1 duplicate signature). Crucially the matrix did not merely
+  fail to reproduce the bug — **rows m2 and m3 exercised the whole path**: `Regridding 1 /
+  abandoning 0 … QPSK R1/2 -> QPSK R1/4` → `Re-queued 1 message object(s)` → receiver
+  `Dropping duplicate message object id=3 (97 bytes) — already delivered` (m3: `id=4, 50 bytes`),
+  with `cmp` byte-identical text. That dropped duplicate IS the ambiguous fully-sent-awaiting-ACK
+  case that made attempt 1 deliver twice. Zero `Abandoning active message` and zero `FAIL #`
+  anywhere in the matrix. NOTE: m4/m8 — the two rows that failed originally — did NOT hit an
+  escape this run (the documented non-determinism), so they are no-regression evidence only;
+  the fix evidence is m2/m3 plus the deterministic unit regressions.
 
 - 2026-07-14: BUG-MPG20-OVER-DEMOTE-R14 fixed — Good@20 read as Moderate → RX authority
   pinned QPSK R1/4 (operator: "R1/4 doesn't make sense"). **Root cause:** the Good/Moderate

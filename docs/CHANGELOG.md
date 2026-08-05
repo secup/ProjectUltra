@@ -10,6 +10,115 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-05 — FIX: BUG-MESSAGE-LOST-ON-FORCED-DEMOTE — idempotent message resend (wire change)
+
+### What was broken
+
+A MANDATORY geometry escape (receiver-commanded or stuck-frame demote) DESTROYED an
+in-flight operator message: `Abandoning active message/binary operation before geometry
+change QPSK R1/2 -> QPSK R1/4` → `FAIL #1 failed`. It fired on **Good@20, a clean channel**,
+in 2 of 10 GUI matrix rows. Adaptive demotes are routine on HF, so this was not an edge case.
+
+Root cause: `applyDataMode()` failed the logical object rather than let old-sized fragments
+reach the smaller frame builder. That half was right — silent truncation, which reports
+delivery for bytes never transmitted, is worse than loss. But it treated a FRAGMENTATION
+problem as an OBJECT problem. A geometry change invalidates the cut, not the content; the
+payload is still in hand, and nothing in the physics requires the message to die.
+
+The obvious repair duplicates messages. "Record still active" covers both mid-flight AND
+fully-sent-awaiting-ACK, and in the second case the peer already delivered the object. Both
+sender-side variants were built and MEASURED unsound on 2026-08-05 (duplicate delivery
+`rx = #1/#2/#2/#3`; then a narrowed gate that stopped firing because submitted-but-unacked is
+the ambiguous state AND the common one). This is the classic ARQ ambiguity: no sender-side
+heuristic resolves it, because the sender cannot know what the receiver holds.
+
+### What changed
+
+Make the resend IDEMPOTENT so the sender no longer has to guess. The receiver CAN tell, so
+duplicate suppression belongs there.
+
+- `src/protocol/file_transfer.hpp` — new `PayloadType::TEXT_MESSAGE_OBJECT = 0x04`, wire form
+  `{0x04, object_id, text…}`, plus `kMessageObjectPrefixBytes`. Deliberately in the
+  message-object PAYLOAD prefix, NOT `DataFrame::HEADER_SIZE` (which feeds
+  `FIXED_FRAME_OVERHEAD`, CONNECT sizing at `protocol_engine.cpp:530,561`, and the RX framer)
+  — a header byte would ripple into control frames and capacity math for no benefit.
+- `src/protocol/connection.hpp/.cpp` — `OutboundMessageTxRecord` gains `object_id`,
+  `enqueue_order` (admission rank) and `geometry_regrid_attempts`; `outboundMessageWireBytes()`
+  rebuilds the wire object on demand; `delivered_message_object_ids_` (depth 8) is the receiver
+  ledger. `applyDataMode()` now re-grids instead of failing: the record survives with its
+  identity, only the old wire identity is cleared, and the object is re-admitted at the FRONT
+  of `queued_payloads_` in admission order so the cross-class FIFO holds. Bounded by
+  `kMaxMessageGeometryRegridAttempts` = 2. Gated on `arq_.moveEpochEnabled()` — the forced
+  epoch bump is what makes the peer discard the stale partial prefix — so without the contract
+  the path still fails closed and disconnects exactly as before.
+- `src/protocol/connection_handlers.cpp` — `handleDataPayload()` reads the identity after
+  reassembly and drops an already-delivered id BEFORE any application callback. Consumers now
+  receive application bytes only, never the transport prefix.
+
+### Why it works
+
+The peer is the only party that knows whether it holds the object, so the ambiguity that
+blocks every sender-side fix simply stops mattering: a wrong guess costs one suppressed
+frame group. A 1-bit generation toggle was rejected with a counterexample — a fully lost
+object desynchronizes the toggle and the NEXT message is dropped as a duplicate, which is
+silent loss, the original bug reintroduced. A byte gives 255 live identities against a
+depth-8 window and ids allocated strictly "most recent + 1", so a NEW object's id can never
+collide with the window.
+
+Invariants held: silent truncation stays rejected; the epoch-rebase stale-prefix discard
+stays load-bearing; one SUBMITTED and one terminal result per object across any number of
+re-grids; `submitted_at` stamped only on the FIRST wire submission so `elapsed_ms` reports
+the operator's real wait; the legacy `on_message_sent_(false)` fires only when something
+actually died. Binary/TNC payloads carry no identity and are NOT re-gridded — they still
+fail explicitly, and `tnc_session` owns their retry.
+
+Hardened alongside: a reassembled text object whose first byte is neither `0x04` nor legacy
+`0x00` is discarded with a WARN instead of being handed to the operator as content — that
+byte pattern is exactly what a stitched stale-prefix object looks like. Identity state is
+per-session, cleared in `enterConnected()` (a peer that missed a DISCONNECT would otherwise
+carry a stale ledger into the next session), `enterDisconnected()` and `reset()`.
+
+### Test verification
+
+`cmake --build build -j4 && ctest --test-dir build --output-on-failure -j4` → **101/101**,
+including four new deterministic regressions in `test_connection_adaptive` that force the
+geometry change rather than hoping a seeded channel demotes: re-grid delivers exactly once
+end-to-end with the same object id; the re-cut honours the NEW capacity on every resumed
+frame; the budget is bounded then fails closed with one attributed FAILED; the receiver
+suppresses a duplicate by identity, still delivers a DISTINCT id carrying identical text, and
+handles the fragmented case.
+
+`tools/message_gui_matrix.sh` → **10/10 PASS** (`ultra_gui` md5 `ccc7b4ed…`; earlier runs were
+killed and restarted because source changed after launch — a gate run on a non-shipping binary
+is worthless). Every message row `msg_tx == msg_rx == msg_delivered`, `MESSAGE_EXACT_MATCH=1`;
+both file regressions `FILE_CRC_OK_COUNT=2`; zero `msg_rx > msg_tx`.
+
+The matrix did not merely fail to reproduce the bug — **rows m2 and m3 exercised the entire
+mechanism**:
+
+```
+[132.402][WARN] Connection: Regridding 1 / abandoning 0 active message object(s)
+                before geometry change QPSK R1/2 -> QPSK R1/4
+[132.402][INFO] Connection: Re-queued 1 message object(s) for re-fragmentation at QPSK R1/4
+[135.497][INFO] Connection: Dropping duplicate message object id=3 (97 bytes) — already delivered
+```
+
+(m3: `id=4, 50 bytes`.) That dropped duplicate is precisely the fully-sent-awaiting-ACK case
+that made attempt 1 deliver the message twice. `cmp` byte-identical on both rows. Zero
+`Abandoning active message` and zero `FAIL #` anywhere in the matrix.
+
+**Honest limit:** m4/m8 — the two rows that failed originally — did NOT hit an escape this
+run. The bug entry documents that these rows are non-deterministic (a code change shifts the
+timeline enough that the same seed need not meet the same fade), so they are no-regression
+evidence only. The fix evidence is m2/m3 plus the deterministic unit regressions.
+
+**Wire compatibility:** this changes the message wire format. There are no deployed peers, and
+both stations in the sim/rig are built together, so no migration path is provided. An old
+sender's bare-text object still decodes (the legacy `0x00`/no-prefix RX branch is retained);
+an old receiver would not understand `0x04`.
+
+---
+
 ## 2026-08-05 — VERIFY: GUI message matrix; two message-resume fixes measured UNSOUND and reverted
 
 ### What was done

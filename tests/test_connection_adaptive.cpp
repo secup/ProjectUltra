@@ -465,16 +465,54 @@ struct ConnectionAdaptiveTestAccess {
         return c.queued_payloads_.size();
     }
 
+    // Application text of a queued message — the message-object identity prefix
+    // (PayloadType::TEXT_MESSAGE_OBJECT + object id) is transport, not content.
     static std::string queuedPayloadText(const Connection& c, size_t index) {
         if (index >= c.queued_payloads_.size()) {
             return {};
         }
         const auto& data = c.queued_payloads_[index].data;
-        return std::string(data.begin(), data.end());
+        auto begin = data.begin();
+        if (!c.queued_payloads_[index].binary_payload &&
+            data.size() >= kMessageObjectPrefixBytes &&
+            data[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT)) {
+            begin += static_cast<std::ptrdiff_t>(kMessageObjectPrefixBytes);
+        }
+        return std::string(begin, data.end());
+    }
+
+    static size_t queuedPayloadObjectId(const Connection& c, size_t index) {
+        if (index >= c.queued_payloads_.size()) {
+            return 0;
+        }
+        const auto& data = c.queued_payloads_[index].data;
+        if (data.size() < kMessageObjectPrefixBytes ||
+            data[0] != static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT)) {
+            return 0;
+        }
+        return data[1];
     }
 
     static size_t outboundMessageRecordCount(const Connection& c) {
         return c.outbound_message_tx_records_.size();
+    }
+
+    static size_t deliveredMessageObjectIdCount(const Connection& c) {
+        return c.delivered_message_object_ids_.size();
+    }
+
+    static unsigned messageGeometryRegridAttempts(const Connection& c,
+                                                  size_t index) {
+        if (index >= c.outbound_message_tx_records_.size()) {
+            return 0;
+        }
+        return c.outbound_message_tx_records_[index].geometry_regrid_attempts;
+    }
+
+    static void deliverDataPayload(Connection& c, const Bytes& payload,
+                                   bool more_data) {
+        c.handleDataPayload(payload, more_data, v2::FrameType::DATA,
+                            more_data ? v2::Flags::MORE_FRAG : v2::Flags::FINAL);
     }
 
     static bool queuedFile(const Connection& c) {
@@ -3026,7 +3064,10 @@ void test_forced_r1_3_cw1_rejects_file_before_wire_tx() {
     const std::string message = "message-over-eight-bytes";
     CHECK(c.sendMessage(message),
           "the same 8-byte profile must accept a fragmented operator message");
-    CHECK(tx_frames.size() == (message.size() + 7) / 8,
+    // The fragmented object is the WIRE object: text plus the message-object
+    // identity prefix that makes a re-grid resend idempotent.
+    const size_t wire_bytes = message.size() + kMessageObjectPrefixBytes;
+    CHECK(tx_frames.size() == (wire_bytes + 7) / 8,
           "message must split into the exact number of 8-byte DATA frames");
     for (const auto& bytes : tx_frames) {
         const auto frame = v2::DataFrame::deserialize(bytes);
@@ -3244,7 +3285,9 @@ void test_deferred_payload_fifo_survives_failed_head_and_new_submission() {
           "restoring the transport must start exactly one queued payload");
     const auto first_after_recovery = v2::DataFrame::deserialize(transmitted.back());
     CHECK(first_after_recovery &&
-              std::string(first_after_recovery->payload.begin(),
+              first_after_recovery->payload.size() >= kMessageObjectPrefixBytes &&
+              std::string(first_after_recovery->payload.begin() +
+                              kMessageObjectPrefixBytes,
                           first_after_recovery->payload.end()) == "fifo-B",
           "the older surviving payload must retain wire priority over the new submission");
 
@@ -3262,7 +3305,12 @@ void test_deferred_payload_fifo_survives_failed_head_and_new_submission() {
           "every accepted FIFO item must receive exactly one terminal result");
 }
 
-void test_midwindow_message_geometry_change_fails_closed_and_link_recovers() {
+// BUG-MESSAGE-LOST-ON-FORCED-DEMOTE. A mandatory escape used to DESTROY the
+// in-flight message. Nothing physical requires that: a geometry change invalidates
+// the object's fragmentation, not the object. These tests pin the replacement
+// contract — re-grid the same object, and let the RECEIVER suppress the duplicate,
+// because the sender cannot resolve "never received" vs "ACK in flight".
+void test_midwindow_message_geometry_change_regrids_object_and_delivers_once() {
     setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
     Connection c;
     unsetenv("ULTRA_ARQ_MOVE_EPOCH");
@@ -3283,64 +3331,241 @@ void test_midwindow_message_geometry_change_fails_closed_and_link_recovers() {
     ConnectionAdaptiveTestAccess::setDataGeometry(
         c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
 
-    const size_t old_capacity =
-        ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
-    const std::string long_message(old_capacity + 17, 'G');
-    CHECK(c.sendMessage(long_message) &&
-              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
-          "geometry-change fixture must own a live multi-frame message");
+    // Six characters + the two-byte identity prefix == the eight-byte payload the
+    // post-demotion geometry can carry, so the object survives the re-cut whole and
+    // the round trip stays one frame at both geometries.
+    const std::string message = "REGRID";
+    CHECK(c.sendMessage(message) && transmitted.size() == 1,
+          "regrid fixture must put one live message frame on the wire");
+    const auto first_attempt = v2::DataFrame::deserialize(transmitted.front());
+    CHECK(first_attempt &&
+              first_attempt->payload.size() == message.size() + kMessageObjectPrefixBytes &&
+              first_attempt->payload[0] ==
+                  static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT),
+          "a message must reach the wire behind its object identity");
+    const uint8_t object_id = first_attempt->payload[1];
+    CHECK(object_id != 0, "object id 0 is reserved for 'no identity'");
     const uint8_t epoch_before =
         ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
 
-    // Model an unavoidable receiver-commanded/stuck-frame demotion while old
-    // message slots are live. It must fail the complete logical object instead
-    // of letting old oversized chunks reach the smaller frame builder.
+    // Model an unavoidable receiver-commanded/stuck-frame demotion while the
+    // message slot is live.
     ConnectionAdaptiveTestAccess::applyDataMode(
         c, Modulation::QPSK, CodeRate::R1_3, /*cw_count=*/1);
     CHECK(!ConnectionAdaptiveTestAccess::fragmentedMessagePending(c) &&
-              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0 &&
-              statuses.size() == 2 &&
+              ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 1 &&
+              ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 1 &&
+              ConnectionAdaptiveTestAccess::queuedPayloadText(c, 0) == message &&
+              ConnectionAdaptiveTestAccess::queuedPayloadObjectId(c, 0) == object_id &&
+              ConnectionAdaptiveTestAccess::messageGeometryRegridAttempts(c, 0) == 1,
+          "a mandatory escape must re-admit the SAME object, not destroy it");
+    CHECK(statuses.size() == 1 &&
               statuses.front().status == Connection::MessageTxStatus::SUBMITTED &&
-              statuses.back().status == Connection::MessageTxStatus::FAILED &&
-              statuses.back().text == long_message &&
-              statuses.back().remote_call == "K2DEF" &&
-              legacy_results.size() == 1 && !legacy_results.front(),
-          "mid-window regrid must publish one attributed terminal failure and clear old fragments");
+              legacy_results.empty(),
+          "a re-gridded object must not publish any terminal result");
     CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) != epoch_before,
-          "abandoning a partial logical object must enter a fresh move epoch");
+          "abandoning the old slots must enter a fresh move epoch so the peer drops the stale prefix");
     CHECK(ConnectionAdaptiveTestAccess::currentPayloadCapacity(c) == 8,
           "forced demotion fixture must establish the smaller eight-byte capacity");
 
-    const size_t wire_before_recovery = transmitted.size();
+    const size_t wire_before_resume = transmitted.size();
     CHECK(!ConnectionAdaptiveTestAccess::sendFixedData(
               c, Bytes(9, 0xA5), v2::Flags::FINAL) &&
-              transmitted.size() == wire_before_recovery,
+              transmitted.size() == wire_before_resume,
           "production ARQ must refuse an oversized stale-geometry chunk before wire serialization");
-    CHECK(c.sendMessage("RECOVER"),
-          "the first post-regrid message must be accepted on the same connection");
-    CHECK(transmitted.size() == wire_before_recovery + 1,
-          "post-regrid message must produce one new bounded frame");
-    const auto recovery = v2::DataFrame::deserialize(transmitted.back());
-    CHECK(recovery && recovery->payload == Bytes({'R','E','C','O','V','E','R'}),
-          "post-regrid payload must be exact, never silently truncated");
+
+    // Production dispatch (the CONNECTED tick) re-fragments at the NEW geometry.
+    c.tick(1);
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 0 &&
+              transmitted.size() == wire_before_resume + 1,
+          "the re-admitted object must go back on the wire at the new geometry");
+    const auto resumed = v2::DataFrame::deserialize(transmitted.back());
+    CHECK(resumed && resumed->payload.size() <= 8 &&
+              resumed->payload[0] ==
+                  static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT) &&
+              resumed->payload[1] == object_id,
+          "the resend must carry the SAME object id — that is what makes it idempotent at the peer");
+    CHECK(resumed->payload ==
+              Bytes({static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT),
+                     object_id, 'R','E','G','R','I','D'}),
+          "the resent payload must be exact, never silently truncated");
 
     ToneBurstAckDetection ack;
-    ack.payload.group_seq = static_cast<uint8_t>(recovery->seq & 0x3F);
+    ack.payload.group_seq = static_cast<uint8_t>(resumed->seq & 0x3F);
     ack.payload.frame_mask = 0;
     ack.payload.rate_hint = 7;
     ack.payload.type = AckType::Ack;
     ack.payload.move_epoch = ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
     ack.payload.rung_cmd = kRungCmdNone;
     ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
-    CHECK(c.onToneBurstAck(ack),
-          "post-regrid exact message ACK must be accepted");
-    CHECK(statuses.size() == 4 &&
-              statuses[2].status == Connection::MessageTxStatus::SUBMITTED &&
-              statuses[2].text == "RECOVER" &&
-              statuses[3].status == Connection::MessageTxStatus::DELIVERED &&
-              statuses[3].text == "RECOVER" &&
-              legacy_results.size() == 2 && legacy_results.back(),
-          "the same link must deliver the next exact message after the failed regrid object");
+    CHECK(c.onToneBurstAck(ack), "resumed message ACK must be accepted");
+    CHECK(statuses.size() == 2 &&
+              statuses.back().status == Connection::MessageTxStatus::DELIVERED &&
+              statuses.back().text == message &&
+              statuses.back().remote_call == "K2DEF" &&
+              legacy_results.size() == 1 && legacy_results.front(),
+          "one accepted message must yield exactly one SUBMITTED and one DELIVERED across the re-grid");
+}
+
+void test_message_geometry_regrid_recuts_fragments_at_new_capacity() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+
+    const size_t old_capacity =
+        ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
+    const std::string long_message(old_capacity + 17, 'G');
+    CHECK(c.sendMessage(long_message) &&
+              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
+          "re-cut fixture must own a live multi-frame message");
+    const auto first_attempt = v2::DataFrame::deserialize(transmitted.front());
+    CHECK(first_attempt && first_attempt->payload.size() == old_capacity,
+          "the first attempt must fill the old geometry exactly");
+    const uint8_t object_id = first_attempt->payload[1];
+
+    const size_t wire_before_resume = transmitted.size();
+    ConnectionAdaptiveTestAccess::applyDataMode(
+        c, Modulation::QPSK, CodeRate::R1_3, /*cw_count=*/1);
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 1 &&
+              ConnectionAdaptiveTestAccess::queuedPayloadText(c, 0) == long_message,
+          "the whole logical object must be re-admitted, not the leftover fragments");
+
+    c.tick(1);
+    CHECK(ConnectionAdaptiveTestAccess::fragmentedMessagePending(c) &&
+              transmitted.size() > wire_before_resume,
+          "the re-admitted object must re-fragment and resume transmission");
+    const auto resumed = v2::DataFrame::deserialize(transmitted[wire_before_resume]);
+    CHECK(resumed && resumed->payload.size() == 8,
+          "re-fragmentation must cut to the NEW eight-byte capacity, not the old one");
+    CHECK(resumed->payload[0] ==
+              static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT) &&
+              resumed->payload[1] == object_id,
+          "a re-cut object keeps its identity so the peer can suppress the duplicate");
+    // Every resumed frame must respect the new geometry — a stale oversized chunk
+    // reaching the smaller frame builder is the failure this escape exists to avoid.
+    for (size_t i = wire_before_resume; i < transmitted.size(); ++i) {
+        const auto frame = v2::DataFrame::deserialize(transmitted[i]);
+        CHECK(frame && frame->payload.size() <= 8,
+              "no resumed frame may exceed the new payload capacity");
+    }
+    c.abortTxNow();
+}
+
+void test_message_geometry_regrid_is_bounded_then_fails_closed() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Connection::MessageTxStatusEvent> statuses;
+    std::vector<bool> legacy_results;
+    c.setTransmitCallback([](const Bytes&) {});
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    c.setMessageTxStatusCallback(
+        [&](const Connection::MessageTxStatusEvent& event) {
+            statuses.push_back(event);
+        });
+    c.setMessageSentCallback(
+        [&](bool success) { legacy_results.push_back(success); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+
+    const std::string message = "REGRID";
+    CHECK(c.sendMessage(message), "bounded-regrid fixture must accept one message");
+
+    // A message that re-cuts forever on a flapping ladder is worse for the operator
+    // than one honest failure, so the escape is budgeted.
+    const CodeRate ladder[] = {CodeRate::R1_3, CodeRate::R1_2, CodeRate::R2_3};
+    for (size_t attempt = 0; attempt < 2; ++attempt) {
+        ConnectionAdaptiveTestAccess::applyDataMode(
+            c, Modulation::QPSK, ladder[attempt], /*cw_count=*/1);
+        CHECK(ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 1 &&
+                  ConnectionAdaptiveTestAccess::messageGeometryRegridAttempts(c, 0) ==
+                      attempt + 1,
+              "each escape within budget must re-grid the object and count the attempt");
+        CHECK(legacy_results.empty(),
+              "a re-gridded object must not report failure while it is still in budget");
+        c.tick(1);  // resume: put it back on the wire so the next escape can see it
+        CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 0,
+              "the re-admitted object must be dispatched before the next escape");
+    }
+
+    ConnectionAdaptiveTestAccess::applyDataMode(
+        c, Modulation::QPSK, ladder[2], /*cw_count=*/1);
+    CHECK(ConnectionAdaptiveTestAccess::outboundMessageRecordCount(c) == 0 &&
+              ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 0,
+          "an out-of-budget object must be dropped, not re-queued forever");
+    CHECK(statuses.size() == 2 &&
+              statuses.front().status == Connection::MessageTxStatus::SUBMITTED &&
+              statuses.back().status == Connection::MessageTxStatus::FAILED &&
+              statuses.back().text == message,
+          "exhausting the re-grid budget must publish one attributed terminal failure");
+    CHECK(legacy_results.size() == 1 && !legacy_results.front(),
+          "the legacy boolean must report the terminal failure exactly once");
+}
+
+void test_receiver_suppresses_duplicate_message_object() {
+    Connection c;
+    std::vector<std::string> received;
+    std::vector<Bytes> raw_received;
+    c.setTransmitCallback([](const Bytes&) {});
+    c.setMessageReceivedCallback(
+        [&](const std::string& text) { received.push_back(text); });
+    c.setDataReceivedCallback(
+        [&](const Bytes& data, bool) { raw_received.push_back(data); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    const Bytes object = {
+        static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT), 7,
+        'h','e','l','l','o'};
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, object, /*more_data=*/false);
+    CHECK(received.size() == 1 && received.front() == "hello",
+          "a message object must be delivered once, without its transport prefix");
+    CHECK(raw_received.size() == 1 &&
+              raw_received.front() == Bytes({'h','e','l','l','o'}),
+          "raw data consumers must not see the transport prefix either");
+
+    // The sender may legitimately re-send after a geometry escape without knowing
+    // the peer already has the object. Suppressing it here is what makes that safe.
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, object, /*more_data=*/false);
+    CHECK(received.size() == 1 && raw_received.size() == 1,
+          "a resend of an already-delivered object id must be suppressed");
+
+    // A DIFFERENT object with the same text is a real second message, not a
+    // duplicate — suppression keys on identity, never on content.
+    const Bytes second = {
+        static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT), 8,
+        'h','e','l','l','o'};
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, second, /*more_data=*/false);
+    CHECK(received.size() == 2 && received.back() == "hello",
+          "a distinct object id carrying identical text must still be delivered");
+
+    // Fragmented objects are keyed the same way: the identity rides the first
+    // fragment and is read after reassembly.
+    const Bytes frag_a = {
+        static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT), 9, 'a','b'};
+    const Bytes frag_b = {'c','d'};
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, frag_a, /*more_data=*/true);
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, frag_b, /*more_data=*/false);
+    CHECK(received.size() == 3 && received.back() == "abcd",
+          "a fragmented object must reassemble to exact text");
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, frag_a, /*more_data=*/true);
+    ConnectionAdaptiveTestAccess::deliverDataPayload(c, frag_b, /*more_data=*/false);
+    CHECK(received.size() == 3,
+          "a re-sent fragmented object must be suppressed after reassembly");
+
+    CHECK(ConnectionAdaptiveTestAccess::deliveredMessageObjectIdCount(c) == 3,
+          "suppression history must hold one entry per delivered object");
 }
 
 void test_ordinary_adaptation_holds_geometry_for_complete_message() {
@@ -3641,10 +3866,9 @@ void test_same_epoch_rebase_preserves_multiwindow_message_prefix() {
         [&](const std::string& text) { messages.push_back(text); });
     receiver.setTransmitCallback([](const Bytes&) {});
 
-    auto inject = [&](uint16_t seq, char value, bool more) {
+    auto inject = [&](uint16_t seq, const Bytes& payload, bool more) {
         auto frame = v2::makeFixedDataFrame(
-            "K2DEF", "W1ABC", seq, Bytes{static_cast<uint8_t>(value)},
-            CodeRate::R2_3);
+            "K2DEF", "W1ABC", seq, payload, CodeRate::R2_3);
         frame.flags = static_cast<uint8_t>(
             frame.flags | v2::Flags::EPOCH_REBASE | v2::epochToFlags(0) |
             (more ? v2::Flags::MORE_FRAG : v2::Flags::FINAL));
@@ -3654,9 +3878,11 @@ void test_same_epoch_rebase_preserves_multiwindow_message_prefix() {
     // Stop-and-wait/window-drain traffic can create each next fragment at the
     // current TX base, so every fragment legitimately carries EPOCH_REBASE in
     // the SAME epoch. None of those window boundaries is a logical-message reset.
-    inject(0, 'A', true);
-    inject(1, 'B', true);
-    inject(2, 'C', false);
+    // The object identity rides the FIRST fragment only.
+    inject(0, Bytes{static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT), 1, 'A'},
+           true);
+    inject(1, Bytes{'B'}, true);
+    inject(2, Bytes{'C'}, false);
     CHECK(messages.size() == 1 && messages.front() == "ABC" &&
               ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 0,
           "same-epoch rebase boundaries must preserve the complete message prefix");
@@ -3673,18 +3899,21 @@ void test_move_epoch_rebase_drops_stale_message_prefix() {
         [&](const std::string& text) { messages.push_back(text); });
     receiver.setTransmitCallback([](const Bytes&) {});
 
+    const uint8_t kObjectType =
+        static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT);
     auto old_fragment = v2::makeFixedDataFrame(
-        "K2DEF", "W1ABC", 0, Bytes{'O', 'L', 'D', '-'}, CodeRate::R2_3);
+        "K2DEF", "W1ABC", 0, Bytes{kObjectType, 4, 'O', 'L', 'D', '-'},
+        CodeRate::R2_3);
     old_fragment.flags = static_cast<uint8_t>(
         old_fragment.flags | v2::Flags::EPOCH_REBASE | v2::Flags::MORE_FRAG |
         v2::epochToFlags(0));
     receiver.onFrameReceived(old_fragment.serialize());
     CHECK(messages.empty() &&
-              ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 4,
+              ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 6,
           "old-era prefix must be buffered but not delivered");
 
     auto new_message = v2::makeFixedDataFrame(
-        "K2DEF", "W1ABC", 1, Bytes{'N', 'E', 'W'}, CodeRate::R2_3);
+        "K2DEF", "W1ABC", 1, Bytes{kObjectType, 5, 'N', 'E', 'W'}, CodeRate::R2_3);
     new_message.flags = static_cast<uint8_t>(
         new_message.flags | v2::Flags::EPOCH_REBASE | v2::Flags::FINAL |
         v2::epochToFlags(1));
@@ -3693,6 +3922,18 @@ void test_move_epoch_rebase_drops_stale_message_prefix() {
     CHECK(messages.size() == 1 && messages.front() == "NEW" &&
               ConnectionAdaptiveTestAccess::rxReassemblyBytes(receiver) == 0,
           "new-era message must deliver without contamination from the abandoned prefix");
+
+    // Belt and braces on the same failure mode: if the stale prefix were NOT
+    // dropped, the stitched object would start with the old era's bytes and no
+    // longer parse as a message object. Prove that case is refused rather than
+    // handed to the operator as content.
+    auto stitched = v2::makeFixedDataFrame(
+        "K2DEF", "W1ABC", 2, Bytes{'O', 'L', 'D', '-', kObjectType, 6, 'X'},
+        CodeRate::R2_3);
+    stitched.flags = static_cast<uint8_t>(stitched.flags | v2::Flags::FINAL);
+    receiver.onFrameReceived(stitched.serialize());
+    CHECK(messages.size() == 1,
+          "a payload with no valid message discriminator must never be delivered as text");
 }
 
 void test_authority_climb_prices_the_real_file_tail() {
@@ -4340,7 +4581,10 @@ void test_synchronous_burst_ack_cannot_overwrite_outer_committed_frames() {
     const size_t capacity = ConnectionAdaptiveTestAccess::dataPayloadCapacity(c);
     CHECK(frame_count >= 2 && capacity > 0,
           "fixture needs a full group plus one nested-refill frame");
-    CHECK(c.sendMessage(std::string((frame_count + 1) * capacity, 'r')),
+    // Size the TEXT so the WIRE object (text + message-object identity prefix)
+    // lands on an exact fragment boundary.
+    CHECK(c.sendMessage(std::string(
+              (frame_count + 1) * capacity - kMessageObjectPrefixBytes, 'r')),
           "message should enter the synchronous burst transport");
 
     CHECK(burst_callback_count == 1,
@@ -4679,7 +4923,10 @@ void test_fragment_tail_hole_repairs_immediately_and_uses_one_frame_rto() {
     CHECK(one_frame_timeout < full_round_timeout,
           "one-frame repair deadline must be shorter than the full group deadline");
 
-    CHECK(c.sendMessage(std::string(frame_count * capacity, 'x')),
+    // Text sized so the WIRE object (text + message-object identity prefix) is an
+    // exact frame_count-fragment group.
+    CHECK(c.sendMessage(
+              std::string(frame_count * capacity - kMessageObjectPrefixBytes, 'x')),
           "fragmented message should enter the unified sender");
     CHECK(bursts.size() == 1 && bursts[0].size() == frame_count,
           "message should leave as one exact budget-sized initial group");
@@ -6715,7 +6962,10 @@ int main() {
     test_reset_terminal_fails_accepted_queued_message();
     test_accepted_queued_start_failure_reports_terminal_status();
     test_deferred_payload_fifo_survives_failed_head_and_new_submission();
-    test_midwindow_message_geometry_change_fails_closed_and_link_recovers();
+    test_midwindow_message_geometry_change_regrids_object_and_delivers_once();
+    test_message_geometry_regrid_recuts_fragments_at_new_capacity();
+    test_message_geometry_regrid_is_bounded_then_fails_closed();
+    test_receiver_suppresses_duplicate_message_object();
     test_ordinary_adaptation_holds_geometry_for_complete_message();
     test_runtime_forced_cw_override_cannot_regrid_active_message();
     test_submitted_status_reset_runs_after_physical_handoff();

@@ -185,6 +185,29 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
 **Frame flow:** PING/PONG → CONNECT/CONNECT_ACK → MODE_CHANGE/ACK → DATA/ACK → DISCONNECT/ACK
 (all handshake/control in MC-DPSK).
 
+**DATA payload discriminator** (`PayloadType`, `file_transfer.hpp:17`, first byte of a DATA
+payload; NOT part of `DataFrame::HEADER_SIZE`):
+- `0x00 TEXT_MESSAGE` 🟠 LEGACY-RX-ONLY — bare text, no identity. Nothing emits it; the RX
+  strip survives only so an old-format object would still decode.
+- `0x01/0x02/0x03 FILE_START/FILE_DATA/FILE_BLOCK` 🟢 — consumed by `FileTransferController::processPayload`.
+- `0x04 TEXT_MESSAGE_OBJECT` 🟢 (2026-08-05) — `{0x04, object_id, text…}`; the ONLY format
+  `sendMessage`/`sendMessages` emit. The id is allocated per logical object at admission
+  (`createOutboundMessageRecord`) and is CONSTANT across geometry re-grids, which is what makes
+  a re-send idempotent. TX wrap: `outboundMessageWireBytes` (`connection.cpp`). RX dedup:
+  `messageObjectAlreadyDelivered` / `noteMessageObjectDelivered` against
+  `delivered_message_object_ids_` (depth 8), applied in `handleDataPayload`
+  (`connection_handlers.cpp`) AFTER reassembly and BEFORE any application callback. Both the id
+  counter and the delivered-set are per-session (cleared in `disconnect()` and `reset()`).
+  Binary payloads (`sendBinary`, the TNC path) carry NO identity and are NOT re-gridded.
+
+**Mandatory-escape message re-grid** 🟢 (2026-08-05, no env knob — `applyDataMode`,
+`connection.cpp`): a receiver-commanded / stuck-frame demotion re-fragments the in-flight
+message object at the new capacity and re-admits it at the FRONT of `queued_payloads_` in
+admission order, instead of destroying it (BUG-MESSAGE-LOST-ON-FORCED-DEMOTE). Bounded by
+`kMaxMessageGeometryRegridAttempts` (2), then it fails terminally with an attributed status.
+Gated on `arq_.moveEpochEnabled()` — the forced move-epoch bump is what makes the peer discard
+the stale partial prefix, so without it the path still fails closed and disconnects as before.
+
 ---
 
 ## 5. Waveform registry

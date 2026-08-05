@@ -1235,14 +1235,6 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
     rx_reassembly_binary_ = false;
     rx_reassembly_epoch_ = 0;
 
-    // Strip TEXT_MESSAGE type prefix if present
-    size_t start = 0;
-    if (!binary_payload &&
-        !complete_payload.empty() &&
-        complete_payload[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
-        start = 1;
-    }
-
     if (binary_payload) {
         if (on_data_received_) {
             on_data_received_(complete_payload, false);
@@ -1250,18 +1242,61 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
         return;
     }
 
-    std::string text;
-    if (start < complete_payload.size()) {
-        text.assign(complete_payload.begin() + static_cast<std::ptrdiff_t>(start),
-                    complete_payload.end());
+    // Strip the message-object type prefix.
+    size_t start = 0;
+    if (!complete_payload.empty()) {
+        if (complete_payload[0] ==
+                static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT) &&
+            complete_payload.size() >= kMessageObjectPrefixBytes) {
+            const uint8_t object_id = complete_payload[1];
+            start = kMessageObjectPrefixBytes;
+            // Idempotent-resend contract (BUG-MESSAGE-LOST-ON-FORCED-DEMOTE). The
+            // SENDER cannot tell "never received" from "received, ACK still in
+            // flight" — the classic ARQ ambiguity — so it is allowed to re-send an
+            // object it re-gridded onto a new geometry. The RECEIVER can tell, and
+            // suppresses the copy here, before any application callback. Dropping a
+            // duplicate is silent on purpose: nothing was lost.
+            if (messageObjectAlreadyDelivered(object_id)) {
+                LOG_MODEM(INFO,
+                          "Connection: Dropping duplicate message object id=%u (%zu bytes) — already delivered",
+                          static_cast<unsigned>(object_id),
+                          complete_payload.size() - kMessageObjectPrefixBytes);
+                return;
+            }
+            noteMessageObjectDelivered(object_id);
+        } else if (complete_payload[0] ==
+                   static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
+            // Legacy bare text object: no identity, so no duplicate suppression.
+            start = 1;
+        } else {
+            // Every text object we emit is TEXT_MESSAGE_OBJECT, so an unknown
+            // discriminator means this is not a whole object: a stale fragment
+            // prefix that survived a move-epoch change and got stitched to a fresh
+            // one, or a FILE payload the file controller declined. Handing those
+            // bytes to the operator as a message would present corruption as
+            // content. Drop it loudly instead.
+            LOG_MODEM(WARN,
+                      "Connection: Discarding %zu-byte payload with unknown message discriminator 0x%02X",
+                      complete_payload.size(),
+                      static_cast<unsigned>(complete_payload[0]));
+            return;
+        }
     }
+
+    // Application bytes only — consumers never see the transport prefix.
+    Bytes application_payload(
+        complete_payload.begin() + static_cast<std::ptrdiff_t>(
+            std::min(start, complete_payload.size())),
+        complete_payload.end());
+
+    std::string text(application_payload.begin(), application_payload.end());
 
     if (!text.empty() && on_message_received_) {
         on_message_received_(text);
     }
 
     if (on_data_received_) {
-        on_data_received_(complete_payload, false);
+        on_data_received_(application_payload, false);
     }
 }
 

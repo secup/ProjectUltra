@@ -973,9 +973,22 @@ private:
         bool submitted_reported = false;
         bool terminal_reported = false;
         std::chrono::steady_clock::time_point submitted_at{};
+        // Wire identity of the logical object (PayloadType::TEXT_MESSAGE_OBJECT).
+        // Constant across geometry re-grids — that is what makes the resend
+        // idempotent at the peer.
+        uint8_t object_id = 0;
+        // Admission rank, so a re-gridded object rejoins the cross-class FIFO in
+        // its original position rather than at the back.
+        uint64_t enqueue_order = 0;
+        uint8_t geometry_regrid_attempts = 0;
     };
     std::deque<OutboundMessageTxRecord> outbound_message_tx_records_;
     uint64_t next_outbound_message_token_ = 1;
+    uint8_t next_outbound_message_object_id_ = 1;
+    // A message object may be re-fragmented onto a new geometry at most this many
+    // times. An object that re-grids forever on a flapping ladder is worse for the
+    // operator than one that fails once with an honest reason.
+    static constexpr uint8_t kMaxMessageGeometryRegridAttempts = 2;
     uint64_t arq_submit_message_token_ = 0;
     std::deque<MessageTxStatusEvent> pending_message_tx_status_events_;
     size_t message_tx_status_deferral_depth_ = 0;
@@ -1009,6 +1022,16 @@ private:
     bool rx_reassembly_active_ = false;
     bool rx_reassembly_binary_ = false;
     uint8_t rx_reassembly_epoch_ = 0;
+    // Identities of recently delivered message objects, most recent last. A resend
+    // whose id is still here is dropped BEFORE any application callback fires — the
+    // duplicate-suppression half of the idempotent-resend contract.
+    //
+    // Depth vs wrap: ids are allocated strictly "most recent + 1", so the id of a
+    // NEW object is never in the window regardless of depth; the window only has to
+    // outlive the re-grid attempts of one object. Eight is generous for a bound of
+    // kMaxMessageGeometryRegridAttempts.
+    std::deque<uint8_t> delivered_message_object_ids_;
+    static constexpr size_t kDeliveredMessageObjectIdHistory = 8;
 
     // Connection timing
     uint32_t timeout_remaining_ms_ = 0;
@@ -1721,6 +1744,14 @@ private:
     bool sendPayload(const Bytes& data, bool binary_payload);
     bool startPayloadNow(const Bytes& data, bool binary_payload, uint64_t message_token = 0);
     uint64_t createOutboundMessageRecord(const Bytes& data);
+    // Wire bytes for a tracked message object: the identity prefix plus the text.
+    // Rebuilt on demand rather than stored, so a re-grid cannot serialize a payload
+    // that has drifted from the record the operator sees. Empty if token is unknown.
+    Bytes outboundMessageWireBytes(uint64_t token) const;
+    uint64_t outboundMessageEnqueueOrder(uint64_t token) const;
+    uint8_t allocateMessageObjectId();
+    bool messageObjectAlreadyDelivered(uint8_t object_id) const;
+    void noteMessageObjectDelivered(uint8_t object_id);
     void setOutboundMessageExpectedFragments(uint64_t token, size_t fragments);
     void dropOutboundMessageRecord(uint64_t token);
     void failOutboundMessageRecord(uint64_t token);
