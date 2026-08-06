@@ -1015,6 +1015,9 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
             turn_request_retransmit_ms_ = 0;
             turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
             armDataTurnTxGuard(dataTurnControlGuardMs());
+            // Re-arm: the peer asking again proves the previous grant did not land, so the
+            // recovery timer restarts from this re-assert rather than from the first one.
+            armTurnoverRepeat();
         }
         return;
     }

@@ -332,6 +332,12 @@ Connection::Connection(const ConnectionConfig& config)
         descriptor_mode_switch_enabled_ = true;
     }
 
+    // ULTRA_TURNOVER_REPEAT (read once per Connection; default OFF = byte-identical):
+    // re-assert an unacknowledged DATA-turn grant instead of waiting to be asked again.
+    if (const char* tr = std::getenv("ULTRA_TURNOVER_REPEAT"); tr && std::atoi(tr) != 0) {
+        turnover_repeat_enabled_ = true;
+    }
+
     // RX-RATE-CMD Phase 2 (design §5.2, knob ULTRA_RX_RATE_CMD, read once per
     // Connection; default ON since 2026-07-05). The tone-ACK codec must use the
     // widened CRC span whenever this command path or RX authority is enabled.
@@ -1829,6 +1835,7 @@ bool Connection::maybeYieldDataTurn() {
     received_peer_data_since_connect_ = false;
     resetDataTurnFairness();
     armDataTurnTxGuard(dataTurnControlGuardMs());
+    armTurnoverRepeat();
     return true;
 }
 
@@ -6606,6 +6613,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     received_peer_data_since_connect_ = false;
                     resetDataTurnFairness();
                     armDataTurnTxGuard(dataTurnControlGuardMs());
+                    armTurnoverRepeat();
                     interactive_initiator_yield_done_ = true;
                     LOG_MODEM(INFO, "Connection: interactive ISS yielded first DATA turn to %s (B2F responder speaks first)",
                               remote_call_.c_str());
@@ -6676,6 +6684,9 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             tickModeChangeAckRepeats(elapsed_ms);
+            // Same class as the MODE_CHANGE ACK repeats above: an unacknowledged control
+            // frame whose loss would otherwise only surface a full peer round trip later.
+            tickTurnoverRepeat(elapsed_ms);
 
             // Handle MODE_CHANGE timeout.
             // BUG-MC-RETRY-SPURIOUS (2026-07-04, E1 forensics): the deadline HOLDS
@@ -7102,6 +7113,72 @@ uint32_t Connection::turnRequestRetransmitMs() const {
         static_cast<uint64_t>(currentControlFrameAirtimeMs());
     return static_cast<uint32_t>(
         std::max<uint64_t>(TURN_REQUEST_RETRANSMIT_FLOOR_MS, guard_ms));
+}
+
+uint32_t Connection::turnoverRetransmitMs() const {
+    // Re-assert on the same "channel has settled" interval the request path already uses:
+    // 2x the control guard plus one data-frame airtime. Derived from the live geometry, not a
+    // tuned constant — the quantity that matters is how long before the medium is clear of the
+    // exchange that just happened, and that is exactly what this expresses.
+    //
+    // Deliberately SHORTER than turnRequestRetransmitMs() (which adds a further control-frame
+    // airtime on top): the whole point is for the grantor to recover before the requester
+    // spends a full round trip discovering the loss. If it were >= the request retry, the peer
+    // would always ask first and this would buy nothing.
+    return turnRequestHoldoffAfterDataMs();
+}
+
+void Connection::armTurnoverRepeat() {
+    if (!turnover_repeat_enabled_) {
+        return;
+    }
+    turnover_retransmit_ms_ = turnoverRetransmitMs();
+    turnover_repeat_count_ = 0;
+}
+
+void Connection::tickTurnoverRepeat(uint32_t elapsed_ms) {
+    if (!turnover_repeat_enabled_ || turnover_retransmit_ms_ == 0) {
+        return;
+    }
+    // The peer taking the turn is the only acknowledgement this grant can get, and
+    // handleDataPayload clears the flag the moment peer DATA arrives. Anything else that ends
+    // the wait (disconnect, us reclaiming the turn) also clears it, so this cannot re-assert
+    // into a state where the grant is no longer meaningful.
+    if (state_ != ConnectionState::CONNECTED ||
+        !yielded_data_turn_waiting_for_peer_data_) {
+        turnover_retransmit_ms_ = 0;
+        turnover_repeat_count_ = 0;
+        return;
+    }
+    if (elapsed_ms >= turnover_retransmit_ms_) {
+        turnover_retransmit_ms_ = 0;
+    } else {
+        turnover_retransmit_ms_ -= elapsed_ms;
+        return;
+    }
+    if (turnover_repeat_count_ >= TURNOVER_MAX_REPEATS) {
+        return;  // peer's own request retry is the outer backstop
+    }
+    // Never transmit inside our own control guard — that is the window the grant is
+    // suspected of being lost in, and re-sending there would reproduce the defect.
+    if (data_turn_tx_guard_ms_ > 0) {
+        turnover_retransmit_ms_ = data_turn_tx_guard_ms_;
+        return;
+    }
+    // KNOWN, BOUNDED SIDE-EFFECT: handleTurnover() is idempotent state assignment, but it
+    // also calls resetDataTurnFairness(). So a repeat that lands in the narrow window after
+    // the peer took the turn and before its first DATA reaches us will reset the peer's
+    // fairness budget once, letting it hold the turn slightly longer. Bounded by
+    // TURNOVER_MAX_REPEATS and strictly cheaper than the 41-176 s handovers this exists to
+    // remove — but it is the thing to watch if the A/B shows turn-hogging.
+    ++turnover_repeat_count_;
+    auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
+    LOG_MODEM(INFO,
+              "Connection: re-asserting unacknowledged TURNOVER to %s (repeat %d/%d, peer has not taken the turn)",
+              remote_call_.c_str(), turnover_repeat_count_, TURNOVER_MAX_REPEATS);
+    transmitFrame(turnover.serialize());
+    turnover_retransmit_ms_ = turnoverRetransmitMs();
+    armDataTurnTxGuard(dataTurnControlGuardMs());
 }
 
 uint32_t Connection::turnRequestAckEmbeddedRetransmitMs() const {
@@ -8819,6 +8896,9 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     // saw the new handshake starts clean regardless of how the last one ended.
     delivered_message_object_ids_.clear();
     next_outbound_message_object_id_ = 1;
+    // Per-session: a grant re-assert must never survive into the next connection.
+    turnover_retransmit_ms_ = 0;
+    turnover_repeat_count_ = 0;
     latent_startup_probe_allowed_ = automatic_rate_allowed;
     staged_timeout_batch_.clear();
     arq_tick_in_progress_ = false;
@@ -9043,6 +9123,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     // connection, so a stale delivered-set would suppress a NEW message.
     delivered_message_object_ids_.clear();
     next_outbound_message_object_id_ = 1;
+    // Per-session: a grant re-assert must never survive into the next connection.
+    turnover_retransmit_ms_ = 0;
+    turnover_repeat_count_ = 0;
     // #58 increment 3: session boundary — nothing in the connect-SNR pool may leak
     // into the next handshake's entry pick.
     connect_snr_pool_.clear();
@@ -9688,6 +9771,9 @@ void Connection::reset() {
     // connection, so a stale delivered-set would suppress a NEW message.
     delivered_message_object_ids_.clear();
     next_outbound_message_object_id_ = 1;
+    // Per-session: a grant re-assert must never survive into the next connection.
+    turnover_retransmit_ms_ = 0;
+    turnover_repeat_count_ = 0;
     // Per-connection channel-coherence verdict (see setChannelCoherence hold-last-valid).
     coherence_score_ = 0.0f;
     coherence_doppler_hz_ = 0.0f;

@@ -1060,6 +1060,21 @@ private:
     static constexpr uint32_t DISCONNECT_RETRANSMIT_FLOOR_MS = 5000;
     static constexpr int DISCONNECT_MAX_RETRIES = 3;
 
+    // DATA-turn grant re-assert (ULTRA_TURNOVER_REPEAT, default-OFF). Same shape as the
+    // DISCONNECT retransmit above and for the same reason: a control frame that matters,
+    // unacknowledged, whose loss is only discovered by the peer asking again a full retry
+    // interval later. `yielded_data_turn_waiting_for_peer_data_` IS the "granted, peer has
+    // not spoken yet" state — it is set at every yield and cleared in handleDataPayload the
+    // moment peer DATA arrives — so no new state is needed to detect the loss.
+    // Latched PER Connection in the ctor (not a function-local static): a process-wide
+    // latch cannot be exercised by the test binaries, which pin knobs once at start-up.
+    bool turnover_repeat_enabled_ = false;
+    uint32_t turnover_retransmit_ms_ = 0;
+    int turnover_repeat_count_ = 0;
+    // Bounded like DISCONNECT: a grant that re-asserts forever would hold a link that has
+    // genuinely gone away, and the peer's own request retry remains as the outer backstop.
+    static constexpr int TURNOVER_MAX_REPEATS = 3;
+
     // Disconnect grace period (responder side)
     // After receiving DISCONNECT, stay connected briefly and re-send ACK
     // periodically to ensure the initiator gets it (fading can lose frames)
@@ -1613,6 +1628,11 @@ private:
     uint32_t dataTurnControlGuardMs() const;
     uint32_t turnRequestHoldoffAfterDataMs() const;
     uint32_t turnRequestRetransmitMs() const;
+    uint32_t turnoverRetransmitMs() const;
+    // Arm / re-assert the grant. Called from every yield site so no path can grant without
+    // arming recovery; a no-op when the knob is off.
+    void armTurnoverRepeat();
+    void tickTurnoverRepeat(uint32_t elapsed_ms);
     uint32_t turnRequestAckEmbeddedRetransmitMs() const;
     uint32_t fileCancelTxGuardMs() const;
     uint32_t fileCancelConfirmDataGuardMs() const;
