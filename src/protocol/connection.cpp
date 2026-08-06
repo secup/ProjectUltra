@@ -4266,7 +4266,10 @@ bool Connection::startupProbeHasSufficientPayload() const {
               Modulation::QPSK, CodeRate::R2_3, negotiated_mode_,
               connection_policy::coherenceAdjustedFadingIndex(
                   fading_index_, coherence_score_, coherence_valid_),
-              wireSnrDb());
+              // decisionSnrDb(), NOT wireSnrDb(): the wire value may be the stale
+              // sentinel ("no measurement"), which a CW recommendation would read as a
+              // catastrophic channel. See connection_policy::decisionSnrFromWire.
+              decisionSnrDb());
     const int physical_cw = physicalDataFrameCodewordsFor(
         Modulation::QPSK, CodeRate::R2_3, cw);
     const int lifting_z = selectBurstLiftingZFor(
@@ -4327,7 +4330,10 @@ bool Connection::authorityClimbHasSufficientPayload(
               target_mod, target_rate, negotiated_mode_,
               connection_policy::coherenceAdjustedFadingIndex(
                   fading_index_, coherence_score_, coherence_valid_),
-              wireSnrDb());
+              // decisionSnrDb(), NOT wireSnrDb(): the wire value may be the stale
+              // sentinel ("no measurement"), which a CW recommendation would read as a
+              // catastrophic channel. See connection_policy::decisionSnrFromWire.
+              decisionSnrDb());
     const int physical_cw = physicalDataFrameCodewordsFor(
         target_mod, target_rate, cw);
     const int lifting_z = selectBurstLiftingZFor(
@@ -8610,7 +8616,11 @@ bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
               mod, rate, negotiated_mode_,
               connection_policy::coherenceAdjustedFadingIndex(
                   fading_index_, coherence_score_, coherence_valid_),
-              measured_snr);
+              // measured_snr is the caller's WIRE value (every call site passes
+              // wireSnrDb()) and may be the stale sentinel. The geometry decision uses
+              // the last real measurement; commitLocalModeSwitch below still receives
+              // measured_snr, so what goes on the wire is unchanged.
+              decisionSnrDb());
 
     // Descriptor-bearing-burst guard: encodeBurstLight emits NO BURST_HEADER for a
     // single-frame burst (streaming_encoder.cpp:476-489) — the announcement could not
