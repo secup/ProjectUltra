@@ -8,6 +8,45 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE (open, 2026-08-06) — P2, RELIABILITY AT THE FLOOR
+
+**Symptom.** The AWGN@8 MC-DPSK message row (`m7` in `tools/message_gui_matrix.sh`) fails
+about **half the time**, with a sharply BIMODAL signature — never anything in between:
+
+| outcome | elapsed | delivered |
+|---|---|---|
+| PASS | 78–79 s | 2/2, byte-exact |
+| FAIL | 347 s | 0/2 (`SR-ARQ: Frame seq=0 failed after 10 retries` → `FAIL #0`) |
+
+**Measured (2026-08-06), interleaved A/B, 4 pairs, binaries verified by embedded commit:**
+
+| arm | commit | result |
+|---|---|---|
+| OLD | `c37148e` (before that night's changes) | **2/4 PASS** |
+| NEW | `9aea693` | **2/4 PASS** |
+
+**PRE-EXISTING — not caused by the stale-SNR or provenance work.** Both arms fail at the same
+rate with the same timing signature. The A/B was run precisely because the row had passed on
+older binaries and started failing after those commits; it did not.
+
+**The interesting part.** By RUN ORDER the interleaved sequence was
+`PASS, FAIL, FAIL, PASS, PASS, FAIL, FAIL, PASS` — a period-4 alternation that ignores which
+binary is running. Every run uses `--seed 17`, so the channel realisation is IDENTICAL each
+time; the nondeterminism is therefore in timing/scheduling, not the channel. Combined with the
+bimodality (78 s or 347 s, nothing between) this points at a discrete acquisition/handshake
+outcome, and the run-order structure suggests carry-over between consecutive harness runs
+(ota_simulator socket/port state is the obvious suspect) rather than anything in the modem.
+
+**Context.** AWGN@8 is only ~3 dB above the documented MC-DPSK R1/4 in-band floor of 5 dB, and
+the matrix comments call this row "the reachability case" — some marginality is expected by
+design. A ~50% failure rate is more than marginal, but this row is the FLOOR probe, not a
+representative operating point: every other message row (AWGN@20, Good@20/15/10, Poor@20) and
+both file regressions passed byte-exact in the same matrix.
+
+**Before chasing the modem, test the harness hypothesis:** run m7 in isolation with a long
+settle between runs, and with a fresh `ota_simulator` per run, and see whether the period-4
+structure survives. If it does not, this is apparatus, not PHY.
+
 ### BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO (open, 2026-08-05) — P2, LATENCY (IONOS rig)
 
 **Symptom.** The DATA-turn handover stalls for ~46 s on a healthy link. The requester
