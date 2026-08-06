@@ -120,6 +120,40 @@ spent 175.8 s on it and ran out of transfer window. Handover cost 41–176 s whe
 Note `grants RX = 1` is expected by construction (one handover per run), so the meaningful
 statistics are grants-sent-per-completed-handover and latency — not the raw ratio alone.
 
+### ATTEMPTED FIX (2026-08-06): `ULTRA_TURNOVER_REPEAT` — mechanism WINS, outcome LOSES. STAYS DEFAULT-OFF.
+
+Sender-side re-assert of an unacknowledged grant (commit `7432650`). Interleaved A/B, 3 pairs,
+both ends verified at `55cb3ff`, knob on the GRANTOR:
+
+| arm | grants → landed | re-asserts | requests | handover (mean) | **return transfer** |
+|---|---|---|---|---|---|
+| OFF | 42 → 2 | 0 | 59 | 43.5 s | **2/3** |
+| ON | 22 → 5 | 15 | 14 | **19.1 s** | **1/3** |
+
+Every mechanism metric improved — handover 2.3× faster, landed 3/3 vs 2/3, 4× fewer requests.
+**The end-to-end outcome got worse**, so it does not ship.
+
+**Why, and it is visible in the data, not inferred:** ON pair 2 recorded `grants_rx = 3`. The
+requester DECODED THREE GRANTS. It needs one. The extra re-asserts arrived after it had
+already taken the turn and begun transmitting — so on a half-duplex channel the grantor was
+transmitting ON TOP OF the peer's data.
+
+**The flaw is the stop condition, not the idea.** `yielded_data_turn_waiting_for_peer_data_`
+clears only when peer DATA is DECODED, which lags seconds behind the peer keying up. So the
+re-assert window stays open through the exact period the peer is transmitting. The fix wins
+the handover and then corrupts the transfer it just enabled. (The commit's own comment
+predicted a fairness-reset side-effect here; the real harm is worse than predicted — it is
+interference, not just fairness accounting.)
+
+**Next iteration, if pursued:** gate the repeat on "no peer ENERGY on channel" (carrier sense /
+any decoded frame from the peer, control included) rather than "no peer DATA decoded". The
+codebase already has a CCA/idle notion (`CCA: rms=… quiet_thresh=… idle=`) that is much faster
+than a DATA decode. Without that, more re-asserts simply buy more interference.
+
+**Caveat: n=3 per arm is WEAK** for the outcome column (2/3 vs 1/3 is one run). What is NOT
+weak is the harm mechanism — `grants_rx=3` is direct evidence of re-asserts landing after the
+turn was taken, independent of the outcome counts.
+
 ### MECHANISM TEST (2026-08-06) — the receiver-side hypothesis is REFUTED
 
 Two candidate causes were in play: (a) the grant is destroyed on air by the requester's own

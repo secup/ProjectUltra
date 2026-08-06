@@ -325,8 +325,21 @@ TURN_REQUEST in 60–76% of transmissions). If the cause is receiver-side, NEITH
 helps and this entry's scope changes entirely. Settle that first (contended scenario,
 `ULTRA_WARM_TURNAROUND_OFF=1` vs default, interleaved).
 
-**Status:** `BLOCKED` on the mechanism test. No code written yet — this entry is the plan, not
-a record of one.
+**UPDATE 2026-08-06 — the interim fix EXISTS and MEASURED NET-NEGATIVE.** `ULTRA_TURNOVER_REPEAT`
+(`7432650`) is implemented, unit-tested and default-OFF. Its A/B improved every mechanism
+metric (handover 43.5→19.1 s, landed 3/3 vs 2/3, 4× fewer requests) but **reduced completed
+return transfers 2/3 → 1/3**, because re-asserts land after the peer has taken the turn and
+interfere with its data (`grants_rx=3` observed). See KNOWN_BUGS for the full table.
+
+So this scope entry is now LIVE, not hypothetical:
+- If the repeat is not repaired (energy-gated stop condition) within a couple of sessions,
+  **delete it** — knob, timer, counter, the three arm sites and the tick hook. A default-off
+  knob that measured net-negative is exactly the dead path this list exists to prevent.
+- If it IS repaired and ships, it still gets deleted when a piggybacked grant supersedes it,
+  per the scope above.
+
+**Status:** `QUEUED` — either repair with an energy-gated stop condition, or delete. Do not
+leave it sitting default-off indefinitely.
 
 ---
 
