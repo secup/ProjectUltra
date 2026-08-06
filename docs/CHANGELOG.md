@@ -10,6 +10,81 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-08-05 (night) — FIX: stale-SNR sentinel drove live rate decisions; build provenance was stale
+
+### What was broken
+
+**1. A "no measurement" marker was steering the rate ladder.** The IONOS rig logged three
+consecutive demotes — `R2/3 → R1/2 → R1/4` — each stamped `SNR=-10.0 dB (ofdm_broadband)`,
+on a link that was transferring a file at the time (`local_fading=0.12 AWGN`).
+
+`kConnectSnrStaleSentinelDb` (−10.0) means "no measurement". Its comment argued the value is
+collision-free because no frame decodes at a true −10 dB effective SNR — which justifies the
+ENCODING but says nothing about CONSUMPTION. It is a finite float: `isfinite()` passes,
+comparisons work, and a decision consumer reads it as a catastrophic channel. `wireSnrDb()`
+returns it whenever the connect-SNR pool holds nothing younger than 3·Tc, and it flowed
+directly into `recommendCWCountForChannel()` — so a healthy link whose pool was merely STALE
+got the most conservative geometry. `ULTRA_WIRE_SNR_FRESH` is DEFAULT-ON, so this is a
+production path (its comment claimed "default OFF"; that text was stale and is corrected).
+
+**2. `ultra_gui --version` lied about its own commit.** The Mac reported
+`commit=923ce70 dirty=false` while running feature-branch code, mid rig campaign — where
+provenance is the whole basis for attributing a measurement. Caught only because `strings`
+disagreed with `--version`. `execute_process(git rev-parse)` + `configure_file` run once at
+CONFIGURE time; incremental builds never re-run configure, so commit/dirty/tag rot silently.
+
+### What changed
+
+- `connection_policy.hpp`: `isStaleSnrSentinel()` (0.5 dB tolerance, matching the GUI's
+  existing n/a render so display and decision agree) and the pure, env-free selector
+  `decisionSnrFromWire(wire, last_real)` — same unit-testable pattern as the defer predicate
+  beside it.
+- `Connection::decisionSnrDb()` delegates to it, falling back to `measured_snr_db_` (only ever
+  assigned from a finite reading that passed `acceptsRateSelectionSNR()`, so it is a
+  measurement or nothing).
+- **Four** decision sites now screened: `requestModeChange()`, `connection.cpp:4272`,
+  `:4336`, and `tryDescriptorModeSwitch()`.
+- `cmake/UltraBuildInfo.cmake` + an ALL custom target regenerate `build_info.hpp` at BUILD
+  time, `copy_if_different` so the 6 TUs including it rebuild only on real git movement.
+
+### Why it works
+
+The wire is deliberately NOT "fixed" alongside: it keeps sending the honest "unknown"
+(byte 0 → peer renders n/a). Reporting a frozen number as if current is precisely the
+dishonesty the freshness gate exists to prevent. Only the DECISION falls back.
+
+Direction is set by cost asymmetry: mistaking a genuine −10 dB channel for "unknown" costs
+nothing — no rung is usable there and every floor is ≥ 5 dB — while mistaking "unknown" for
+−10 dB collapses a healthy link to the most conservative geometry.
+
+`kBuildTimeUtc` is now HEAD's COMMIT date, not wall-clock: a wall-clock stamp differs on every
+invocation, which would defeat copy-if-different and force a rebuild of those TUs on every
+incremental build. Commit date is stable per commit and identifies the SOURCE rather than the
+builder's clock.
+
+### Honest note on process
+
+The first sentinel fix covered **1 of 4** sites. The rig log named one symptom, I traced that
+path, fixed it, and believed it closed. The sweep of every `wireSnrDb()` consumer is what
+found the rest — including `tryDescriptorModeSwitch()`, which runs mid-file-transfer, i.e.
+exactly where the rig observed the defect. A partial fix would have looked complete and
+changed nothing.
+
+### Test verification
+
+`ctest --test-dir build --output-on-failure -j4` → **101/101**, including a new
+`test_stale_snr_sentinel_is_screened_from_decisions` covering the predicate, the selector, the
+fresh-value pass-through, and the degenerate no-real-measurement case. Provenance verified by
+construction: reports the true commit, and flips `dirty=true → false` across a commit while a
+no-op rebuild recompiles **0** TUs.
+
+A knob-dependent Connection-level test was written first, found un-runnable (the test binaries
+pin `ULTRA_WIRE_SNR_FRESH` process-wide through a function-local static latch), and **removed
+rather than left passing vacuously** — a test that cannot reach the code under test is worse
+than no test, because it reads as coverage.
+
+---
+
 ## 2026-08-05 — FIX: BUG-MESSAGE-LOST-ON-FORCED-DEMOTE — idempotent message resend (wire change)
 
 ### What was broken

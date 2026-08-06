@@ -2031,6 +2031,50 @@ Current blockers:
 
 ## Fixed Bugs
 
+- 2026-08-05: BUG-STALE-SNR-SENTINEL-DRIVES-DECISIONS fixed — the "no measurement" marker
+  was steering live rate decisions. IONOS rig logged three consecutive demotes
+  (**R2/3 → R1/2 → R1/4**), each stamped `SNR=-10.0 dB (ofdm_broadband)`, on a link that was
+  successfully transferring a file (`local_fading=0.12 AWGN`). **Root cause:** `-10.0` carries
+  two meanings no consumer can separate. `kConnectSnrStaleSentinelDb` (−10.0) means "no
+  measurement"; the existing comment argued it is collision-free because no frame decodes at a
+  true −10 dB effective SNR. That argument justifies the ENCODING, not the CONSUMPTION — the
+  sentinel is a finite float, so `isfinite()` passes and a decision consumer reads it as a
+  catastrophic channel. `wireSnrDb()` returns it whenever the connect-SNR pool holds nothing
+  younger than 3·Tc, and it flowed straight into `recommendCWCountForChannel()`, so a healthy
+  link with a merely STALE pool got the most conservative geometry. **Fix:** separate what we
+  REPORT from what we DECIDE with — `isStaleSnrSentinel()` (0.5 dB tolerance, matching the
+  GUI's existing n/a render) plus the pure, env-free selector `decisionSnrFromWire()`;
+  `Connection::decisionSnrDb()` delegates and falls back to `measured_snr_db_`, which is only
+  ever assigned from a finite reading that passed `acceptsRateSelectionSNR()`. The wire is
+  deliberately unchanged — it still sends the honest "unknown" (byte 0 → peer renders n/a),
+  because reporting a frozen number is the dishonesty the freshness gate exists to prevent.
+  Direction set by cost asymmetry: mistaking a real −10 dB channel for "unknown" costs nothing
+  (no rung is usable there, every floor ≥ 5 dB); mistaking "unknown" for −10 dB collapses a
+  healthy link. **Scope note — the first fix was 1 of 4.** A sweep of every `wireSnrDb()`
+  consumer found three more decision sites (`connection.cpp:4272`, `:4336`, and
+  `tryDescriptorModeSwitch()`, whose `measured_snr` parameter is fed `wireSnrDb()` by both its
+  call sites). The descriptor path is the one that runs mid-file-transfer — exactly where the
+  rig saw it — so stopping at the first site would have left the observed defect alive. Also
+  corrected a stale comment claiming `ULTRA_WIRE_SNR_FRESH` is "default OFF" while the code
+  beneath returns DEFAULT-ON since 2026-07-05; that disagreement is why the path is reachable
+  in production at all. Tests: the seam is covered by unit-testing the pure selector — the test
+  binaries pin `ULTRA_WIRE_SNR_FRESH` process-wide via a function-local static latch, so a
+  knob-dependent Connection test cannot exercise it (that variant was written, found
+  un-runnable, and removed rather than left passing vacuously). ctest 101/101.
+
+- 2026-08-05: BUILD-PROVENANCE-STALE fixed — `ultra_gui --version` reported the commit the
+  build tree was CONFIGURED on, not the code in the binary. The Mac reported
+  `commit=923ce70 dirty=false` while running feature-branch code, during a rig campaign where
+  binary provenance is the entire basis for attributing a measurement; caught only because
+  `strings` disagreed with `--version`. `execute_process(git rev-parse)` + `configure_file`
+  run once at configure time and incremental builds never re-run configure. Fixed by
+  regenerating `build_info.hpp` at BUILD time (`cmake/UltraBuildInfo.cmake` via an ALL custom
+  target), writing a temp and `copy_if_different` so the 6 TUs including it rebuild only when
+  git state actually moved (verified: no-op rebuild recompiles 0 TUs). `kBuildTimeUtc` is now
+  HEAD's COMMIT date, deliberately not wall-clock — a wall-clock stamp differs every
+  invocation, defeating copy-if-different and forcing a rebuild every time. Verified: reports
+  the true commit and flips `dirty` correctly across a commit.
+
 - 2026-08-05: BUG-MESSAGE-LOST-ON-FORCED-DEMOTE fixed — an in-flight operator message was
   destroyed by a MANDATORY geometry escape (receiver-commanded / stuck-frame demote), on
   **Good@20, a clean channel**, 2 of 10 GUI matrix rows. **Root cause:** `applyDataMode()`

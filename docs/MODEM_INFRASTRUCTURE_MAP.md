@@ -200,6 +200,25 @@ payload; NOT part of `DataFrame::HEADER_SIZE`):
   counter and the delivered-set are per-session (cleared in `disconnect()` and `reset()`).
   Binary payloads (`sendBinary`, the TNC path) carry NO identity and are NOT re-gridded.
 
+**Stale-SNR decision screen** 🟢 (2026-08-05, no env knob — `connection_policy.hpp`):
+`kConnectSnrStaleSentinelDb` (−10.0) is the WIRE marker for "no measurement" and is correct
+there (encodes to byte 0 → peer renders n/a). It must never reach a decision: it is a finite
+float, so a numeric consumer reads it as a catastrophic channel.
+`isStaleSnrSentinel()` + the pure selector `decisionSnrFromWire(wire, last_real)` screen it;
+`Connection::decisionSnrDb()` delegates and falls back to `measured_snr_db_`. **Four** decision
+sites ride it — `requestModeChange()` (`connection_handlers.cpp`), `connection.cpp:4272`,
+`:4336`, and `tryDescriptorModeSwitch()`. `wireSnrDb()` remains WIRE-ONLY; anything new that
+consumes it for a decision is a bug. Note `ULTRA_WIRE_SNR_FRESH` is **DEFAULT-ON** (its
+"default OFF" comment was stale, corrected 2026-08-05), so the sentinel is production-reachable.
+
+**Build provenance** 🟢 (2026-08-05, `cmake/UltraBuildInfo.cmake` + `ultra_build_info` target):
+`build_info.hpp` is regenerated at BUILD time, not configure time — the configure-time version
+silently reported the commit the tree was configured on. `kBuildTimeUtc` is HEAD's COMMIT date
+(stable per commit, so `copy_if_different` keeps incremental rebuilds at 0 TUs). **`--version`
+is now trustworthy; before 2026-08-05 it was not** — historical campaign logs that cite it for
+binary provenance should be treated with suspicion, and `strings` on new log literals remains
+the independent check.
+
 **Mandatory-escape message re-grid** 🟢 (2026-08-05, no env knob — `applyDataMode`,
 `connection.cpp`): a receiver-commanded / stuck-frame demotion re-fragments the in-flight
 message object at the new capacity and re-admits it at the FRONT of `queued_payloads_` in
