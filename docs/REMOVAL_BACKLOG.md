@@ -279,6 +279,57 @@ the `ULTRA_LATENT_RATE=0` escape hatch, deliberately retained for 0.5.1 so the d
 has a fallback; it carries the last `kOfdmLegacyAnchorScaleOffsetDb` reference and dies in
 0.5.2 after field exposure.
 
+### R13. DATA-turn grant machinery, once the handover is fixed — `BLOCKED 2026-08-06` (written BEFORE the fix, deliberately)
+
+**Why this exists now.** BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO will be fixed in one of two
+shapes, and BOTH leave debris. Filing the demolition plan before writing the fix so the
+interim scaffolding cannot quietly become permanent — the failure mode is N default-off knobs
+and two mechanisms doing one job.
+
+**Measured baseline the fix must beat** (IONOS n=8, 2026-08-06): 121 grants transmitted / 7
+decoded; handover 41–176 s; direction needing no handover 8/8 delivered vs 6/8 for the
+direction requiring one. Keep this table until the replacement is proven against it.
+
+**Scope (delete) — IF the interim "grant retransmit timer" ships first:**
+- the whole retransmit scaffolding (timer field, retry counter, its max-retries constant) and
+  its default-off knob, the MOMENT the piggyback version below lands. Two mechanisms granting
+  the turn is strictly worse than either alone.
+- the reactive re-grant in `handleTurnRequest()` (`connection_handlers.cpp` ~1007-1018,
+  "RX TURN_REQUEST … reasserting TURNOVER"): with a sender-side timer OR a piggybacked grant,
+  re-granting on a repeated request is a second recovery path for the same loss. Keep exactly
+  one.
+
+**Scope (delete) — IF/WHEN the grant is piggybacked on the last DATA frame:**
+- the dedicated grant transmission on the *common* path (ISS yields while it still has a final
+  frame to stamp), i.e. the `makeTurnover()` emit inside `maybeYieldDataTurn()` for that case.
+- any grant-retransmit machinery from the interim step (see above).
+- whichever request-retry slack becomes unnecessary once grants stop being independently
+  loseable — re-derive `turn_request_retransmit_ms_` at that point rather than assuming.
+
+**KEEP — the anti-footgun. Do NOT delete `TURNOVER` as a frame type or its handler.**
+- `ControlFrame::makeTurnover()` / `handleTurnover()` must survive: there is a real case with
+  **no data frame to piggyback on** — the ISS yielding when it has nothing queued (see
+  `only_unstarted_file_waiting` in `maybeYieldDataTurn`) and the initiator's proactive
+  post-connect yield (~1.5 s after CONNECT, the half-duplex INTERACTIVE/TNC path). A
+  piggyback-only design would strand both.
+- `Flags::TURN_REQUEST` on the SACK (`selective_repeat_arq.cpp:2315`,
+  `connection.cpp:6013`) — this is the REQUEST half, it already piggybacks, and it MEASURES
+  FINE. It is the model the grant should copy, not something to touch.
+- `PHYSICAL_BURST_END` and `FINAL` keep their current distinct meanings (physical burst
+  envelope vs logical transfer boundary). A grant bit is a THIRD meaning — do not overload
+  either of them to save a bit.
+
+**Blocker.** The mechanism is not yet isolated: on-air collision vs the requester's receiver
+discarding audio while it catches up (`LOAD-SHED … fell behind live`, and it decodes its own
+TURN_REQUEST in 60–76% of transmissions). If the cause is receiver-side, NEITHER fix above
+helps and this entry's scope changes entirely. Settle that first (contended scenario,
+`ULTRA_WARM_TURNAROUND_OFF=1` vs default, interleaved).
+
+**Status:** `BLOCKED` on the mechanism test. No code written yet — this entry is the plan, not
+a record of one.
+
+---
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
