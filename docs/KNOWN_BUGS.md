@@ -92,7 +92,35 @@ so it needs its own paired rig measurement (n≥8 per the rig A/B discipline), n
 **Not a regression.** Independent of BUG-MESSAGE-LOST-ON-FORCED-DEMOTE; the turn path was
 untouched by that fix. Evidence: `/tmp/mac_run2_full.log`, `/tmp/pi5_run2_full.log`.
 
-### SCOPE CORRECTION (same session, 2026-08-05) — DOES NOT REPRODUCE in the clean case
+### CONFIRMED n=8 UNDER CONTENTION (2026-08-06) — and it CAUSES failed transfers
+
+Contended campaign, 8 iterations, both ends `--half-duplex --auto-send-file`, both binaries
+verified at `9aea693`:
+
+| iter | Pi5→Mac | Mac→Pi5 | grants TX | grants RX | req TX | handover |
+|---|---|---|---|---|---|---|
+| 1 | ok | ok | 16 | 1 | 29 | 111.4 s |
+| 2 | ok | ok | 14 | 1 | 22 | 93.1 s |
+| 3 | ok | ok | 7 | 1 | 12 | 45.5 s |
+| **4** | ok | **FAIL** | 29 | **0** | 119 | **never** |
+| 5 | ok | ok | 8 | 1 | 14 | 58.5 s |
+| **6** | ok | **FAIL** | 26 | 1 | 41 | **175.8 s** |
+| 7 | ok | ok | 15 | 1 | 28 | 119.3 s |
+| 8 | ok | ok | 6 | 1 | 10 | 41.5 s |
+
+**121 grants transmitted, 7 decoded — 94% never arrive.** This reproduces the original single-run
+figure (87.5%) closely, so the earlier scope-correction below was right that it needs
+CONTENTION, and wrong to leave the magnitude in doubt.
+
+**It is not merely slow — it costs transfers.** The direction needing no handover delivered
+**8/8**; the direction requiring one delivered **6/8**. Both failures are the grant path:
+iteration 4 never completed a handover despite 29 grants and 119 requests, and iteration 6
+spent 175.8 s on it and ran out of transfer window. Handover cost 41–176 s whenever it worked.
+
+Note `grants RX = 1` is expected by construction (one handover per run), so the meaningful
+statistics are grants-sent-per-completed-handover and latency — not the raw ratio alone.
+
+### SCOPE CORRECTION (2026-08-05) — does not reproduce when the link is IDLE
 
 The 87.5% figure above is ONE run, and a follow-up run did not reproduce it. In a clean
 message+reply scenario on the same pair, the handover completed in **~7 s after 2 requests**:

@@ -70,6 +70,23 @@ found the rest — including `tryDescriptorModeSwitch()`, which runs mid-file-tr
 exactly where the rig observed the defect. A partial fix would have looked complete and
 changed nothing.
 
+### Hardware verification (IONOS, 8-iteration contended campaign, 2026-08-06)
+
+The fix was given a FALSIFIABLE prediction before the campaign ran: the campaign CSV counts
+MODE_CHANGE decision lines still showing a bare `SNR=-10.0` (`sentinel_raw`), and W1+W3 predict
+that column is **0**.
+
+Result across 8 iterations, both ends verified at `9aea693`: **`sentinel_raw` = 0, every run.**
+
+Crucially the pass is NOT vacuous — the new screen line fired **16 times across 7 of the 8
+runs**, so the stale-pool condition genuinely arose on hardware and was caught each time. Had
+both columns read zero, the campaign would have proven nothing either way, and that was written
+down as the disqualifying outcome in advance.
+
+The same campaign independently confirmed BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO at n=8
+(121 grants transmitted, 7 decoded; 2 of 8 return-direction transfers lost to it) — see
+KNOWN_BUGS.
+
 ### Test verification
 
 `ctest --test-dir build --output-on-failure -j4` → **101/101**, including a new
