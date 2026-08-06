@@ -237,15 +237,30 @@ file path, which is correct by construction: the escape block is gated on
    `physical 8.0 dB in-band` — ~11.5 dB of inflation, which put the link on an undecodable
    R1/2 and caused the retx storm above.
 
-   CORRECTION (2026-08-05, same session): this was first written up as the known
-   `kOfdmLegacyAnchorScaleOffsetDb` over-commit. That attribution is WRONG. The log names the
-   estimator: `mcdpsk_in_band`, the data-aided MC-DPSK handshake estimator — a different path
-   from the OFDM anchor offset. Moreover this run already carried `d9a6870` (latent-state
-   controller DEFAULT-ON, predictive-climb offset site retired) and `4e141be` (offset killed
-   in the ACK staircase), both long since merged to main. So the merged offset work did NOT
-   prevent this, and the ~11.5 dB gap is far outside the ±2-3 dB a single connect-time fade
-   snapshot is expected to scatter. Treat as an open question against CURRENT main, not a
-   re-discovery. `ULTRA_EVM_DEMOTE` was NOT enabled for these runs.
+   CORRECTION 1 (2026-08-05): first written up as the known `kOfdmLegacyAnchorScaleOffsetDb`
+   over-commit. Wrong — the log names the estimator `mcdpsk_in_band`, and the run already
+   carried `d9a6870` + `4e141be` (both merged to main), so the merged offset work did not
+   prevent it.
+
+   CORRECTION 2 (2026-08-05, and this one retracts my own "~11.5 dB of inflation"): that
+   number was a **basis error**. I compared `sel=19.5` — a DIAL-EQUIVALENT value — against
+   `physical 8.0 dB in-band`. Different quantities on different scales; the subtraction was
+   meaningless.
+
+   What the code actually does: `connectSelectionSnrDb` → `dialEquivalentSnrDb`, and with
+   `ULTRA_CONNECT_AFFINE_BASIS` (DEFAULT-ON) that is a **slope-0 fit** —
+   `kConnectAffineDialEquivDb = 19.55`, correction `clamp(19.55 − reading, +2, +11)`. So on
+   ANY fading channel every connect reading in **[8.55, 17.55] dB maps to the same 19.55 dB**
+   selection value; the measurement is discarded across a 9 dB band BY DESIGN (the estimator
+   saturates on fading, so the calibration deliberately substitutes a constant). Rig arithmetic
+   checks out exactly: reading 11.6 → correction 7.95 → sel 19.55 ≈ logged 19.5.
+
+   So there is no "inflation" to explain. The open question is narrower and sharper: the link
+   entered a rung it could not sustain (6 timeout retx → escape to R1/4), and entry selection
+   on a fading channel carries almost no information from the measurement. Whether the 19.55
+   constant is wrong for this hardware, or the entry cap is too loose, is a MEASUREMENT
+   question for the tracked SNR-calibration work — not a threshold to guess at.
+   `ULTRA_EVM_DEMOTE` was NOT enabled for these runs.
 3. **`peer_snr=-10.0 dB` reached a MODE_CHANGE decision** (`[234.454]`, `[250.122]`) — a
    sentinel/no-measurement value being consumed as a real reading by rate control.
 
