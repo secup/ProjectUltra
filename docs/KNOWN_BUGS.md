@@ -53,6 +53,32 @@ so it needs its own paired rig measurement (n≥8 per the rig A/B discipline), n
 **Not a regression.** Independent of BUG-MESSAGE-LOST-ON-FORCED-DEMOTE; the turn path was
 untouched by that fix. Evidence: `/tmp/mac_run2_full.log`, `/tmp/pi5_run2_full.log`.
 
+### SCOPE CORRECTION (same session, 2026-08-05) — DOES NOT REPRODUCE in the clean case
+
+The 87.5% figure above is ONE run, and a follow-up run did not reproduce it. In a clean
+message+reply scenario on the same pair, the handover completed in **~7 s after 2 requests**:
+
+```
+[45.117] TX TURN_REQUEST      [49.417] TX TURN_REQUEST
+[51.921] RX << TURNOVER seq=0        -> reply delivered, rx_messages=1
+```
+
+So this is NOT a general handover failure, and the entry as first written overstated it. The
+distinguishing condition in the failing run was CONTENTION: both stations held a queued file,
+the ladder was thrashing (MODE_CHANGE R1/2<->R2/3, and a `peer_snr=-10.0` decision), and the
+channel was busy — versus a 14-byte reply on an otherwise idle link here. Any retest must
+reproduce the CONTENDED case (both ends `--half-duplex --auto-send-file`), not the idle one.
+
+Also corrected: two earlier runs where "the reply never arrived" were a TEST-CONFIG artifact,
+not evidence for this bug — `--auto-disconnect-after` was short enough that the initiator tore
+the link down before the responder could take its turn. Bidirectional messaging is confirmed
+WORKING on the rig (message out 4.8 s, reply back by 55 s).
+
+The `Full-anchor wait rejected DATA fallback` streak (300 rejections, streak 294) seen
+alongside is the IDLE receiver spinning with nothing to decode after the exchange completed —
+not a stalled transfer. Do not read it as a stall signature without checking whether work was
+actually outstanding.
+
 ### BUG-MESSAGE-LOST-ON-FORCED-DEMOTE — FIXED 2026-08-05 (see Fixed Bugs) — kept here for the two dead ends
 
 **Symptom.** An application message in flight is destroyed when a MANDATORY geometry
