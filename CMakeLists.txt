@@ -298,11 +298,38 @@ configure_file(
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/ultra/version.hpp
     @ONLY
 )
+# Seed build_info.hpp at configure time so the first build has a header to include...
 configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/include/ultra/build_info.hpp.in
     ${CMAKE_CURRENT_BINARY_DIR}/generated/include/ultra/build_info.hpp
     @ONLY
 )
+
+# ...but REFRESH it at BUILD time. Configure-time provenance goes stale the moment you
+# commit or switch branches without re-running cmake, and a binary that misreports its
+# own commit is worse than one with no version at all — it gets believed. This nearly
+# produced a mixed-binary mis-attribution during the 2026-08-05 IONOS campaign.
+# The script copies only on change, so the TUs including build_info.hpp rebuild solely
+# when the git state actually moved.
+add_custom_target(ultra_build_info ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DULTRA_SRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+        -DULTRA_TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/include/ultra/build_info.hpp.in
+        -DULTRA_OUT_HEADER=${CMAKE_CURRENT_BINARY_DIR}/generated/include/ultra/build_info.hpp
+        -DPROJECT_VERSION=${PROJECT_VERSION}
+        -DULTRA_BUILD_OS=${ULTRA_BUILD_OS}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/UltraBuildInfo.cmake
+    COMMENT "Refreshing build provenance (git commit/dirty/tag) at build time"
+    VERBATIM
+)
+
+# Any target that EMBEDS provenance must be built after it is refreshed. Attached
+# defensively (if(TARGET ...)) so an optional/disabled target cannot break configure.
+function(ultra_attach_build_info tgt)
+    if(TARGET ${tgt})
+        add_dependencies(${tgt} ultra_build_info)
+    endif()
+endfunction()
 
 # SDL2 detection — used by ultra_gui (always required) and ultra_tnc (optional,
 # for live hardware audio I/O). Detect once at the top level so both targets
@@ -826,3 +853,10 @@ if(ULTRA_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+# Provenance consumers (include ultra/build_info.hpp). Declared at the end so every
+# target exists regardless of the option()s above.
+ultra_attach_build_info(ultra_gui)
+ultra_attach_build_info(ultra_tnc)
+ultra_attach_build_info(ultra_report)
+ultra_attach_build_info(ota_simulator)
