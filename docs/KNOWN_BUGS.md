@@ -64,7 +64,39 @@ This is NOT a weak path: Pi5→Mac *file data* completed CRC-clean at 0.91 kbps 
 session, and Pi5→Mac control frames (MODE_CHANGE, DISCONNECT) decoded fine. Only the grant
 is being lost, and only in this exchange.
 
-### MECHANISM CORRECTED 2026-08-06 (operator challenge) — it is NOT an echo; the requester is DEAF
+### MECHANISM — FOURTH AND BEST-SUPPORTED READING (2026-08-06): the requester is NOT LOOKING
+
+Measured in the requester's own log across a 50 s handover window:
+
+| | |
+|---|---|
+| sync correlations actually RUN | **2** (19.6 s apart) |
+| skipped — buffer `unsearched < min=120000` (2.5 s) | 18 |
+| skipped — `RMS < 0.040` | 21 |
+| `LOAD-SHED` (audio DISCARDED to stay within 2.6 s of live) | 1 |
+| TURN_REQUEST transmitted every | **3.87 s**, metronomic |
+
+And the single grant that landed did so **4.7 s after the only successful search**:
+`searchForSync: audio=128.68s, search=27.2ms, found=1, corr=0.532` → `RX << TURNOVER`.
+
+**The grant is not destroyed on the air and the requester is not merely deaf while keyed
+(TX duty is only ~39%: a TURN_REQUEST is 67,680 samples = 1.41 s, plus ~200 ms lead-in/tail,
+every 3.87 s). It arrives into a buffer the receiver searches roughly once every 20 seconds.**
+
+Three independent measurements agree, and unlike the earlier readings this one rests on
+counting rather than on a physical story that can be misread.
+
+**Consequence: BOTH protocol-timing fixes are wrong.** Re-sending the grant sooner
+(`ULTRA_TURNOVER_REPEAT`, built and reverted) and delaying it until the requester is back in
+RX are both answers to a *receiver-scheduling* problem. The real question is why the sync
+search is gated so hard during a turn negotiation — the two gates are the 2.5 s accumulation
+minimum and the 0.040 RMS floor, plus load-shed discarding audio to stay near-live.
+
+**Investigate next (do NOT patch blind — this is the fourth hypothesis in this entry):**
+whether the RMS gate is computed over a window dominated by idle noise, so a 1.41 s grant
+inside a mostly-quiet buffer averages below 0.040 and is skipped unsearched.
+
+### SUPERSEDED reading (2026-08-06): "the requester is DEAF while transmitting"
 
 The "requester decodes its own TURN_REQUEST ~2 s later" reading below is **WRONG** and the
 echo-tail mechanism built on it is **RETRACTED**. A station cannot hear itself: `startTx()`
