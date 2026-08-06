@@ -117,6 +117,58 @@ both stations in the sim/rig are built together, so no migration path is provide
 sender's bare-text object still decodes (the legacy `0x00`/no-prefix RX branch is retained);
 an old receiver would not understand `0x04`.
 
+### HARDWARE VALIDATION — IONOS rig, 2026-08-05 (both ends on `1fdd15c`)
+
+Sim proves the mechanism; the rig proves it survives real audio, real T/R turnaround and a
+real analog path. Both stations rebuilt from this commit and verified by binary content
+(`--version` reports the CONFIGURE-time commit, so it is NOT a valid provenance check here —
+`strings` on the new log literals is).
+
+**The fix fired in the field and worked.** A genuine stuck-frame escape occurred (not
+injected): the Mac could not decode QPSK R1/2, six timeout retransmissions followed, and the
+escape dropped the rung mid-message:
+
+```
+[ 80.668][WARN] ESCAPE-drop R1/2 -> R1/4 (frame stuck, 5 retx at current rate) via MODE_CHANGE
+[116.916][WARN] Regridding 1 / abandoning 0 active message object(s)
+                before geometry change QPSK R1/2 -> QPSK R1/4
+[116.916][INFO] Re-queued 1 message object(s) for re-fragmentation at QPSK R1/4 cw=4
+[138.153][INFO] OK #1 delivered (101.4s)
+```
+
+On the old code that is `Abandoning active message` → `FAIL #1`. Here the object survived the
+escape and was DELIVERED. Pi5 stats: `tx_submitted=3 tx_delivered=3 tx_failed=0` (run 1).
+
+**Bidirectional file, two transfers in one session** (`--half-duplex`, both ends sending,
+role swap mid-session — the state-reset test):
+
+| Direction | Bytes | Result | Rate |
+|---|---|---|---|
+| Pi5→Mac | 10240 | CRC ok, **byte-identical** (md5 `84bbbe79…`) | 0.91 kbps |
+| Mac→Pi5 | 10240 | CRC ok, **byte-identical** (md5 `2259b15e…`) | 0.30 kbps |
+
+Both `cmp`-clean against the sources. The role swap, the second file-transfer state, and the
+ARQ requeue-on-abort path all reset correctly. Zero message-object regrids occurred on the
+file path, which is correct by construction: the escape block is gated on
+`file_transfer_.getState() != SENDING`, so files use their own `requeuePendingChunks()`.
+
+**Three pre-existing problems surfaced, none of them regressions from this change:**
+
+1. **BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO (filed).** 87.5% of DATA-turn grants lost
+   (8 sent, 1 received) → ~46 s handover stall. The grant is transmitted with zero turnaround
+   delay into the requester's own echo tail.
+2. **Rate over-commit.** `SNR_sel=19.5 dB (mcdpsk_in_band)` drove the ladder while the frame
+   actually decoded at `physical 8.0 dB in-band` — ~11.5 dB of inflation, which is what put
+   the link on an undecodable R1/2 and caused the retx storm above. This is the known
+   `kOfdmLegacyAnchorScaleOffsetDb` over-commit; `ULTRA_EVM_DEMOTE` exists as a default-off
+   mitigation and was NOT enabled for these runs.
+3. **`peer_snr=-10.0 dB` reached a MODE_CHANGE decision** (`[234.454]`, `[250.122]`) — a
+   sentinel/no-measurement value being consumed as a real reading by rate control.
+
+None were patched here: all three are rate-control/turn-timing territory, they need paired
+rig measurement (n≥8) rather than a one-shot reaction, and reacting to a single unpaired run
+is exactly how the two reverted message-resume attempts happened earlier this session.
+
 ---
 
 ## 2026-08-05 — VERIFY: GUI message matrix; two message-resume fixes measured UNSOUND and reverted

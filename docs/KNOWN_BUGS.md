@@ -8,6 +8,51 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO (open, 2026-08-05) — P2, LATENCY (IONOS rig)
+
+**Symptom.** The DATA-turn handover stalls for ~46 s on a healthy link. The requester
+re-sends `TURN_REQUEST` up to a dozen times while the grantor answers every one — the grants
+simply do not land.
+
+**Measured (IONOS Mac↔Pi5, bidirectional 10 KB file run, 2026-08-05, both ends on `1fdd15c`):**
+
+| Direction | Sent | Received | Loss |
+|---|---|---|---|
+| Mac→Pi5 `TURN_REQUEST` | 11 | 8 | 27% |
+| Pi5→Mac `TURNOVER` | 8 | **1** | **87.5%** |
+
+This is NOT a weak path: Pi5→Mac *file data* completed CRC-clean at 0.91 kbps in the same
+session, and Pi5→Mac control frames (MODE_CHANGE, DISCONNECT) decoded fine. Only the grant
+is being lost, and only in this exchange.
+
+**Mechanism (well-supported hypothesis, not yet proven by a controlled run).** The grant is
+transmitted with ZERO turnaround delay — `handleTurnRequest()`
+(`connection_handlers.cpp:1007-1018`) calls `transmitFrame(turnover)` synchronously on
+receipt. Meanwhile the requester decodes its OWN `TURN_REQUEST` **2.00–2.14 s** after
+transmitting it (measured, 5 consecutive samples: 2.14/2.10/2.00/2.14/2.03 s), i.e. its own
+emission is still coming back off the channel. The grant therefore arrives inside the window
+where the requester's own transmission occupies the medium and the decoder. The protocol
+layer correctly ignores the self-addressed echo (dst=peer), so this is not a framing bug —
+it is a half-duplex TIMING bug: **we answer into the other station's own echo tail.**
+
+Note the asymmetry is self-consistent: `TURN_REQUEST` is sent from an idle channel (73%
+success) while `TURNOVER` is sent into the tail of the request that triggered it (12.5%).
+
+**Why it self-heals eventually.** `TURNOVER` is fire-and-forget — there is no grant ACK and
+no grant retransmit timer. Recovery relies entirely on the requester's `TURN_REQUEST` retry
+(~4.3 s apart), so each lost grant costs a full T/R cycle. With 87.5% grant loss that is
+~46 s of dead air before the roles swap.
+
+**Fix direction (do NOT patch blind — one rig run only).** Delay the grant by at least the
+requester's echo/turnaround window before transmitting, or give `TURNOVER` its own
+retransmit/ack discipline instead of leaning on the requester's retry. The guard machinery
+already exists (`armDataTurnTxGuard`/`dataTurnControlGuardMs`) but currently gates the
+grantor's DATA, not the grant frame itself. Any change here affects EVERY QSO's turnaround,
+so it needs its own paired rig measurement (n≥8 per the rig A/B discipline), not a one-shot.
+
+**Not a regression.** Independent of BUG-MESSAGE-LOST-ON-FORCED-DEMOTE; the turn path was
+untouched by that fix. Evidence: `/tmp/mac_run2_full.log`, `/tmp/pi5_run2_full.log`.
+
 ### BUG-MESSAGE-LOST-ON-FORCED-DEMOTE — FIXED 2026-08-05 (see Fixed Bugs) — kept here for the two dead ends
 
 **Symptom.** An application message in flight is destroyed when a MANDATORY geometry
