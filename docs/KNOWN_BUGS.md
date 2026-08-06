@@ -120,6 +120,33 @@ spent 175.8 s on it and ran out of transfer window. Handover cost 41–176 s whe
 Note `grants RX = 1` is expected by construction (one handover per run), so the meaningful
 statistics are grants-sent-per-completed-handover and latency — not the raw ratio alone.
 
+### MECHANISM TEST (2026-08-06) — the receiver-side hypothesis is REFUTED
+
+Two candidate causes were in play: (a) the grant is destroyed on air by the requester's own
+signal tail, or (b) the grant arrives but the requester's decoder is busy with its own echo
+and sheds audio. Discriminator: `ULTRA_WARM_TURNAROUND_OFF=1` on the REQUESTER restores the
+pre-TX echo-clear, changing ONLY the receiver's workload, not the air.
+
+| arm | self-decoded own TURN_REQUEST | grants TX→RX | handover | return transfer |
+|---|---|---|---|---|
+| echo-clear restored | **0–1** | 54 → **0** | **never** | **0/2** |
+| default | 25, 10 | 39 → 2 | 63–150 s | 1/2 |
+
+The echo-clear did what it claims — self-decodes went 25 → 0 — and the handover got **strictly
+worse**: not one grant landed, and the return transfer never happened in either run. So (b) is
+refuted; the requester decoding its own emission is not what loses the grant.
+
+The likely reason it HURTS is already documented elsewhere: the pre-TX echo-clear wipes
+warm-sync state, so the receiver must cold-acquire and misses the grant entirely. Which yields
+a second, independent finding worth keeping:
+
+**`ULTRA_WARM_TURNAROUND_OFF=1` is ACTIVELY HARMFUL to DATA-turn handover.** Do not reach for
+it as a diagnostic knob on this path.
+
+Note also the request direction is throttled, not lost: with 118 requests transmitted the
+grantor still only re-asserted ~26 times, because `handleTurnRequest` arms
+`turn_request_holdoff_ms_` + the control TX guard on each re-assert.
+
 ### SCOPE CORRECTION (2026-08-05) — does not reproduce when the link is IDLE
 
 The 87.5% figure above is ONE run, and a follow-up run did not reproduce it. In a clean
