@@ -64,7 +64,40 @@ This is NOT a weak path: Pi5→Mac *file data* completed CRC-clean at 0.91 kbps 
 session, and Pi5→Mac control frames (MODE_CHANGE, DISCONNECT) decoded fine. Only the grant
 is being lost, and only in this exchange.
 
-**Mechanism (well-supported hypothesis, not yet proven by a controlled run).** The grant is
+### MECHANISM CORRECTED 2026-08-06 (operator challenge) — it is NOT an echo; the requester is DEAF
+
+The "requester decodes its own TURN_REQUEST ~2 s later" reading below is **WRONG** and the
+echo-tail mechanism built on it is **RETRACTED**. A station cannot hear itself: `startTx()`
+does `setRxMuted(true)` + `stopCapture()` + `clearRxBuffer()` (`app.cpp` ~4010), and the RX
+callback is gated on `!rx_muted_` (`audio_engine.cpp:453`), so during TX no samples reach the
+decoder at all. The warm-turnaround comment states it outright: *"the audio side already
+prevents echo."* Those `OFDM control TURN_REQUEST decoded` lines are genuine off-air frames
+FROM THE PEER — they carry measured CFO (`-0.21 Hz`) and EVM (`6.3 dB, 329 carriers`), which
+you do not get from a signal you never received.
+
+**What is actually happening.** Roles verified from both logs (iter 1): MAC `TX TURN_REQUEST=29`,
+`RX<<TURNOVER=1`; PI5 `RX<<TURN_REQUEST=16`, `TX TURNOVER=1` plus 15 re-asserts. So the loss is
+real (16 grants sent, 1 arrived) but the cause is:
+
+> **The requester is DEAF while it transmits, and the grantor replies instantly on decode.**
+> `handleTurnRequest` calls `transmitFrame(turnover)` synchronously, so the grant flies back
+> toward a station that is still keyed — or still switching back to RX. It is not destroyed in
+> flight; it arrives while nobody is listening.
+
+**This changes which fix is correct.**
+- REPEATING the grant does not address it — repeats keep landing in the same deaf windows, and
+  a repeat that fires while the peer is transmitting is INTERFERENCE. Exactly what the
+  `ULTRA_TURNOVER_REPEAT` A/B measured: grants landed sooner, transfers completed less.
+- DELAYING the grant until the requester is plausibly back in RX addresses the actual cause.
+  The delay is NOT a guessed constant: it is the requester's control-frame airtime plus the
+  T/R turnaround, both derivable from geometry already in scope
+  (`currentControlFrameAirtimeMs`, `dataTurnControlGuardMs`, and the configured
+  `ULTRA_TX_LEADIN_MS`/`TAIL_MS`).
+
+The earlier ranking in this entry (delay = "band-aid", repeat = "reasonable stopgap") is
+INVERTED by this correction.
+
+**Superseded hypothesis, kept for the record:** The grant is
 transmitted with ZERO turnaround delay — `handleTurnRequest()`
 (`connection_handlers.cpp:1007-1018`) calls `transmitFrame(turnover)` synchronously on
 receipt. Meanwhile the requester decodes its OWN `TURN_REQUEST` **2.00–2.14 s** after
