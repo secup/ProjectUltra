@@ -1091,9 +1091,20 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
         return;
     }
 
-    LOG_MODEM(INFO, "Connection: Requesting MODE_CHANGE to %s %s (SNR=%.1f dB (%s))",
-              modulationToString(new_mod), codeRateToString(new_rate), measured_snr,
-              snrSourceToString(measured_snr_source_));
+    // When the wire value is the stale sentinel, say SO and say what the geometry was
+    // actually decided on. Without this the log reads `SNR=-10.0` and gives no hint that
+    // the decision used something else — which is exactly how the pre-fix rig trace
+    // looked, and why the defect survived a read of that log.
+    if (connection_policy::isStaleSnrSentinel(measured_snr)) {
+        LOG_MODEM(INFO,
+                  "Connection: Requesting MODE_CHANGE to %s %s (wire SNR=unknown/stale; decided on %.1f dB (%s))",
+                  modulationToString(new_mod), codeRateToString(new_rate),
+                  decisionSnrDb(), snrSourceToString(measured_snr_source_));
+    } else {
+        LOG_MODEM(INFO, "Connection: Requesting MODE_CHANGE to %s %s (SNR=%.1f dB (%s))",
+                  modulationToString(new_mod), codeRateToString(new_rate), measured_snr,
+                  snrSourceToString(measured_snr_source_));
+    }
 
     // Store pending mode change parameters for retry
     pending_modulation_ = new_mod;
