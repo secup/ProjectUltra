@@ -157,11 +157,20 @@ file path, which is correct by construction: the escape block is gated on
 1. **BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO (filed).** 87.5% of DATA-turn grants lost
    (8 sent, 1 received) → ~46 s handover stall. The grant is transmitted with zero turnaround
    delay into the requester's own echo tail.
-2. **Rate over-commit.** `SNR_sel=19.5 dB (mcdpsk_in_band)` drove the ladder while the frame
-   actually decoded at `physical 8.0 dB in-band` — ~11.5 dB of inflation, which is what put
-   the link on an undecodable R1/2 and caused the retx storm above. This is the known
-   `kOfdmLegacyAnchorScaleOffsetDb` over-commit; `ULTRA_EVM_DEMOTE` exists as a default-off
-   mitigation and was NOT enabled for these runs.
+2. **Connect-time rate over-commit — NEW observation, not the known offset issue.**
+   `SNR_sel=19.5 dB (mcdpsk_in_band)` drove the ladder while the frames actually decoded at
+   `physical 8.0 dB in-band` — ~11.5 dB of inflation, which put the link on an undecodable
+   R1/2 and caused the retx storm above.
+
+   CORRECTION (2026-08-05, same session): this was first written up as the known
+   `kOfdmLegacyAnchorScaleOffsetDb` over-commit. That attribution is WRONG. The log names the
+   estimator: `mcdpsk_in_band`, the data-aided MC-DPSK handshake estimator — a different path
+   from the OFDM anchor offset. Moreover this run already carried `d9a6870` (latent-state
+   controller DEFAULT-ON, predictive-climb offset site retired) and `4e141be` (offset killed
+   in the ACK staircase), both long since merged to main. So the merged offset work did NOT
+   prevent this, and the ~11.5 dB gap is far outside the ±2-3 dB a single connect-time fade
+   snapshot is expected to scatter. Treat as an open question against CURRENT main, not a
+   re-discovery. `ULTRA_EVM_DEMOTE` was NOT enabled for these runs.
 3. **`peer_snr=-10.0 dB` reached a MODE_CHANGE decision** (`[234.454]`, `[250.122]`) — a
    sentinel/no-measurement value being consumed as a real reading by rate control.
 
