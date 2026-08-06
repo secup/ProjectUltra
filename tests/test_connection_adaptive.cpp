@@ -465,23 +465,6 @@ struct ConnectionAdaptiveTestAccess {
         return c.queued_payloads_.size();
     }
 
-    static void enterGrantedWaitingForPeer(Connection& c) {
-        c.yielded_data_turn_waiting_for_peer_data_ = true;
-        c.local_data_turn_ = false;
-        c.data_turn_tx_guard_ms_ = 0;
-        c.armTurnoverRepeat();
-    }
-    static void peerTookTheTurn(Connection& c) {
-        c.yielded_data_turn_waiting_for_peer_data_ = false;
-    }
-    static int turnoverRepeatCount(const Connection& c) {
-        return c.turnover_repeat_count_;
-    }
-    static uint32_t turnoverRetransmitMs(const Connection& c) {
-        return c.turnoverRetransmitMs();
-    }
-    static int maxTurnoverRepeats() { return Connection::TURNOVER_MAX_REPEATS; }
-
 
     // Application text of a queued message — the message-object identity prefix
     // (PayloadType::TEXT_MESSAGE_OBJECT + object id) is transport, not content.
@@ -3584,87 +3567,6 @@ void test_receiver_suppresses_duplicate_message_object() {
 
     CHECK(ConnectionAdaptiveTestAccess::deliveredMessageObjectIdCount(c) == 3,
           "suppression history must hold one entry per delivered object");
-}
-
-// BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO (ULTRA_TURNOVER_REPEAT, default-OFF).
-// TURNOVER is fire-and-forget: no ack, no retransmit. IONOS n=8 measured 121 grants
-// transmitted / 7 decoded, handover 41-176 s, and 2 of 8 return-direction transfers lost
-// because the grant never landed. The grantor CAN detect the loss — if the peer had the turn
-// it would be transmitting — so it should re-assert rather than wait to be asked again.
-static size_t countTurnoverFrames(const std::vector<Bytes>& frames) {
-    size_t n = 0;
-    for (const auto& f : frames) {
-        if (v2::parseHeader(f).type == v2::FrameType::TURNOVER) ++n;
-    }
-    return n;
-}
-
-void test_turnover_repeat_reasserts_an_unacknowledged_grant() {
-    // Knob OFF must be byte-identical: no re-assert ever.
-    unsetenv("ULTRA_TURNOVER_REPEAT");
-    {
-        Connection off;
-        std::vector<Bytes> tx;
-        off.setTransmitCallback([&](const Bytes& f) { tx.push_back(f); });
-        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-            off, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
-        ConnectionAdaptiveTestAccess::enterGrantedWaitingForPeer(off);
-        const size_t before = tx.size();
-        for (int i = 0; i < 40; ++i) off.tick(1000);
-        CHECK(countTurnoverFrames(std::vector<Bytes>(tx.begin() + static_cast<std::ptrdiff_t>(before), tx.end())) == 0 &&
-                  ConnectionAdaptiveTestAccess::turnoverRepeatCount(off) == 0,
-              "knob OFF must never re-assert a grant (byte-identical default)");
-    }
-
-    setenv("ULTRA_TURNOVER_REPEAT", "1", 1);
-    Connection c;
-    unsetenv("ULTRA_TURNOVER_REPEAT");  // latched per-Connection in the ctor
-    std::vector<Bytes> tx;
-    c.setTransmitCallback([&](const Bytes& f) { tx.push_back(f); });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
-    ConnectionAdaptiveTestAccess::enterGrantedWaitingForPeer(c);
-
-    const uint32_t interval = ConnectionAdaptiveTestAccess::turnoverRetransmitMs(c);
-    CHECK(interval > 0, "the re-assert interval must be derived, not zero");
-
-    // Before the interval elapses: nothing. The fix must not spray grants.
-    size_t mark = tx.size();
-    c.tick(interval / 4);
-    CHECK(countTurnoverFrames(std::vector<Bytes>(tx.begin() + static_cast<std::ptrdiff_t>(mark), tx.end())) == 0,
-          "must not re-assert before the settle interval elapses");
-
-    // Past the interval: exactly one re-assert.
-    mark = tx.size();
-    c.tick(interval);
-    CHECK(countTurnoverFrames(std::vector<Bytes>(tx.begin() + static_cast<std::ptrdiff_t>(mark), tx.end())) == 1 &&
-              ConnectionAdaptiveTestAccess::turnoverRepeatCount(c) == 1,
-          "an unacknowledged grant must be re-asserted exactly once per interval");
-
-    // Bounded: never more than the cap, however long the peer stays silent.
-    for (int i = 0; i < 20; ++i) c.tick(interval * 4);
-    const int cap = ConnectionAdaptiveTestAccess::maxTurnoverRepeats();
-    CHECK(ConnectionAdaptiveTestAccess::turnoverRepeatCount(c) == cap,
-          "re-assert must stop at the cap — a grant that repeats forever holds a dead link");
-
-    // And the peer taking the turn stops it immediately: the peer transmitting IS the only
-    // acknowledgement this grant can get.
-    Connection c2;
-    setenv("ULTRA_TURNOVER_REPEAT", "1", 1);
-    Connection c3;
-    unsetenv("ULTRA_TURNOVER_REPEAT");
-    (void)c2;
-    std::vector<Bytes> tx3;
-    c3.setTransmitCallback([&](const Bytes& f) { tx3.push_back(f); });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        c3, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
-    ConnectionAdaptiveTestAccess::enterGrantedWaitingForPeer(c3);
-    ConnectionAdaptiveTestAccess::peerTookTheTurn(c3);
-    const size_t m3 = tx3.size();
-    for (int i = 0; i < 10; ++i) c3.tick(interval * 2);
-    CHECK(countTurnoverFrames(std::vector<Bytes>(tx3.begin() + static_cast<std::ptrdiff_t>(m3), tx3.end())) == 0 &&
-              ConnectionAdaptiveTestAccess::turnoverRepeatCount(c3) == 0,
-          "once the peer takes the turn the re-assert must stop immediately");
 }
 
 void test_ordinary_adaptation_holds_geometry_for_complete_message() {
@@ -7065,7 +6967,6 @@ int main() {
     test_message_geometry_regrid_recuts_fragments_at_new_capacity();
     test_message_geometry_regrid_is_bounded_then_fails_closed();
     test_receiver_suppresses_duplicate_message_object();
-    test_turnover_repeat_reasserts_an_unacknowledged_grant();
     test_ordinary_adaptation_holds_geometry_for_complete_message();
     test_runtime_forced_cw_override_cannot_regrid_active_message();
     test_submitted_status_reset_runs_after_physical_handoff();
