@@ -1368,6 +1368,53 @@ void test_anchor_offset_override() {
     unsetenv("ULTRA_OFDM_ANCHOR_OFFSET_DB");
 }
 
+// BUG-STALE-SNR-SENTINEL-DRIVES-DECISIONS. kConnectSnrStaleSentinelDb (-10.0) means
+// "no measurement" on the wire, where it is correct (encodes to byte 0 -> peer renders
+// n/a). It is ALSO a finite float that every numeric consumer accepts silently, and the
+// IONOS rig caught it driving three consecutive demotes (R2/3 -> R1/2 -> R1/4) on a link
+// that was transferring a file. This screen is what keeps it out of decisions.
+void test_stale_snr_sentinel_is_screened_from_decisions() {
+    CHECK(isStaleSnrSentinel(kConnectSnrStaleSentinelDb),
+          "the sentinel itself must be recognised");
+    CHECK(isStaleSnrSentinel(std::numeric_limits<float>::quiet_NaN()),
+          "a non-finite reading is equally 'no measurement'");
+    CHECK(isStaleSnrSentinel(-10.4f) && isStaleSnrSentinel(-9.6f),
+          "the 0.5 dB tolerance must match the GUI's n/a render, so display and "
+          "decision agree on what counts as no-measurement");
+
+    // The whole point: real readings must survive the screen untouched. A floor-adjacent
+    // but genuine value must NOT be discarded, or the screen becomes its own bug.
+    CHECK(!isStaleSnrSentinel(-9.0f),
+          "-9.0 is outside the tolerance band and must be treated as a measurement");
+    CHECK(!isStaleSnrSentinel(0.0f) && !isStaleSnrSentinel(5.0f) &&
+              !isStaleSnrSentinel(20.0f),
+          "ordinary operating SNRs must never be screened out");
+
+    // Cost asymmetry that justifies the direction: mistaking a real -10 dB channel for
+    // "unknown" costs nothing (no rung is usable there and every floor is >= 5 dB), while
+    // mistaking "unknown" for -10 dB collapses a healthy link to the most conservative
+    // geometry. The screen must therefore err toward "unknown" at the floor.
+    CHECK(isStaleSnrSentinel(kConnectSnrStaleSentinelDb + 0.25f),
+          "at the encodable floor the screen must err toward 'no measurement'");
+
+    // THE SEAM. Connection::decisionSnrDb() is a one-line delegation to this, so testing
+    // the selector here covers the wiring without depending on ULTRA_WIRE_SNR_FRESH —
+    // which the test binaries pin process-wide via a function-local static latch.
+    CHECK(std::fabs(decisionSnrFromWire(kConnectSnrStaleSentinelDb, 14.5f) - 14.5f) < 1e-4f,
+          "a stale wire value must fall back to the last real measurement");
+    CHECK(std::fabs(decisionSnrFromWire(std::numeric_limits<float>::quiet_NaN(), 9.0f) - 9.0f)
+              < 1e-4f,
+          "a non-finite wire value must fall back too");
+    CHECK(std::fabs(decisionSnrFromWire(17.25f, 3.0f) - 17.25f) < 1e-4f,
+          "a FRESH wire value must be used as-is — the fallback must not shadow real data");
+    // Degenerate but reachable: if there is no real measurement either, the selector must
+    // pass the fallback through unchanged rather than inventing a number. The caller keeps
+    // whatever validity contract measured_snr_db_ carries; this must not paper over it.
+    CHECK(decisionSnrFromWire(kConnectSnrStaleSentinelDb, kConnectSnrStaleSentinelDb) ==
+              kConnectSnrStaleSentinelDb,
+          "with no real measurement the selector must not fabricate one");
+}
+
 // ULTRA_LINEAR_SNR_RING: the domain fix and its compensating offset reduction are ONE knob.
 // Splitting them is the documented footgun -- fixing the ring domain alone RAISES the ladder
 // input ~1.7 dB on a path already measured to over-commit ~2 rungs.
@@ -1595,6 +1642,7 @@ int main() {
     test_connect_fading_pool_aggregate();
     test_connect_pick_defer_semantics();
     test_anchor_offset_override();
+    test_stale_snr_sentinel_is_screened_from_decisions();
     test_linear_ring_couples_offset_compensation();
     test_inflight_ack_timeout_scales_with_frames();
     test_silent_ack_repeat_broad_signal_hold_is_waveform_independent();

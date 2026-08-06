@@ -465,6 +465,7 @@ struct ConnectionAdaptiveTestAccess {
         return c.queued_payloads_.size();
     }
 
+
     // Application text of a queued message — the message-object identity prefix
     // (PayloadType::TEXT_MESSAGE_OBJECT + object id) is transport, not content.
     static std::string queuedPayloadText(const Connection& c, size_t index) {

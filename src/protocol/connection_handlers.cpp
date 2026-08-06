@@ -1117,13 +1117,18 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // (BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE follow-through: this is the mid-stream
     // negotiate site, where the coherence verdict CAN be valid — equals the raw
     // fading_index until it is).
+    // measured_snr is the WIRE value and may be the stale sentinel (-10.0 = "no
+    // measurement"). It is correct to REPORT that, but a CW recommendation made from
+    // it would read a healthy link as catastrophic and pick the most conservative
+    // geometry. Decide on the last real measurement instead; the wire byte is
+    // unaffected (pending_snr_db_ above still carries the honest "unknown").
     pending_cw_count_ = static_cast<uint8_t>((config_.forced_cw_count != 0)
         ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
         : connection_policy::recommendCWCountForChannel(
               new_mod, new_rate, negotiated_mode_,
               connection_policy::coherenceAdjustedFadingIndex(
                   fading_index_, coherence_score_, coherence_valid_),
-              measured_snr));
+              decisionSnrDb()));
 
     mode_change_seq_++;
     auto frame = v2::ControlFrame::makeModeChange(local_call_, remote_call_,

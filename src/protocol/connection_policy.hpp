@@ -882,6 +882,31 @@ private:
 // change. Physically collision-free: no control frame decodes at a true -10 dB
 // effective SNR (all floors >= 5 dB), so byte 0 is unreachable as a measurement.
 inline constexpr float kConnectSnrStaleSentinelDb = -10.0f;
+
+// ...but "unreachable as a measurement" justifies the ENCODING, not the CONSUMPTION.
+// The sentinel is a finite float, so every numeric consumer accepts it silently:
+// isfinite() passes, comparisons work, and it reads as a catastrophically bad channel.
+// IONOS rig 2026-08-05 caught this driving live decisions — `SNR=-10.0 dB
+// (ofdm_broadband)` appeared in three consecutive MODE_CHANGE requests
+// (R2/3 -> R1/2 -> R1/4) on a link that was transferring a file at the time.
+// Any DECISION input must be screened through this; only the wire may carry it.
+inline bool isStaleSnrSentinel(float snr_db) {
+    // Same 0.5 dB tolerance the GUI already uses for its "n/a" render (app.cpp),
+    // so display and decision agree on what counts as "no measurement".
+    return !std::isfinite(snr_db) ||
+           snr_db <= kConnectSnrStaleSentinelDb + 0.5f;
+}
+
+// Pure decision selector (knob- and env-free so it is unit-testable, same pattern as
+// the defer predicate below). The WIRE may carry "unknown"; a DECISION may not.
+//
+// Cost asymmetry sets the direction: mistaking a genuine -10 dB channel for "unknown"
+// costs nothing — no rung is usable there and every floor is >= 5 dB — while mistaking
+// "unknown" for -10 dB collapses a healthy link to the most conservative geometry.
+// So at the encodable floor we err toward "no measurement" and keep the last real one.
+inline float decisionSnrFromWire(float wire_db, float last_real_db) {
+    return isStaleSnrSentinel(wire_db) ? last_real_db : wire_db;
+}
 // A fade-state estimate decorrelates in Tc (Clarke/Jakes A(Tc)=0.5); nothing newer
 // than 3*Tc means the pool no longer describes the CURRENT link -> send the sentinel
 // instead of a frozen number (W2 shipped 16.5 for 40 s / 22.0 for 40+ s).
@@ -912,9 +937,13 @@ inline bool connectPickDeferEnabled() {
     return v;
 }
 
-// ULTRA_WIRE_SNR_FRESH (default OFF => wire bytes unchanged): MODE_CHANGE embeds use
-// the pool mean over readings younger than 3*Tc, else the -10 dB stale sentinel
-// (wire byte 0 = the receiver's existing "n/a" rendering). Read ONCE (static).
+// ULTRA_WIRE_SNR_FRESH (DEFAULT-ON since 2026-07-05 — the "default OFF => wire bytes
+// unchanged" text here was stale and contradicted the code below; corrected 2026-08-05):
+// MODE_CHANGE embeds use the pool mean over readings younger than 3*Tc, else the -10 dB
+// stale sentinel (wire byte 0 = the receiver's existing "n/a" rendering). Read ONCE
+// (static) — so a test binary that pins this env var latches it process-wide.
+// Because it is DEFAULT-ON, the sentinel is reachable in production: see
+// decisionSnrFromWire() above for why it must never reach a decision.
 inline bool wireSnrFreshEnabled() {
     static const bool v = [] {
         const char* e = std::getenv("ULTRA_WIRE_SNR_FRESH");

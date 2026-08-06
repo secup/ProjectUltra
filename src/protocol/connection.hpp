@@ -765,6 +765,21 @@ private:
         return std::isfinite(agg) ? agg : connection_policy::kConnectSnrStaleSentinelDb;
     }
 
+    // The freshness-gated value above is for the WIRE, where the stale sentinel is
+    // exactly right: it encodes to byte 0 and the peer renders "n/a". It must NEVER
+    // reach a DECISION. -10.0 dB is simultaneously the stale marker and the lowest
+    // encodable reading, so a numeric consumer cannot tell "no measurement" from
+    // "catastrophic channel" — and will pick the most conservative geometry for a
+    // link that may be perfectly healthy (IONOS 2026-08-05: three consecutive
+    // demotes at SNR=-10.0 during a live file transfer).
+    //
+    // Decisions fall back to the last real scalar. measured_snr_db_ is only ever
+    // assigned from a finite reading that passed acceptsRateSelectionSNR(), so it is
+    // a measurement or nothing — never the sentinel.
+    float decisionSnrDb() const {
+        return connection_policy::decisionSnrFromWire(wireSnrDb(), measured_snr_db_);
+    }
+
     // Same freshness contract as wireSnrDb for the MODE_CHANGE fading byte: the
     // sender's fading_index_ freezes between sparse control decodes exactly like
     // the SNR did (rig W5b/W8: peer_fading pinned at 0.42/0.70 for 300+ s on the
