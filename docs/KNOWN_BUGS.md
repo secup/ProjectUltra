@@ -64,7 +64,51 @@ This is NOT a weak path: Pi5→Mac *file data* completed CRC-clean at 0.91 kbps 
 session, and Pi5→Mac control frames (MODE_CHANGE, DISCONNECT) decoded fine. Only the grant
 is being lost, and only in this exchange.
 
-### STRONGEST LEAD (2026-08-07): `currentControlFrameAirtimeMs()` under-reports by ~6x
+### ROOT CAUSE FOUND AND FIXED (2026-08-07): turn tokens carried a full dual-chirp anchor
+
+**The turn-negotiation frames were 6.7x larger than they needed to be**, and that — not any
+timing constant — is why the grant could not fit in the requester's listening window.
+
+Measured, same 20-byte frame, same link:
+
+| preamble | samples | airtime |
+|---|---|---|
+| full (dual chirp) | 67,680 | **1.41 s** |
+| light (LTS only) | 10,080 | **0.21 s** |
+
+Two full-anchored frames per exchange occupy **2.82 s of a 4.33 s retry cycle (~65%)**. At
+0.21 s the same exchange occupies ~10% and the collision window stops existing.
+
+**Why they were full-anchored.** `is_turn_control` (modem_engine.cpp) bundled TURNOVER and
+TURN_REQUEST with the burst-coordination tokens, justified as "don't depend on warm sync
+across a half-duplex turnaround". That is CORRECT for `GROUP_ACK` — it crosses a turnaround
+after an ~11 s data burst, so the peer is genuinely cold, and the code records the measurement
+(light correlates ~0.88, rejected by the 0.90 gate). It does NOT hold for the negotiation
+pair: they are exchanged every ~4 s DURING a negotiation against a peer that decoded one of
+our frames seconds ago, and unlike MODE_CHANGE they change no geometry, so the peer's sync
+remains valid by construction.
+
+**Fix:** `ULTRA_LIGHT_TURN_TOKENS` splits the negotiation pair out on the real distinction —
+is the peer warm, and does this frame move the geometry — rather than on "is it a link-state
+token". GROUP_ACK/GROUP_NACK/DISCONNECT/teardown-ACK/FILE_CANCEL/MODE_CHANGE keep the full
+anchor, deliberately.
+
+**Interleaved A/B, 4 pairs, one binary (`1d82205`) with the knob as the only variable:**
+
+| | LIGHT | FULL |
+|---|---|---|
+| handover landed | **4/4** | 1/4 |
+| handover time | **16 s mean** | 102 s |
+| requests needed | **16** | 258 |
+| grants sent → landed | 10 → 4 (**40%**) | 67 → 1 (1.5%) |
+| **return transfer completed** | **4/4** | **1/4** |
+
+Every pair individually better. FULL pair 1 sent 149 requests for zero grants; LIGHT pair 1
+completed in 16 s after 4. Preamble asserted from the log (light 26/full 0 vs light 0/full
+325), so an inert knob could not masquerade as a null result. n=8 confirmation in progress
+before the default flips.
+
+### SUPERSEDED LEAD: `currentControlFrameAirtimeMs()` under-reports by ~6x
 
 `Connection::currentControlFrameAirtimeMs()` returns `wideOFDMFrameTiming(...).ack_ms` — the
 **tone-burst ACK** duration, ~240 ms — for every waveform mode. But a CONTROL frame
