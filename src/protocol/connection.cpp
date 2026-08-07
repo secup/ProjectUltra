@@ -7097,33 +7097,9 @@ uint32_t Connection::turnRequestHoldoffAfterDataMs() const {
 }
 
 uint32_t Connection::turnRequestRetransmitMs() const {
-    // BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO root cause (IONOS, 2026-08-06/07).
-    //
-    // This budgeted ONE control-frame airtime — our own request going out — and forgot the
-    // GRANT coming back. A request/response exchange has TWO legs, and re-asking before the
-    // answer could physically have arrived means our own transmission lands on top of it.
-    //
-    // Measured, wideband OFDM control at QPSK R1/4: a TURN_REQUEST is 67,680 samples =
-    // 1.41 s of airtime; the grant is the same frame type, so 1.41 s again. With the old
-    // formula the requester re-asked every 3.87 s while keyed 1.61 s of that (airtime +
-    // lead-in/tail), leaving a 2.26 s listening window. The peer's decode + turnaround put
-    // the grant on air ~2.0 s into the cycle, so it finished around 3.4 s against a window
-    // closing at 3.87 s — a ~0.5 s margin. Any jitter and the requester's OWN next request
-    // clipped the tail of the grant it was waiting for. Result: 121 grants transmitted, 7
-    // decoded (94% lost), handovers of 41-176 s, and 2 of 8 return transfers never happening.
-    //
-    // Half-duplex makes this a hard constraint rather than a tuning preference: while we
-    // transmit we are deaf, so a retry interval shorter than the round trip does not merely
-    // waste airtime — it actively destroys the reply.
-    //
-    // So budget both legs plus the turnaround the holdoff already accounts for. This stays
-    // DERIVED from live geometry (control airtime moves with modulation/rate/re-anchor), not
-    // a tuned constant.
-    const uint64_t our_request_airtime = currentControlFrameAirtimeMs();
-    const uint64_t peer_grant_airtime = currentControlFrameAirtimeMs();
     const uint64_t guard_ms =
         static_cast<uint64_t>(turnRequestHoldoffAfterDataMs()) +
-        our_request_airtime + peer_grant_airtime;
+        static_cast<uint64_t>(currentControlFrameAirtimeMs());
     return static_cast<uint32_t>(
         std::max<uint64_t>(TURN_REQUEST_RETRANSMIT_FLOOR_MS, guard_ms));
 }
