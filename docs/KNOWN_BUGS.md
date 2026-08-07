@@ -64,7 +64,57 @@ This is NOT a weak path: Pi5→Mac *file data* completed CRC-clean at 0.91 kbps 
 session, and Pi5→Mac control frames (MODE_CHANGE, DISCONNECT) decoded fine. Only the grant
 is being lost, and only in this exchange.
 
-### MECHANISM — FOURTH AND BEST-SUPPORTED READING (2026-08-06): the requester is NOT LOOKING
+### STRONGEST LEAD (2026-08-07): `currentControlFrameAirtimeMs()` under-reports by ~6x
+
+`Connection::currentControlFrameAirtimeMs()` returns `wideOFDMFrameTiming(...).ack_ms` — the
+**tone-burst ACK** duration, ~240 ms — for every waveform mode. But a CONTROL frame
+(TURN_REQUEST / TURNOVER / MODE_CHANGE) is a full-preamble frame, measured on the rig at
+**67,680 samples = 1.41 s**.
+
+So every turn-timing quantity built on it is sized against the wrong thing:
+`turnRequestHoldoffAfterDataMs()` and `turnRequestRetransmitMs()` both consume it, and both
+therefore budget ~240 ms where the channel is actually occupied for ~1.41 s.
+
+This was found by accident: a fix that added "one more control-frame airtime" to the retry
+moved the measured gap only **+0.24 s** instead of the predicted **+1.41 s**. The discrepancy
+IS the finding.
+
+**Why it is not fixed here.** The function has several consumers beyond the turn path, so
+changing what it returns re-times ACK/holdoff logic elsewhere. That needs a measurement this
+rig cannot deliver at n=4 in one session (see the A/B record below), and a wrong global
+re-timing is worse than the bug.
+
+**Do this next, in order:** (1) confirm the intended semantics — is `ack_ms` deliberate for
+"how long until the peer can reply", with control-frame occupancy a separate quantity? (2) if
+it is genuinely wrong, add a distinct `currentControlFrameOccupancyMs()` rather than changing
+`ack_ms`'s meaning under existing consumers. (3) re-derive the turn holdoff/retry on the new
+quantity and A/B with n>=8 per arm.
+
+### ATTEMPTED FIX 2 (2026-08-07): budget both legs of the exchange — UNSUPPORTED, reverted
+
+`turnRequestRetransmitMs()` budgeted our request's airtime but not the grant's return leg.
+The reasoning is sound in principle — on half-duplex you are DEAF while transmitting, so
+re-asking before the reply can arrive destroys it — but it did not survive measurement.
+
+Interleaved A/B, 4 pairs, both binaries swapped on BOTH ends and verified by commit each run:
+
+| arm | handover landed | return transfer | requests | retry gap |
+|---|---|---|---|---|
+| BASE `d1f9961` | **3/4** (mean 77 s) | **2/4** | 97 | 4.33 s |
+| FIX `0a8e990` | **1/4** (mean 100 s) | **1/4** | 231 | 4.44 s |
+
+Leans negative on both metrics. At n=4 binary this is NOT significant (Fisher p≈0.49), so the
+correct word is **unsupported**, not "harmful" — but it does not ship, and the change was
+nearly inert anyway (+0.24 s) for the airtime reason above. Reverted in `df966c8`.
+
+### MECHANISM — FOURTH READING (2026-08-06), WRONG: "the requester is NOT LOOKING"
+
+**RETRACTED.** This was a LOG-THROTTLE ARTIFACT. Both `searchForSync: RMS skip` and
+`searchForSync: RUNNING correlation` are emitted under `if (++count % 10 == 1)`
+(`sync_controller.cpp`), so the "2 correlations in 50 s" I measured was really ~20 — the
+normal ~2.5 s cadence. The receiver was searching correctly all along. Counting throttled log
+lines as events is the specific error; check for a `% N` guard before treating any log count
+as an event count.
 
 Measured in the requester's own log across a 50 s handover window:
 
