@@ -407,9 +407,36 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     const bool is_disconnect_teardown_ack = header.valid &&
         header.type == protocol::v2::FrameType::ACK &&
         header.seq == protocol::v2::DISCONNECT_SEQ;
-    const bool is_turn_control = header.valid &&
+    // ULTRA_LIGHT_TURN_TOKENS (default OFF => byte-identical): let the DATA-turn
+    // NEGOTIATION pair ride a light preamble.
+    //
+    // These two are NOT in the same acquisition situation as the burst-coordination
+    // tokens below, even though they were bundled with them. GROUP_ACK crosses a
+    // turnaround after an ~11 s data burst, so the peer is genuinely cold (measured:
+    // light correlates ~0.88, rejected by the 0.90 gate) — that stays full-anchored.
+    // TURNOVER/TURN_REQUEST are exchanged every ~4 s DURING a negotiation, so the peer
+    // decoded one of our frames seconds ago and is warm. They also change no geometry
+    // (unlike MODE_CHANGE), so the peer's sync remains valid by construction.
+    //
+    // The cost of the bundling, measured on IONOS: a 20-byte turn frame with a full
+    // dual-chirp anchor is 67,680 samples = 1.41 s, versus 10,080 = 0.21 s light — 6.7x.
+    // Two of those per exchange occupy 2.82 s of a 4.33 s retry cycle (~65%), which is
+    // why the grant cannot fit in the requester's listening window: 121 grants
+    // transmitted / 7 decoded, handovers 41-176 s, half the return transfers lost.
+    // At 0.21 s the same exchange occupies ~10% and the collision window disappears
+    // rather than being tuned around.
+    static const bool kLightTurnTokens = [] {
+        const char* e = std::getenv("ULTRA_LIGHT_TURN_TOKENS");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    const bool is_turn_negotiation = header.valid &&
         (header.type == protocol::v2::FrameType::TURNOVER ||
-         header.type == protocol::v2::FrameType::TURN_REQUEST ||
+         header.type == protocol::v2::FrameType::TURN_REQUEST);
+
+    const bool is_turn_control = header.valid &&
+        ((!kLightTurnTokens &&
+          (header.type == protocol::v2::FrameType::TURNOVER ||
+           header.type == protocol::v2::FrameType::TURN_REQUEST)) ||
          header.type == protocol::v2::FrameType::FILE_CANCEL ||
          // §14.27: the GROUP_ACK is the one-way burst transport's whole-burst
          // coordination token. It crosses a half-duplex turnaround AFTER an ~11 s
@@ -447,10 +474,15 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     // physically contiguous frames inside transmitBurst().
     //
     // Connected OFDM ACK/NACK control frames stay light for turnaround
-    // efficiency. TURNOVER, TURN_REQUEST, FILE_CANCEL, and MODE_CHANGE are
-    // link-state transition tokens, so they carry a full anchor instead of
-    // depending on warm sync across a half-duplex turnaround or a degraded
-    // high-order data mode.
+    // efficiency. FILE_CANCEL, the burst-coordination tokens (GROUP_ACK/NACK,
+    // DISCONNECT) and MODE_CHANGE carry a full anchor: the first three cross to a
+    // peer that is genuinely cold, and MODE_CHANGE changes the physical geometry the
+    // peer would need the anchor to re-acquire.
+    //
+    // TURNOVER/TURN_REQUEST are split out under ULTRA_LIGHT_TURN_TOKENS (see above):
+    // they are exchanged every few seconds during a negotiation against a WARM peer
+    // and change no geometry, so the full anchor buys robustness that is already
+    // there and costs 6.7x the airtime on the one frame that must fit in a gap.
     bool use_light = ((connected_ && handshake_complete_) || is_disconnect_ack) &&
                      is_ofdm &&
                      !is_data_frame &&
@@ -473,6 +505,11 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         streaming_encoder_->setLDPCLiftingZ(27);
     }
 
+    if (is_turn_negotiation) {
+        LOG_MODEM(INFO, "[%s] TURN-TOKEN %s preamble=%s", log_prefix_.c_str(),
+                  protocol::v2::frameTypeToString(header.type),
+                  use_light ? "LIGHT" : "FULL");
+    }
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 
