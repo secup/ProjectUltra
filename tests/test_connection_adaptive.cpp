@@ -465,6 +465,16 @@ struct ConnectionAdaptiveTestAccess {
         return c.queued_payloads_.size();
     }
 
+    static uint32_t turnRequestRetransmitMs(const Connection& c) {
+        return c.turnRequestRetransmitMs();
+    }
+    static uint32_t turnRequestHoldoffAfterDataMs(const Connection& c) {
+        return c.turnRequestHoldoffAfterDataMs();
+    }
+    static uint32_t controlFrameAirtimeMs(const Connection& c) {
+        return c.currentControlFrameAirtimeMs();
+    }
+
 
     // Application text of a queued message — the message-object identity prefix
     // (PayloadType::TEXT_MESSAGE_OBJECT + object id) is transport, not content.
@@ -3567,6 +3577,42 @@ void test_receiver_suppresses_duplicate_message_object() {
 
     CHECK(ConnectionAdaptiveTestAccess::deliveredMessageObjectIdCount(c) == 3,
           "suppression history must hold one entry per delivered object");
+}
+
+// BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO root cause. The DATA-turn request retry budgeted
+// only OUR request's airtime and forgot the GRANT coming back. On half-duplex that is not a
+// tuning preference: while we transmit we are DEAF, so re-asking before the reply could
+// physically have arrived means our own carrier lands on top of it.
+//
+// Measured on IONOS: request and grant are the same control frame (67,680 samples = 1.41 s
+// each). The old interval left ~0.5 s of margin and 94% of grants were destroyed by the
+// requester's own next transmission.
+void test_turn_request_retry_budgets_both_legs_of_the_exchange() {
+    Connection c;
+    c.setTransmitCallback([](const Bytes&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+
+    const uint32_t holdoff = ConnectionAdaptiveTestAccess::turnRequestHoldoffAfterDataMs(c);
+    const uint32_t control = ConnectionAdaptiveTestAccess::controlFrameAirtimeMs(c);
+    const uint32_t retry = ConnectionAdaptiveTestAccess::turnRequestRetransmitMs(c);
+    CHECK(control > 0 && holdoff > 0, "fixture must have a live control-frame geometry");
+
+    // THE FIX: both legs. Anything less re-asks while the answer is still on the air.
+    const uint32_t both_legs = holdoff + 2u * control;
+    CHECK(retry >= both_legs || retry == 2500u /*floor*/,
+          "retry must budget our request AND the peer's grant, not just our own transmission");
+
+    // The specific regression: budgeting ONE leg is not enough. If the retry ever equals
+    // holdoff + a single control airtime again, the 0.5 s margin is back and grants die.
+    const uint32_t one_leg_only = holdoff + control;
+    CHECK(retry > one_leg_only || retry == 2500u,
+          "one-leg budgeting is the defect — it must not silently return");
+
+    // Physical sanity: a requester keyed for `control` ms cannot hear a `control` ms reply
+    // inside a window shorter than their sum. This is geometry, not preference.
+    CHECK(retry >= 2u * control || retry == 2500u,
+          "retry shorter than request+grant airtime guarantees self-collision on half-duplex");
 }
 
 void test_ordinary_adaptation_holds_geometry_for_complete_message() {
@@ -6967,6 +7013,7 @@ int main() {
     test_message_geometry_regrid_recuts_fragments_at_new_capacity();
     test_message_geometry_regrid_is_bounded_then_fails_closed();
     test_receiver_suppresses_duplicate_message_object();
+    test_turn_request_retry_budgets_both_legs_of_the_exchange();
     test_ordinary_adaptation_holds_geometry_for_complete_message();
     test_runtime_forced_cw_override_cannot_regrid_active_message();
     test_submitted_status_reset_runs_after_physical_handoff();
