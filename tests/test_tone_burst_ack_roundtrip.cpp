@@ -12,6 +12,7 @@
 #include "waveform/tone_burst_ack/tone_burst_detector.hpp"
 #include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
 #include "waveform/tone_burst_ack/tone_burst_payload.hpp"
+#include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -330,9 +331,73 @@ void test_detect_and_decode_at_plus5_db_with_silence() {
     EXPECT(decoded_ok >= 18);  // 90%+
 }
 
+// BUG-TONE-ACK-CLEAN-MISS (2026-11-08): a payload that CONTAINS the Costas sequence has an
+// alias that scores like the preamble. With the candidate gate at 3x the window average, a
+// window the ACK mostly fills (the monitor's 12 ms tail window: burst + one 100 ms cadence +
+// one symbol) admitted only the global maximum, so when the alias outscored a slightly faded
+// preamble the clean ACK was lost (GUI gate: group 42, alias at symbols 5-8, CRC fail every
+// pass). Candidates are now tried strongest-first above the absolute floor.
+void test_costas_alias_in_payload_does_not_hide_the_preamble() {
+    std::printf("[test] costas_alias_in_payload_does_not_hide_the_preamble\n");
+    // Find payloads whose dibits contain the Costas pattern EARLY enough that the alias is a
+    // timing candidate of the monitor's tail window (the full burst must fit from it: alias
+    // start <= the 100 ms cadence = burst symbol 8, i.e. payload index <= 4; the GUI-gate case
+    // had it at payload index 1).
+    std::vector<ToneBurstAckPayload> aliased;
+    std::vector<size_t> alias_at;
+    for (int g = 0; g < 64 && aliased.size() < 4; ++g) {
+        for (int mask = 0; mask < 4 && aliased.size() < 4; ++mask) {
+            for (int rate = 0; rate < 8 && aliased.size() < 4; ++rate) {
+                ToneBurstAckPayload p;
+                p.group_seq = static_cast<uint8_t>(g);
+                p.frame_mask = static_cast<uint16_t>(mask);
+                p.rate_hint = static_cast<uint8_t>(rate);
+                p.type = AckType::Ack;
+                const auto d = encodePayloadDibits(p);
+                for (size_t i = 0; i <= 4; ++i) {
+                    bool match = true;
+                    for (uint32_t k = 0; k < kCostasSymbols; ++k) {
+                        match = match && d[i + k] == kCostasPattern[k];
+                    }
+                    if (match) { aliased.push_back(p); alias_at.push_back(i); break; }
+                }
+            }
+        }
+    }
+    EXPECT(aliased.size() >= 2);
+    const uint32_t ms = kSymbolMsHighSNR;
+    const uint32_t spp = (kSampleRate * ms) / 1000u;
+    const float floor_peak = ToneBurstAckMonitor::idealCostasPeak(ms) *
+                             ToneBurstAckMonitor::Config{}.min_peak_fraction;
+    std::mt19937 rng(0xA11A5);
+    int ok = 0;
+    for (size_t n = 0; n < aliased.size(); ++n) {
+        const auto& p = aliased[n];
+        ToneBurstEncoder enc;
+        auto burst = enc.encode(p, ms);
+        // The preamble 1 dB down (a slow fade): the alias becomes the global maximum.
+        for (size_t i = 0; i < static_cast<size_t>(kCostasSymbols) * spp; ++i) burst[i] *= 0.89f;
+        std::vector<float> win(spp, 0.0f);  // monitor tail window geometry
+        win.insert(win.end(), burst.begin(), burst.end());
+        win.insert(win.end(), 4800, 0.0f);
+        addAWGN(win, sigmaForInBandSNR(20.0f, kToneAmplitude), rng);
+        ToneBurstDetector det;
+        const auto r = det.detectAndDecode(win.data(), win.size(), ms, 32, {}, floor_peak);
+        const bool good = r.decode.payload && payloadsEqual(*r.decode.payload, p);
+        const size_t err = (r.detected_offset_samples > spp) ? r.detected_offset_samples - spp
+                                                             : spp - r.detected_offset_samples;
+        std::printf("  group %u mask %u rate %u (alias at payload %zu): decoded=%d offset_err=%zu\n",
+                    static_cast<unsigned>(p.group_seq), static_cast<unsigned>(p.frame_mask),
+                    static_cast<unsigned>(p.rate_hint), alias_at[n], good ? 1 : 0, err);
+        if (good && err < spp / 4) ++ok;
+    }
+    EXPECT_EQ(ok, static_cast<int>(aliased.size()));
+}
+
 }  // namespace
 
 int main() {
+    test_costas_alias_in_payload_does_not_hide_the_preamble();
     test_encode_output_size_and_amplitude();
     test_phase_continuity_at_symbol_boundaries();
     test_clean_round_trip_baseline_duration();

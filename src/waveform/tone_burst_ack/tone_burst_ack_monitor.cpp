@@ -221,7 +221,8 @@ void ToneBurstAckMonitor::runDetectionPass() {
         const size_t tail_base = buffer_.size() - window;
         const auto r = detector_.detectAndDecode(
             buffer_.data() + tail_base, window, symbol_ms,
-            cfg_.sweep_step_samples, acceptance_predicate_);
+            cfg_.sweep_step_samples, acceptance_predicate_,
+            idealCostasPeak(symbol_ms) * cfg_.min_peak_fraction);
         if (r.semantic_rejections > 0) {
             semantic_candidates_rejected_ += r.semantic_rejections;
             if (r.strongest_rejected_payload.has_value()) {

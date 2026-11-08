@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-08 — FIX: tone-ACK timing candidates — a Costas alias in the payload hid a clean ACK (BUG-TONE-ACK-CLEAN-MISS)
+
+**What was broken.** GUI gate Good@15 s42: the group-42 ACK was missed in 4 of 13 runs (old and
+new detector alike), one RTO each, with a clean 408 ms burst in the armed window and no monitor
+log line. The candidate gate was 3x the window AVERAGE of the Costas statistic. The monitor's
+12 ms tail window is only 27 % longer than the burst, so the average IS the ACK's energy and the
+gate admitted only the global maximum; group 42's payload contains 0 1 3 2 at symbols 5-8, and
+when a slow fade left the preamble ~1 dB below that alias, the ACK decoded 5 symbols late and
+failed CRC on every pass. ~10 % of payloads contain the sequence. (The first reading of the
+recording — "60 ms of audio missing in transport" — was this 5-symbol mis-timing.)
+
+**What changed** (`tone_burst_detector.cpp`, `tone_burst_ack_monitor.cpp`). Timing candidates are
+the LOCAL MAXIMA of the coarse statistic (one per lobe; aliases are >= 4 symbols from the
+preamble, lobes +-1 symbol), tried strongest first while above the caller's ABSOLUTE floor — the
+monitor passes `min_peak_fraction` x `idealCostasPeak`, the gate it already applied after decode
+— within the existing distinct-candidate budget (INV-TONE-ACK-004). Maxima matter as much as the
+floor: ranking all coarse offsets let the alias lobe's slope points (each refining to a distinct
+offset) spend the budget first. Forensics added: `gui_qso_scenario.sh --record` (-rec on both
+stations), `measure_ack_staircase analyze FILE START MS GROUP ...` (replay one ACK, per-symbol
+tone powers per subband vs the expected sequence) and `scan FILE MS` (decode every ACK in a
+recording); the tool now searches with the production 32-sample step and floor.
+
+**Verification.** New `ToneBurstAckRoundTrip` case (aliased payloads, preamble 1 dB down,
+monitor tail-window geometry): old gate 0/4 (offset error exactly 2880 = 5 symbols), floor
+without maxima 3/4, final 4/4; both recorded GUI windows replay to group 42 CRC-OK. CPU: on noise
+the floor admits no candidate, so an armed pass no longer decodes a noise candidate — 0.8 ms
+(diversity, uncertified prior), 4.7 ms worst case (no prior, ±50 Hz). `measure_ack_staircase`
+(diversity, production search): AWGN 12 ms 78.5 → 90.8 % at −2 dB and 99.8 → 100 % at 6 dB (the
+constant 1-in-400 high-SNR floor was this alias), 25 ms 63.5 → 84.0 % at −6 dB; Good 12 ms
+96.2 → 97.8 % at 6 dB (1000 trials) — the staircase edges are unchanged on the 2 dB grid, so the
+table stays (now slightly conservative). GUI gate: the failing scenario 6/6 with no miss (was
+4/13 missing); the 8-scenario batch 8/8 PASS with ZERO missed ACKs (108/108; both previous
+batches lost 2), goodput 8530 vs 8230 bps over the six paired scenarios (+3.6 %). ctest 106/106.
+
 ## 2026-11-08 — FIX: tone-burst ACK — frequency diversity, carrier-offset prior, scannable staircase (BUG-TONE-ACK-RETURN-LOSS-ON-FADING + 2 latent defects)
 
 **What was broken.** The GUI gate occasionally lost a tone-burst ACK on ITU Good@15-20 although

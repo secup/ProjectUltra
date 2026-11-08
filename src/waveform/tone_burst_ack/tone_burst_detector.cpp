@@ -259,7 +259,8 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
                                                           uint32_t symbol_ms,
                                                           uint32_t sweep_step_samples,
                                                           const ToneBurstAckAcceptancePredicate&
-                                                              acceptance_predicate) {
+                                                              acceptance_predicate,
+                                                          float min_candidate_peak) {
     DetectAndDecodeResult result;
     const uint32_t samples_per_symbol = (kSampleRate * symbol_ms) / 1000u;
     const size_t total_needed =
@@ -326,15 +327,36 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
             }
         }
     }
-    // Noise-floor proxy: average correlation across the sweep. Anything more
-    // than ~3× the average is a candidate worth trying.
-    double corr_sum = 0.0;
-    for (const auto& c : candidates) corr_sum += c.corr;
-    const float corr_avg = static_cast<float>(corr_sum / static_cast<double>(n_offsets));
-    const float candidate_threshold = std::max(corr_avg * 3.0f, 1.0f);
+    // Which timing candidates are worth a CRC check. NOT "3x the window average" (the rule
+    // until 2026-11-08): when the ACK fills most of the window — the monitor's 12 ms tail
+    // window is only 27 % longer than the burst — the average is the ACK's own energy, 3x it
+    // exceeds every alignment but the global maximum, and a payload that contains the Costas
+    // sequence (27 four-symbol windows x 1/256: ~10 % of payloads) lost the ACK whenever its
+    // alias outscored the preamble (BUG-TONE-ACK-CLEAN-MISS: group 42 carries 0 1 3 2 at
+    // symbols 5-8; decoded 5 symbols late, CRC fail, every pass). Candidates are now tried
+    // strongest first while above the caller's absolute floor, bounded by the distinct-
+    // candidate budget below; on noise the monitor's floor (5 % of the ideal peak, noise sits
+    // near 1 %) admits none, so the CRC/false-alarm exposure per pass does not grow.
+    const float candidate_threshold = std::max(min_candidate_peak, 1e-6f);
 
-    // Sort candidates by correlation strength descending (stable: equal scores keep
-    // ascending-offset order, as the per-offset sweep produced them).
+    // Timing hypotheses = the LOCAL MAXIMA of the coarse Costas statistic, one per correlation
+    // lobe. The lobe is +-1 symbol wide; a payload alias of the Costas sequence is >= 4 symbols
+    // from the preamble (symbols 1-3 ARE the Costas), so lobes never merge. Ranking every coarse
+    // offset instead let the slope points of the strongest lobe — each refining to a distinct
+    // offset 32 samples from its neighbour — spend the distinct-candidate budget before a
+    // slightly weaker preamble lobe was reached (the alias regression test: 1 of 4 lost).
+    {
+        std::vector<Candidate> maxima;
+        maxima.reserve(64);
+        for (size_t k = 0; k < candidates.size(); ++k) {
+            const float c = candidates[k].corr;
+            const bool ge_left = (k == 0) || c >= candidates[k - 1].corr;
+            const bool gt_right = (k + 1 == candidates.size()) || c > candidates[k + 1].corr;
+            if (ge_left && gt_right) maxima.push_back(candidates[k]);
+        }
+        candidates.swap(maxima);
+    }
+    // Strongest first (stable: equal scores keep ascending-offset order).
     std::stable_sort(candidates.begin(), candidates.end(),
                      [](const Candidate& a, const Candidate& b) { return a.corr > b.corr; });
 
@@ -360,7 +382,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
         size_t offset = candidates[k].offset;
         const float corr_coarse = candidates[k].corr;
         const float hyp_hz = hyps[static_cast<size_t>(candidates[k].hyp)];
-        if (corr_coarse < candidate_threshold && k > 0) break;
+        if (!(corr_coarse > candidate_threshold)) break;
         if (corr_coarse > global_peak) {
             global_peak = corr_coarse;
             global_offset = offset;

@@ -23,22 +23,13 @@ skip that whenever ANY caffeinate was running, e.g. an agent's `caffeinate -i`).
 the audio drain (and protocol tick) off the render thread, or render without blocking vsync when
 the window is occluded. The headless `ultra_tnc` is unaffected.
 
-### BUG-TONE-ACK-CLEAN-MISS (open, 2026-11-08) — P2, intermittent, pre-existing
+### BUG-TONE-ACK-PREAMBLE-FADE (open, 2026-11-08) — P3, physical
 
-GUI gate Good@15 seed 42, QPSK R1/2 pinned: the group-42 tone ACK (12 ms, BRAVO snr_used 14.1)
-went undetected in 2 of 5 runs — once with the old single-tone detector, once with the
-two-subband + prefix-sum detector — costing one RTO each (~17 s). It is NOT a fade: OTASim's
-client log shows ALPHA received AND the GUI pulled (`client_get_rx`) a flat 408 ms burst at
-rms 0.22-0.25 over a 0.165 noise floor (~20 dB per tone bin), inside the armed window, with the
-right CFO prior; no monitor line at all (no candidate rejection, no regressed detection, no
-expiry — the RTO re-armed 624 samples before the deadline). The ACK-vs-TX-end timing (+0.10 s)
-is identical in the runs that detected it. `ULTRA_TONE_ACK_TRACE=1` (per-pass trace) added to
-catch the next occurrence; 2 traced repetitions did not reproduce it.
-
-A related, physical, weakness: the timing search keys on the 4 Costas symbols at the START of
-the ACK only. On Moderate@20 an ACK whose first ~80 ms sat in a deep fade (both subbands) was
-lost although its remaining 330 ms were strong; a sync statistic that also integrates the payload
-symbols' energy would remove that single point of failure.
+The tone-ACK timing search keys on the 4 Costas symbols at the START of the burst only. On
+Moderate@20 an ACK whose first ~80 ms sat in a deep two-subband fade was lost although its
+remaining 330 ms were strong (GUI gate, OTASim client RMS trace). A sync statistic that also
+integrates the payload symbols' energy (non-coherent max-tone energy over all 34 symbols, CRC
+arbitrating the symbol-shift ambiguity) would remove that single point of failure.
 
 ### BUG-MODERATE-8PSK-COHERENT-FLOOR (open, 2026-11-08) — P2, the REAL remaining Moderate limit
 
@@ -2375,6 +2366,32 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-TONE-ACK-CLEAN-MISS (FIXED 2026-11-08) — a clean ACK lost to a Costas alias in its own payload
+
+**Symptom.** GUI gate Good@15 s42 (QPSK R1/2 pinned): the group-42 tone ACK was missed in 4 of
+13 runs, with the old single-tone detector and with the two-subband one alike, one RTO
+(~17 s) each. OTASim's client log showed a flat, strong 408 ms burst received and pulled by the
+GUI inside the armed window; the monitor logged nothing.
+
+**Root cause (found with `ULTRA_TONE_ACK_TRACE` + `gui_qso_scenario.sh --record` +
+`measure_ack_staircase analyze`).** Group 42's payload carries the exact Costas sequence
+0 1 3 2 at symbols 5-8. The detector tried timing candidates only above 3x the WINDOW AVERAGE of
+the Costas statistic — but the monitor's 12 ms tail window is only 27 % longer than the burst, so
+that average is the ACK's own energy and 3x it exceeds every alignment except the global maximum.
+When a slow fade left the preamble ~1 dB under the alias, only the alias was tried: decoded
+5 symbols late (2880 samples — first misread as 60 ms of audio lost in transport), CRC fail,
+every pass. ~10 % of payloads contain the sequence somewhere.
+
+**Fix (`tone_burst_detector.cpp`).** Candidates are the LOCAL MAXIMA of the coarse statistic
+(one per lobe; an alias is >= 4 symbols from the preamble, a lobe +-1 symbol), tried strongest
+first above the monitor's absolute floor (min_peak_fraction x ideal peak, the gate it already
+applied after decode) within the distinct-candidate budget. Ranking every coarse offset instead
+of maxima let the alias lobe's slope points spend the budget. Regression test
+`ToneBurstAckRoundTrip` (`costas_alias_in_payload_does_not_hide_the_preamble`): old gate 0/4,
+average-free gate without maxima 3/4, final 4/4. The recorded GUI windows replay correctly.
+Side effect: on noise the floor admits no candidate, so an armed pass no longer decodes the top
+noise candidate — 3.8 -> 0.8 ms per pass.
 
 ### BUG-TONE-ACK-RETURN-LOSS-ON-FADING (FIXED 2026-11-08) + two latent tone-ACK defects found with it
 

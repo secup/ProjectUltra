@@ -36,6 +36,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="awgn"
 SNR_DB="20"
 CFO_HZ="0"
+RECORD=0
 SEED="42"
 EXPECT_RATE="R1/4"
 EXPECT_MOD="16QAM"
@@ -66,6 +67,7 @@ usage() {
   printf '  --cfo-hz HZ                    Dial offset between the two radios: ALPHA hears BRAVO\n'
   printf '                                 at -HZ, BRAVO hears ALPHA at +HZ (default: 0)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
+  printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
   printf '  --expect-mod MOD               Expected/locked modulation (default: 16QAM)\n'
   printf '  --out DIR                      Result directory\n'
@@ -177,6 +179,7 @@ while [[ $# -gt 0 ]]; do
     --channel) CHANNEL="${2:?}"; shift 2 ;;
     --snr-db) SNR_DB="${2:?}"; shift 2 ;;
     --cfo-hz) CFO_HZ="${2:?}"; shift 2 ;;
+    --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
     --expect-mod) EXPECT_MOD="${2:?}"; shift 2 ;;
@@ -855,6 +858,9 @@ if [[ "$SCENARIO_KIND" == "message" && "$REPLY_MESSAGE_SET" -eq 1 ]]; then
     --auto-disconnect-after "$DISCONNECT_AFTER"
   )
 fi
+if [[ "$RECORD" -eq 1 ]]; then
+  BRAVO_ARGS+=(-rec "$OUT/bravo")   # writes $OUT/bravo_rx.f32 / bravo_tx.f32 at exit
+fi
 ULTRA_E2E_DEBUG_LOG="$E2E_BRAVO_LOG" "$ROOT/build/ultra_gui" "${BRAVO_ARGS[@]}" >/dev/null 2>&1 &
 BRAVO_PID=$!
 
@@ -883,6 +889,9 @@ else
     --auto-send-file "$PAYLOAD"
     --auto-disconnect-after "$DISCONNECT_AFTER"
   )
+fi
+if [[ "$RECORD" -eq 1 ]]; then
+  ALPHA_ARGS+=(-rec "$OUT/alpha")   # writes $OUT/alpha_rx.f32 / alpha_tx.f32 at exit
 fi
 ULTRA_E2E_DEBUG_LOG="$E2E_ALPHA_LOG" "$ROOT/build/ultra_gui" "${ALPHA_ARGS[@]}" >/dev/null 2>&1 &
 ALPHA_PID=$!

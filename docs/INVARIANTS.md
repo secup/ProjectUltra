@@ -280,6 +280,16 @@ offset cost the 100 ms rung > 6 dB. **Test:** `StreamingDecoderToneBurstMonitor`
 100 ms ACK at -4 dB: tracker +7.3 decodes 10/10, -7.3 decodes 0/10 — the sign is pinned) and
 `ToneBurstAckWatterson` (`cfo_*` cells).
 
+### INV-TONE-ACK-004: Timing candidates are lobe maxima above an ABSOLUTE floor
+
+**Rule:** `detectAndDecode` tries the local maxima of the coarse Costas statistic, strongest
+first, while above the caller's absolute floor (the monitor: `min_peak_fraction` x
+`idealCostasPeak`), within the distinct-candidate budget. Never gate candidates on a statistic of
+the window itself (average, median): the ACK fills most of a tail window, so such a gate admits
+only the global maximum, and a payload containing the Costas sequence (~10 % of payloads) then
+loses its ACK whenever the alias outscores the preamble (BUG-TONE-ACK-CLEAN-MISS).
+**Test:** `ToneBurstAckRoundTrip` (`costas_alias_in_payload_does_not_hide_the_preamble`).
+
 ---
 
 ## Sample Position Invariants

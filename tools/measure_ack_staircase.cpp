@@ -51,6 +51,8 @@
 #include "waveform/tone_burst_ack/tone_burst_constants.hpp"
 #include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
 #include "waveform/tone_burst_ack/tone_burst_detector.hpp"
+#include "waveform/tone_burst_ack/tone_burst_payload.hpp"
+#include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -116,7 +118,11 @@ double runCell(const WattersonChannel::Config& cfg, uint32_t symbol_ms, int tria
         std::vector<float> noisy;
         ch.process(std::span<const float>(in), noisy);
 
-        const auto dr = det.detectAndDecode(noisy.data(), noisy.size(), symbol_ms);
+        // Production monitor search: 32-sample coarse step and its absolute candidate floor.
+        const auto dr = det.detectAndDecode(
+            noisy.data(), noisy.size(), symbol_ms, 32, {},
+            ToneBurstAckMonitor::idealCostasPeak(symbol_ms) *
+                ToneBurstAckMonitor::Config{}.min_peak_fraction);
         if (dr.decode.payload.has_value() && payloadsEqual(*dr.decode.payload, orig)) ++ok;
     }
     return static_cast<double>(ok) / static_cast<double>(trials);
@@ -150,7 +156,9 @@ int runBench(bool diversity, float halfwidth_hz) {
         const int reps = (ms >= 50) ? 10 : 40;
         const auto t0 = std::chrono::steady_clock::now();
         for (int r = 0; r < reps; ++r) {
-            (void)det.detectAndDecode(x.data(), x.size(), ms, 32, {});
+            (void)det.detectAndDecode(x.data(), x.size(), ms, 32, {},
+                                      ToneBurstAckMonitor::idealCostasPeak(ms) *
+                                          ToneBurstAckMonitor::Config{}.min_peak_fraction);
         }
         const double per =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
@@ -165,7 +173,114 @@ int runBench(bool diversity, float halfwidth_hz) {
     return 0;
 }
 
+// ANALYZE mode: replay one ACK from a recording (ultra_gui -rec / gui_qso_scenario.sh --record,
+// float32 mono 48 kHz) — run the production detectAndDecode over a window around `start`,
+// then print, per symbol at the detected timing, the four tone magnitudes on each subband
+// next to the tone the given payload SHOULD carry. A wrong symbol with a strong expected tone
+// on one subband points at the combiner; both subbands weak at that tone = a channel null.
+int runAnalyze(int argc, char** argv) {
+    if (argc < 6) {
+        std::fprintf(stderr, "analyze FILE.f32 START_SAMPLE SYMBOL_MS GROUP_SEQ [MASK] [RATE_HINT] "
+                             "[CFO_PRIOR_HZ] [HALFWIDTH_HZ]\n");
+        return 2;
+    }
+    std::FILE* f = std::fopen(argv[2], "rb");
+    if (!f) { std::fprintf(stderr, "cannot open %s\n", argv[2]); return 2; }
+    const long start = std::atol(argv[3]);
+    const uint32_t ms = static_cast<uint32_t>(std::atoi(argv[4]));
+    ToneBurstAckPayload p{};
+    p.group_seq = static_cast<uint8_t>(std::atoi(argv[5]));
+    p.frame_mask = static_cast<uint16_t>(argc > 6 ? std::strtol(argv[6], nullptr, 0) : 0);
+    p.rate_hint = static_cast<uint8_t>(argc > 7 ? std::atoi(argv[7]) : 0);
+    p.type = AckType::Ack;
+    const float prior = argc > 8 ? static_cast<float>(std::atof(argv[8])) : 0.0f;
+    const float halfw = argc > 9 ? static_cast<float>(std::atof(argv[9])) : 0.0f;
+    const uint32_t spp = (kFs * ms) / 1000u;
+    const size_t burst = static_cast<size_t>(kTotalSymbols) * spp;
+    const long lead = static_cast<long>(4 * spp);
+    std::vector<float> x(burst + 8 * spp);
+    std::fseek(f, (start - lead) * static_cast<long>(sizeof(float)), SEEK_SET);
+    const size_t got = std::fread(x.data(), sizeof(float), x.size(), f);
+    std::fclose(f);
+    x.resize(got);
+    ToneBurstDetector det;
+    det.setFrequencyPrior(prior, halfw);
+    const auto r = det.detectAndDecode(x.data(), x.size(), ms, 32, {},
+                                       ToneBurstAckMonitor::idealCostasPeak(ms) *
+                                           ToneBurstAckMonitor::Config{}.min_peak_fraction);
+    std::printf("detectAndDecode: sync=%d crc=%d offset=%zu (abs %ld) peak=%.1f hyps=%d cfo=%.2f\n",
+                r.sync_acquired ? 1 : 0, r.decode.stats.crc_ok ? 1 : 0, r.detected_offset_samples,
+                start - lead + static_cast<long>(r.detected_offset_samples),
+                r.costas_correlation_peak, r.frequency_hypotheses, r.detected_frequency_offset_hz);
+    if (r.decode.payload) {
+        std::printf("decoded: group_seq=%u mask=0x%04X rate_hint=%u\n",
+                    static_cast<unsigned>(r.decode.payload->group_seq),
+                    static_cast<unsigned>(r.decode.payload->frame_mask),
+                    static_cast<unsigned>(r.decode.payload->rate_hint));
+    }
+    std::vector<uint8_t> expect(kCostasPattern.begin(), kCostasPattern.end());
+    const auto pay = encodePayloadDibits(p);
+    expect.insert(expect.end(), pay.begin(), pay.end());
+    const size_t off = r.detected_offset_samples;
+    int wrong = 0;
+    std::printf("sym exp | A: t0 t1 t2 t3 | B: t0 t1 t2 t3 | dec\n");
+    for (size_t s = 0; s < expect.size() && off + (s + 1) * spp <= x.size(); ++s) {
+        const float* w = x.data() + off + s * spp;
+        const auto a = ToneBurstDetector::toneMagnitudes(w, spp, false, r.detected_frequency_offset_hz);
+        // subband B alone: total minus A, in power
+        const auto ab = ToneBurstDetector::toneMagnitudes(w, spp, true, r.detected_frequency_offset_hz);
+        float conf = 0.0f;
+        const uint8_t dec = ToneBurstDetector::demapDibit(ab, conf);
+        if (dec != expect[s]) ++wrong;
+        std::printf("%3zu  %u  |", s, static_cast<unsigned>(expect[s]));
+        for (int k = 0; k < 4; ++k) std::printf(" %5.0f", a[k]);
+        std::printf(" |");
+        for (int k = 0; k < 4; ++k) {
+            const float b2 = std::max(0.0f, ab[k] * ab[k] - a[k] * a[k]);
+            std::printf(" %5.0f", std::sqrt(b2));
+        }
+        std::printf(" |  %u%s\n", static_cast<unsigned>(dec), dec != expect[s] ? "  <-- WRONG" : "");
+    }
+    std::printf("wrong symbols: %d of %zu\n", wrong, expect.size());
+    return 0;
+}
+
+// SCAN mode: decode every ACK in a recording (e.g. a station's TX recording) — sliding windows
+// of one burst + 2 symbols, step half a burst; prints each new decoded payload and its position.
+int runScan(int argc, char** argv) {
+    if (argc < 4) { std::fprintf(stderr, "scan FILE.f32 SYMBOL_MS\n"); return 2; }
+    std::FILE* f = std::fopen(argv[2], "rb");
+    if (!f) { std::fprintf(stderr, "cannot open %s\n", argv[2]); return 2; }
+    std::vector<float> x;
+    float buf[65536];
+    size_t n;
+    while ((n = std::fread(buf, sizeof(float), 65536, f)) > 0) x.insert(x.end(), buf, buf + n);
+    std::fclose(f);
+    const uint32_t ms = static_cast<uint32_t>(std::atoi(argv[3]));
+    const uint32_t spp = (kFs * ms) / 1000u;
+    const size_t burst = static_cast<size_t>(kTotalSymbols) * spp;
+    const size_t win = burst + 4 * spp;
+    ToneBurstDetector det;
+    long last = -1000000;
+    for (size_t a = 0; a + win <= x.size(); a += burst / 2) {
+        const auto r = det.detectAndDecode(x.data() + a, win, ms, 32, {});
+        if (!r.decode.stats.crc_ok || !r.decode.payload) continue;
+        const long pos = static_cast<long>(a + r.detected_offset_samples);
+        if (pos - last < static_cast<long>(burst / 2)) continue;
+        last = pos;
+        std::printf("ACK at %ld: group_seq=%u mask=0x%04X rate_hint=%u adv=%u epoch=%u\n", pos,
+                    static_cast<unsigned>(r.decode.payload->group_seq),
+                    static_cast<unsigned>(r.decode.payload->frame_mask),
+                    static_cast<unsigned>(r.decode.payload->rate_hint),
+                    static_cast<unsigned>(r.decode.payload->drive_advisory),
+                    static_cast<unsigned>(r.decode.payload->move_epoch));
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc > 1 && std::strcmp(argv[1], "scan") == 0) return runScan(argc, argv);
+    if (argc > 1 && std::strcmp(argv[1], "analyze") == 0) return runAnalyze(argc, argv);
     if (argc > 1 && std::strcmp(argv[1], "bench") == 0) {
         const float w = (argc > 2) ? static_cast<float>(std::atof(argv[2])) : 0.0f;
         std::printf("bench, diversity OFF\n"); runBench(false, w);

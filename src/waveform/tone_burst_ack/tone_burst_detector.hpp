@@ -123,12 +123,17 @@ public:
     // Used when timing is uncertain (sender's "expected window" + guard).
     // `sweep_step_samples` controls the timing-search granularity (smaller
     // = finer + slower).
+    // min_candidate_peak: absolute Costas-statistic floor a timing candidate must exceed to be
+    // worth a CRC check (the monitor passes min_peak_fraction x idealCostasPeak, the same gate
+    // it applies to an accepted decode). Candidates are tried strongest first, up to the
+    // distinct-candidate budget, while above the floor.
     DetectAndDecodeResult detectAndDecode(SampleSpan samples,
                                           size_t num_samples,
                                           uint32_t symbol_ms = kBaselineSymbolMs,
                                           uint32_t sweep_step_samples = 8,
                                           const ToneBurstAckAcceptancePredicate&
-                                              acceptance_predicate = {});
+                                              acceptance_predicate = {},
+                                          float min_candidate_peak = 0.0f);
 
     // ----- helpers exposed for testing -----
 
