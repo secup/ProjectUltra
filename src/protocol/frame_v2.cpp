@@ -2,6 +2,7 @@
 #include "ultra/fec.hpp"  // LDPC encoder/decoder + ChannelInterleaver
 #include "../fec/frame_interleaver.hpp"  // Frame-level interleaving
 #include "../fec/ldpc_codec.hpp"  // For getRecommendedIterations
+#include "../fec/turbo_codec.hpp"  // One turbo codeword per OFDM data frame
 #include "ultra/logging.hpp"  // LOG_MODEM
 #include "ultra/timing_profiler.hpp"
 #include <cstring>
@@ -2075,6 +2076,121 @@ inline size_t infoBytesPerCodewordZ(CodeRate r, int lifting_z) {
 constexpr int kLdpcBlockCols = 24;  // n = kLdpcBlockCols * Z (648 @ Z27, 1944 @ Z81)
 }  // namespace
 
+Bytes padFixedFrameInfo(const Bytes& frame_data, size_t total_info_bytes) {
+    Bytes padded = frame_data;
+    if (padded.size() < total_info_bytes) {
+        // WHITEN THE PAD with a deterministic PRBS, NOT zeros. A zero pad makes a mostly-
+        // empty frame (e.g. the ~90%-padding FILE_START) LDPC-encode to long runs of the
+        // SAME 16QAM constellation point; a systematic channel-estimate error then hits all
+        // of them the same way -> correlated symbol errors that LDPC (built for RANDOM
+        // errors) cannot fix. Measured 2026-05-30: FILE_START failed with biased LLRs
+        // (llr_avg≈4-6, high unsat) while random-data frames in the SAME group decoded clean
+        // -- purely a payload-entropy effect. Whitening the pad gives every frame diverse
+        // symbols. RX-transparent: the receiver reads payload_len bytes and ignores the pad,
+        // so no de-whitening and no compat bit are needed. (The turbo data frame whitens
+        // the WHOLE info block on top of this; see fec/turbo_codec.hpp.)
+        const size_t pad_start = padded.size();
+        padded.resize(total_info_bytes);
+        uint32_t r = 0x9E3779B9u;  // fixed nonzero seed -> deterministic xorshift32 PRBS
+        for (size_t i = pad_start; i < total_info_bytes; ++i) {
+            r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+            padded[i] = static_cast<uint8_t>(r);
+        }
+    } else if (padded.size() > total_info_bytes) {
+        padded.resize(total_info_bytes);  // Truncate (caller should have chunked)
+    }
+    return padded;
+}
+
+DataFrameFec ofdmDataFrameFec() {
+    static const DataFrameFec fec = [] {
+        if (const char* e = std::getenv("ULTRA_DATA_FEC")) {
+            const std::string s(e);
+            if (s == "turbo" || s == "TURBO") return DataFrameFec::TURBO;
+            if (s == "ldpc" || s == "LDPC") return DataFrameFec::LDPC;
+            LOG_MODEM(WARN, "ULTRA_DATA_FEC='%s' not recognised (ldpc|turbo); using default", e);
+        }
+        return DataFrameFec::LDPC;
+    }();
+    return fec;
+}
+
+namespace {
+size_t fixedFrameInfoBytesPerCodeword(CodeRate rate, int lifting_z) {
+    return (lifting_z == 27) ? getBytesPerCodeword(rate) : infoBytesPerCodewordZ(rate, lifting_z);
+}
+}  // namespace
+
+Bytes encodeTurboFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count, int lifting_z) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    const size_t total_info_bytes =
+        static_cast<size_t>(cw_count) * fixedFrameInfoBytesPerCodeword(rate, lifting_z);
+    const int air_bits = cw_count * kLdpcBlockCols * lifting_z;
+    return fec::turbo::encode(padFixedFrameInfo(frame_data, total_info_bytes), air_bits);
+}
+
+CodewordStatus decodeTurboFixedFrame(const std::vector<float>& air_soft, CodeRate rate,
+                                     int cw_count, int lifting_z, Bytes* hard_info_bytes) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    const size_t block = static_cast<size_t>(kLdpcBlockCols * lifting_z);
+    const size_t air_bits = static_cast<size_t>(cw_count) * block;
+    const size_t n = static_cast<size_t>(cw_count);
+
+    CodewordStatus status;
+    status.fixed_frame = true;
+    status.decoded.assign(n, false);
+    status.data.assign(n, Bytes{});
+    status.iterations.assign(n, 0);
+    status.unsatisfied_checks.assign(n, 1);
+    status.llr_abs_mean.assign(n, 0.0f);
+    status.llr_abs_min.assign(n, 0.0f);
+    status.llr_abs_p10.assign(n, 0.0f);
+    status.llr_abs_p50.assign(n, 0.0f);
+    status.llr_abs_p90.assign(n, 0.0f);
+    status.used_perturbation.assign(n, 0);
+    status.harq_attempts.assign(n, 1);
+    if (air_soft.size() < air_bits) {
+        return status;
+    }
+    // Per-air-block pre-FEC |LLR| summaries keep the LDPC-era diagnostics meaningful.
+    for (size_t i = 0; i < n; ++i) {
+        const std::vector<float> blk(air_soft.begin() + static_cast<std::ptrdiff_t>(i * block),
+                                     air_soft.begin() + static_cast<std::ptrdiff_t>((i + 1) * block));
+        const auto s = summarizeAbsLlrs(blk);
+        status.llr_abs_mean[i] = s.mean;
+        status.llr_abs_min[i] = s.min;
+        status.llr_abs_p10[i] = s.p10;
+        status.llr_abs_p50[i] = s.p50;
+        status.llr_abs_p90[i] = s.p90;
+    }
+
+    const size_t total_info_bytes = n * fixedFrameInfoBytesPerCodeword(rate, lifting_z);
+    const auto r = fec::turbo::decode(std::span<const float>(air_soft.data(), air_bits),
+                                      total_info_bytes);
+    std::fill(status.iterations.begin(), status.iterations.end(), r.iterations);
+    if (hard_info_bytes) {
+        *hard_info_bytes = r.info_bytes;  // de-whitened hard decisions (valid or not)
+    }
+    if (r.crc_ok) {
+        status.data[0] = r.info_bytes;
+        std::fill(status.decoded.begin(), status.decoded.end(), true);
+        // Defense in depth: CRC-32C passed, the frame's own header/frame CRCs must too.
+        if (!fixedFramePayloadIsValid(status.reassemble())) {
+            LOG_MODEM(WARN, "turbo: CRC-32C ok but frame header/CRC invalid (cw=%d) — rejected", cw_count);
+            std::fill(status.decoded.begin(), status.decoded.end(), false);
+            status.data[0].clear();
+        } else {
+            std::fill(status.unsatisfied_checks.begin(), status.unsatisfied_checks.end(), 0);
+        }
+    }
+    LOG_MODEM(DEBUG, "turbo: cw=%d K=%d N=%zu iters=%d crc=%d stop=%d |llr|=%.2f clip=%.3f",
+              cw_count, fec::turbo::infoBitsForBytes(total_info_bytes), air_bits, r.iterations,
+              r.crc_ok ? 1 : 0, static_cast<int>(r.stop), r.mean_abs_llr, r.clip_fraction);
+    return status;
+}
+
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
                        bool use_channel_interleave, size_t bits_per_symbol,
                        int lifting_z) {
@@ -2088,28 +2204,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
     size_t total_info_bytes = static_cast<size_t>(cw_count) * bytes_per_cw;
 
     // Pad frame data to exactly N CWs worth of info bytes.
-    Bytes padded = frame_data;
-    if (padded.size() < total_info_bytes) {
-        // WHITEN THE PAD with a deterministic PRBS, NOT zeros. A zero pad makes a mostly-
-        // empty frame (e.g. the ~90%-padding FILE_START) LDPC-encode to long runs of the
-        // SAME 16QAM constellation point; a systematic channel-estimate error then hits all
-        // of them the same way -> correlated symbol errors that LDPC (built for RANDOM
-        // errors) cannot fix. Measured 2026-05-30: FILE_START failed with biased LLRs
-        // (llr_avg≈4-6, high unsat) while random-data frames in the SAME group decoded clean
-        // -- purely a payload-entropy effect. Whitening the pad gives every frame diverse
-        // symbols. RX-transparent: the receiver reads payload_len bytes and ignores the pad,
-        // so no de-whitening and no compat bit are needed. (The general fix is a full data
-        // scrambler over all frames; this whitens the pad region only.)
-        const size_t pad_start = padded.size();
-        padded.resize(total_info_bytes);
-        uint32_t r = 0x9E3779B9u;  // fixed nonzero seed -> deterministic xorshift32 PRBS
-        for (size_t i = pad_start; i < total_info_bytes; ++i) {
-            r ^= r << 13; r ^= r >> 17; r ^= r << 5;
-            padded[i] = static_cast<uint8_t>(r);
-        }
-    } else if (padded.size() > total_info_bytes) {
-        padded.resize(total_info_bytes);  // Truncate (caller should have chunked)
-    }
+    Bytes padded = padFixedFrameInfo(frame_data, total_info_bytes);
 
     // Split into fixed-size info chunks and LDPC encode each
     LDPCEncoder& encoder = fixedFrameEncoderForRate(rate, lifting_z);

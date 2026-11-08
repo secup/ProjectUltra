@@ -10,6 +10,7 @@
 #include "demodulator_impl.hpp"
 #include "demodulator_constants.hpp"
 #include "genie_tx_capture.hpp"
+#include "measured_llr_noise.hpp"
 #include "soft_demap.hpp"
 #include "ultra/logging.hpp"
 
@@ -944,6 +945,126 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
             } else {
                 equalized[i] *= inv_beta;
                 carrier_noise_var[i] = std::max(MIN_CARRIER_NOISE_VAR, nv_unbiased);
+            }
+        }
+    }
+
+    // ── MEASURED TOTAL-ERROR LLR NOISE (ULTRA_LLR_MEASURED_NV, default ON) ──
+    // Technique adopted from an open-source HF modem's receiver (LLR noise from
+    // the frame's own decision residual), generalized to a Gaussian scale
+    // mixture — derivation in measured_llr_noise.hpp.
+    //
+    // Why. Every model above sets the LLR sigma^2 from THERMAL noise (+ modelled
+    // estimate error). The true post-equalization error also holds what no model
+    // here captures exactly: channel-estimate interpolation/staleness error,
+    // residual CFO/timing phase, TX/RX EVM. When the model under-reads the
+    // truth, LLRs exceed MAX_LLR and clip to +/-20. The LDPC is NORMALIZED
+    // MIN-SUM — invariant to a uniform LLR scale — so the scale matters ONLY
+    // through that clip, and a fully clipped frame decodes as hard decisions.
+    // Measured 2026-11-08 (measure_ack_fer, ITU Good, 96 frames/cell): 8PSK R3/4
+    // FER 29% @24 dB RISING to 40% @40-60 dB; FER climbing with SNR is that
+    // saturation's signature.
+    //
+    // What.
+    //  1. Received-domain residual r_c = Y - H*xhat (xhat = hard decision of the
+    //     unbiased point Y/H). E|r|^2 = sigma_n^2 + E|x|^2 E|H-H_est|^2 + ...,
+    //     ~white across carriers, so one running per-pass mean s2 maps to every
+    //     carrier by the SAME MMSE form the model uses, with thermal sigma^2
+    //     replaced by the total: floor_c = s2 / (|H_c|^2 + sigma_n^2).
+    //  2. Expected variance v_c = max(model_c, floor_c): both are LOWER bounds
+    //     (thermal-only; decision errors shorten the measured distance), so the
+    //     larger is the tightest available bound on the truth.
+    //  3. Tail weight alpha from the standardized residual u_c = e_c / v_c
+    //     (exactly R = 2 for a correct Gaussian model -> alpha = inf -> no change).
+    //  4. Cell variance = first-order Student-t blend of v_c and the cell's own
+    //     residual; never below the model (it cannot make a carrier more
+    //     confident than the existing model allows).
+    // Modulation-agnostic by construction: hardDecision of the in-scope
+    // constellation, no per-mod constant, no tuned constant. Runs LAST so the DD
+    // tracker gates, EVM meter and ZF stage above all see today's statistics.
+    static const bool kMeasuredNv = [] {
+        if (const char* e = std::getenv("ULTRA_LLR_MEASURED_NV")) {
+            return !(e[0] == '0' && e[1] == '\0');
+        }
+        return true;
+    }();
+    if (kMeasuredNv && equalized.size() == data_carrier_indices.size() &&
+        carrier_noise_var.size() == data_carrier_indices.size()) {
+        const size_t nd = data_carrier_indices.size();
+        measured_cell_r2_.assign(nd, -1.0f);
+        double sym_sum = 0.0;
+        size_t sym_cells = 0;
+        for (size_t i = 0; i < nd; ++i) {
+            const int idx = data_carrier_indices[i];
+            const Complex h = use_adaptive ? lms_weights[idx] : channel_estimate[idx];
+            const float p = std::norm(h);
+            if (!(p > 1.0e-12f) || !std::isfinite(p)) {
+                continue;
+            }
+            const Complex y = freq_domain[idx];
+            const Complex xhat = hardDecision(y / h, mod);
+            if (!(std::norm(xhat) > 1.0e-9f)) {
+                continue;
+            }
+            const float r2 = std::norm(y - h * xhat);
+            if (!std::isfinite(r2)) {
+                continue;
+            }
+            measured_cell_r2_[i] = r2;
+            sym_sum += r2;
+            ++sym_cells;
+        }
+        measured_residual_sum_ += sym_sum;
+        measured_residual_cells_ += static_cast<double>(sym_cells);
+        if (measured_residual_cells_ > 0.0) {
+            const double s2 = measured_residual_sum_ / measured_residual_cells_;
+            // Same domain as the (eq, nv) pair the demapper reads: ZF-unbiased
+            // when that stage ran, MMSE otherwise.
+            auto denomOf = [&](size_t i) {
+                const int idx = data_carrier_indices[i];
+                const Complex h = use_adaptive ? lms_weights[idx] : channel_estimate[idx];
+                const float p = std::norm(h);
+                return static_cast<double>(kZfLlrUnbias ? p : (p + noise_variance));
+            };
+            // Pass A: expected variance per cell, and the standardized moments.
+            for (size_t i = 0; i < nd; ++i) {
+                if (measured_cell_r2_[i] < 0.0f ||
+                    (i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0)) {
+                    continue;
+                }
+                const double denom = denomOf(i);
+                if (!(denom > 1.0e-12) || !std::isfinite(denom)) {
+                    continue;
+                }
+                const double v = std::max(static_cast<double>(carrier_noise_var[i]), s2 / denom);
+                const double u = (static_cast<double>(measured_cell_r2_[i]) / denom) / v;
+                if (std::isfinite(u)) {
+                    measured_u_sum_ += u;
+                    measured_u2_sum_ += u * u;
+                    measured_u_cells_ += 1.0;
+                }
+            }
+            const double alpha =
+                measured_llr::tailAlpha(measured_u_sum_, measured_u2_sum_, measured_u_cells_);
+            // Pass B: write the cell variances.
+            for (size_t i = 0; i < nd; ++i) {
+                if (i < carrier_erasure_flags_.size() && carrier_erasure_flags_[i] != 0) {
+                    continue;  // already a declared erasure (nv = MAX)
+                }
+                const double denom = denomOf(i);
+                if (!(denom > 1.0e-12) || !std::isfinite(denom)) {
+                    continue;
+                }
+                const double model = static_cast<double>(carrier_noise_var[i]);
+                const double v = std::max(model, s2 / denom);
+                double nv = v;
+                if (measured_cell_r2_[i] >= 0.0f) {
+                    nv = measured_llr::cellVariance(
+                        v, static_cast<double>(measured_cell_r2_[i]) / denom, alpha);
+                }
+                nv = std::max(nv, model);
+                carrier_noise_var[i] =
+                    static_cast<float>(std::min(static_cast<double>(MAX_CARRIER_NOISE_VAR), nv));
             }
         }
     }

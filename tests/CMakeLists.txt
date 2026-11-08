@@ -53,6 +53,22 @@ target_include_directories(test_papr_ace PRIVATE
     ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/thirdparty/pocketfft)
 add_test(NAME PaprAce COMMAND test_papr_ace)
 
+# Measured total-error LLR noise model (Student-t tail weight from data).
+add_executable(test_measured_llr_noise test_measured_llr_noise.cpp)
+target_include_directories(test_measured_llr_noise PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME MeasuredLlrNoise COMMAND test_measured_llr_noise)
+
+# Frame-level turbo code (one codeword per OFDM data frame).
+add_executable(test_turbo_codec test_turbo_codec.cpp)
+target_link_libraries(test_turbo_codec PRIVATE ultra_core)
+target_include_directories(test_turbo_codec PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME TurboCodec COMMAND test_turbo_codec)
+
+add_executable(test_turbo_data_frame test_turbo_data_frame.cpp)
+target_link_libraries(test_turbo_data_frame PRIVATE ultra_core)
+target_include_directories(test_turbo_data_frame PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME TurboDataFrame COMMAND test_turbo_data_frame)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)

@@ -271,6 +271,8 @@ public:
     virtual std::vector<float> getCarrierGammaSnapshot() const { return {}; }
     virtual float getLastLTSNoiseVariance() const { return 0.0f; }
     virtual float getLastLTSResidualCFOHz() const { return 0.0f; }
+    // LTS-pair structure statistic of the last processed frame (0 = unavailable).
+    virtual float getLastLTSPairChi() const { return 0.0f; }
 
     // Push measured Wiener correlation-model params (Doppler Hz / delay spread s) from the
     // channel-class verdict (OFDM only; non-OFDM modes ignore). See the design doc.

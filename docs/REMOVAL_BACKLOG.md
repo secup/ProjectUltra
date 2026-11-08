@@ -343,6 +343,28 @@ leave it sitting default-off indefinitely.
 
 ---
 
+### R14. Superseded LLR-noise patches, after the measured-noise model is rig-validated — `QUEUED 2026-11-08`
+
+**Why.** `ULTRA_LLR_MEASURED_NV` (default ON, `measured_llr_noise.hpp` + end of `equalize()`)
+measures the total post-equalization error and floors the LLR σ² at it, with a Student-t tail
+weight learned from the data. Several earlier patches attacked the same over-confidence with
+per-modulation heuristics and are now either redundant or subsumed.
+
+**Scope (delete):**
+- `ULTRA_LLR_NOISE_EMP_FLOOR` (single-symbol hard-decision floor; measured net-negative
+  2026-06-12) and its block in `channel_equalizer_equalize.cpp`.
+
+**Scope (re-evaluate, delete only on a measured null):** `relativeFadeNoiseInflation`
+(QPSK/QAM8), `softGrayZoneNoiseInflation` (QAM16+), `CE_MARGIN_8PSK/QAM16`,
+`CARRIER_ADAPTIVE_K` magnitude-variance inflation in `ofdm_symbol_demap.cpp` — each is a
+per-modulation special case the measured model may make redundant. Remove one at a time with
+an A/B; the measured floor is a max() so removing an inflation can only lower σ² toward the
+measured truth.
+
+**KEEP (anti-footgun):** the eps_H Wiener estimate-error term (`ULTRA_HERR_LLR_K`) and the
+erasure flags — they are per-CARRIER evidence the frame-wide measured model cannot see; the
+DD-EVM accumulators (`evm_dd_accum_` …) — they feed the radio-agnostic EVM SNR meter, not LLRs.
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

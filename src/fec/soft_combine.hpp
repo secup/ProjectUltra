@@ -40,6 +40,11 @@ public:
         // layout, so this is sufficient in practice; revisit if a
         // dynamic-pilot mode is added later.
         uint16_t carrier_count_hash = 0;
+        // Whole-frame (turbo) entries only: the frame's 16-bit header CRC. A turbo frame
+        // is ONE codeword over the whole info block, so ANY header change (flags, length,
+        // tail status) is a different codeword and must never chase-combine. 0 for every
+        // LDPC per-codeword key (unchanged behaviour).
+        uint16_t header_crc = 0;
 
         bool operator==(const Key& other) const {
             return sender_hash == other.sender_hash &&
@@ -52,9 +57,12 @@ public:
                    modulation == other.modulation &&
                    channel_interleave == other.channel_interleave &&
                    physical_burst_end == other.physical_burst_end &&
-                   carrier_count_hash == other.carrier_count_hash;
+                   carrier_count_hash == other.carrier_count_hash &&
+                   header_crc == other.header_crc;
         }
     };
+    // cw_index marking a whole-frame (one turbo codeword) entry; LDPC keys use 0..15.
+    static constexpr uint8_t kWholeFrameCwIndex = 0xFE;
 
     // A decoded CW0 is the authority for the provisional key's protected DATA
     // identity. Compare every header-visible key field that can change protected
@@ -94,6 +102,7 @@ public:
         bool physical_burst_end = false;
         int waveform_mode = 0;          // protocol::WaveformMode underlying byte
         int ofdm_data_carriers = 0;
+        uint16_t header_crc = 0;        // whole-frame (turbo) keys only
     };
 
     struct ProvisionalContext {

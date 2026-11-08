@@ -6,6 +6,7 @@
 #include "ofdm/genie_true_h.hpp"
 #include "ofdm/pilot_pattern.hpp"
 #include "protocol/link_abstraction.hpp"
+#include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -49,14 +50,28 @@ struct Args {
     std::string config_name;
     uint64_t seed = 0;
     int n = 0;
-    // Diversity-sweep parameters (default to the legacy DQPSK R1/4 AWGN behavior
-    // so existing invocations are byte-identical).
-    ultra::Modulation mod = ultra::Modulation::DQPSK;
+    // Diversity-sweep parameters. Default modulation is QPSK (2026-11-08): the old
+    // DQPSK default was silently measured as coherent QPSK (OFDMChirpWaveform falls
+    // back) and DQPSK will become a real differential waveform, so the default must
+    // name what is actually transmitted.
+    ultra::Modulation mod = ultra::Modulation::QPSK;
     ultra::CodeRate rate = ultra::CodeRate::R1_4;
     ultra::ota_channel_core::ChannelType channel =
         ultra::ota_channel_core::ChannelType::AWGN;
     bool carrier_interleave = false;
-    std::string mod_name = "dqpsk";
+    // Production geometry (2026-11-08): frame CW count from recommendCWCount(mod, rate)
+    // and MEDIUM CP, i.e. what the GUI actually transmits. Off by default so historical
+    // invocations stay comparable.
+    bool geometry_production = false;
+    // Channel-noise pre-roll fed to the decoder before EACH burst. A real receiver always
+    // hears band noise before a burst (INV-SIM-AWGN-001); without it the first trial on a
+    // fresh decoder arms the anchor wait mid-burst and misses its chirp (the constant
+    // 1-per-run first-frame failure). 0 = legacy behaviour.
+    int preroll_ms = 0;
+    // Pump the full sample budget every trial so two arms of an A/B stay in lockstep
+    // (identical channel samples per frame => paired comparison).
+    bool fixed_budget = false;
+    std::string mod_name = "qpsk";
     std::string rate_name = "r1_4";
     std::string channel_name = "awgn";
     // Burst-chunk (file-class keystone) parameters.
@@ -255,6 +270,16 @@ Args parseArgs(int argc, char** argv) {
             args.genie_clean_snr_db = std::stof(requireValue("--genie-clean-snr"));
         } else if (key == "--ldpc-z") {
             args.ldpc_z = std::stoi(requireValue("--ldpc-z"));
+        } else if (key == "--geometry") {
+            const std::string g = requireValue("--geometry");
+            if (g != "production" && g != "legacy") {
+                throw std::runtime_error("unknown --geometry: " + g);
+            }
+            args.geometry_production = (g == "production");
+        } else if (key == "--preroll-ms") {
+            args.preroll_ms = std::max(0, std::stoi(requireValue("--preroll-ms")));
+        } else if (key == "--fixed-budget") {
+            args.fixed_budget = std::stoi(requireValue("--fixed-budget")) != 0;
         } else if (key == "--help" || key == "-h") {
             usage(argv[0]);
             std::exit(0);
@@ -266,6 +291,15 @@ Args parseArgs(int argc, char** argv) {
     if (!have_snr || !have_config || !have_seed || !have_n || args.n <= 0) {
         usage(argv[0]);
         throw std::runtime_error("missing required argument");
+    }
+    if (args.geometry_production) {
+        // What the GUI transmits on the connected wideband path: per-rung CW count
+        // (connection_policy::recommendCWCount) and the MEDIUM cyclic prefix installed
+        // by presets::balanced(). Explicit flags given AFTER --geometry do not override
+        // this; give the explicit flags instead of --geometry to measure other shapes.
+        args.frame_cw = ultra::protocol::connection_policy::recommendCWCount(
+            args.mod, args.rate, ultra::protocol::WaveformMode::OFDM_CHIRP);
+        args.cp_name = "medium";
     }
     return args;
 }
@@ -422,12 +456,21 @@ TrialOutcome runFrame(gui::StreamingDecoder& decoder,
                       // channels with the same seed and they only stay in
                       // lockstep if both are advanced by identical sample counts;
                       // the normal early-break would desynchronize their fades.
-                      bool fixed_budget = false) {
+                      bool fixed_budget = false,
+                      size_t preroll_samples = 0) {
     if (reset_decoder) {
         decoder.reset();
     }
     if (expect_full_anchor) {
         decoder.expectFullOFDMAnchorOnce();
+    }
+    // Band noise before the burst, as a real receiver hears it (see Args::preroll_ms).
+    for (size_t fed = 0; fed < preroll_samples;) {
+        const size_t take = std::min(kPumpChunkSamples, preroll_samples - fed);
+        auto rx = channel.receiveForB(take);
+        decoder.feedAudio(rx.data(), rx.size());
+        decoder.processBuffer();
+        fed += take;
     }
 
     TrialOutcome outcome;
@@ -1008,7 +1051,9 @@ Counts measure(const Args& args) {
 
         auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
                                 /*reset_decoder=*/true,
-                                /*expect_full_anchor=*/expect_anchor);
+                                /*expect_full_anchor=*/expect_anchor,
+                                /*fixed_budget=*/args.fixed_budget,
+                                /*preroll_samples=*/static_cast<size_t>(args.preroll_ms) * 48);
         classify(outcome, trial.frame_bytes, counts);
     }
 

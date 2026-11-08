@@ -90,6 +90,11 @@ struct DecodeResult {
     // to emit a causally safe reverse ACK without mistaking an arbitrary/timer
     // callback for a half-duplex turn boundary.
     bool physical_turn_complete = false;
+    // A failed one-codeword (turbo) data frame whose own LTS pair proves a real, aligned
+    // peer frame (LTS-pair chi above its noise law). LDPC frames show the same thing via
+    // codewords_ok > 0; a turbo frame is all-or-nothing, so without this every fade
+    // would read as a sync loss and force a full chirp re-anchor.
+    bool frame_evidence = false;
     float snr_db = 0.0f;            // Consumer-facing routed value; see snr_source.
     SNRSource snr_source = SNRSource::NONE;
     float cfo_hz = 0.0f;            // Measured CFO
@@ -1232,6 +1237,13 @@ private:
     bool burst_transport_rx_ = true;
 
     fec::SoftCombineBuffer* harq_buffer_ = nullptr;  // Non-owning; Connection owns lifecycle.
+    // Turbo whole-frame HARQ same-reception guard: the timing-retry path re-demodulates
+    // and re-decodes the SAME reception within milliseconds; combining it again would
+    // double-count one noise realization. A genuine ARQ retransmission of the same seq
+    // arrives a full turnaround cycle later (>= ~8 s at OFDM rates), so a key seen within
+    // kTurboHarqSameReceptionMs is treated as the same reception.
+    fec::SoftCombineBuffer::Key turbo_harq_last_key_{};
+    std::chrono::steady_clock::time_point turbo_harq_last_time_{};
     HarqProvisionalContextCallback harq_context_callback_;
 
     // Decoded frame queue

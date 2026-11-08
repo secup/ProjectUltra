@@ -374,6 +374,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // If H[sym0] and H[sym1] differ by a consistent phase across carriers,
     // that phase = residual_CFO × T_symbol.
     last_lts_residual_cfo_hz = 0.0f;
+    last_lts_pair_chi = 0.0f;
     if (valid_symbols >= 2) {
         Complex phase_diff_sum(0, 0);
         int cfo_valid = 0;
@@ -391,6 +392,9 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             }
         }
 
+        if (cfo_valid > 0) {
+            last_lts_pair_chi = std::norm(phase_diff_sum) / static_cast<float>(cfo_valid);
+        }
         if (cfo_valid > 10) {
             float avg_phase = std::atan2(phase_diff_sum.imag(), phase_diff_sum.real());
             float symbol_duration = static_cast<float>(symbol_samples) / config.sample_rate;

@@ -144,6 +144,7 @@ SoftCombineBuffer::Key SoftCombineBuffer::makeKey(const HarqKeyInputs& in) {
     uint32_t carrier_h = static_cast<uint32_t>(in.ofdm_data_carriers) << 8;
     carrier_h ^= static_cast<uint32_t>(in.waveform_mode);
     k.carrier_count_hash = static_cast<uint16_t>((carrier_h >> 8) ^ carrier_h);
+    k.header_crc = in.header_crc;
     return k;
 }
 
@@ -159,6 +160,7 @@ size_t SoftCombineBuffer::KeyHash::operator()(const Key& key) const {
     h ^= static_cast<size_t>(key.channel_interleave) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.physical_burst_end) + 0x9e3779b9u + (h << 6) + (h >> 2);
     h ^= static_cast<size_t>(key.carrier_count_hash) + 0x9e3779b9u + (h << 6) + (h >> 2);
+    h ^= static_cast<size_t>(key.header_crc) + 0x9e3779b9u + (h << 6) + (h >> 2);
     return h;
 }
 

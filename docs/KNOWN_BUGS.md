@@ -8,6 +8,43 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-COHERENT-MODERATE-DOPPLER-FLOOR (open, 2026-11-08) — P1, THROUGHPUT ON MODERATE
+
+**Symptom.** Coherent QPSK on ITU Moderate has a frame-error FLOOR that RISES with SNR.
+`measure_ack_fer`, production geometry (`--geometry production --preroll-ms 300`), 6 seeds ×
+24 frames: QPSK R1/2 (cw8) 18.1 % @20 dB, 21.5 % @26 dB — a rate-1/2 code at 26 dB.
+
+**Isolated to time variation.** Same Moderate delay profile (1 ms), Doppler swept with
+`ULTRA_CHANNEL_DOPPLER_HZ` (QPSK R1/2, legacy cw4 geometry): 0 Hz 4.2 % (= the then-present
+harness first-frame artifact), 0.1 Hz 2.1 %, 0.25 Hz 14.6 %, 0.5 Hz (Moderate) 22.9 % @26 dB.
+The coherent pilot tracker cannot follow 0.25-0.5 Hz fading inside a ~1.24 s frame.
+
+**What it is NOT.** Not LLR calibration (the measured-noise model left QPSK bit-identical —
+the failing cells land ON wrong constellation points, invisible to any noise model). Not the
+Wiener prior (default is already 0.5 Hz / 1 ms, `channel_equalizer_pilot.cpp:37-51`; the
+"Moderate prior" A/B set exactly the default). `ULTRA_COHERENT_DD_OFF`, `ULTRA_PILOT_DFT_INTERP`
+and disabling the QPSK DD phase path were bit-identical (paths not active for QPSK).
+
+**Planned fix.** Stage 3 of the 2026-11-08 open-modem technique port: time-differential DQPSK/D8PSK on all
+carriers (needs only ~24 ms coherence: 0.5 Hz rotates 0.075 rad per symbol). Root cause of the
+coherent tracker's failure remains open (worth one more look before Stage 3 lands).
+
+### BUG-HARNESS-003: measure_ack_fer first-frame failure + non-production geometry (FIXED 2026-11-08, opt-in)
+
+- **First-frame failure (constant 1/run).** On a fresh decoder the harness fed the burst from
+  sample 0; the connected-OFDM anchor wait arms inside the first 100 ms chunk and moves the
+  search floor to the arming point (`corr_pos=4800`), so the up-chirp at sample 0 is never
+  searched and the frame decodes from a mistimed data sync. A real receiver always hears band
+  noise before a burst (INV-SIM-AWGN-001). FIX: `--preroll-ms N` feeds N ms of channel noise
+  before every burst (300 used). Default 0 keeps historical invocations comparable.
+- **Geometry.** Every historical `measure_ack_fer` FER (incl. `FADING_ANCHOR_MEASUREMENT`)
+  used 4-CW frames and LONG CP; production is cw8 (QPSK) / cw12 (8PSK) / cw16 (16QAM) and
+  MEDIUM CP. `--geometry production` sets both from `recommendCWCount`. At production geometry
+  with the pre-roll, 8PSK R2/3 Good @20 measures 5.6-6.9 % FER (the old table said 16 %).
+- **Paired A/B.** `--fixed-budget 1` pumps the full sample budget every trial so two arms see
+  identical channel samples. Default `--mod` is now `qpsk` (the old `dqpsk` default silently
+  measured coherent QPSK).
+
 ### BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE (open, 2026-08-06) — P2, RELIABILITY AT THE FLOOR
 
 **Symptom.** The AWGN@8 MC-DPSK message row (`m7` in `tools/message_gui_matrix.sh`) fails

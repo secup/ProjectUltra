@@ -147,6 +147,10 @@ struct OFDMDemodulator::Impl {
     float last_lts_signal_power = 1.0f;
     float last_lts_channel_magnitude = 1.0f;
     float last_lts_residual_cfo_hz = 0.0f;
+    // LTS-pair structure statistic chi = |sum_k unit(H1_k conj(H0_k))|^2 / N_k. ~Exp(1) on
+    // noise or a misaligned window; large on ANY aligned real frame, faded or not (unit
+    // normalization ignores amplitude). FEC-independent "a peer frame is here" evidence.
+    float last_lts_pair_chi = 0.0f;
 
     // Internal per-symbol fading index from raw pilot magnitude variance.
     // This scale feeds demapper/two-pass decisions; it is intentionally
@@ -409,6 +413,25 @@ struct OFDMDemodulator::Impl {
 
     // Per-carrier noise variance after equalization
     std::vector<float> carrier_noise_var;
+
+    // Measured total-error LLR noise model (ULTRA_LLR_MEASURED_NV, equalize(),
+    // math in measured_llr_noise.hpp). Running per-pass sums, reset with the
+    // other per-frame equalizer state (ofdm_stream_processor.cpp):
+    //   residual: received-domain decision residual |Y_k - H_k * xhat_k|^2
+    //   u       : standardized residual (cell residual / its expected variance)
+    double measured_residual_sum_ = 0.0;
+    double measured_residual_cells_ = 0.0;
+    double measured_u_sum_ = 0.0;
+    double measured_u2_sum_ = 0.0;
+    double measured_u_cells_ = 0.0;
+    std::vector<float> measured_cell_r2_;  // this symbol's residual per data carrier (-1 = n/a)
+    void resetMeasuredResidual() {
+        measured_residual_sum_ = 0.0;
+        measured_residual_cells_ = 0.0;
+        measured_u_sum_ = 0.0;
+        measured_u2_sum_ = 0.0;
+        measured_u_cells_ = 0.0;
+    }
 
     // RX-local hard-erasure decisions for the current data symbol.
     // Set by equalize() from gamma_k = |H_k|^2 / sigma^2, consumed by

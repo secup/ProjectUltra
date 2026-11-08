@@ -1340,9 +1340,13 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
     // and announced in BURST_HEADER payload[5] so the RX matches.
     const int ldpc_z = static_cast<int>(ldpc_lifting_z_);
 
-    Bytes encoded = v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
-                                         use_channel_interleave_, bps,
-                                         ldpc_z);
+    // Stage 1 (open-modem technique port): ONE turbo codeword over the whole frame when the
+    // lockstep ULTRA_DATA_FEC=turbo knob is set; same air geometry and capacity.
+    Bytes encoded = (v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO)
+        ? v2::encodeTurboFixedFrame(tx_data, code_rate_, frame_cw_count, ldpc_z)
+        : v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
+                               use_channel_interleave_, bps,
+                               ldpc_z);
 
     LOG_MODEM(DEBUG, "[%s] OFDM data: %zu bytes -> %d CWs (%zu coded, frame_interleave=%s, channel_interleave=%s, ldpc_z=%d)",
               log_prefix_.c_str(), tx_data.size(), frame_cw_count, encoded.size(),

@@ -1219,6 +1219,38 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol = 106);
 
 /**
+ * OFDM DATA-frame FEC selection (2026-11-08, Stage 1 of the open-modem technique port).
+ *
+ * LDPC: today's N independent 648-bit (or 1944-bit) codewords per frame.
+ * TURBO: ONE turbo codeword over the whole frame (fec/turbo_codec.hpp). The air
+ *        geometry is identical (cw x 648 coded bits, same symbols/frame, same payload
+ *        capacity); only the code changes. Applies to OFDM data frames ONLY — control
+ *        frames, BURST_HEADER, ACK, DATA_REPAIR and the MC-DPSK fixed CONNECT stay LDPC.
+ *
+ * Lockstep knob ULTRA_DATA_FEC=ldpc|turbo (read once; BOTH stations must agree —
+ * there is no negotiation by design decision).
+ */
+enum class DataFrameFec : uint8_t { LDPC = 0, TURBO = 1 };
+DataFrameFec ofdmDataFrameFec();
+
+/** Pads frame_data to total_info_bytes with the deterministic fixed-frame PRBS. */
+Bytes padFixedFrameInfo(const Bytes& frame_data, size_t total_info_bytes);
+
+/** Turbo encode of an OFDM data frame: returns cw x (24*Z) coded bits, air order. */
+Bytes encodeTurboFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count, int lifting_z = 27);
+
+/**
+ * Turbo decode of an OFDM data frame. CodewordStatus contract (vectors have length
+ * cw so every LDPC-era consumer keeps its indexing): success => decoded all true,
+ * data[0] = the full de-whitened info bytes, data[1..] empty; failure => all false.
+ * iterations[] carries the turbo iteration count, unsatisfied_checks[] = 0 on
+ * success / 1 on failure.
+ */
+CodewordStatus decodeTurboFixedFrame(const std::vector<float>& air_soft, CodeRate rate,
+                                     int cw_count, int lifting_z = 27,
+                                     Bytes* hard_info_bytes = nullptr);
+
+/**
  * Encode without channel interleaving for an explicit CW count.
  */
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count);

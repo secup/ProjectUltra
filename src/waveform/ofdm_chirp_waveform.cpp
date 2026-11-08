@@ -1227,6 +1227,10 @@ float OFDMChirpWaveform::getLastLTSNoiseVariance() const {
     return 0.0f;
 }
 
+float OFDMChirpWaveform::getLastLTSPairChi() const {
+    return demodulator_ ? demodulator_->getLastLTSPairChi() : 0.0f;
+}
+
 float OFDMChirpWaveform::getLastLTSResidualCFOHz() const {
     if (demodulator_) {
         return demodulator_->getLastLTSResidualCFOHz();

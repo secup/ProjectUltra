@@ -10,6 +10,90 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-08 — FEAT: measured-noise LLRs (default ON) + one-codeword-per-frame turbo FEC (knob, default LDPC)
+
+Stages 0-1 of porting the high-speed techniques of an open-source (MIT) HF modem that runs
+our exact OFDM geometry. Techniques re-derived for this stack; no code copied.
+
+### What was broken
+
+**1. LLRs saturated at high SNR (all coherent rungs, worst on 8PSK/16QAM).** The LLR noise
+variance came from THERMAL noise (+ modelled estimate error). The real post-equalization error
+also holds channel-estimate interpolation/staleness error, residual CFO/timing phase and EVM.
+The decoder is NORMALIZED MIN-SUM, invariant to a uniform LLR scale EXCEPT through the MAX_LLR
+= 20 clip — so when the model under-reads the error, every LLR clips and the frame decodes as
+hard decisions. Signature: FER RISING with SNR (8PSK R3/4 on ITU Good, legacy geometry: 29 %
+@24 dB → 40 % @40-60 dB).
+
+**2. The FER harness misreported every historical number.** (a) The first frame of every
+`measure_ack_fer` run failed (constant 1/run): on a fresh decoder the anchor wait arms inside the
+first 100 ms chunk, moving the search floor past the chirp at sample 0. (b) All historical FER
+used 4-CW frames and LONG CP; production is cw8/12/16 with MEDIUM CP. (c) `--mod dqpsk|d8psk`
+silently measured coherent QPSK. Logged as BUG-HARNESS-003.
+
+### What changed
+
+- **`src/ofdm/measured_llr_noise.hpp` + end of `equalize()` (`channel_equalizer_equalize.cpp`):**
+  received-domain decision residual r = Y − H·x̂ → running per-pass mean s2 → floor
+  s2/(|H|²+σ²) (same MMSE form as the model with thermal σ² replaced by the total) → expected
+  variance v = max(model, floor) (both are lower bounds). A Gaussian-scale-mixture (Student-t)
+  per-cell blend ((α−1)v + e_c)/(α+1), with tail weight α = 2(R−1)/(R−2) from the STANDARDIZED
+  residual moment ratio R, acted on only when R − 2 exceeds 3 standard errors (2/√n under the
+  Gaussian null, delta method). Never below the model. Runs LAST, so DD-tracker gates, the EVM
+  meter and the ZF stage are untouched. Knob `ULTRA_LLR_MEASURED_NV` (default ON, `=0` off).
+  Per-frame resets at all four frame-start sites (`ofdm_stream_processor.cpp`).
+- **Turbo FEC (`src/fec/turbo_codec.{hpp,cpp}`, `src/fec/crc32c.hpp`):** ONE codeword per OFDM
+  data frame. PCCC of two 8-state RSC (13/15 octal), each terminated; deterministic S-random
+  interleaver (integer-only SplitMix64 — std::shuffle differs between libc++ and libstdc++);
+  exact rate matching to the frame's air bits (Bresenham parity selection, systematic repetition
+  at low rate) folded with a frame-wide random channel permutation; info = whitened payload +
+  CRC-32C (drives early stop); scaled max-log-MAP, 16 iterations, extrinsic 0.75. Table digests
+  pinned in `TurboCodec`. Frame wrapper `encodeTurboFixedFrame`/`decodeTurboFixedFrame`
+  (`frame_v2.cpp`) keeps the air geometry (cw × 648 bits), payload capacity and the
+  `CodewordStatus` vector shape. TX dispatch at the fixed-frame site in `streaming_encoder.cpp`;
+  RX dispatch in the `decodeFixed` lambda (`streaming_ofdm_decode.cpp`). OFDM data frames only;
+  control/descriptor/ACK/DATA_REPAIR/MC-DPSK CONNECT stay LDPC. Lockstep knob
+  `ULTRA_DATA_FEC=ldpc|turbo` (default `ldpc`).
+- **Turbo HARQ:** whole-frame chase combining, fresh decode first, keyed by the decoded header or
+  a failed decode's HCRC-verified header; `SoftCombineBuffer::Key::header_crc` (0 for LDPC keys,
+  so LDPC is unchanged) separates any header change; same-reception guard (a key retained < 3 s
+  ago is the timing-retry of the same reception — never self-combined).
+- **FEC-independent frame evidence:** LTS-pair χ = |Σ unit(H1·H0*)|²/N (~Exp(1) on noise / a
+  misaligned window) via `getLastLTSPairChi()`; a failed turbo frame with χ ≥ ln(10³) sets
+  `DecodeResult::frame_evidence`, which exempts it from the 0/N-codewords forced chirp re-anchor
+  (a turbo frame is all-or-nothing, so without this every fade would read as a sync loss). The
+  constituent-extrinsic agreement statistic was measured first and REJECTED (failed real frames
+  0.48-0.73 overlap noise 0.47-0.54).
+- **Harness (`tools/measure_ack_fer.cpp`):** `--geometry production`, `--preroll-ms N`,
+  `--fixed-budget 1`; default `--mod qpsk`. Shared `padFixedFrameInfo()` (LDPC byte-identical).
+- **Docs:** KNOWN_BUGS (BUG-COHERENT-MODERATE-DOPPLER-FLOOR, BUG-HARNESS-003); MODEM_INFRASTRUCTURE_MAP
+  (new rows + four stale rows corrected against the code: anchor-skip K default 1, descriptor mode
+  switch ON, SoftCombineBuffer ON in production, production CP MEDIUM); REMOVAL_BACKLOG R14.
+
+### Test verification
+
+- New CTests `MeasuredLlrNoise`, `TurboCodec`, `TurboDataFrame` (codec invariants, pinned digests,
+  round trips at every production geometry, AWGN bounds, 20 % erasure, CRC traps, chase combining
+  12/12 both-failed pairs recovered).
+- LLR model, `measure_ack_fer --geometry production --preroll-ms 300`, 6 seeds × 24 frames (144 per
+  cell), off → on: 8PSK R3/4 Good @20 20.8 → 16.0 %, @30 4.2 → 0.7 %; 8PSK R2/3 Moderate @20
+  48.6 → 42.4 %, @26 36.8 → 32.6 %; 16QAM R2/3 Good @24 7.6 → 5.6 %; QPSK, AWGN low-SNR and ACK
+  frames neutral — no cell worse.
+- Turbo vs LDPC (8-iteration build, paired channel samples, 96 frames/cell), SNR at FER 10 %:
+  AWGN QPSK R1/2 +0.88 dB, R2/3 +0.45, 8PSK R2/3 +0.69, 16QAM R2/3 +0.55, QPSK R1/4 > 1 dB;
+  Good QPSK R1/2 +1.02, R2/3 +0.54, 8PSK R2/3 +1.56; R3/4 better through the waterfall and within
+  noise in the tail. Moderate: 8PSK R2/3 43.8 → 34.4 % @20; the QPSK Doppler floor is untouched
+  (not an FEC problem). 16 iterations / scale 0.75 measured further 3-4× FER reduction at the
+  waterfall (codec-level BPSK).
+- GUI gate (`tools/gui_qso_scenario.sh`, two real `ultra_gui -sim` over OTASim, 21 KB), LLR model
+  off / on, all PASS CRC-clean: Good@20 adaptive (lands on QPSK R2/3) s42 1620/1620, s43
+  1480/1480, s44 1700/1700, s45 1710/1430 bps; Moderate@20 s42 1510/1510, s43 1380/1350;
+  forced 8PSK R2/3 Good@24 s42 2350/2540, s43 2370/2270 (mean +1.9 %, n=2 — inconclusive).
+  The gate is deterministic per seed: bit-identical pairs mean the model changes no QPSK
+  decision at these SNRs; its value is on the higher rungs Stage 4 re-anchoring will open.
+- Targeted CTest subset (35 suites: OFDM, FrameV2, SoftCombine, interleavers, LDPC, streaming
+  decode/encode policies, connection, ARQ, SNR/EVM calibration, turbo): 35/35 pass.
+
 ## 2026-08-05 (night) — FIX: stale-SNR sentinel drove live rate decisions; build provenance was stale
 
 ### What was broken

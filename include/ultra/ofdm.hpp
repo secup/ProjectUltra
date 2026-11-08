@@ -220,6 +220,8 @@ public:
     // coherence disc's noise-floor de-bias (read-only diagnostic for now).
     float getLastLTSNoiseVariance() const;
     float getLastLTSResidualCFOHz() const;
+    // LTS-pair structure statistic of the last frame (see demodulator_impl.hpp).
+    float getLastLTSPairChi() const;
 
     // Override the Wiener correlation-model parameters (Doppler Hz / delay spread s) from a
     // measured channel-class verdict (ADAPTIVITY_AUDIT Case #2). Until set, the env-aware

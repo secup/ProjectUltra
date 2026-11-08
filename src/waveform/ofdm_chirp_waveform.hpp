@@ -133,6 +133,7 @@ public:
     std::vector<float> getCarrierGammaSnapshot() const override;
     float getLastLTSNoiseVariance() const override;
     float getLastLTSResidualCFOHz() const override;
+    float getLastLTSPairChi() const override;
     void setWienerChannelParams(float doppler_hz, float delay_spread_s) override;
     std::string getFailureAttributionDiagnosticsText() const override;
     std::vector<std::complex<float>> getConstellationSymbols() const override;

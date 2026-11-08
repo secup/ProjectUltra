@@ -433,6 +433,7 @@ add_library(ultra_core STATIC
     src/fec/burst_interleaver.cpp
     src/fec/carrier_ldpc_interleaver.cpp
     src/fec/soft_combine.cpp
+    src/fec/turbo_codec.cpp
     src/dsp/fft.cpp
     src/dsp/filters.cpp
     src/dsp/resampler.cpp

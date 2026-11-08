@@ -3173,7 +3173,8 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (!is_non_data_frame) {
             sync_controller_.expect_full_ofdm_anchor_ = false;
         }
-    } else if (!result.success && result.codewords_ok == 0 && connected_ && is_ofdm) {
+    } else if (!result.success && result.codewords_ok == 0 && !result.frame_evidence &&
+               connected_ && is_ofdm) {
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         if (sync_from_warm_timed_window_) {
             noteFrameArrivalSyncMissLocked();
@@ -3420,7 +3421,8 @@ void StreamingDecoder::decodeCurrentFrame() {
             next_search_abs += min_block;
 
             // If decode failed completely, stop the burst
-            if (!next_result.success && next_result.codewords_ok == 0) break;
+            if (!next_result.success && next_result.codewords_ok == 0 &&
+                !next_result.frame_evidence) break;
         }
     }
 
@@ -4472,7 +4474,88 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                            physical_burst_end);
         };
         const auto _profile_fs_start_ = std::chrono::steady_clock::now();
+        const bool turbo_data_fec = v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
         auto decodeFixed = [&](int cw_count) {
+            if (turbo_data_fec) {
+                // One turbo codeword over the whole frame (Stage 1). No CW0 peek / HARQ
+                // key: there is no independently decodable codeword 0 to read a header
+                // from. Same air bits, same status vector shape (see frame_v2.hpp).
+                built_key_provisional = false;
+                harq_key_intentionally_ineligible = true;
+                provisional_key_used.reset();
+                Bytes hard_info;
+                auto st = v2::decodeTurboFixedFrame(soft_bits, rate, cw_count,
+                                                    active_lifting_z, &hard_info);
+                // Whole-frame chase combining. FRESH decode first (above), so a stored
+                // history can never block a decode the fresh reception manages alone.
+                const size_t air_bits =
+                    static_cast<size_t>(v2::sanitizeFixedFrameCodewords(cw_count)) * 24u *
+                    static_cast<size_t>(active_lifting_z);
+                if (!harq_buffer_ || !harq_buffer_->enabled() || soft_bits.size() < air_bits) {
+                    return st;
+                }
+                // Key from the decoded header on success, or from the failed decode's hard
+                // decisions when their header passes its own HCRC (magic + 16-bit CRC).
+                const Bytes& hsrc = st.allSuccess() ? st.data[0] : hard_info;
+                if (hsrc.size() < v2::DataFrame::HEADER_SIZE) {
+                    return st;
+                }
+                const auto hdr = v2::parseHeader(hsrc);
+                if (!hdr.valid || hdr.is_control ||
+                    hdr.total_cw != v2::sanitizeFixedFrameCodewords(cw_count) ||
+                    v2::isOFDMBurstPadHeader(hdr)) {
+                    return st;
+                }
+                fec::SoftCombineBuffer::HarqKeyInputs ki;
+                ki.sender_hash = hdr.src_hash;
+                ki.dst_hash = hdr.dst_hash;
+                ki.seq = hdr.seq;
+                ki.rate = rate;
+                ki.cw_count = static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(cw_count));
+                ki.cw_index = fec::SoftCombineBuffer::kWholeFrameCwIndex;
+                ki.lifting_z = active_lifting_z;
+                ki.modulation = current_modulation_;
+                ki.channel_interleave = false;
+                ki.physical_burst_end = (hsrc[3] & v2::Flags::PHYSICAL_BURST_END) != 0;
+                ki.waveform_mode = static_cast<int>(mode_);
+                ki.ofdm_data_carriers = ofdm_data_carriers_;
+                ki.header_crc = static_cast<uint16_t>((static_cast<uint16_t>(hsrc[15]) << 8) | hsrc[16]);
+                const auto key = fec::SoftCombineBuffer::makeKey(ki);
+                if (st.allSuccess()) {
+                    harq_buffer_->drop(key);
+                    return st;
+                }
+                constexpr auto kTurboHarqSameReceptionMs = std::chrono::milliseconds(3000);
+                const auto now = std::chrono::steady_clock::now();
+                if (key == turbo_harq_last_key_ &&
+                    now - turbo_harq_last_time_ < kTurboHarqSameReceptionMs) {
+                    return st;  // same reception (timing retry) — never self-combine
+                }
+                turbo_harq_last_key_ = key;
+                turbo_harq_last_time_ = now;
+                std::vector<float> fresh(soft_bits.begin(),
+                                         soft_bits.begin() + static_cast<std::ptrdiff_t>(air_bits));
+                std::vector<float> combined;
+                const int attempts = harq_buffer_->combine(key, fresh, combined);
+                if (attempts > 1) {
+                    auto st2 = v2::decodeTurboFixedFrame(combined, rate, cw_count, active_lifting_z);
+                    if (st2.allSuccess()) {
+                        const auto h2 = v2::parseHeader(st2.data[0]);
+                        if (h2.valid && h2.seq == hdr.seq && h2.src_hash == hdr.src_hash &&
+                            h2.dst_hash == hdr.dst_hash) {
+                            harq_buffer_->drop(key);
+                            std::fill(st2.harq_attempts.begin(), st2.harq_attempts.end(), attempts);
+                            LOG_MODEM(INFO, "[%s] Turbo HARQ: seq=%u recovered from %d combined receptions",
+                                      log_prefix_.c_str(), static_cast<unsigned>(hdr.seq), attempts);
+                            return st2;
+                        }
+                    }
+                    harq_buffer_->retain(key, std::move(combined));
+                } else {
+                    harq_buffer_->retain(key, std::move(fresh));
+                }
+                return st;
+            }
             fec::SoftCombineBuffer::Key harq_key;
             fec::SoftCombineBuffer::Key* harq_key_ptr = nullptr;
             fec::SoftCombineBuffer* harq_buffer = nullptr;
@@ -4583,6 +4666,12 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             }
         }
         copyCodewordDiagnostics(result, cw_status);
+        if (turbo_data_fec && !cw_status.allSuccess() && waveform_) {
+            // chi ~ Exp(1) under H0 (no aligned frame): P(chi >= T) = e^-T. T = ln(1e3)
+            // => 1e-3 chance of calling noise a real frame (a probability constant).
+            constexpr float kFrameEvidenceChi = 6.9077553f;  // ln(1000)
+            result.frame_evidence = waveform_->getLastLTSPairChi() >= kFrameEvidenceChi;
+        }
 
         // Record duration into failed_4cw_after_peek if this attempt failed.
         // Note: this duration also counts inside decode_fixed_frame_total
@@ -4636,9 +4725,11 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 if (data_aided_chest_enabled_ && burst_logical_index_ >= 0 &&
                     !cw_status.usedAnyPerturbation()) {
                     const int ldpc_z_da = activeBurstLiftingZ();
-                    result.data_aided_air_bytes = v2::encodeFixedFrame(
-                        result.frame_data, rate, decode_cw_count,
-                        apply_channel_deinterleave, bps, ldpc_z_da);
+                    result.data_aided_air_bytes = turbo_data_fec
+                        ? v2::encodeTurboFixedFrame(result.frame_data, rate,
+                                                    decode_cw_count, ldpc_z_da)
+                        : v2::encodeFixedFrame(result.frame_data, rate, decode_cw_count,
+                                               apply_channel_deinterleave, bps, ldpc_z_da);
                 }
             }
 

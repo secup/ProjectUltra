@@ -398,6 +398,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
                 impl_->carrier_erasure_flags_.clear();
                 impl_->carrier_eq_mag_ema_.clear();
+                impl_->resetMeasuredResidual();
                 impl_->carrier_eq_mag_var_.clear();
                 impl_->dd_qam16_channel_observations_.clear();
                 impl_->dd_qam16_measurement_var_.clear();
@@ -486,6 +487,7 @@ bool OFDMDemodulator::process(SampleSpan samples) {
 
                     impl_->carrier_erasure_flags_.clear();
                     impl_->carrier_eq_mag_ema_.clear();
+                    impl_->resetMeasuredResidual();
                     impl_->carrier_eq_mag_var_.clear();
                     impl_->dd_qam16_channel_observations_.clear();
                     impl_->dd_qam16_measurement_var_.clear();
@@ -773,6 +775,10 @@ float OFDMDemodulator::getLastLTSNoiseVariance() const {
     return impl_->noise_variance;
 }
 
+float OFDMDemodulator::getLastLTSPairChi() const {
+    return impl_->last_lts_pair_chi;
+}
+
 float OFDMDemodulator::getLastLTSResidualCFOHz() const {
     return impl_->last_lts_residual_cfo_hz;
 }
@@ -978,6 +984,7 @@ bool OFDMDemodulator::processPresynced(SampleSpan samples, int training_symbols)
 
     impl_->carrier_erasure_flags_.clear();
     impl_->carrier_eq_mag_ema_.clear();
+    impl_->resetMeasuredResidual();
     impl_->carrier_eq_mag_var_.clear();
     impl_->dd_qam16_channel_observations_.clear();
     impl_->dd_qam16_measurement_var_.clear();
@@ -1255,6 +1262,7 @@ void OFDMDemodulator::reset() {
     impl_->last_lts_signal_power = 1.0f;
     impl_->last_lts_channel_magnitude = 1.0f;
     impl_->last_lts_residual_cfo_hz = 0.0f;
+    impl_->last_lts_pair_chi = 0.0f;
 
     impl_->freq_offset_hz = 0.0f;
     impl_->freq_offset_filtered = 0.0f;
@@ -1269,6 +1277,7 @@ void OFDMDemodulator::reset() {
     impl_->mixer.reset();
     impl_->carrier_erasure_flags_.clear();
     impl_->carrier_eq_mag_ema_.clear();
+    impl_->resetMeasuredResidual();
     impl_->carrier_eq_mag_var_.clear();
     impl_->dd_qam16_channel_observations_.clear();
     impl_->dd_qam16_measurement_var_.clear();
