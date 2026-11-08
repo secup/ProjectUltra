@@ -38,14 +38,22 @@ Samples ToneBurstEncoder::encodeDibits(const std::vector<uint8_t>& dibits,
         const uint8_t tone_idx = (dibit < kNumTones) ? dibit : 0;
         const float freq = kToneFreqHz[tone_idx];
         const float phase_inc = kTwoPi * freq * dt;
+        const float phase_inc_b = kTwoPi * kToneFreqHzDiversity[tone_idx] * dt;
 
         for (uint32_t n = 0; n < samples_per_symbol; ++n) {
-            out.push_back(kToneAmplitude * std::sin(phase_));
+            if (diversity_) {
+                // Two phase-continuous tones at half amplitude: same peak as one tone.
+                out.push_back(0.5f * kToneAmplitude * (std::sin(phase_) + std::sin(phase_b_)));
+                phase_b_ += phase_inc_b;
+            } else {
+                out.push_back(kToneAmplitude * std::sin(phase_));
+            }
             phase_ += phase_inc;
         }
         // Keep the phase accumulator small to preserve float precision over
         // long bursts. Modulo into [0, 2*pi).
         phase_ = wrapPhase(phase_);
+        phase_b_ = wrapPhase(phase_b_);
     }
     return out;
 }

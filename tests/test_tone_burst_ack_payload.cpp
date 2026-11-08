@@ -6,7 +6,9 @@
 
 #include "env_compat.hpp"  // setenv/unsetenv on MSVC (knob-pinning below)
 
+#include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
@@ -61,6 +63,57 @@ void test_constants_sanity() {
     for (float f : kToneFreqHz) {
         const float quotient = f / 25.0f;
         EXPECT_EQ(static_cast<int>(quotient * 100), static_cast<int>(quotient) * 100);
+    }
+
+    // Frequency-diversity subband (BUG-TONE-ACK-RETURN-LOSS-ON-FADING): same tone index,
+    // kDiversityOffsetHz below, on the 25 Hz grid, inside a 300-2700 Hz SSB passband.
+    constexpr float kSsbLowHz = 300.0f, kSsbHighHz = 2700.0f;
+    for (uint32_t k = 0; k < kNumTones; ++k) {
+        EXPECT(std::fabs(kToneFreqHzDiversity[k] -
+                         (kToneFreqHz[k] - static_cast<float>(kDiversityOffsetHz))) < 1e-3f);
+        const float q = kToneFreqHzDiversity[k] / 25.0f;
+        EXPECT(std::fabs(q - std::round(q)) < 1e-4f);
+        EXPECT(kToneFreqHzDiversity[k] >= kSsbLowHz);
+    }
+    // Disjoint from subband A by more than the shortest symbol's Goertzel main lobe (2 / T).
+    const float main_lobe_hz = 2.0f * 1000.0f / static_cast<float>(kSymbolMsHighSNR);
+    EXPECT(kToneFreqHz[0] - kToneFreqHzDiversity[kNumTones - 1] > main_lobe_hz);
+    // Third-order intermod of each two-tone symbol (2b - a, 2a - b) lands OUTSIDE the passband:
+    // a real PA's IMD3 cannot fall on the ACK's own tones or anywhere a peer listens.
+    for (uint32_t k = 0; k < kNumTones; ++k) {
+        const float a = kToneFreqHz[k], b = kToneFreqHzDiversity[k];
+        EXPECT(2.0f * b - a < kSsbLowHz);
+        EXPECT(2.0f * a - b > kSsbHighHz);
+    }
+    // The offset is DERIVED: the minimax over the ITU-R F.1487 delays (Good 0.5, Moderate 1,
+    // Poor 2 ms) of the two-path branch power correlation cos^2(pi df tau), over every 25 Hz
+    // offset that keeps subband B in the passband and clear of A. The ITU delays are all
+    // multiples of 0.5 ms, so the objective is symmetric about df = 1000 Hz and 675 / 1325 Hz
+    // tie exactly; the tie breaks toward the LARGER offset, which decorrelates faster at delay
+    // spreads below 0.5 ms (tau 0.25 ms: 0.25 vs 0.75) and is the one whose IMD3 is out of band.
+    {
+        constexpr double kPi = 3.14159265358979323846;
+        const double taus[] = {0.5e-3, 1.0e-3, 2.0e-3};
+        auto worst = [&](double df) {
+            double w = 0.0;
+            for (double t : taus) w = std::max(w, std::pow(std::cos(kPi * df * t), 2.0));
+            return w;
+        };
+        uint32_t best = 0;
+        double best_w = 2.0;
+        for (uint32_t df = 25; df <= 2400; df += 25) {
+            const bool in_passband = (kToneFreqHz[0] - static_cast<float>(df)) >= kSsbLowHz;
+            const bool clear_of_a = (kToneFreqHz[kNumTones - 1] - static_cast<float>(df)) <
+                                    (kToneFreqHz[0] - main_lobe_hz);
+            if (!in_passband || !clear_of_a) continue;
+            const double w = worst(df);
+            if (w < best_w - 1e-9 || std::fabs(w - best_w) <= 1e-9) {  // ties -> larger df
+                best = df;
+                best_w = std::min(best_w, w);
+            }
+        }
+        EXPECT_EQ(best, kDiversityOffsetHz);
+        EXPECT(best_w < 0.30);  // worst branch power correlation 0.273 (Moderate)
     }
 }
 
@@ -535,54 +588,64 @@ void test_costas_autocorrelation_peak() {
 
 void test_symbol_ms_staircase() {
     std::printf("[test] symbol_ms_staircase\n");
-    // RE-MEASURED 2026-08-01 (tools/measure_ack_staircase). The previous expectations
-    // encoded the ORIGINAL, unmeasured edges (18/12/5/-5 dB) and are replaced, not
-    // accommodated: a real encode -> Watterson -> detect+decode sweep (24 trials/cell,
-    // production timing search) puts the 95%-decode edges at
+    // RE-MEASURED 2026-11-08 for the two-subband (frequency-diversity) ACK by
+    // tools/measure_ack_staircase (production detectAndDecode, equal peak, 400-1000 trials per
+    // short cell): 95 %-decode edges
     //
-    //     symbol_ms |  AWGN  | Good fading
-    //        12 ms  |  -4 dB |   +10 dB
-    //        25 ms  |  -8 dB |   + 2 dB
-    //       100 ms  | -10 dB |   - 2 dB
+    //     symbol_ms |  AWGN  | Good | Moderate      fading column = worst fading class
+    //        12 ms  |   0 dB |  +6  |    +8
+    //        25 ms  |  -4 dB |  +2  |    +4
+    //        50 ms  |  -6 dB |   0  |    +2
+    //       100 ms  | -10 dB |  -2  |  (floor)
     //
-    // i.e. the old AWGN edge was ~22 dB too conservative, sending 850 ms ACKs where 408 ms
-    // decodes perfectly. app.cpp used to add kOfdmLegacyAnchorScaleOffsetDb (+8.70 dB) to
-    // OFDM-sourced readings to make the old edges line up; one constant cannot correct a
-    // two-column table, and it left AWGN 13 dB conservative while making fading 2.7 dB
-    // AGGRESSIVE. Both the compensation and the old edges are gone.
-    //
-    // Edges below carry the +2 dB kAckEdgeMarginDb (the sweep omits real-radio impairment).
+    // (2026-08-01 single-tone table, 24 trials/cell: AWGN -4/-8/-10, Good +10/+2/-2, with a
+    // 200 ms bottom rung the production monitor could never decode.) Edges below carry the
+    // +2 dB kAckEdgeMarginDb (the sweep omits real-radio impairment).
     // AWGN column (fading_present defaults to false):
     EXPECT_EQ(symbolMsForSNR(25.0f), kSymbolMsHighSNR);
-    EXPECT_EQ(symbolMsForSNR(-2.0f), kSymbolMsHighSNR);   // measured -4 + 2 margin
-    EXPECT_EQ(symbolMsForSNR(-2.1f), kSymbolMsMidSNR);
-    EXPECT_EQ(symbolMsForSNR(-6.0f), kSymbolMsMidSNR);    // measured -8 + 2
-    EXPECT_EQ(symbolMsForSNR(-6.1f), kSymbolMsMargSNR);
-    EXPECT_EQ(symbolMsForSNR(-8.0f), kSymbolMsMargSNR);   // measured -10 + 2
-    EXPECT_EQ(symbolMsForSNR(-8.1f), kSymbolMsWeakSNR);
-    EXPECT_EQ(symbolMsForSNR(-20.0f), kSymbolMsWeakSNR);
+    EXPECT_EQ(symbolMsForSNR(2.0f), kSymbolMsHighSNR);    // measured 0 + 2 margin
+    EXPECT_EQ(symbolMsForSNR(1.9f), kSymbolMsMidSNR);
+    EXPECT_EQ(symbolMsForSNR(-2.0f), kSymbolMsMidSNR);    // measured -4 + 2
+    EXPECT_EQ(symbolMsForSNR(-2.1f), kSymbolMsLowSNR);
+    EXPECT_EQ(symbolMsForSNR(-4.0f), kSymbolMsLowSNR);    // measured -6 + 2
+    EXPECT_EQ(symbolMsForSNR(-4.1f), kSymbolMsMargSNR);
+    EXPECT_EQ(symbolMsForSNR(-20.0f), kSymbolMsMargSNR);  // floor, never 200 ms
 
-    // FADING column — materially stricter, which is the point: a deep null inside a short
-    // symbol is unrecoverable, so 12 ms needs +10 dB on Good against -4 dB on AWGN.
+    // FADING column — materially stricter: a deep null inside a short symbol is unrecoverable.
     EXPECT_EQ(symbolMsForSNR(25.0f, true), kSymbolMsHighSNR);
-    EXPECT_EQ(symbolMsForSNR(12.0f, true), kSymbolMsHighSNR);  // measured +10 + 2
-    EXPECT_EQ(symbolMsForSNR(11.9f, true), kSymbolMsMidSNR);
-    EXPECT_EQ(symbolMsForSNR(4.0f,  true), kSymbolMsMidSNR);   // measured +2 + 2
+    EXPECT_EQ(symbolMsForSNR(10.0f, true), kSymbolMsHighSNR);  // Moderate +8 + 2
+    EXPECT_EQ(symbolMsForSNR(9.9f,  true), kSymbolMsMidSNR);
+    EXPECT_EQ(symbolMsForSNR(6.0f,  true), kSymbolMsMidSNR);   // Moderate +4 + 2
+    EXPECT_EQ(symbolMsForSNR(5.9f,  true), kSymbolMsLowSNR);
+    EXPECT_EQ(symbolMsForSNR(4.0f,  true), kSymbolMsLowSNR);   // Moderate +2 + 2
     EXPECT_EQ(symbolMsForSNR(3.9f,  true), kSymbolMsMargSNR);
-    EXPECT_EQ(symbolMsForSNR(0.0f,  true), kSymbolMsMargSNR);  // measured -2 + 2
-    EXPECT_EQ(symbolMsForSNR(-0.1f, true), kSymbolMsWeakSNR);
+    EXPECT_EQ(symbolMsForSNR(-20.0f, true), kSymbolMsMargSNR); // floor, never 200 ms
+
+    // Every value the staircase can return is a rung the production monitor scans
+    // (kStaircaseSymbolMs is its scan set): the 200 ms rung was a guaranteed miss.
+    for (bool fading : {false, true}) {
+        for (float s = -40.0f; s <= 40.0f; s += 0.25f) {
+            const uint32_t ms = symbolMsForSNR(s, fading);
+            bool scanned = false;
+            for (uint32_t r : kStaircaseSymbolMs) scanned = scanned || (r == ms);
+            EXPECT(scanned);
+        }
+    }
 
     // The fading edge must never be LOOSER than the AWGN one at the same duration —
     // fading strictly costs margin, and inverting that would key a short ACK into a null.
-    EXPECT(symbolMsForSNR(5.0f, true) >= symbolMsForSNR(5.0f, false));
-    EXPECT(symbolMsForSNR(0.0f, true) >= symbolMsForSNR(0.0f, false));
+    for (float s = -20.0f; s <= 30.0f; s += 0.5f) {
+        EXPECT(symbolMsForSNR(s, true) >= symbolMsForSNR(s, false));
+    }
 
     // Monotonic non-increasing: a better channel never yields a LONGER ACK.
-    uint32_t prev = symbolMsForSNR(-30.0f);
-    for (float s = -30.0f; s <= 30.0f; s += 0.5f) {
-        uint32_t cur = symbolMsForSNR(s);
-        EXPECT(cur <= prev);
-        prev = cur;
+    for (bool fading : {false, true}) {
+        uint32_t prev = symbolMsForSNR(-30.0f, fading);
+        for (float s = -30.0f; s <= 30.0f; s += 0.5f) {
+            const uint32_t cur = symbolMsForSNR(s, fading);
+            EXPECT(cur <= prev);
+            prev = cur;
+        }
     }
     // The ~20 dB hardware operating point uses the short tier (675 -> 324 ms).
     EXPECT_EQ(symbolMsForSNR(20.0f), kSymbolMsHighSNR);

@@ -775,8 +775,15 @@ trap cleanup EXIT
 
 cd "$ROOT"
 
-if command -v caffeinate >/dev/null 2>&1 && ! pgrep -x caffeinate >/dev/null 2>&1; then
-  caffeinate -dimsu >"$OUT/caffeinate.log" 2>&1 &
+# Keep the DISPLAY awake (and wake it, -u) for the whole run. Not optional: ultra_gui drains
+# RX audio into the modem from its render loop, and with vsync on SDL_GL_SwapWindow blocks on
+# the display link while the display sleeps — both stations then stop hearing audio ~2 s in and
+# the run fails or times out (BUG-GUI-DISPLAY-SLEEP-STALL). One caffeinate per run, tied to this
+# script's PID (-w) so it exits with the run. The previous `! pgrep -x caffeinate` guard skipped
+# this whenever ANY caffeinate existed — e.g. an agent's `caffeinate -i`, which keeps the system
+# awake but lets the display sleep.
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -dimsu -w $$ >"$OUT/caffeinate.log" 2>&1 &
   echo "CAFFEINATE_PID=$!" | tee -a "$SUMMARY"
 fi
 

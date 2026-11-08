@@ -44,6 +44,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 
 namespace ultra {
 namespace waveform {
@@ -67,6 +68,41 @@ inline constexpr std::array<float, 4> kToneFreqHz = {{
     2625.0f,  // tone 3 -> dibit 0b11
 }};
 
+// FREQUENCY DIVERSITY (2026-11-08, BUG-TONE-ACK-RETURN-LOSS-ON-FADING). A 225 Hz-wide FSK
+// burst fades as ONE Rayleigh branch on a two-path HF channel, so its loss probability falls
+// only ~1/SNR: a deep fade during the 408 ms ACK costs a full RTO (measured in the GUI gate at
+// 13.6-17 dB on ITU Good). The half-duplex ACK slot owns the whole audio band, so every symbol
+// is sent SIMULTANEOUSLY on a second subband kDiversityOffsetHz below and the detector
+// square-law combines the two (|X_A|^2 + |X_B|^2 per tone): loss ~P^2 instead of ~P.
+// The offset is DERIVED: for a two-path channel with delay tau the branch power correlation is
+// cos^2(pi * df * tau); 1325 Hz minimizes the WORST correlation over the ITU-R F.1487 delays
+// (Good 0.5 ms 0.24, Moderate 1 ms 0.27, Poor 2 ms 0.21), on the 25 Hz grid, with both
+// subbands inside a 300-2700 Hz SSB passband. Cost on AWGN: equal-peak two-tone ACK -> each
+// branch -6 dB, combined -3 dB (PAPR 3 -> 6 dB). ULTRA_TONE_ACK_DIVERSITY=0 opts out; both
+// directions degrade gracefully against an old peer (old RX sees branch A at -6 dB; new RX
+// sums a noise-only branch B).
+inline constexpr uint32_t kDiversityOffsetHz = 1325;
+inline constexpr std::array<float, 4> kToneFreqHzDiversity = {{
+    2400.0f - kDiversityOffsetHz,  // 1075 Hz
+    2475.0f - kDiversityOffsetHz,  // 1150 Hz
+    2550.0f - kDiversityOffsetHz,  // 1225 Hz
+    2625.0f - kDiversityOffsetHz,  // 1300 Hz
+}};
+
+inline bool toneAckDiversityEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_TONE_ACK_DIVERSITY");
+        return !(e && e[0] == '0');
+    }();
+    return on;
+}
+
+// Carrier-offset search when the receiver holds NO estimate of the reverse-link dial offset:
+// the modem's specified acquisition range (+-50 Hz; the dual-chirp estimator itself spans
+// +-60 Hz, chirp_sync.hpp estimateCFO). Below the 75 Hz tone spacing, so a hypothesis one
+// tone away is resolved by the Costas pattern (<= 1 coincidence) and the CRC.
+inline constexpr float kToneAckCfoAcquisitionHalfWidthHz = 50.0f;
+
 inline constexpr uint32_t kToneSeparationHz = 75;
 inline constexpr uint32_t kNumTones = 4;
 inline constexpr uint32_t kBitsPerSymbol = 2;  // 4-FSK -> 2 bits/sym
@@ -84,68 +120,69 @@ static_assert(kBaselineSymbolSamples * 1000 == kSampleRate * kBaselineSymbolMs,
               "tone-burst symbol duration must be sample-aligned");
 
 // SNR-adaptive durations (§15.5 staircase).
-inline constexpr uint32_t kSymbolMsHighSNR = 12;   // SNR >= 18 dB
-inline constexpr uint32_t kSymbolMsMidSNR = 25;    // SNR 12-18 dB (baseline)
-inline constexpr uint32_t kSymbolMsLowSNR = 50;    // SNR 5-12 dB
-inline constexpr uint32_t kSymbolMsMargSNR = 100;  // SNR -5 to 5 dB
-inline constexpr uint32_t kSymbolMsWeakSNR = 200;  // SNR < -5 dB
+inline constexpr uint32_t kSymbolMsHighSNR = 12;   // 408 ms ACK
+inline constexpr uint32_t kSymbolMsMidSNR = 25;    // 850 ms ACK (baseline)
+inline constexpr uint32_t kSymbolMsLowSNR = 50;    // 1.7 s ACK
+inline constexpr uint32_t kSymbolMsMargSNR = 100;  // 3.4 s ACK, the staircase floor
+// 200 ms (6.8 s ACK) is decodable by ToneBurstDetector but is NOT a staircase rung: a 200 ms
+// burst is 326,400 samples, larger than the production monitor buffer (sized from
+// kStaircaseSymbolMs), so the monitor never scans it. Kept for detector-level tests.
+inline constexpr uint32_t kSymbolMsWeakSNR = 200;
 
-// §15.5 staircase selector: map a measured in-band SNR to the symbol duration.
-// Shorter symbols at high SNR shrink the ACK airtime (lower half-duplex
-// turnaround); longer symbols at low SNR add matched-filter integration for
-// robust detection. The receiver's ACK monitor scans ALL durations, so the
-// two ends need not pre-agree. Thresholds mirror the kSymbolMs* comments above;
-// monotonic non-increasing, so it only shortens as SNR rises.
+// The staircase rungs — EXACTLY the durations the production ACK monitor scans
+// (streaming_decoder.cpp builds its scan set and sizes its buffer from this array). A rung the
+// monitor does not scan is a guaranteed miss and a full RTO: until 2026-11-08 symbolMsForSNR
+// returned 200 ms below 0 dB on fading / -8 dB on AWGN while the monitor scanned only
+// {12, 25, 50, 100} — the app.cpp claim "a conservative (longer) choice is always decodable"
+// was false at the bottom of the table.
+inline constexpr std::array<uint32_t, 4> kStaircaseSymbolMs = {{
+    kSymbolMsHighSNR, kSymbolMsMidSNR, kSymbolMsLowSNR, kSymbolMsMargSNR}};
+
+// §15.5 staircase selector: map the receiver's measured in-band SNR (of the forward link, the
+// best available proxy for the reverse link the ACK rides) to the symbol duration. Shorter
+// symbols at high SNR shrink the ACK airtime (lower half-duplex turnaround); longer symbols at
+// low SNR add matched-filter integration. The sender's monitor scans every rung, so the ends
+// need not pre-agree. Monotonic non-increasing in SNR.
 //
-// fading_present (BUG-ACK-STAIRCASE-FADE-BIN, 2026-07-01): the caller's in-band
-// SNR basis is FADE-EFFECTIVE on a fading channel (carries the ~2 dB
-// fading/Jensen penalty vs the AWGN-equivalent dial), while the 18 dB edge was
-// calibrated in AWGN-equivalent terms against the pre-2026-06-16 (absolute-
-// referenced) meter — so the fast rung never engaged on fading (measured
-// occupancy: 3 of 4 runs at 0%, incl. 30/30 rig ACKs at 675 ms at MPG@20).
-// The 12 ms rung's hardware proof (2026-06-15, MPG@20, 0 retx/15 bursts) is
-// the SAME physical operating point that now reads ~16-17 effective, so on a
-// fading channel the fast edge is 16 dB — a basis correction back to the
-// validated point, not a new one. ONLY the top edge shifts: the lower rungs
-// are detection-safety-side and stay put (shifting them would shorten ACKs at
-// low SNR — the unsafe direction).
-inline constexpr float kFastAckEdgeAwgnDb = 18.0f;
-inline constexpr float kFastAckEdgeFadingDb = 16.0f;
-// MEASURED 2026-08-01 by tools/measure_ack_staircase — decode success of a real
-// encode -> Watterson -> detect+decode round trip (production path, timing search enabled),
-// 24 trials per cell, edge = lowest SNR clearing 95%:
+// RE-MEASURED 2026-11-08 for the two-subband (frequency-diversity) ACK by
+// tools/measure_ack_staircase: real encode -> Watterson -> production detectAndDecode, the
+// burst at the SAME PEAK as the single-tone ACK (PEP-limited, each subband -6 dB), fixed noise
+// referenced to the modem reference level. 400-1000 trials per 12/25/50 ms cell, 150 per
+// 100 ms cell; edge = lowest 2 dB step clearing 95 % decode:
 //
-//     symbol_ms |  AWGN  |  Good fading
-//        12 ms  |  -4 dB |   +10 dB
-//        25 ms  |  -8 dB |   + 2 dB
-//        50 ms  | -10 dB |   + 2 dB      (dominated: 25 ms is shorter at the same edge)
-//       100 ms  | -10 dB |   - 2 dB
-//       200 ms  | -10 dB |   - 2 dB      (dominated by 100 ms)
+//     symbol_ms |  AWGN  | Good fading | Moderate fading
+//        12 ms  |   0 dB |    +6 dB    |     +8 dB
+//        25 ms  |  -4 dB |    +2 dB    |     +4 dB
+//        50 ms  |  -6 dB |     0 dB    |     +2 dB
+//       100 ms  | -10 dB |    -2 dB    |     (floor)
 //
-// THE SNR HERE IS THE HONEST IN-BAND READING. These edges replace a table that was tuned
-// against the pre-2026-07-07 OFDM estimator, which read ~8.7 dB high; app.cpp compensated by
-// adding connection_policy::kOfdmLegacyAnchorScaleOffsetDb back to every OFDM-sourced
-// reading. That single constant could not correct a two-column table: it left AWGN 13 dB too
-// CONSERVATIVE (effective edge 9.3 dB against a measured -4) while making fading 2.7 dB too
-// AGGRESSIVE (effective 7.3 against a measured +10, i.e. firing the 12 ms ACK below where it
-// decodes — and a failed ACK costs a full retransmission cycle, ~9.5 s).
+// The FADING column takes the WORST fading class: fading_present cannot tell Good from
+// Moderate (the classifier can't make the distinction; see app.cpp). Diversity costs ~3.5-4 dB
+// on AWGN (each subband -6 dB at equal peak, square-law combined), which moves every AWGN edge
+// up but leaves them all below any wideband operating point; on fading it removes the
+// single-branch loss FLOOR the old table could not see — single-tone 12 ms on Moderate stays at
+// 1.0-1.5 % loss even at 18-22 dB (1000 trials), the two-subband ACK 0.1-0.2 %.
+//
+// Cross-check, expected airtime per ACK = T_ack + P_loss x C_loss with C_loss ~16 s (one RTO):
+// with the margin below, the 12 <-> 25 ms switch the criterion picks (10 dB fading) is where
+// the expected-cost optimum sits (8-10 dB); the lower edges are conservative by this measure
+// in a regime the wideband modes do not operate in.
 //
 // MARGIN: +2 dB (one sweep step) over the measured edge. The sweep runs on the channel model
-// alone and omits real-radio impairments (cheap-card distortion, level drift, ALC), so the
-// measured edge is optimistic for hardware. 24 trials also gives only ~+-10% per cell.
+// alone and omits real-radio impairments (cheap-card distortion, level drift, ALC).
 inline constexpr float kAckEdgeMarginDb = 2.0f;
 
 inline constexpr uint32_t symbolMsForSNR(float snr_db, bool fading_present = false) {
     if (fading_present) {
-        if (snr_db >= 10.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;  // 12 ms -> 408 ms
-        if (snr_db >=  2.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;   // 25 ms -> 850 ms
-        if (snr_db >= -2.0f + kAckEdgeMarginDb) return kSymbolMsMargSNR;  // 100 ms -> 3400 ms
-        return kSymbolMsWeakSNR;                                          // 200 ms, best effort
+        if (snr_db >= 8.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;  // 12 ms -> 408 ms
+        if (snr_db >= 4.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;   // 25 ms -> 850 ms
+        if (snr_db >= 2.0f + kAckEdgeMarginDb) return kSymbolMsLowSNR;   // 50 ms -> 1.7 s
+        return kSymbolMsMargSNR;                                         // 100 ms floor
     }
-    if (snr_db >=  -4.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;
-    if (snr_db >=  -8.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;
-    if (snr_db >= -10.0f + kAckEdgeMarginDb) return kSymbolMsMargSNR;
-    return kSymbolMsWeakSNR;
+    if (snr_db >=  0.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;
+    if (snr_db >= -4.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;
+    if (snr_db >= -6.0f + kAckEdgeMarginDb) return kSymbolMsLowSNR;
+    return kSymbolMsMargSNR;
 }
 
 // ============================================================================

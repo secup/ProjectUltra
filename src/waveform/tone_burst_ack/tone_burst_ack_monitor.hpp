@@ -42,6 +42,10 @@ struct ToneBurstAckDetection {
     float min_symbol_confidence = 0.0f;
     int hamming_corrected_blocks = 0;
     uint32_t symbol_ms_used = 0;
+    // Carrier-offset hypothesis (Hz) the ACK decoded at — a direct measurement of the
+    // reverse-link dial offset — and the prior it was searched around.
+    float frequency_offset_hz = 0.0f;
+    float frequency_prior_hz = 0.0f;
 };
 using ToneBurstAckCallback = std::function<void(const ToneBurstAckDetection&)>;
 
@@ -49,17 +53,10 @@ class ToneBurstAckMonitor {
 public:
     struct Config {
         // Symbol durations to scan for. The detector tries each in order
-        // and stops at the first CRC-passing decode. Default covers the
-        // §15.5 staircase from high-SNR (12 ms) through marginal-SNR
-        // (100 ms). 200 ms / 50 ms are omitted from the default to keep
-        // detection latency bounded; callers targeting weak-signal modes
-        // can include them.
-        std::vector<uint32_t> symbol_durations_ms = {
-            kSymbolMsHighSNR,   // 12 ms
-            kBaselineSymbolMs,  // 25 ms
-            kSymbolMsLowSNR,    // 50 ms
-            kSymbolMsMargSNR,   // 100 ms
-        };
+        // and stops at the first CRC-passing decode. Default = the §15.5
+        // staircase rung set (kStaircaseSymbolMs, 12 / 25 / 50 / 100 ms).
+        std::vector<uint32_t> symbol_durations_ms{kStaircaseSymbolMs.begin(),
+                                                  kStaircaseSymbolMs.end()};
         // §15 step 4d-late: when armed_only=true, detection only runs while
         // the monitor is "armed" (via arm()). Outside the armed window,
         // runDetectionPass() returns immediately with zero work. This makes
@@ -150,6 +147,15 @@ public:
     void feedAudio(const std::vector<float>& samples) {
         feedAudio(samples.data(), samples.size());
     }
+
+    // Carrier-offset prior for the detector (see ToneBurstDetector::setFrequencyPrior): the
+    // receiver's tracked reverse-link CFO and the half-width of its uncertainty. Cheap; the
+    // owner refreshes it before each feedAudio.
+    void setFrequencyPrior(float offset_hz, float halfwidth_hz) {
+        detector_.setFrequencyPrior(offset_hz, halfwidth_hz);
+    }
+    float frequencyPriorHz() const { return detector_.frequencyPriorHz(); }
+    float frequencyHalfWidthHz() const { return detector_.frequencyHalfWidthHz(); }
 
     // Install the callback. May be called once; subsequent calls replace.
     void setCallback(ToneBurstAckCallback cb) { callback_ = std::move(cb); }

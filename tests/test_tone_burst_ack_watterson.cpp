@@ -95,9 +95,11 @@ struct CellResult {
 constexpr int kTrials = 20;
 
 CellResult runWattersonCell(const WattersonChannel::Config& base_config,
-                             uint32_t symbol_ms, int trials, uint64_t base_seed) {
+                             uint32_t symbol_ms, int trials, uint64_t base_seed,
+                             float prior_hz = 0.0f, float prior_halfwidth_hz = 0.0f) {
     ToneBurstEncoder enc;
     ToneBurstDetector det;
+    det.setFrequencyPrior(prior_hz, prior_halfwidth_hz);
     CellResult r;
     r.trials = trials;
 
@@ -282,9 +284,80 @@ void test_good_no_fading_snr10_25ms_reference() {
     EXPECT(r.decoded_ok >= kTrials * 85 / 100);  // ~85% floor (NoFading@10, ~100% actual)
 }
 
+// ============================================================================
+// Carrier offset (2026-11-08). An SSB dial offset shifts every tone by the same delta; the
+// Goertzel main lobe is 2 / T wide, so an uncompensated 7.3 Hz offset costs the 100 ms rung
+// > 6 dB (measure_ack_staircase: -4 dB AWGN 15 % vs 100 % at 0 Hz). The receiver supplies a
+// prior (its tracked reverse-link CFO) and the detector searches its stated uncertainty on a
+// half-bin grid. AWGN cells (fading off) isolate the frequency effect.
+// ============================================================================
+
+WattersonChannel::Config awgnWithCfo(float snr_db, float cfo_hz) {
+    auto cfg = itu::good(snr_db);
+    cfg.fading_enabled = false;
+    cfg.multipath_enabled = false;
+    cfg.cfo_enabled = true;
+    cfg.cfo_hz = cfo_hz;
+    return cfg;
+}
+
+void test_cfo_without_prior_breaks_100ms_rung() {
+    std::printf("[test] cfo_without_prior_breaks_100ms_rung\n");
+    const auto r = runWattersonCell(awgnWithCfo(-4.0f, 7.3f), kSymbolMsMargSNR, kTrials, 0xCF01);
+    printCell("AWGN@-4 / 100ms / CFO +7.3 / no prior", r);
+    // The defect the prior exists for: if this ever passes, the search is not needed and the
+    // plumbing can be revisited — it must not pass by accident of a weaker channel model.
+    EXPECT(r.decoded_ok <= kTrials * 60 / 100);
+}
+
+void test_cfo_exact_prior_restores_100ms_rung() {
+    std::printf("[test] cfo_exact_prior_restores_100ms_rung\n");
+    const auto r = runWattersonCell(awgnWithCfo(-4.0f, 7.3f), kSymbolMsMargSNR, kTrials, 0xCF01,
+                                    7.3f, 0.0f);
+    printCell("AWGN@-4 / 100ms / CFO +7.3 / exact prior", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= kTrials * 90 / 100);
+}
+
+void test_cfo_uncertified_prior_restores_100ms_rung() {
+    std::printf("[test] cfo_uncertified_prior_restores_100ms_rung\n");
+    // A dual-chirp prior carrying a 3 Hz multipath phantom, searched over the 4.8 Hz phantom
+    // bound (tau_max 2 ms x chirp rate 4800 Hz/s / 2): 3 hypotheses at 5 Hz spacing.
+    const auto r = runWattersonCell(awgnWithCfo(-4.0f, 7.3f), kSymbolMsMargSNR, kTrials, 0xCF01,
+                                    7.3f + 3.0f, 4.8f);
+    printCell("AWGN@-4 / 100ms / CFO +7.3 / prior +3 Hz off, W 4.8", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= kTrials * 90 / 100);
+}
+
+void test_cfo_no_prior_wide_search_25ms() {
+    std::printf("[test] cfo_no_prior_wide_search_25ms\n");
+    const auto r = runWattersonCell(awgnWithCfo(-2.0f, -20.0f), kBaselineSymbolMs, kTrials,
+                                    0xCF02, 0.0f, 50.0f);
+    printCell("AWGN@-2 / 25ms / CFO -20 / no prior, W 50", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= kTrials * 90 / 100);
+}
+
+void test_cfo_no_prior_wide_search_12ms_large_offset() {
+    std::printf("[test] cfo_no_prior_wide_search_12ms_large_offset\n");
+    // +45 Hz is 60 % of the 75 Hz tone spacing: uncompensated, the energy lands nearer the
+    // NEXT tone than its own.
+    const auto r = runWattersonCell(awgnWithCfo(2.0f, 45.0f), kSymbolMsHighSNR, kTrials, 0xCF03,
+                                    0.0f, 50.0f);
+    printCell("AWGN@+2 / 12ms / CFO +45 / no prior, W 50", r);
+    EXPECT_EQ(r.decoded_wrong, 0);
+    EXPECT(r.decoded_ok >= kTrials * 90 / 100);
+}
+
 }  // namespace
 
 int main() {
+    test_cfo_without_prior_breaks_100ms_rung();
+    test_cfo_exact_prior_restores_100ms_rung();
+    test_cfo_uncertified_prior_restores_100ms_rung();
+    test_cfo_no_prior_wide_search_25ms();
+    test_cfo_no_prior_wide_search_12ms_large_offset();
     test_good_snr20_25ms_aligned();
     test_good_snr10_25ms_aligned();
     test_good_snr5_50ms_aligned();

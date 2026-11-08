@@ -698,8 +698,9 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             // modem RX path); NEVER call protocol_ here — this callback runs while
             // protocol_ holds its mutex, so re-entry self-deadlocks. Only a
             // trusted physical in-band source shortens; otherwise safe baseline.
-            // The data-sender's monitor scans every staircase duration, so a
-            // conservative (longer) choice is always decodable.
+            // The data-sender's monitor scans every staircase rung
+            // (kStaircaseSymbolMs is its scan set), so any value symbolMsForSNR
+            // returns is decodable there.
             uint32_t symbol_ms = ultra::waveform::tone_burst_ack::kBaselineSymbolMs;
             const SNRSource src = cached_inband_snr_source_.load(std::memory_order_relaxed);
             const float current_snr =
@@ -707,9 +708,10 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             float staircase_snr = current_snr;
             bool fading_present = false;
             if (src == SNRSource::IDLE_IN_BAND || src == SNRSource::OFDM_BROADBAND) {
-                // Fade-aware fast edge (BUG-ACK-STAIRCASE-FADE-BIN): the cached
-                // in-band SNR is fade-effective on a fading channel, so the fast
-                // rung's edge is 16 dB there (18 dB on AWGN). Uses the same
+                // Fade-aware staircase column (BUG-ACK-STAIRCASE-FADE-BIN): the
+                // cached in-band SNR is fade-effective on a fading channel, and
+                // the fading column's edges are the worst of Good/Moderate
+                // (tone_burst_constants.hpp symbolMsForSNR). Uses the same
                 // AWGN-vs-fading split as capInitialOFDMRate (kFadingAwgnMax);
                 // the Good-vs-Moderate distinction is deliberately NOT consulted
                 // (the classifier can't make it). ULTRA_ACK_FADE_EDGE=0 opts out.

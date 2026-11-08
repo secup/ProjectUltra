@@ -138,6 +138,26 @@ static void dumpBufferSnapshot(const std::vector<float>& buffer, size_t write_po
               label.c_str(), valid_samples, filename, rms, max_val);
 }
 
+namespace {
+
+// Upper bound (Hz) of the dual-chirp multipath CFO phantom: a dominant-path switch between the
+// up- and down-chirp moves one correlation peak by up to the delay spread tau, a CFO error of
+// tau / (2 kappa) with kappa = fs / chirp_rate samples per Hz (lts_cfo_update.hpp), i.e.
+// tau x chirp_rate / 2. tau is bounded by the ITU-R F.1487 Poor design delay (2 ms), the worst
+// channel any waveform is specified for; the production chirp (300 -> 2700 Hz, 500 ms,
+// 4800 Hz/s) gives 4.8 Hz.
+float toneAckChirpPhantomBoundHz() {
+    constexpr double kDesignMaxDelaySpreadS = 2.0e-3;
+    const sync::ChirpConfig chirp{};
+    const double rate_hz_per_s = std::abs(static_cast<double>(chirp.f_end - chirp.f_start)) /
+                                 (static_cast<double>(chirp.duration_ms) / 1000.0);
+    return static_cast<float>(kDesignMaxDelaySpreadS * rate_hz_per_s / 2.0);
+}
+
+using ultra::waveform::tone_burst_ack::kToneAckCfoAcquisitionHalfWidthHz;
+
+}  // namespace
+
 StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     : sync_controller_(buffer_capacity_samples) {  // owns sync_controller_.ring_; its ctor validates + sizes the buffer
     waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
@@ -195,12 +215,11 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
         // was then invisible to this monitor -> missed ACK -> timeout retx. The
         // detector tries each in order and stops at the first CRC-passing decode,
         // so the common 25 ms case still resolves quickly.
-        tba_cfg.symbol_durations_ms = {
-            ultra::waveform::tone_burst_ack::kSymbolMsHighSNR,   // 12 ms (408 ms ACK)
-            ultra::waveform::tone_burst_ack::kBaselineSymbolMs,  // 25 ms (850 ms baseline)
-            ultra::waveform::tone_burst_ack::kSymbolMsLowSNR,    // 50 ms
-            ultra::waveform::tone_burst_ack::kSymbolMsMargSNR,   // 100 ms
-        };
+        // The scan set IS the staircase rung set (single source of truth: a rung the sender
+        // can emit but this monitor does not scan is a guaranteed miss).
+        tba_cfg.symbol_durations_ms.assign(
+            ultra::waveform::tone_burst_ack::kStaircaseSymbolMs.begin(),
+            ultra::waveform::tone_burst_ack::kStaircaseSymbolMs.end());
         tba_cfg.sweep_step_samples = 32;
         // TAIL-WINDOW sweep (2026-07-04): production monitors run on constrained
         // hosts (Pi5 ARM) at a 100 ms armed cadence — per-pass cost must not scale
@@ -280,7 +299,7 @@ void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
                       "[%s] ToneBurstAck monitor: detected group_seq=%u type=%s "
                       "mask=0x%04X epoch=%u peak=%.1f normalized_peak=%.3f "
                       "min_conf=%.3f hamming_corrected=%d symbol_ms=%u "
-                      "stream_offset=%llu",
+                      "stream_offset=%llu cfo=%.2f cfo_prior=%.2f",
                       log_prefix_.c_str(),
                       static_cast<unsigned>(d.payload.group_seq),
                       d.payload.type ==
@@ -296,7 +315,8 @@ void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
                       d.min_symbol_confidence,
                       d.hamming_corrected_blocks,
                       static_cast<unsigned>(d.symbol_ms_used),
-                      static_cast<unsigned long long>(d.detected_stream_offset));
+                      static_cast<unsigned long long>(d.detected_stream_offset),
+                      d.frequency_offset_hz, d.frequency_prior_hz);
             if (cb) cb(d);
         });
 }
@@ -452,6 +472,21 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
     // feedAudio is called from a single audio thread). The monitor's
     // callback fires synchronously here on the audio thread — keep it
     // cheap (log-only in 4b, lightweight queue-push in 4d).
+    // Carrier-offset prior for the tone-ACK detector (2026-11-08): the ACK arrives on the
+    // reverse link, whose dial offset the tracker holds from the peer's last chirp/frame. A
+    // pilot-CERTIFIED value is searched alone; an uncertified dual-chirp value carries at most
+    // the multipath phantom (dominant-path switch between the chirps: tau / (2 kappa), bounded
+    // by the 2 ms ITU-R F.1487 Poor design delay = tau_max x chirp rate / 2 = 4.8 Hz); with no
+    // estimate the detector searches the +-50 Hz acquisition range the chirp sync guarantees.
+    {
+        float prior_hz = 0.0f;
+        float halfwidth_hz = kToneAckCfoAcquisitionHalfWidthHz;
+        if (cfo_tracker_.established()) {
+            prior_hz = cfo_tracker_.tracked();
+            halfwidth_hz = cfo_tracker_.pilotSeeded() ? 0.0f : toneAckChirpPhantomBoundHz();
+        }
+        tone_burst_monitor_.setFrequencyPrior(prior_hz, halfwidth_hz);
+    }
     tone_burst_monitor_.feedAudio(samples, count);
 
     // Audio-activity instrumentation: detect "transmission arrived" events

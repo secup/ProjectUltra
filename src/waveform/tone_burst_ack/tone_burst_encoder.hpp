@@ -33,7 +33,12 @@ using Samples = std::vector<float>;
 // boundary, phase carries over; only the increment changes.
 class ToneBurstEncoder {
 public:
-    ToneBurstEncoder() = default;
+    ToneBurstEncoder() : diversity_(toneAckDiversityEnabled()) {}
+
+    // Frequency diversity (kToneFreqHzDiversity): each symbol on both subbands at half
+    // amplitude each (same peak). Defaults to toneAckDiversityEnabled().
+    void setDiversity(bool on) { diversity_ = on; }
+    bool diversity() const { return diversity_; }
 
     // Encode one full tone-burst ACK: [4 Costas symbols][kPayloadSymbols (30) payload symbols].
     // symbol_ms picks the duration per the §15.5 staircase (default = baseline
@@ -49,7 +54,7 @@ public:
 
     // Reset the internal phase accumulator to 0. Tests use this for
     // determinism; production resets at the start of each burst anyway.
-    void resetPhase() { phase_ = 0.0f; }
+    void resetPhase() { phase_ = 0.0f; phase_b_ = 0.0f; }
 
     float currentPhase() const { return phase_; }
 
@@ -57,6 +62,8 @@ private:
     // Current instantaneous phase (radians), preserved across encode() calls.
     // Tests can reset() before each call for byte-exact comparison.
     float phase_ = 0.0f;
+    float phase_b_ = 0.0f;  // diversity subband
+    bool diversity_ = true;
 };
 
 }  // namespace tone_burst_ack

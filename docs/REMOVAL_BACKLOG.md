@@ -402,6 +402,22 @@ the six decode sites (`decode_cfo` then always = the sync/burst CFO).
 `CFOTracker::ingestPilotResidual` (with pre-correction 0 it is the absolute-CFO feedback); the
 MC-DPSK correlator CFO term (`corr_cfo_hz_`); `HilbertTransform` itself (detectors use it).
 
+### R17. The single-tone tone-burst ACK, after one rig A/B of the two-subband ACK — `QUEUED 2026-11-08`
+
+**Why.** `ULTRA_TONE_ACK_DIVERSITY=0` restores the single-subband ACK, kept only so a rig can A/B
+the two-subband ACK's real-PA behaviour (6 dB PAPR at the same PEP; IMD3 lands out of band by
+construction). The simulator gates (1000-trial staircase sweep; GUI batch) favour diversity on
+every fading channel; it costs ~3.5-4 dB on AWGN, below every wideband operating point.
+
+**Scope (delete after the rig A/B):** the `ULTRA_TONE_ACK_DIVERSITY` knob
+(`toneAckDiversityEnabled`), the `diversity == false` branches in `ToneBurstEncoder::encodeDibits`
+and the detector's band loop (bands becomes the constant 2), the `combine` factor's 1.0 arm in
+`ToneBurstAckMonitor::idealCostasPeak`, and the `diversity` arms of `tools/measure_ack_staircase`.
+
+**KEEP:** `kToneFreqHz` (subband A), `kToneFreqHzDiversity` + its derivation test, the
+square-law combiner, the carrier-offset prior and the prefix-sum sweep (both independent of
+diversity), `kSymbolMsWeakSNR` (detector-level tests only — never a staircase rung).
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

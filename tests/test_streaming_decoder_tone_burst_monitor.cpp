@@ -11,9 +11,12 @@
 #include "waveform/tone_burst_ack/tone_burst_constants.hpp"
 #include "waveform/tone_burst_ack/tone_burst_encoder.hpp"
 #include "waveform/tone_burst_ack/tone_burst_payload.hpp"
+#include "ota_channel_core/models.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <mutex>
+#include <span>
 #include <vector>
 
 namespace tba = ultra::waveform::tone_burst_ack;
@@ -198,9 +201,66 @@ void test_streaming_decoder_pure_silence_does_not_fire_monitor() {
     EXPECT_EQ(dec.toneBurstAcksDetected(), static_cast<uint64_t>(0));
 }
 
+// Carrier-offset prior (2026-11-08): the decoder hands the monitor its tracked reverse-link CFO
+// as the detector's prior. This pins the SIGN convention end to end — the tracker reads the
+// physical shift of the received audio (rx = tx shifted by +cfo) and the detector probes f +
+// prior — on the rung where it matters: a 100 ms ACK shifted +7.3 Hz at -4 dB in-band decodes
+// with the right prior and fails with the opposite sign (residual 9.6 Hz ~ one Goertzel bin).
+int decodeShiftedSlowAck(float known_cfo_hz, int trials) {
+    using ultra::ota_channel_core::WattersonChannel;
+    int ok = 0;
+    for (int t = 0; t < trials; ++t) {
+        ultra::gui::StreamingDecoder dec;
+        int detections = 0;
+        dec.setToneBurstAckCallback([&](const tba::ToneBurstAckDetection&) { ++detections; });
+        dec.setKnownCFO(known_cfo_hz);  // established, uncertified: searched over +-4.8 Hz
+        dec.armToneBurstMonitor(6000);
+
+        tba::ToneBurstEncoder enc;
+        auto orig = makePayload();
+        orig.group_seq = static_cast<uint8_t>(t);
+        const auto burst = enc.encode(orig, tba::kSymbolMsMargSNR);
+        const size_t pad = static_cast<size_t>(tba::kSampleRate) / 5;  // 200 ms
+        std::vector<float> in(pad, 0.0f);
+        in.insert(in.end(), burst.begin(), burst.end());
+        in.insert(in.end(), 4 * pad, 0.0f);
+
+        WattersonChannel::Config cfg;
+        cfg.snr_db = -4.0f;
+        cfg.sample_rate = tba::kSampleRate;
+        cfg.fading_enabled = false;
+        cfg.multipath_enabled = false;
+        cfg.noise_enabled = true;
+        cfg.cfo_enabled = true;
+        cfg.cfo_hz = 7.3f;
+        WattersonChannel ch(cfg, 0x5EED00u + static_cast<uint64_t>(t));
+        std::vector<float> rx;
+        ch.process(std::span<const float>(in), rx);
+
+        const size_t chunk = 1024;
+        for (size_t off = 0; off < rx.size(); off += chunk) {
+            dec.feedAudio(rx.data() + off, std::min(chunk, rx.size() - off));
+        }
+        if (detections == 1) ++ok;
+    }
+    return ok;
+}
+
+void test_streaming_decoder_feeds_tracked_cfo_to_tone_monitor() {
+    std::printf("[test] streaming_decoder_feeds_tracked_cfo_to_tone_monitor\n");
+    constexpr int kTrials = 10;
+    const int right = decodeShiftedSlowAck(+7.3f, kTrials);
+    const int wrong = decodeShiftedSlowAck(-7.3f, kTrials);
+    std::printf("  100 ms ACK, +7.3 Hz, -4 dB: tracker +7.3 -> %d/%d, tracker -7.3 -> %d/%d\n",
+                right, kTrials, wrong, kTrials);
+    EXPECT(right >= 9);
+    EXPECT(wrong <= 5);
+}
+
 }  // namespace
 
 int main() {
+    test_streaming_decoder_feeds_tracked_cfo_to_tone_monitor();
     test_streaming_decoder_fires_tone_burst_callback_on_baseline_burst();
     test_streaming_encoder_to_decoder_loopback();
     test_streaming_decoder_pure_silence_does_not_fire_monitor();

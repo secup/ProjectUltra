@@ -8,15 +8,37 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-TONE-ACK-RETURN-LOSS-ON-FADING (open, 2026-11-08) — P2, costs one RTO per loss
+### BUG-GUI-DISPLAY-SLEEP-STALL (open, 2026-11-08) — P1 for unattended stations
 
-On ITU Good@15-20 the 4-FSK tone-burst ACK is sometimes not detected by the sender although the
-receiver delivered the group 5/5 and transmitted it (seen 4× in today's GUI runs, e.g. Good@15
-s42 at 108.6 s, Good@20 structure s42 at 60.8 s; the ACK before the loss already arrived weak,
-normalized peak 0.16). Each loss costs a full RTO (~16-20 s, −11..−21 % goodput on a 21 KB
-transfer). Independent of the acquisition mode and of the CFO work (the tone monitor is
-non-coherent and reads no OFDM CFO state). Candidates: SNR-adaptive ACK duration at the floor of
-the staircase on fading, a second ACK repeat, or a cheaper receiver-side backstop re-ACK.
+`ultra_gui` drains RX audio into the modem from its RENDER loop (`App::pollRadioRx` /
+`pollOtaRx`, once per frame), and with vsync on (`SDL_GL_SetSwapInterval(1)`,
+`main_gui.cpp:920`) `SDL_GL_SwapWindow` blocks on the display link while the macOS display is
+asleep. Observed: both GUI-gate stations stopped feeding audio ~2 s after start (one `feed:
+audio` line, then nothing; `sample` showed the main thread in `Cocoa_GL_SwapWindow →
+SDL_CondWait` at 0 % CPU; `system_profiler` "Display Asleep: Yes"). The GUI's own
+`SDL_DisableScreenSaver` assertion only prevents IDLE sleep — a display already asleep, or put to
+sleep by the operator, freezes RX (and anything else ticked per frame) on a real radio too. The
+gate script now wakes and holds the display for every run (`caffeinate -dimsu -w $$`; it used to
+skip that whenever ANY caffeinate was running, e.g. an agent's `caffeinate -i`). Real fix: move
+the audio drain (and protocol tick) off the render thread, or render without blocking vsync when
+the window is occluded. The headless `ultra_tnc` is unaffected.
+
+### BUG-TONE-ACK-CLEAN-MISS (open, 2026-11-08) — P2, intermittent, pre-existing
+
+GUI gate Good@15 seed 42, QPSK R1/2 pinned: the group-42 tone ACK (12 ms, BRAVO snr_used 14.1)
+went undetected in 2 of 5 runs — once with the old single-tone detector, once with the
+two-subband + prefix-sum detector — costing one RTO each (~17 s). It is NOT a fade: OTASim's
+client log shows ALPHA received AND the GUI pulled (`client_get_rx`) a flat 408 ms burst at
+rms 0.22-0.25 over a 0.165 noise floor (~20 dB per tone bin), inside the armed window, with the
+right CFO prior; no monitor line at all (no candidate rejection, no regressed detection, no
+expiry — the RTO re-armed 624 samples before the deadline). The ACK-vs-TX-end timing (+0.10 s)
+is identical in the runs that detected it. `ULTRA_TONE_ACK_TRACE=1` (per-pass trace) added to
+catch the next occurrence; 2 traced repetitions did not reproduce it.
+
+A related, physical, weakness: the timing search keys on the 4 Costas symbols at the START of
+the ACK only. On Moderate@20 an ACK whose first ~80 ms sat in a deep fade (both subbands) was
+lost although its remaining 330 ms were strong; a sync statistic that also integrates the payload
+symbols' energy would remove that single point of failure.
 
 ### BUG-MODERATE-8PSK-COHERENT-FLOOR (open, 2026-11-08) — P2, the REAL remaining Moderate limit
 
@@ -2353,6 +2375,29 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-TONE-ACK-RETURN-LOSS-ON-FADING (FIXED 2026-11-08) + two latent tone-ACK defects found with it
+
+Filed as: on ITU Good@15-20 the 4-FSK tone-burst ACK was occasionally not detected although the
+receiver delivered the group and transmitted it; each loss cost a full RTO (~16-20 s, −11..−21 %
+goodput on a 21 KB transfer). Three separate mechanisms, all fixed (CHANGELOG 2026-11-08
+"tone-burst ACK: frequency diversity, carrier-offset prior, scannable staircase"):
+
+1. **Single-branch fading.** A 225 Hz-wide ACK fades as ONE Rayleigh branch; its loss has a floor
+   that SNR barely moves (`measure_ack_staircase`, 1000 trials: single-tone 12 ms on Moderate
+   1.5 % at 20 dB, 1.0 % at 22 dB; Good 2.6 % at 12 dB). Fix: every symbol on TWO subbands
+   (1325 Hz apart, the minimax of the two-path branch correlation over the ITU delays), square-law
+   combined: Moderate 0.1 % at 20-22 dB, Good 0.1 % at 12 dB.
+2. **No carrier-offset tolerance.** The detector probed fixed frequencies; a 7.3 Hz dial offset
+   cost the 100 ms rung > 6 dB and 20 Hz cost the 25 ms rung > 4 dB and zeroed the 50-200 ms rungs
+   at 0 dB. Fix: the decoder's tracked reverse-link CFO is the detector's prior, searched over its
+   uncertainty on a half-bin grid (20 Hz offset with a 3 Hz-wrong prior: 25 ms at −4 dB 95.0 % =
+   the 0 Hz value).
+3. **Unscannable staircase floor.** `symbolMsForSNR` returned 200 ms below 0 dB (fading) /
+   −8 dB (AWGN), but the production monitor scanned only 12/25/50/100 ms with a buffer too small
+   for a 200 ms burst — a guaranteed miss. Fix: `kStaircaseSymbolMs` is both the staircase rung
+   set and the monitor scan set; the floor is 100 ms.
+
 
 ### BUG-LTS-CFO-SEED-GATE (FIXED 2026-11-08) — formerly filed as BUG-COHERENT-MODERATE-DOPPLER-FLOOR
 

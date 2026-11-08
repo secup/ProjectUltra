@@ -249,6 +249,39 @@ lead-in fill (30 ms silent T/R floor first).
 
 ---
 
+## Tone-Burst ACK Invariants (2026-11-08)
+
+### INV-TONE-ACK-001: The staircase can only emit rungs the monitor scans
+
+**Rule:** `kStaircaseSymbolMs` (`tone_burst_constants.hpp`) is BOTH the set `symbolMsForSNR`
+returns from and the production monitor's scan set (`streaming_decoder.cpp` assigns it and sizes
+the monitor buffer from its slowest member). Never add a rung to one without the other.
+**Why:** a rung the sender emits but the monitor does not scan is a guaranteed miss and a full
+RTO; until 2026-11-08 the staircase floor was 200 ms, which the monitor could not even buffer.
+**Test:** `ToneBurstAckPayload` (`symbol_ms_staircase`: every return value is in the set).
+
+### INV-TONE-ACK-002: Diversity is lockstep and power-combined
+
+**Rule:** the two-subband ACK (`kToneFreqHzDiversity`, `ULTRA_TONE_ACK_DIVERSITY`, default ON) is
+a wire change — both stations must run the same setting. TX sends each symbol on both subbands at
+HALF amplitude (same peak as one tone); RX square-law combines (|X_A|^2 + |X_B|^2 per tone) and
+the monitor's ideal-peak reference is scaled by 1/sqrt(2). The offset is derived (minimax of
+cos^2(pi df tau) over the ITU delays, IMD3 out of band) — pinned by `ToneBurstAckPayload`
+`constants_sanity`; do not move a subband without re-running that derivation.
+
+### INV-TONE-ACK-003: The tone detector's carrier-offset prior is the tracked reverse-link CFO
+
+**Rule:** before every monitor feed the decoder sets the detector prior to
+`cfo_tracker_.tracked()` (the physical shift of the received audio, rx = tx shifted by +cfo) with
+half-width 0 when pilot-certified, the dual-chirp phantom bound (tau_max x chirp_rate / 2 =
+4.8 Hz) when uncertified, and the +-50 Hz acquisition range when no estimate exists. The detector
+probes f + prior on a 1/(2T) grid. **Why:** the Goertzel main lobe is 2/T wide — 7.3 Hz of dial
+offset cost the 100 ms rung > 6 dB. **Test:** `StreamingDecoderToneBurstMonitor` (a +7.3 Hz
+100 ms ACK at -4 dB: tracker +7.3 decodes 10/10, -7.3 decodes 0/10 — the sign is pinned) and
+`ToneBurstAckWatterson` (`cfo_*` cells).
+
+---
+
 ## Sample Position Invariants
 
 ### INV-POS-001: detectSync() Returns TRAINING Start, Not Data Start

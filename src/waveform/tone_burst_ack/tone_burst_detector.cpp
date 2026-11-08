@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <complex>
+#include <numeric>
 
 namespace ultra {
 namespace waveform {
@@ -31,16 +33,136 @@ float goertzelPowerAt(SampleSpan samples, size_t n_samples, float freq_hz) {
     return q1 * q1 + q2 * q2 - coeff * q1 * q2;
 }
 
+using Cd = std::complex<double>;
+constexpr double kTwoPiD = 6.283185307179586476925286766559;
+constexpr int kMaxBands = 2;
+constexpr int kMaxBatch = kCostasSymbols * kMaxBands;  // 4 Costas tones x 2 subbands
+
+// Tone k on subband `band` (0 = primary, 1 = diversity), shifted by the carrier offset.
+float toneHz(uint32_t k, int band, float offset_hz) {
+    return (band == 0 ? kToneFreqHz[k] : kToneFreqHzDiversity[k]) + offset_hz;
+}
+
+double omegaOf(float hz) { return kTwoPiD * static_cast<double>(hz) / kSampleRate; }
+
+// GRID PREFIX SUMS for nf frequencies in one pass over x:
+//     out[f][k] = sum_{m = begin}^{begin + k g - 1} x[m] e^{-j omega_f m},   k = 0..count_grid,
+// with an ABSOLUTE phase reference m, so for any window [a, a + N) on the grid the DFT
+// magnitude |sum_m x[m] e^{-j omega m}| is |out[(a + N - begin) / g] - out[(a - begin) / g]| —
+// exactly goertzelPowerAt(x + a, N, f) up to rounding. Each frequency runs the Goertzel
+// recursion s[m] = x[m] + 2 cos(w) s[m-1] - s[m-2] in DOUBLE (prefix sums grow with the span;
+// float would lose the window difference), and at every grid point extracts
+// y = s[m] - e^{-jw} s[m-1] = sum_l x[l] e^{jw(m-l)}, i.e. S(m) = e^{-jwm} y. The nf
+// recursions are independent, so one pass keeps the loop throughput-bound, not latency-bound.
+void gridPrefixSums(const float* x, size_t begin, size_t count_grid, size_t g,
+                    const double* omega, int nf, std::vector<Cd>* out) {
+    double coeff[kMaxBatch], s1[kMaxBatch] = {}, s2[kMaxBatch] = {};
+    Cd e_mjw[kMaxBatch], rot_g[kMaxBatch], ph[kMaxBatch];
+    for (int f = 0; f < nf; ++f) {
+        coeff[f] = 2.0 * std::cos(omega[f]);
+        e_mjw[f] = std::polar(1.0, -omega[f]);
+        rot_g[f] = std::polar(1.0, -omega[f] * static_cast<double>(g));
+        ph[f] = std::polar(1.0, -omega[f] * static_cast<double>(begin + g - 1));
+        out[f].assign(count_grid + 1, Cd(0.0, 0.0));
+    }
+    size_t m = begin;
+    for (size_t k = 1; k <= count_grid; ++k) {
+        for (size_t i = 0; i < g; ++i, ++m) {
+            const double xm = static_cast<double>(x[m]);
+            for (int f = 0; f < nf; ++f) {
+                const double s0 = xm + coeff[f] * s1[f] - s2[f];
+                s2[f] = s1[f];
+                s1[f] = s0;
+            }
+        }
+        for (int f = 0; f < nf; ++f) {
+            out[f][k] = ph[f] * (Cd(s1[f], 0.0) - e_mjw[f] * s2[f]);
+            ph[f] *= rot_g[f];
+            if ((k & 1023u) == 0) ph[f] /= std::abs(ph[f]);
+        }
+    }
+}
+
+// Costas statistic sum_i sqrt(sum_b |X_{i,b}|^2) from per-(symbol, band) window DFTs.
+float costasStatistic(const Cd* X, int bands) {
+    double sum = 0.0;
+    for (uint32_t i = 0; i < kCostasSymbols; ++i) {
+        double p = 0.0;
+        for (int b = 0; b < bands; ++b) p += std::norm(X[i * bands + b]);
+        sum += std::sqrt(p);
+    }
+    return static_cast<float>(sum);
+}
+
+// FINE timing sweep at one carrier-offset hypothesis: every offset o in [lo, hi] at 1-sample
+// resolution, the four Costas-window DFTs SLID one sample at a time
+//     X(o+1) = X(o) - x[o + i N] e^{-jw(o + i N)} + x[o + (i+1) N] e^{-jw(o + (i+1) N)},
+// O(1) per offset instead of a fresh O(N) Goertzel. Updates (best_corr, best_offset) when an
+// offset beats best_corr (strictly), as the per-offset sweep did.
+void fineSweep(SampleSpan x, size_t lo, size_t hi, uint32_t spp, int bands, float offset_hz,
+               float& best_corr, size_t& best_offset) {
+    Cd X[kMaxBatch], ph_out[kMaxBatch], ph_in[kMaxBatch], rot[kMaxBatch];
+    for (uint32_t i = 0; i < kCostasSymbols; ++i) {
+        const size_t a = lo + static_cast<size_t>(i) * spp;
+        double om[kMaxBands];
+        for (int b = 0; b < bands; ++b) om[b] = omegaOf(toneHz(kCostasPattern[i], b, offset_hz));
+        std::vector<Cd> tmp[kMaxBands];
+        gridPrefixSums(x, a, 1, spp, om, bands, tmp);
+        for (int b = 0; b < bands; ++b) {
+            const int w = static_cast<int>(i) * bands + b;
+            X[w] = tmp[b][1];
+            ph_out[w] = std::polar(1.0, -om[b] * static_cast<double>(a));
+            ph_in[w] = std::polar(1.0, -om[b] * static_cast<double>(a + spp));
+            rot[w] = std::polar(1.0, -om[b]);
+        }
+    }
+    for (size_t o = lo; o <= hi; ++o) {
+        if (o > lo) {
+            for (uint32_t i = 0; i < kCostasSymbols; ++i) {
+                const size_t out_idx = o - 1 + static_cast<size_t>(i) * spp;
+                const double x_out = static_cast<double>(x[out_idx]);
+                const double x_in = static_cast<double>(x[out_idx + spp]);
+                for (int b = 0; b < bands; ++b) {
+                    const int w = static_cast<int>(i) * bands + b;
+                    X[w] += x_in * ph_in[w] - x_out * ph_out[w];
+                    ph_out[w] *= rot[w];
+                    ph_in[w] *= rot[w];
+                }
+            }
+        }
+        const float c = costasStatistic(X, bands);
+        if (c > best_corr) {
+            best_corr = c;
+            best_offset = o;
+        }
+    }
+}
+
 }  // namespace
+
+int ToneBurstDetector::frequencyHypothesesPerSide(float halfwidth_hz, uint32_t symbol_ms) {
+    const float step = frequencyHypothesisStepHz(symbol_ms);
+    if (!(halfwidth_hz > 0.0f) || !(step > 0.0f)) return 0;
+    const double j = std::ceil((static_cast<double>(halfwidth_hz) - 0.5 * step) / step);
+    return static_cast<int>(std::max(0.0, j));
+}
 
 // ----- static helpers -----
 
 std::vector<float> ToneBurstDetector::toneMagnitudes(SampleSpan window_samples,
-                                                      size_t window_samples_count) {
+                                                      size_t window_samples_count,
+                                                      bool diversity, float offset_hz) {
     std::vector<float> mags;
     mags.reserve(kNumTones);
-    for (float f : kToneFreqHz) {
-        const float power = goertzelPowerAt(window_samples, window_samples_count, f);
+    for (uint32_t k = 0; k < kNumTones; ++k) {
+        // Square-law (power) combining of the two subbands: the optimal non-coherent combiner
+        // for equal-power branches.
+        float power = goertzelPowerAt(window_samples, window_samples_count,
+                                      toneHz(k, 0, offset_hz));
+        if (diversity) {
+            power += goertzelPowerAt(window_samples, window_samples_count,
+                                     toneHz(k, 1, offset_hz));
+        }
         // Use sqrt(power) = magnitude. Cheaper to compare on power, but the
         // tests want a "confidence ratio" so we want amplitude here.
         mags.push_back(std::sqrt(std::max(power, 0.0f)));
@@ -74,7 +196,8 @@ uint8_t ToneBurstDetector::demapDibit(const std::vector<float>& magnitudes,
 float ToneBurstDetector::costasCorrelationAtOffset(SampleSpan samples,
                                                     size_t num_samples,
                                                     size_t start_offset,
-                                                    uint32_t samples_per_symbol) {
+                                                    uint32_t samples_per_symbol,
+                                                    bool diversity, float offset_hz) {
     // Sum of expected-tone Goertzel magnitudes across the 4 Costas symbols.
     // High when the actual tones at those positions match the expected
     // Costas pattern; near-noise-floor otherwise.
@@ -83,9 +206,12 @@ float ToneBurstDetector::costasCorrelationAtOffset(SampleSpan samples,
         const uint8_t expected_tone = kCostasPattern[s];
         const size_t window_start = start_offset + s * samples_per_symbol;
         if (window_start + samples_per_symbol > num_samples) return 0.0f;
-        const float f = kToneFreqHz[expected_tone];
-        const float power = goertzelPowerAt(samples + window_start,
-                                             samples_per_symbol, f);
+        float power = goertzelPowerAt(samples + window_start, samples_per_symbol,
+                                      toneHz(expected_tone, 0, offset_hz));
+        if (diversity) {
+            power += goertzelPowerAt(samples + window_start, samples_per_symbol,
+                                     toneHz(expected_tone, 1, offset_hz));
+        }
         sum += std::sqrt(std::max(power, 0.0f));
     }
     return sum;
@@ -93,9 +219,10 @@ float ToneBurstDetector::costasCorrelationAtOffset(SampleSpan samples,
 
 // ----- decode aligned -----
 
-DecodeAlignedResult ToneBurstDetector::decodeAligned(SampleSpan samples,
-                                                      size_t num_samples,
-                                                      uint32_t symbol_ms) {
+DecodeAlignedResult ToneBurstDetector::decodeAlignedAt(SampleSpan samples,
+                                                        size_t num_samples,
+                                                        uint32_t symbol_ms,
+                                                        float offset_hz) {
     DecodeAlignedResult result;
     const uint32_t samples_per_symbol = (kSampleRate * symbol_ms) / 1000u;
     const size_t needed = static_cast<size_t>(kTotalSymbols) * samples_per_symbol;
@@ -112,7 +239,8 @@ DecodeAlignedResult ToneBurstDetector::decodeAligned(SampleSpan samples,
     for (uint32_t s = 0; s < kPayloadSymbols; ++s) {
         const size_t window_start =
             (static_cast<size_t>(kCostasSymbols) + s) * samples_per_symbol;
-        const auto mags = toneMagnitudes(samples + window_start, samples_per_symbol);
+        const auto mags =
+            toneMagnitudes(samples + window_start, samples_per_symbol, diversity_, offset_hz);
         float conf = 0.0f;
         const uint8_t dibit = demapDibit(mags, conf);
         dibits.push_back(dibit);
@@ -145,26 +273,70 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     // like the Costas pattern {0, 1, 3, 2}). So we collect candidates and
     // verify each by CRC.
     const size_t max_offset = num_samples - total_needed;
+    if (sweep_step_samples == 0) sweep_step_samples = 1;
+    const size_t step = sweep_step_samples;
+    const int bands = diversity_ ? 2 : 1;
 
+    // Carrier-offset hypotheses around the prior (see setFrequencyPrior).
+    const int per_side = frequencyHypothesesPerSide(freq_halfwidth_hz_, symbol_ms);
+    const float hyp_step = frequencyHypothesisStepHz(symbol_ms);
+    std::vector<float> hyps;
+    hyps.reserve(static_cast<size_t>(2 * per_side + 1));
+    for (int j = -per_side; j <= per_side; ++j) {
+        hyps.push_back(freq_prior_hz_ + static_cast<float>(j) * hyp_step);
+    }
+    result.frequency_hypotheses = static_cast<int>(hyps.size());
+
+    // COARSE sweep: offsets 0, step, ..., <= max_offset, each scored by the Costas statistic
+    // maximized over the offset hypotheses. All window edges (t + i N) lie on the grid
+    // g = gcd(step, N), so one grid-prefix-sum pass per frequency serves every offset.
+    struct Candidate {
+        size_t offset;
+        float corr;
+        int hyp;
+    };
+    const size_t n_offsets = max_offset / step + 1;
+    const size_t g = std::gcd(step, static_cast<size_t>(samples_per_symbol));
+    const size_t span = (n_offsets - 1) * step + kCostasSymbols * samples_per_symbol;
+    const size_t step_grid = step / g;
+    const size_t sym_grid = samples_per_symbol / g;
+    std::vector<Candidate> candidates(n_offsets);
+    std::vector<Cd> prefix[kMaxBatch];
+    for (size_t h = 0; h < hyps.size(); ++h) {
+        double om[kMaxBatch];
+        for (uint32_t i = 0; i < kCostasSymbols; ++i) {
+            for (int b = 0; b < bands; ++b) {
+                om[i * bands + b] = omegaOf(toneHz(kCostasPattern[i], b, hyps[h]));
+            }
+        }
+        gridPrefixSums(samples, 0, span / g, g, om, static_cast<int>(kCostasSymbols) * bands,
+                       prefix);
+        for (size_t k = 0; k < n_offsets; ++k) {
+            const size_t t_grid = k * step_grid;
+            Cd X[kMaxBatch];
+            for (uint32_t i = 0; i < kCostasSymbols; ++i) {
+                for (int b = 0; b < bands; ++b) {
+                    const auto& P = prefix[i * bands + b];
+                    X[i * bands + b] = P[t_grid + (i + 1) * sym_grid] - P[t_grid + i * sym_grid];
+                }
+            }
+            const float c = costasStatistic(X, bands);
+            if (h == 0 || c > candidates[k].corr) {
+                candidates[k] = Candidate{k * step, c, static_cast<int>(h)};
+            }
+        }
+    }
     // Noise-floor proxy: average correlation across the sweep. Anything more
     // than ~3× the average is a candidate worth trying.
-    std::vector<std::pair<size_t, float>> candidates;  // (offset, corr)
-    candidates.reserve(64);
-    float corr_sum = 0.0f;
-    size_t corr_n = 0;
-    for (size_t offset = 0; offset <= max_offset; offset += sweep_step_samples) {
-        const float corr = costasCorrelationAtOffset(samples, num_samples,
-                                                      offset, samples_per_symbol);
-        corr_sum += corr;
-        ++corr_n;
-        candidates.emplace_back(offset, corr);
-    }
-    const float corr_avg = (corr_n > 0) ? (corr_sum / static_cast<float>(corr_n)) : 0.0f;
+    double corr_sum = 0.0;
+    for (const auto& c : candidates) corr_sum += c.corr;
+    const float corr_avg = static_cast<float>(corr_sum / static_cast<double>(n_offsets));
     const float candidate_threshold = std::max(corr_avg * 3.0f, 1.0f);
 
-    // Sort candidates by correlation strength descending.
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto& a, const auto& b) { return a.second > b.second; });
+    // Sort candidates by correlation strength descending (stable: equal scores keep
+    // ascending-offset order, as the per-offset sweep produced them).
+    std::stable_sort(candidates.begin(), candidates.end(),
+                     [](const Candidate& a, const Candidate& b) { return a.corr > b.corr; });
 
     // Try the top-K distinct timing candidates. K=8 covers the ordinary case where
     // the global peak is a payload alias and the real burst is somewhere lower in the
@@ -179,30 +351,30 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     refined_offsets_tried.reserve(kAfterSemanticRejectBudget);
     float global_peak = 0.0f;
     size_t global_offset = 0;
+    float global_hyp_hz = hyps[static_cast<size_t>(per_side)];
     DecodeAlignedResult best_decode;  // empty by default
     size_t best_decode_offset = 0;
+    float best_decode_hyp_hz = global_hyp_hz;
 
     for (size_t k = 0; k < candidates.size(); ++k) {
-        size_t offset = candidates[k].first;
-        const float corr_coarse = candidates[k].second;
+        size_t offset = candidates[k].offset;
+        const float corr_coarse = candidates[k].corr;
+        const float hyp_hz = hyps[static_cast<size_t>(candidates[k].hyp)];
         if (corr_coarse < candidate_threshold && k > 0) break;
         if (corr_coarse > global_peak) {
             global_peak = corr_coarse;
             global_offset = offset;
+            global_hyp_hz = hyp_hz;
         }
 
-        // Fine sweep around this candidate to refine the offset.
+        // Fine sweep around this candidate (at its winning offset hypothesis).
         float best_corr = corr_coarse;
         size_t best_offset = offset;
-        if (sweep_step_samples > 1) {
-            const size_t lo = (offset >= sweep_step_samples)
-                ? offset - sweep_step_samples : 0;
-            const size_t hi = std::min(offset + sweep_step_samples, max_offset);
-            for (size_t o = lo; o <= hi; ++o) {
-                const float c = costasCorrelationAtOffset(samples, num_samples,
-                                                          o, samples_per_symbol);
-                if (c > best_corr) { best_corr = c; best_offset = o; }
-            }
+        if (step > 1) {
+            const size_t lo = (offset >= step) ? offset - step : 0;
+            const size_t hi = std::min(offset + step, max_offset);
+            fineSweep(samples, lo, hi, samples_per_symbol, bands, hyp_hz, best_corr,
+                      best_offset);
         }
 
         // Adjacent coarse sweep points commonly refine onto the same Costas lobe.
@@ -231,7 +403,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
         // pass wins. A CRC-valid but impossible payload is treated like a failed
         // timing hypothesis and the search continues.
         const size_t remaining = num_samples - best_offset;
-        auto decode = decodeAligned(samples + best_offset, remaining, symbol_ms);
+        auto decode = decodeAlignedAt(samples + best_offset, remaining, symbol_ms, hyp_hz);
         if (decode.stats.crc_ok) {
             if (acceptance_predicate && decode.payload.has_value() &&
                 !acceptance_predicate(*decode.payload)) {
@@ -250,6 +422,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
             }
             best_decode = std::move(decode);
             best_decode_offset = best_offset;
+            best_decode_hyp_hz = hyp_hz;
             // Report the accepted candidate's own peak. A stronger rejected
             // candidate is diagnostic evidence, not signal energy belonging to this
             // ACK and must not inflate the monitor's peak gate/readout.
@@ -260,6 +433,8 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     }
 
     result.detected_offset_samples = best_decode.stats.crc_ok ? best_decode_offset : global_offset;
+    result.detected_frequency_offset_hz =
+        best_decode.stats.crc_ok ? best_decode_hyp_hz : global_hyp_hz;
     result.costas_correlation_peak = global_peak;
     result.decode = std::move(best_decode);
     result.sync_acquired = result.decode.stats.crc_ok;

@@ -10,6 +10,97 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-08 — FIX: tone-burst ACK — frequency diversity, carrier-offset prior, scannable staircase (BUG-TONE-ACK-RETURN-LOSS-ON-FADING + 2 latent defects)
+
+**What was broken.** The GUI gate occasionally lost a tone-burst ACK on ITU Good@15-20 although
+the receiver delivered the group and transmitted the ACK; each loss is a full RTO (~16-20 s).
+Measuring the ACK in isolation (`tools/measure_ack_staircase`: real encoder → Watterson →
+production `detectAndDecode`, 400-1000 trials per cell) found three mechanisms:
+
+1. *Single-branch fading floor.* The 4-FSK ACK occupies 225 Hz, so on a two-path HF channel it
+   fades as ONE Rayleigh branch: its loss stops falling with SNR. Single-tone 12 ms ACK: Good
+   2.6 % at 12 dB, 1.1 % at 14 dB; Moderate 1.5 % at 20 dB, 1.0 % at 22 dB.
+2. *No carrier-offset tolerance.* The detector probed the four tones at fixed frequencies; the
+   Goertzel main lobe is 2/T wide, so a dial offset of 7.3 Hz cost the 100 ms rung > 6 dB and the
+   200 ms rung > 8 dB, and 20 Hz cost the 25 ms rung > 4 dB and decoded nothing at 50-200 ms at
+   0 dB (AWGN). Invisible until the simulator applied a dial offset (today's CFO work); the
+   staircase sweep itself ran with `cfo_enabled = false`.
+3. *Unscannable staircase floor.* `symbolMsForSNR` returned 200 ms below 0 dB (fading) / −8 dB
+   (AWGN), but the production monitor scans 12/25/50/100 ms and its buffer (172,800 samples)
+   cannot hold a 200 ms burst (326,400): every such ACK was a guaranteed miss.
+
+**What changed.**
+- *Frequency diversity* (`tone_burst_constants.hpp` `kToneFreqHzDiversity`, encoder, detector,
+  monitor; `ULTRA_TONE_ACK_DIVERSITY`, default ON, `=0` opts out — WIRE CHANGE, lockstep). Every
+  symbol is sent on subband A (2400-2625 Hz) and simultaneously on subband B 1325 Hz below
+  (1075-1300 Hz), half amplitude each so the PEAK is unchanged; the detector square-law combines
+  |X_A|² + |X_B|² per tone (the optimal non-coherent combiner for equal branches). The offset is
+  derived: two-path branch power correlation cos²(π Δf τ), minimax over the ITU-R F.1487 delays
+  (0.5/1/2 ms) on the 25 Hz grid with B inside a 300-2700 Hz passband and clear of A; 675 and
+  1325 Hz tie exactly (all ITU delays are multiples of 0.5 ms), the larger wins (faster
+  decorrelation below 0.5 ms, IMD3 out of band). Worst correlation 0.27 (Moderate). The monitor's
+  ideal-peak reference scales by 1/√2. The half-duplex ACK slot owns the band, so the second
+  subband costs no airtime.
+- *Carrier-offset prior* (`ToneBurstDetector::setFrequencyPrior`, `ToneBurstAckMonitor::
+  setFrequencyPrior`, `StreamingDecoder::feedAudio`). The ACK rides the reverse link, whose dial
+  offset the decoder's `CFOTracker` holds from the peer's last chirp. The detector probes every tone
+  at f + prior on a 1/(2T) grid (half a bin: worst scalloping −0.91 dB) spanning the prior's
+  uncertainty: 0 if pilot-certified, the dual-chirp multipath-phantom bound τ_max × chirp_rate / 2
+  = 4.8 Hz (2 ms ITU Poor) if uncertified, ±50 Hz (the acquisition spec) with no estimate. Logged
+  at arm (`cfo_prior=` `cfo_halfwidth=`) and per detection (`cfo=`).
+- *Staircase* (`kStaircaseSymbolMs` = the monitor scan set, INV-TONE-ACK-001; floor 100 ms) with
+  edges RE-MEASURED for the diversity ACK at equal peak (95 % decode, +2 dB margin; fading column
+  = worst of Good/Moderate): fading 12 ms ≥ 10 dB, 25 ms ≥ 6, 50 ms ≥ 4, else 100 ms; AWGN
+  12 ms ≥ 2, 25 ms ≥ −2, 50 ms ≥ −4, else 100 ms (was fading 12/4/0 → 12/25/100/200 ms, AWGN
+  −2/−6/−8). The dead `kFastAckEdgeAwgnDb` / `kFastAckEdgeFadingDb` (18/16 dB) are removed.
+- *Detector CPU* (`tone_burst_detector.cpp`). Diversity doubled the Goertzel work of an already
+  heavy sweep (one fresh Goertzel per 32-sample offset): 17.6 → 34.9 ms per armed pass on a
+  desktop core, risky on the Pi 5 (a 2026-07-04 monitor CPU growth once put its decode thread 19 s
+  behind live). The coarse sweep now builds GRID PREFIX SUMS per probed frequency (Goertzel
+  recursion in double, one complex extraction per gcd(step, N) grid point) so each window DFT is a
+  difference of two prefix values, and the fine sweep slides the Costas-window DFTs one sample at a
+  time: **3.4 ms per pass with diversity** (3.8 ms with the uncertified-prior search, 8.3 ms
+  worst case with no prior and ±50 Hz) — every case cheaper than the old single-tone detector.
+  Magnitudes equal the per-window Goertzel to rounding (`measure_ack_staircase bench`).
+- *Gate script.* `tools/gui_qso_scenario.sh` always runs `caffeinate -dimsu -w $$`: it skipped the
+  call whenever any caffeinate was running, and with the display asleep `ultra_gui`'s vsync swap
+  blocks and both stations stop feeding audio (BUG-GUI-DISPLAY-SLEEP-STALL, filed open).
+- *Tool.* `measure_ack_staircase [trials] [fading_only] [snr_lo] [snr_hi] [diversity]
+  [rungs] [cfo_hz] [prior_err_hz] [prior_halfwidth_hz]`, Moderate sweep, `bench [halfwidth]`.
+
+**Measured (measure_ack_staircase, equal peak, decode success).**
+| | single-tone | two-subband |
+|---|---|---|
+| Good 12 ms @12 / @16 dB | 97.4 % / 99.3 % | 99.9 % / 100.0 % |
+| Moderate 12 ms @12 / @20 dB | 96.5 % / 98.5 % | 99.0 % / 99.9 % |
+| AWGN 12 ms 95 % edge | −2 dB | 0 dB (the ~3.5-4 dB diversity cost, below every operating point) |
+
+With a 20 Hz dial offset and a prior 3 Hz wrong (±4.8 Hz search): 25 ms at −4 dB 95.0 % (0 Hz:
+95.2 %; no prior: 6 %); 100 ms at −10 dB 91 % (0 Hz: 97 %; no prior at 0 dB: 0 %).
+
+**Simulator caveat.** OTASim normalizes every burst to the same in-band RMS, so in the GUI gate
+the two-subband ACK gets back the 3 dB its equal-peak construction costs on a PEP-limited radio
+(the gate flatters diversity); the staircase tool keeps equal peak and is the authority. On a real
+radio both ACK forms also enjoy a PAPR advantage over the OFDM data whose SNR selects the rung
+(two-tone 6 dB vs OFDM ~10 dB at the same PEP), so the table is conservative there.
+
+**Tests.** `ToneBurstAckPayload` (`constants_sanity`: subband placement, main-lobe clearance,
+IMD3 out of band, the minimax derivation; `symbol_ms_staircase`: new edges, every return value
+scannable, monotonic, fading never looser than AWGN); `ToneBurstAckWatterson` (5 `cfo_*` cells:
+no prior 4/20, exact / 3 Hz-off prior 20/20, ±50 Hz search 20/20 and 19/20 at +45 Hz);
+`StreamingDecoderToneBurstMonitor` (the tracked CFO reaches the detector with the right SIGN:
++7.3 Hz 100 ms ACK at −4 dB, tracker +7.3 → 10/10, −7.3 → 0/10). ctest 106/106.
+
+GUI gate (`gui_qso_scenario.sh`, 21 KB, CRC-checked), final build, 8/8 PASS incl. −23.5 Hz and
+AWGN@12; six scenarios paired against the old behaviour (`ULTRA_TONE_ACK_DIVERSITY=0` on the
+pre-change binary): goodput 8300 vs 8230 bps summed (+0.9 %, a wash — ACK losses are ~1 % events
+and ~90 ACKs per arm cannot resolve them; 2 misses per arm). Good@15 s43 1290 vs 1140 bps
+(the new table keeps 12 ms ACKs at snr_used 10-12, where the old one sent 25 ms). The two
+remaining misses: a Moderate ACK whose Costas preamble fell in a deep two-subband fade, and an
+unexplained miss of a clean ACK that also occurs with the old code (BUG-TONE-ACK-CLEAN-MISS,
+`ULTRA_TONE_ACK_TRACE` added). Detected-ACK log now carries `cfo=` (Moderate run: −9.70 Hz prior
+against a −7.3 Hz truth = the predicted ~2.4 Hz dual-chirp phantom).
+
 ## 2026-11-08 — FIX: the CFO chain, made correct for a REAL dial offset (6 defects) + the simulator now applies one
 
 **Why now.** Every GUI-gate run until today had exactly 0 Hz carrier offset on both links

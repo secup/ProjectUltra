@@ -2,6 +2,8 @@
 
 #include "tone_burst_ack_monitor.hpp"
 
+#include <cstdlib>
+
 #include "ultra/logging.hpp"
 
 #include <algorithm>
@@ -21,7 +23,10 @@ float ToneBurstAckMonitor::idealCostasPeak(uint32_t symbol_ms) {
     const uint32_t spp = (kSampleRate * symbol_ms) / 1000u;
     // Goertzel magnitude for matched tone of amplitude A over N samples: N·A/2.
     const float per_symbol = (static_cast<float>(spp) / 2.0f) * kToneAmplitude;
-    return per_symbol * static_cast<float>(kCostasSymbols);
+    // Diversity ACK (equal peak, two half-amplitude tones, square-law combined): the clean
+    // combined magnitude is sqrt(2 (N A/4)^2) = (N A/2) / sqrt(2).
+    const float combine = toneAckDiversityEnabled() ? 0.70710678f : 1.0f;
+    return per_symbol * static_cast<float>(kCostasSymbols) * combine;
 }
 
 void ToneBurstAckMonitor::reset() {
@@ -53,9 +58,11 @@ void ToneBurstAckMonitor::arm(size_t window_samples) {
     max_feed_chunk_while_armed_ = 0;
     passes_while_armed_ = 0;
     armed_at_stream_ = total_samples_fed_;
-    LOG_MODEM(INFO, "ToneBurstAckMonitor armed: window_samples=%zu fed=%llu deadline=%llu buf_size=%zu",
+    LOG_MODEM(INFO, "ToneBurstAckMonitor armed: window_samples=%zu fed=%llu deadline=%llu buf_size=%zu "
+              "cfo_prior=%.2f cfo_halfwidth=%.1f",
               window_samples, (unsigned long long)total_samples_fed_,
-              (unsigned long long)arm_deadline_stream_offset_, buffer_.size());
+              (unsigned long long)arm_deadline_stream_offset_, buffer_.size(),
+              detector_.frequencyPriorHz(), detector_.frequencyHalfWidthHz());
     // Reset the cadence counter so the FIRST detection pass happens at the
     // current sample position + armed-cadence interval, not whenever the
     // background cadence next fires. This gives the first detection a
@@ -254,6 +261,26 @@ void ToneBurstAckMonitor::runDetectionPass() {
                 }
             }
         }
+        {
+            static const bool kTrace = [] {
+                const char* e = std::getenv("ULTRA_TONE_ACK_TRACE");
+                return e && e[0] == '1';
+            }();
+            const float ideal_t = idealCostasPeak(symbol_ms);
+            if (kTrace && ideal_t > 0.0f && r.costas_correlation_peak > 0.25f * ideal_t) {
+                LOG_MODEM(INFO,
+                          "TONE_TRACE pass=%llu ms=%u win=%zu tail_base=%zu buf=%zu "
+                          "start_stream=%llu peak_norm=%.3f off=%zu crc=%d payload=%d "
+                          "hyps=%d cfo=%.2f fed=%llu",
+                          (unsigned long long)passes_while_armed_, symbol_ms, window,
+                          tail_base, buffer_.size(),
+                          (unsigned long long)buffer_start_stream_offset_,
+                          r.costas_correlation_peak / ideal_t, r.detected_offset_samples,
+                          r.decode.stats.crc_ok ? 1 : 0, r.decode.payload.has_value() ? 1 : 0,
+                          r.frequency_hypotheses, r.detected_frequency_offset_hz,
+                          (unsigned long long)total_samples_fed_);
+            }
+        }
         if (!r.decode.payload.has_value()) continue;
         if (!r.decode.stats.crc_ok) continue;
         // Peak-magnitude gate: rejects rare cases where Costas+Hamming+CRC
@@ -312,6 +339,8 @@ void ToneBurstAckMonitor::runDetectionPass() {
             d.min_symbol_confidence = r.decode.min_confidence;
             d.hamming_corrected_blocks = r.decode.stats.hamming_corrected_blocks;
             d.symbol_ms_used = symbol_ms;
+            d.frequency_offset_hz = r.detected_frequency_offset_hz;
+            d.frequency_prior_hz = detector_.frequencyPriorHz();
             callback_(d);
         }
 

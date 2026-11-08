@@ -73,6 +73,9 @@ results; see docs/CHANGELOG.md):
 **Testing invariants:**
 - SINGLE ModemEngine instance for the entire audio stream (continuous RX)
 - Buffer limit: `MAX_PENDING_SAMPLES = 960000` (20 s at 48 kHz)
+- The GUI gate needs an AWAKE display: `ultra_gui` feeds RX audio from its render loop and its
+  vsync swap blocks while macOS sleeps the display (BUG-GUI-DISPLAY-SLEEP-STALL) — the script holds
+  `caffeinate -dimsu -w $$`; a run whose logs stop after one `feed: audio` line is this, not the modem
 - DEFAULT gate: `ctest --test-dir build --output-on-failure -j4`
 - `tools/gui_qso_scenario.sh` is the faithful full-protocol + fade/throughput gate (two real `ultra_gui -sim` stations over `ota_simulator serve`, real-time). It REPLACED `cli_simulator` (retired 2026-05-30), which was CPU-paced AND used a divergent PHY wrapper (SimulatedStation) — both made it unfaithful. ALL fade/throughput/full-protocol claims go through the GUI gate.
 
