@@ -62,8 +62,11 @@ results; see docs/CHANGELOG.md):
 - CFO from chirp detection is TRUSTED over training-based CFO estimation
 
 **OFDM CFO invariants (full detail: `docs/CFO_CORRECTION_FLOW.md`):**
-- Chirp CFO is coarse — on fading it can be wrong by ±2 Hz
-- LTS residual CFO REFINES chirp CFO per frame (threshold 0.3 Hz)
+- Chirp CFO is coarse — on multipath a dominant-path switch between the up and down chirp
+  gives a PHANTOM of up to delay_spread/(2×10 samples/Hz) (~2.4 Hz on ITU Moderate)
+- LTS residual CFO corrects an UNCERTIFIED prior (fresh chirp / revoked) when significant
+  (|r| > t₍ₙ₋₁₎(3σ)·σ_r, `src/ofdm/lts_cfo_update.hpp`); a CERTIFIED prior is never corrected.
+  Never gate it on |CFO| magnitude or channel flatness (the 2026-11-08 BUG-LTS-CFO-SEED-GATE)
 - After demodulation, corrected CFO propagates back to cached `last_cfo_`
 - NEVER remove the feedback in `ofdm_chirp_waveform.cpp:process()` or `streaming_decoder.cpp` — without it, wrong chirp CFO re-injects every frame → progressive phase drift → CW failures
 
@@ -139,8 +142,10 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
 - AWGN calibration: `SimulatedChannel` AWGN sized from `encodePing()` in-band RMS
   `0.3048` — a NOISE-REFERENCING CONVENTION defined over the 50-2950 Hz band, **not** a filter
   in the RX signal path: `rx_filter_` is constructed (`modem_engine.cpp:325`) and reset
-  (`:332`) but never applied anywhere; only `tx_filter_` is (`:763`). Verified 2026-07-26. Watterson CFO uses an analytic-signal
-  (Hilbert) shifter.
+  (`:332`) but never applied anywhere; only `tx_filter_` is (`:763`). Verified 2026-07-26. OTASim dial offset: `gui_qso_scenario.sh
+  --cfo-hz D` (ALPHA hears −D, BRAVO +D) via the streaming `FrequencyShiftChannelModel`
+  (4097-tap Hilbert pair, chunk-invariant); `WattersonChannel::applyCFO` is block-wise (FFT per
+  call) and is NOT used by OTASim. The GUI gate ran with 0 Hz CFO on every link until 2026-11-08.
 - Per-symbol pilot tracking is active in `channel_equalizer.cpp` (LS pilot H update,
   alpha-smoothed, residual CFO + timing recovery; pilots ~every 10 carriers).
 - **Recommendation:** OFDM_CHIRP with DQPSK; rate auto via `selectOFDMCodeRate()`.

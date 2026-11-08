@@ -520,6 +520,7 @@ void StreamingDecoder::searchForSync() {
     size_t warm_narrow_end_abs = 0;
     size_t warm_narrow_candidate_span_samples = 0;
     bool replaying_deferred_future_sync = false;
+    size_t pre_floor_lead = 0;
 
     // A previous detector pass may have proved the chirps while announcing a
     // training start just beyond live audio. Do not advance/search elsewhere in
@@ -567,6 +568,7 @@ void StreamingDecoder::searchForSync() {
         used_warm_narrow_window = win.used_warm_narrow_window;
         warm_narrow_end_abs = win.warm_narrow_end_abs;
         warm_narrow_candidate_span_samples = win.warm_narrow_candidate_span_samples;
+        pre_floor_lead = std::min(win.pre_floor_lead_samples, search_buffer.size());
     }
 
     // DEBUG: Dump the search buffer on first few searches
@@ -663,13 +665,17 @@ void StreamingDecoder::searchForSync() {
             // detectDataSync + control-threshold evaluation + streak update + weak-accept) lives on
             // the controller; the decoder passes its waveform + the search window and fires the
             // data-sync-accepted callback on success.
+            // The LTS-type fallback keeps the strict post-frame floor: skip the chirp-only lead
+            // (false LTS locks in a decoded frame's tail are what the floor exists to stop).
             auto fb = sync_controller_.detectFullAnchorFallback(
-                waveform_.get(), search_buffer.data(), search_buffer.size(), search_start,
+                waveform_.get(), search_buffer.data() + pre_floor_lead,
+                search_buffer.size() - pre_floor_lead, search_start,
                 min_search, is_narrowband, connected_, CORR_DETECT_THRESHOLD,
                 cfo_tracker_.tracked(), sync_result);
             if (fb.found) {
                 found = true;
                 used_full_anchor_fallback = fb.used_full_anchor_fallback;
+                sync_result.start_sample += static_cast<int>(pre_floor_lead);
             }
         }
 
@@ -1067,6 +1073,14 @@ void StreamingDecoder::searchForSync() {
                       "[%s] DIAG genie-timing-cfo: forcing sync CFO %.2f Hz -> 0.00 Hz",
                       log_prefix_.c_str(), new_cfo);
             new_cfo = 0.0f;
+        }
+        // DIAG (ULTRA_DIAG_FORCE_SYNC_CFO=<Hz>, unset = inert): force every sync CFO to a known
+        // value — the simulator's true CFO — so a CFO-ESTIMATION error can be separated from a
+        // channel limit (the genie arm that root-caused BUG-LTS-CFO-SEED-GATE). Never on a radio.
+        if (const char* g = std::getenv("ULTRA_DIAG_FORCE_SYNC_CFO"); g && *g) {
+            LOG_MODEM(INFO, "[%s] DIAG force-sync-cfo: measured %.2f Hz (chirp %.2f) -> %.2f Hz",
+                      log_prefix_.c_str(), new_cfo, sync_result.cfo_hz, std::atof(g));
+            new_cfo = static_cast<float>(std::atof(g));
         }
 
         sync_cfo_ = new_cfo;

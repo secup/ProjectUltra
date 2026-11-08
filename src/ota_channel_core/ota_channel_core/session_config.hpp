@@ -4,6 +4,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <string_view>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,6 +22,10 @@ struct SessionConfig {
     bool is_lobby = false;
     uint32_t sample_rate = kDefaultSampleRate;
     std::shared_ptr<const std::vector<float>> real_hf_loop_noise;
+    // Per-RECEIVER carrier frequency offset (station id -> Hz): everything that station hears
+    // is shifted by this much (sender oscillator minus receiver oscillator). For two
+    // transceivers whose oscillators differ by D: {B: +D, A: -D}. Absent = 0 Hz.
+    std::map<std::string, float> rx_cfo_hz;
 
     ChannelConfig channelConfig() const {
         return {.type = default_channel_model,
@@ -27,6 +33,13 @@ struct SessionConfig {
                 .seed = seed,
                 .sample_rate = sample_rate,
                 .real_hf_loop_noise = real_hf_loop_noise};
+    }
+
+    ChannelConfig channelConfigFor(std::string_view receiver_id) const {
+        ChannelConfig c = channelConfig();
+        const auto it = rx_cfo_hz.find(std::string(receiver_id));
+        if (it != rx_cfo_hz.end()) c.cfo_hz = it->second;
+        return c;
     }
 };
 

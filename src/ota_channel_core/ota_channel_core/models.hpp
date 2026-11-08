@@ -41,6 +41,10 @@ struct ChannelConfig {
     uint64_t seed = 42;
     uint32_t sample_rate = kDefaultSampleRate;
     std::shared_ptr<const std::vector<float>> real_hf_loop_noise;
+    // Carrier frequency offset (Hz) the RECEIVER sees on this path: the sender's oscillator
+    // error minus the receiver's (SSB dial offset). 0 = no shift (byte-identical models). A
+    // non-zero value wraps the model in FrequencyShiftChannelModel (streaming, continuous).
+    float cfo_hz = 0.0f;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
@@ -81,6 +85,41 @@ public:
         process(input, start_sample, output);
         return output;
     }
+};
+
+// Streaming carrier-frequency offset applied to the OUTPUT of any channel model (a dial offset
+// between two transceivers). Analytic signal from a band-limited Hilbert FIR pair (Blackman,
+// cutoff 3050 Hz), then rotation by a continuous phase: every frequency moves by +cfo_hz with no
+// block-edge artifacts. (WattersonChannel::applyCFO is block-wise — one FFT analytic signal per
+// process() call, circular at every block edge — so OTASim never enabled it; this replaces it.)
+// 4097 taps: the Hilbert transition from DC is ~70 Hz wide, so the image is < -40 dB from the
+// lowest OFDM carrier (140.6 Hz) up (the 1793-tap fading-path design left -29 dB at 160 Hz).
+// Adds the FIR's constant group delay, (taps-1)/2 = 2048 samples (42.7 ms at 48 kHz).
+class FrequencyShiftChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+
+    FrequencyShiftChannelModel(std::unique_ptr<IChannelModel> inner, float cfo_hz,
+                               uint32_t sample_rate);
+
+    void reset() override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
+
+    float cfoHz() const { return cfo_hz_; }
+    static size_t groupDelaySamples();
+
+private:
+    std::unique_ptr<IChannelModel> inner_;
+    float cfo_hz_ = 0.0f;
+    double phase_inc_ = 0.0;
+    double phase_ = 0.0;
+    std::vector<float> g_inphase_;     // reversed taps (contiguous dot product)
+    std::vector<float> g_quadrature_;
+    std::vector<float> line_;          // doubled delay line, length 2 x taps
+    size_t idx_ = 0;
+    std::vector<float> inner_out_;
 };
 
 class PassthroughChannelModel final : public IChannelModel {

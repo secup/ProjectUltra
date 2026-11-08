@@ -222,6 +222,10 @@ std::vector<float> MCDPSKWaveform::getSoftBits() {
     return std::move(soft_bits_);
 }
 
+std::vector<float> MCDPSKWaveform::takeUntrackedSoftBits() {
+    return demodulator_ ? demodulator_->takeUntrackedSoftBits() : std::vector<float>{};
+}
+
 bool MCDPSKWaveform::processDataOnly(SampleSpan samples) {
     if (!demodulator_) {
         return false;

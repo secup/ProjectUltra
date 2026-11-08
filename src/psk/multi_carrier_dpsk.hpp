@@ -314,6 +314,10 @@ public:
     }
 
     // Get soft bits from demodulated frame
+    // Untracked counterpart of the last demodulateSoft() output (empty unless the residual
+    // tracker applied a correction). Consumed once.
+    std::vector<float> takeUntrackedSoftBits() { return std::move(untracked_soft_bits_); }
+
     std::vector<float> getSoftBits() {
         auto result = std::move(soft_bits_);
         soft_bits_.clear();
@@ -374,16 +378,6 @@ public:
         cfo_initial_phase_ = initial_phase_rad;
     }
 
-    // Apply CFO correction to external samples (public wrapper for applyCFOCorrection)
-    // Call this on samples BEFORE demodulation when using direct demodulateSoft() path
-    // Note: This preserves cfo_hz_ so it can be called multiple times on different spans
-    void applyCFO(Samples& samples) {
-        if (std::abs(cfo_hz_) > 0.1f) {
-            float saved_cfo = cfo_hz_;
-            applyCFOCorrection(samples, cfo_hz_);
-            cfo_hz_ = saved_cfo;  // Restore for subsequent spans
-        }
-    }
 
     // Set chirp detected externally (bypass internal chirp detection)
     // Call this when using external detectSync() and passing training+ref+data samples
@@ -457,6 +451,10 @@ public:
         last_physical_snr_db_ = 0.0f;
         noise_ref_rms_ = 0.0f;
         cfo_initial_phase_ = 0.0f;
+        corr_cfo_hz_ = 0.0f;
+        corr_origin_ = nullptr;
+        corr_origin_phase_ = 0.0;
+        corr_next_phase_ = 0.0;
         external_chirp_detected_ = false;
         chirp_position_ = -1;
         last_chirp_corr_ = 0.0f;
@@ -771,6 +769,10 @@ public:
             }
         }
 
+        // Pass-1 (uncorrected) noise statistics, kept for the UNTRACKED soft bits below.
+        const float untracked_noise_sum = noise_sum;
+        const int untracked_noise_count = noise_count;
+
         // When residual correction is active, recompute the phase-noise variance from the
         // CORRECTED residuals so the LLR scale stays calibrated (lower residual noise ->
         // higher confidence). When inactive this is skipped and pass-1's value is used.
@@ -809,6 +811,35 @@ public:
         float scale = 2.0f * std::sqrt(1.0f / phase_noise_var);
         scale = std::min(scale, 20.0f);                        // Cap: prevents overconfident LLRs
 
+
+        // NO-HARM GUARANTEE (2026-11-08). The gates above are heuristics: a tracker that
+        // cycle-slips (per-symbol common-phase change beyond the M-th-power unwrap's +-pi/M
+        // range, e.g. 5 Hz-peak jitter at 3 Hz) rotates every later symbol by 2 pi/M, which no
+        // decision-directed metric can see — the slipped frame looks clean. Only the LDPC can
+        // arbitrate, so when a correction is applied the UNTRACKED soft bits are kept too and
+        // StreamingDecoder::decodeFrame decodes them if the tracked frame fails.
+        untracked_soft_bits_.clear();
+        if (clock_corr_active || jitter_corr_active) {
+            float var_u = (untracked_noise_count > 0)
+                              ? untracked_noise_sum / untracked_noise_count : 0.5f;
+            var_u = std::max(0.01f, var_u);
+            const float scale_u = std::min(2.0f * std::sqrt(1.0f / var_u), 20.0f);
+            untracked_soft_bits_.reserve(static_cast<size_t>(num_symbols) * config_.num_carriers *
+                                         config_.bits_per_symbol);
+            for (int sym = 0; sym < num_symbols; sym++) {
+                for (int c = 0; c < config_.num_carriers; c++) {
+                    float phase = cached_phases[sym * config_.num_carriers + c];
+                    while (phase > (float)M_PI) phase -= 2.0f * (float)M_PI;
+                    while (phase < -(float)M_PI) phase += 2.0f * (float)M_PI;
+                    if (config_.bits_per_symbol == 2) {
+                        untracked_soft_bits_.push_back(std::max(-20.0f, std::min(20.0f, scale_u * std::sin(phase))));
+                        untracked_soft_bits_.push_back(std::max(-20.0f, std::min(20.0f, scale_u * std::sin(2.0f * phase))));
+                    } else {
+                        untracked_soft_bits_.push_back(std::max(-20.0f, std::min(20.0f, scale_u * std::cos(phase))));
+                    }
+                }
+            }
+        }
 
         // Pass 2: Compute soft bits using calibrated scale. theta_c removes the fitted
         // dial+clock per-carrier rotation; psi_per_sym removes the tracked common-phase
@@ -894,7 +925,16 @@ public:
     }
 
     std::vector<float> demodulateDataOnly(SampleSpan data) {
-        return demodulateSoft(data);
+        // A data-only burst continuation is contiguous with what was consumed before it: the
+        // same dial offset, the phase continuing where the previous block ended.
+        corr_origin_ = data.data();
+        corr_origin_phase_ = corr_next_phase_;
+        auto bits = demodulateSoft(data);
+        corr_next_phase_ += 2.0 * M_PI * static_cast<double>(corr_cfo_hz_) *
+                            static_cast<double>(data.size()) /
+                            static_cast<double>(config_.sample_rate);
+        corr_origin_ = nullptr;
+        return bits;
     }
 
 private:
@@ -988,12 +1028,18 @@ private:
             return false;  // Wait for more samples
         }
 
-        // Apply CFO correction to samples BEFORE demodulation (like OFDM does)
-        if (std::abs(cfo_hz_) > 0.1f) {
-            applyCFOCorrection(sample_buffer_, cfo_hz_);
-            LOG_DEMOD(DEBUG, "MC-DPSK: Applied CFO correction: %.1f Hz to %zu samples",
-                      cfo_hz_, sample_buffer_.size());
-        }
+        // CFO is removed INSIDE the per-carrier correlator (demodulateOneSymbol), exactly, with a
+        // phase continuous from this frame origin through every burst continuation (2026-11-08).
+        // Replaced a 127-tap Hilbert pre-shift whose 63-sample group delay was never compensated
+        // (every symbol window slid 63 samples), whose image sat at -22 dB on the 500 Hz carrier,
+        // and which ZEROED cfo_hz_ — so data-only burst continuations were demodulated with no
+        // CFO correction at all (measured: +7.3 Hz dial offset, AWGN@12, every 8-CW continuation
+        // lost; training SNR read 6.4 dB on a 12.1 dB link). The 0 Hz simulator never ran it.
+        corr_cfo_hz_ = cfo_hz_;
+        corr_origin_ = sample_buffer_.data();
+        corr_origin_phase_ = cfo_initial_phase_;
+        LOG_DEMOD(DEBUG, "MC-DPSK: CFO %.2f Hz removed in the correlator (%zu samples)",
+                  cfo_hz_, sample_buffer_.size());
 
         // Save dual chirp CFO estimate before training processing
         float dual_chirp_cfo = cfo_hz_;
@@ -1048,44 +1094,18 @@ private:
         SampleSpan data_span(sample_buffer_.data() + data_start, data_samples);
         soft_bits_ = demodulateSoft(data_span);
 
-        // Consume processed samples
+        // Consume processed samples. The CFO phase continues at the next sample (a data-only
+        // burst continuation starts exactly there).
+        corr_next_phase_ = corr_origin_phase_ + 2.0 * M_PI * static_cast<double>(corr_cfo_hz_) *
+                                                    static_cast<double>(total_needed) /
+                                                    static_cast<double>(config_.sample_rate);
+        corr_origin_ = nullptr;  // the buffer is about to move
         sample_buffer_.erase(sample_buffer_.begin(),
                             sample_buffer_.begin() + total_needed);
 
         state_ = State::FRAME_READY;
         external_chirp_detected_ = false;  // Reset for next frame
         return true;
-    }
-
-    // Apply CFO correction to samples using Hilbert transform (proper SSB frequency shift)
-    // 1. Convert real signal to analytic (complex) via Hilbert transform
-    // 2. Multiply by e^{-j*2*pi*cfo*t} to shift frequency
-    // 3. Take real part
-    void applyCFOCorrection(Samples& samples, float cfo_hz) {
-        if (std::abs(cfo_hz) < 0.01f || samples.size() < 128) return;
-
-        // Use Hilbert transform to get analytic signal
-        HilbertTransform hilbert(127);  // 127 taps for good accuracy
-        SampleSpan span(samples.data(), samples.size());
-        auto analytic = hilbert.process(span);
-
-        // Apply frequency shift: multiply by e^{-j*2*pi*cfo*t}
-        // Start from accumulated initial phase (not 0) for continuous audio streams
-        float phase_inc = -2.0f * M_PI * cfo_hz / config_.sample_rate;
-        float phase = cfo_initial_phase_;
-
-        for (size_t i = 0; i < samples.size() && i < analytic.size(); i++) {
-            Complex rotation(std::cos(phase), std::sin(phase));
-            Complex shifted = analytic[i] * rotation;
-            samples[i] = shifted.real();  // Take real part
-
-            phase += phase_inc;
-            if (phase > M_PI) phase -= 2.0f * M_PI;
-            if (phase < -M_PI) phase += 2.0f * M_PI;
-        }
-
-        // Reset CFO since it's now been applied to samples
-        cfo_hz_ = 0.0f;
     }
 
     void updateTrainingSNREstimate(SampleSpan training) {
@@ -1371,14 +1391,23 @@ private:
 
     // Demodulate one symbol period for one carrier
     // CFO correction: mix at carrier frequency, but the samples have already been
-    // frequency-corrected if cfo_hz_ != 0 (done in applyCFOCorrection)
+    // (the CFO is removed inside demodulateOneSymbol; see corr_cfo_hz_)
     Complex demodulateOneSymbol(const float* samples, int carrier_idx) {
-        // Mix at carrier frequency only - CFO already corrected in samples
-        float freq = carrier_freqs_[carrier_idx];
-        float phase_inc = 2.0f * M_PI * freq / config_.sample_rate;
+        // The carrier term restarts at 0 every symbol (the modulator's convention); the CFO term
+        // is CONTINUOUS from the frame origin (corr_origin_), so a dial offset corr_cfo_hz_ is
+        // removed exactly — mixing a REAL signal with a complex exponential needs no Hilbert.
+        const double fs = static_cast<double>(config_.sample_rate);
+        double cfo_phase0 = 0.0;
+        if (corr_cfo_hz_ != 0.0f && corr_origin_ != nullptr) {
+            cfo_phase0 = corr_origin_phase_ + 2.0 * M_PI * static_cast<double>(corr_cfo_hz_) *
+                                                  static_cast<double>(samples - corr_origin_) / fs;
+        }
+        const float phase_inc = static_cast<float>(
+            2.0 * M_PI * (static_cast<double>(carrier_freqs_[carrier_idx]) +
+                          static_cast<double>(corr_cfo_hz_)) / fs);
 
         Complex sum(0.0f, 0.0f);
-        float phase = 0.0f;
+        float phase = static_cast<float>(std::fmod(cfo_phase0, 2.0 * M_PI));
 
         for (int i = 0; i < config_.samples_per_symbol; i++) {
             Complex mixer = std::polar(1.0f, -phase);
@@ -1400,6 +1429,13 @@ private:
     std::vector<float> soft_bits_;
     float cfo_hz_;
     float cfo_initial_phase_ = 0.0f;  // Initial phase for CFO correction (accumulated at frame start)
+    // CFO removed inside demodulateOneSymbol: value, the sample that carries phase
+    // corr_origin_phase_, and the phase at the first sample after the last consumed block.
+    float corr_cfo_hz_ = 0.0f;
+    std::vector<float> untracked_soft_bits_;
+    const float* corr_origin_ = nullptr;
+    double corr_origin_phase_ = 0.0;
+    double corr_next_phase_ = 0.0;
     int chirp_position_;
     float last_chirp_corr_;
     size_t expected_data_bytes_ = 0;

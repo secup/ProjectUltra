@@ -82,7 +82,19 @@ where cfo_to_samples = sample_rate / chirp_rate = 48000 / 4800 = 10 samples/Hz
 
 **Why dual chirp works:** Up-chirp peak shifts LEFT by CFO×10 samples. Down-chirp peak shifts RIGHT by CFO×10 samples. The gap changes by 2×CFO×10.
 
-**Accuracy:** ±0.5 Hz on AWGN, but ±2 Hz on fading channels due to multipath peak distortion.
+**Accuracy:** sub-0.1 Hz on a single path (time-bandwidth 1200). On multipath the estimate can
+carry a PHANTOM: when the dominant path differs between the up- and down-chirp (0.6 s apart), one
+peak moves by up to the delay spread τ, i.e. an error of up to τ/(2κ) Hz (κ = 10 samples/Hz):
+2.4 Hz for ITU Moderate's 1 ms, bounded by CP/(2κ) = 4.8 Hz for any decodable link.
+
+**Acceptance (2026-11-08, INV-CFO-005):** a low-correlation chirp is clamped only to a MEASURED
+tracked value (`CFOTracker::established()`); a fresh tracker accepts it. The connected search
+window starts κ·100 Hz = 1000 samples before the post-frame floor (INV-CHIRP-003): a positive CFO
+moves the up-chirp peak EARLIER than the chirp's first sample.
+
+**No pre-shift (2026-11-08, INV-CFO-004):** the decoder no longer Hilbert-pre-shifts OFDM frames
+(`ULTRA_CFO_PRECORRECT` default OFF); the demodulator's NCO applies the full CFO. MC-DPSK removes
+it inside its per-carrier correlator.
 
 **Storage path:**
 ```
@@ -105,33 +117,40 @@ exactly as after a warm chirp lock. Cold acquisition is unchanged (handshake chi
 
 **File:** `src/ofdm/channel_equalizer.cpp` (in `estimateChannelFromLTS()`)
 
-**How it works:**
-1. Two LTS training symbols are processed through `toBaseband()` (with current CFO correction)
-2. For each data carrier, compute H[sym0] and H[sym1] (channel estimate per symbol)
-3. Measure phase rotation: `phase_diff = arg(H[sym1] × conj(H[sym0]))`
-4. Average across all carriers for robust estimate
-5. Convert to residual CFO: `residual = avg_phase / (2π × T_symbol)`
-6. If residual > 0.3 Hz: correct `freq_offset_hz` and re-process training symbols
+**How it works (rewritten 2026-11-08):**
+1. Two LTS training symbols are processed through `toBaseband()` (with the current CFO)
+2. For each data carrier, H[sym0] and H[sym1] are LS channel estimates
+3. Unit phase steps `unit(H[sym1] × conj(H[sym0]))` are summed: S over n carriers;
+   coherence c = |S|/n, pair evidence χ = |S|²/n (~Exp(1) on noise)
+4. Residual r = arg(S) / (2π T_symbol); standard error σ_r = sqrt((1 − c⁴)/(2 n c²)) / (2π T)
+   (circular mean of wrapped-normal phase steps)
+5. Decision (`src/ofdm/lts_cfo_update.hpp`, `frameCorrectionHz`):
+   - **certified prior** (CFOTracker certified by a decoded frame since the last reset/revoke)
+     → no correction; the frame keeps the certified CFO, pilots + feedback carry drift;
+   - **uncertified prior** (fresh dual chirp, or revoked/rolled back) → correct by K·r iff
+     χ ≥ ln 1000 and |r| > t(n−1, 3σ)·σ_r (two-sided false-correction probability 0.27 %);
+     K = P/(P+R), P = (CP/(2κ√3))² — the CP-bounded dual-chirp multipath phantom, 2.77 Hz
+     for MEDIUM CP 96 and κ = 10 samples/Hz — so K ≈ 0.95–0.999;
+   - |r| ≥ 5 Hz is rejected (beyond the phantom bound CP/(2κ) = 4.8 Hz).
+6. After a correction the training symbols are re-processed with the corrected CFO.
 
-```cpp
-// Simplified logic:
-Complex phase_diff_sum(0, 0);
-for (each carrier i) {
-    Complex diff = h_per_symbol[1][i] * conj(h_per_symbol[0][i]);
-    phase_diff_sum += normalize(diff);
-}
-float avg_phase = atan2(phase_diff_sum.imag(), phase_diff_sum.real());
-float residual_cfo = avg_phase * sample_rate / (2π × symbol_samples);
+**Why the old rule was replaced.** The old rule applied r only when `|chirp CFO| ≥ 0.75 Hz` or
+the across-carrier CV < 0.20. The decoder pre-corrects every OFDM frame and passes 0 Hz to the
+demod, so the first branch never fired; the second is false on every fading channel. On
+multipath, the dual-chirp estimate reads CFO from the up/down peak POSITIONS, and when the
+dominant path differs between the two chirps (0.6 s apart) one peak moves by the delay spread:
+a phantom of up to τ/(2κ) Hz (2.4 Hz for ITU Moderate's 1 ms). That error was never corrected.
+`measure_ack_fer` (production geometry, every frame chirp-seeded), ITU Moderate, 3 seeds × 48:
 
-if (abs(residual_cfo) > 0.3 && abs(residual_cfo) < 5.0) {
-    freq_offset_hz += residual_cfo;
-    // Re-process training with corrected CFO
-}
-```
+| rung | SNR | old rule | true CFO (genie) | new rule |
+|---|---|---|---|---|
+| QPSK R1/2 | 20 / 26 dB | 14.6 % / 17.4 % | 0.0 % / 0.0 % | 0.0 % / 0.0 % |
+| 8PSK R2/3 | 20 / 26 dB | 43.1 % / 31.2 % | 29.2 % / 14.6 % | 30.6 % / 15.3 % |
 
-**Why 0.3 Hz threshold:** Below 0.3 Hz, the phase drift per symbol is < 5°, which DQPSK handles fine (45° margin). Above that, progressive drift accumulates and causes errors.
-
-**Why re-process training:** The channel estimate from the first pass used the wrong CFO, so H has a built-in phase error. Re-processing with the corrected CFO gives a clean H for data symbols.
+Applying r UNCONDITIONALLY is wrong too: on AWGN the chirp is accurate to ≪ 0.1 Hz, and a 6 dB
+LTS pair has σ_r ≈ 0.7 Hz — unconditional correction took AWGN QPSK R1/2 at 6 dB from 0 % to
+36.5 % FER. The significance test keeps the accurate chirp there (residual cost: 1/96 frames at
+6 and 10 dB in the harness, the 0.27 % false-correction tail on every-frame-uncertified trials).
 
 ### Stage 3: Pilot-Based CFO Tracking (Per Symbol)
 

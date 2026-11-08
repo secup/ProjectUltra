@@ -358,6 +358,9 @@ bool StreamingDecoder::processWaveformForCodewords(SampleSpan samples,
         expected_codewords <= v2::kMaxFixedFrameCodewords;
     waveform_->setCarrierLdpcInterleaverEnabled(allow_carrier_ldpc);
     waveform_->setRXCarrierErasureEnabled(allow_rx_erasure);
+    // Every OFDM frame demod passes here: tell the LTS stage whether the CFO it starts from is
+    // certified (lts_cfo_update.hpp). Uncertified = fresh chirp / revoked: the LTS pair corrects.
+    waveform_->setCfoPriorCertified(cfo_tracker_.pilotSeeded());
     return waveform_->process(samples);
 }
 
@@ -1401,11 +1404,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                         // certify it before BURST_HEADER hands off to the following
                         // DATA anchor (or a synchronous protocol callback can reset
                         // the decoder).
+                        // UNCLAMPED (2026-11-08): the per-update drift clamp guards the
+                        // tracker against UNVERIFIED pilot residuals. This frame is CRC/LDPC
+                        // valid, so the CFO it decoded with (pre-correction + LTS/pilot
+                        // residual) is proven and is what gets certified. Clamping it first
+                        // certified an intermediate instead: an LTS-corrected 2.7 Hz dual-chirp
+                        // phantom was stored as 0.7 Hz (2.7 - 2.0 clamp) and certified, so the
+                        // group's DATA frames started 0.7-0.9 Hz off with a "certified" prior
+                        // that the LTS stage then (correctly) refused to correct.
                         const float control_residual_cfo = waveform_->estimatedCFO();
                         const float control_current_cfo = cfo_tracker_.tracked();
                         const auto control_cfo_update = cfo_tracker_.ingestPilotResidual(
                             frame_demodulator_.preCorrectionCfo(), control_residual_cfo,
-                            control_current_cfo, /*clamp_drift=*/true);
+                            control_current_cfo, /*clamp_drift=*/false);
                         sync_cfo_ = control_cfo_update.accepted_cfo;
                         cfo_tracker_.certifyWarm();
                         LOG_MODEM(INFO,
@@ -3983,7 +3994,24 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
 
     // For MC-DPSK, ALWAYS use simple sequential decode - skip all frame interleaving logic
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
-        return decodeMCDPSKFrame(soft_bits, rate, bytes_per_cw, snr, cfo);
+        DecodeResult tracked = decodeMCDPSKFrame(soft_bits, rate, bytes_per_cw, snr, cfo);
+        // Residual-tracker no-harm guarantee: if the tracked frame fails, decode the untracked
+        // soft bits of the SAME demodulation (present only when a correction was applied).
+        if (!tracked.success) {
+            if (auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get())) {
+                const auto untracked = mc->takeUntrackedSoftBits();
+                if (untracked.size() == soft_bits.size()) {
+                    DecodeResult plain = decodeMCDPSKFrame(untracked, rate, bytes_per_cw, snr, cfo);
+                    if (plain.success) {
+                        LOG_MODEM(INFO, "[%s] MC-DPSK: tracked frame failed, untracked decode OK "
+                                        "(residual tracker overruled by LDPC)",
+                                  log_prefix_.c_str());
+                        return plain;
+                    }
+                }
+            }
+        }
+        return tracked;
     }
 
     // ========================================================================

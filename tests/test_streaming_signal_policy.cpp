@@ -200,32 +200,40 @@ void test_light_sync_decision() {
 void test_cfo_drift_limit() {
     // High-correlation (trusted) chirps: behaviour is the original drift clamp.
     constexpr float kHi = 1.0f;
-    auto disconnected = limitConnectedCFODrift(false, 10.0f, 1.0f, kHi);
+    auto disconnected = limitConnectedCFODrift(false, 10.0f, 1.0f, kHi, /*established=*/true);
     CHECK(!disconnected.clamped, "disconnected trusted CFO should not clamp");
     CHECK_CLOSE(disconnected.accepted_cfo, 10.0f, 0.0001f, "disconnected CFO accepted");
 
-    auto unknown = limitConnectedCFODrift(true, 10.0f, 0.0f, kHi);
+    auto unknown = limitConnectedCFODrift(true, 10.0f, 0.0f, kHi, /*established=*/false);
     CHECK(!unknown.clamped, "near-zero known + trusted chirp should not clamp");
     CHECK_CLOSE(unknown.accepted_cfo, 10.0f, 0.0001f, "unknown CFO accepted");
 
-    auto small_drift = limitConnectedCFODrift(true, 10.9f, 10.0f, kHi);
+    auto small_drift = limitConnectedCFODrift(true, 10.9f, 10.0f, kHi, true);
     CHECK(!small_drift.clamped, "small CFO drift should not clamp");
     CHECK_CLOSE(small_drift.accepted_cfo, 10.9f, 0.0001f, "small drift accepted");
 
-    auto large_drift = limitConnectedCFODrift(true, 12.0f, 10.0f, kHi);
+    auto large_drift = limitConnectedCFODrift(true, 12.0f, 10.0f, kHi, true);
     CHECK(large_drift.clamped, "large CFO drift should clamp");
     CHECK_CLOSE(large_drift.accepted_cfo, 10.0f, 0.0001f, "large drift should use known CFO");
     CHECK_CLOSE(large_drift.diff_hz, 2.0f, 0.0001f, "CFO diff telemetry");
 
-    // Low-confidence (fade-jittered) chirp: a large jump is rejected to the tracked value at
-    // EVERY stage, including the pre-connect PING (so a phantom never establishes in `known`).
-    auto phantom_ping = limitConnectedCFODrift(false, -1.25f, 0.0f, 0.73f);
-    CHECK(phantom_ping.clamped, "low-corr phantom must clamp even at PING (disconnected)");
-    CHECK_CLOSE(phantom_ping.accepted_cfo, 0.0f, 0.0001f, "phantom rejected to tracked 0");
+    // Low-confidence (fade-jittered) chirp against an ESTABLISHED (measured) value: a large jump is
+    // rejected to it at every stage, including the pre-connect PING.
+    auto phantom_ping = limitConnectedCFODrift(false, 9.7f, 7.3f, 0.73f, /*established=*/true);
+    CHECK(phantom_ping.clamped, "low-corr phantom must clamp to an established value");
+    CHECK_CLOSE(phantom_ping.accepted_cfo, 7.3f, 0.0001f, "phantom rejected to the measured value");
+
+    // 2026-11-08 (real dial offset): an UNESTABLISHED tracker holds the default 0 Hz, which is not
+    // a measurement. A low-confidence chirp must NOT be replaced by it: that turned a correct
+    // 7.3 Hz reading into a 7.3 Hz error on 27/48 Good@20 frames (62.5 % FER vs 4.2 %). A phantom
+    // in an accepted chirp is corrected by the first OFDM frame's LTS (uncertified prior).
+    auto unestablished = limitConnectedCFODrift(true, 7.3f, 0.0f, 0.80f, /*established=*/false);
+    CHECK(!unestablished.clamped, "unestablished tracker accepts even a low-corr chirp");
+    CHECK_CLOSE(unestablished.accepted_cfo, 7.3f, 0.0001f, "real dial offset kept");
 
     // Genuine first acquisition: a clean high-corr chirp with a large real dial offset is accepted
     // (no established CFO to clamp to, and the chirp is trusted).
-    auto real_acq = limitConnectedCFODrift(false, 30.0f, 0.0f, 0.95f);
+    auto real_acq = limitConnectedCFODrift(false, 30.0f, 0.0f, 0.95f, /*established=*/false);
     CHECK(!real_acq.clamped, "trusted large real CFO at acquisition must be accepted");
     CHECK_CLOSE(real_acq.accepted_cfo, 30.0f, 0.0001f, "real dial offset acquired");
 }
@@ -235,26 +243,31 @@ void test_connected_anchor_cfo_seed() {
     // warm CFO whatever the chirp reads.
     // (1) The sticky-G13 sub-clamp phantom: known +0.20, chirp -0.20, corr 0.94 —
     //     the drift clamp passes it (diff 0.4 < 1.0); the seed must reject it.
-    auto g13 = connectedAnchorCFOSeed(-0.20f, 0.20f, 0.94f, /*pilot_seeded=*/true);
+    auto g13 = connectedAnchorCFOSeed(-0.20f, 0.20f, 0.94f, /*pilot_seeded=*/true, true);
     CHECK(g13.used_warm, "seeded anchor must keep warm CFO");
     CHECK_CLOSE(g13.accepted_cfo, 0.20f, 0.0001f, "sub-clamp phantom rejected to warm");
 
     // (2) The >1 Hz high-corr blind spot: known ~0 (unestablished), chirp -1.15,
     //     corr 0.90 — the drift clamp accepts it (no established CFO); the seed must not.
-    auto blind = connectedAnchorCFOSeed(-1.15f, 0.0f, 0.90f, true);
+    auto blind = connectedAnchorCFOSeed(-1.15f, 0.0f, 0.90f, true, true);
     CHECK(blind.used_warm, "seeded anchor rejects the high-corr unestablished phantom");
     CHECK_CLOSE(blind.accepted_cfo, 0.0f, 0.0001f, "phantom rejected to warm 0");
 
     // (3) NOT pilot-seeded: cold rules — a trusted large real CFO is accepted.
-    auto cold = connectedAnchorCFOSeed(3.0f, 0.0f, 0.95f, /*pilot_seeded=*/false);
+    auto cold = connectedAnchorCFOSeed(3.0f, 0.0f, 0.95f, /*pilot_seeded=*/false, false);
     CHECK(!cold.used_warm, "unseeded anchor keeps cold chirp trust");
     CHECK_CLOSE(cold.accepted_cfo, 3.0f, 0.0001f, "cold acquisition CFO accepted");
 
-    // (4) NOT pilot-seeded + low-confidence phantom: the standard clamp still bites.
-    auto cold_phantom = connectedAnchorCFOSeed(-1.25f, 0.0f, 0.73f, false);
+    // (4) NOT pilot-seeded + low-confidence phantom against a MEASURED value: the clamp bites.
+    auto cold_phantom = connectedAnchorCFOSeed(9.7f, 7.3f, 0.73f, false, /*established=*/true);
     CHECK(!cold_phantom.used_warm, "unseeded path is the cold arm");
-    CHECK_CLOSE(cold_phantom.accepted_cfo, 0.0f, 0.0001f,
-                "low-corr phantom clamped on the cold arm");
+    CHECK_CLOSE(cold_phantom.accepted_cfo, 7.3f, 0.0001f,
+                "low-corr phantom clamped to the measured value on the cold arm");
+    // (5) NOT pilot-seeded, NOTHING measured yet (fresh tracker): the chirp is the only
+    //     information and is accepted even at low correlation (the 2026-11-08 real-offset bug).
+    auto cold_fresh = connectedAnchorCFOSeed(7.3f, 0.0f, 0.73f, false, /*established=*/false);
+    CHECK_CLOSE(cold_fresh.accepted_cfo, 7.3f, 0.0001f,
+                "fresh tracker keeps the low-corr chirp instead of the default 0 Hz");
 }
 
 void test_pilot_cfo_update() {
@@ -305,7 +318,7 @@ void test_burst_outcome_cfo_reconciliation() {
     CHECK(tracker.pilotSeeded(),
           "partial rollback should preserve an existing warm certificate");
     const auto next_anchor = connectedAnchorCFOSeed(
-        0.20f, tracker.tracked(), 0.79f, tracker.pilotSeeded());
+        0.20f, tracker.tracked(), 0.79f, tracker.pilotSeeded(), tracker.established());
     CHECK_CLOSE(next_anchor.accepted_cfo, 0.05f, 0.0001f,
                 "next connected anchor should consume the restored warm CFO");
 

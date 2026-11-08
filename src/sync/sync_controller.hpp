@@ -92,6 +92,9 @@ struct SearchWindowResult {
     bool   used_warm_narrow_window = false;
     size_t warm_narrow_end_abs = 0;
     size_t warm_narrow_candidate_span_samples = 0;
+    // Samples at the START of search_buffer that lie before the post-frame search floor
+    // (the kChirpCfoPeakLeadSamples lead of a chirp search). LTS-type detectors must skip them.
+    size_t pre_floor_lead_samples = 0;
 };
 
 // The full-anchor fallback verdict (§7 C3 Phase 3b). When a connected full-chirp re-anchor search
@@ -218,6 +221,10 @@ public:
     // passes, the extracted window starts kSearchBacktrackSamples BEFORE the cursor.
     static constexpr size_t kSearchBacktrackSamples = 9600;
     static constexpr size_t kRmsProbeSamples = 1000;
+    // How far BEFORE the search floor a connected chirp/structure search may start: the dual
+    // chirp's up-peak precedes the chirp start by kappa * CFO samples (kappa = fs / chirp_rate
+    // = 48000 / 4800 = 10 samples per Hz) and ChirpSync accepts |CFO| <= 100 Hz -> 1000 samples.
+    static constexpr size_t kChirpCfoPeakLeadSamples = 10 * 100;
 
     // Window for the connected group-start STRUCTURE search (ULTRA_BURST_ACQ=structure). The
     // first pass whose RMS probe sees a frame has the cursor in (x - probe, x - probe + step]

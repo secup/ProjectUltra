@@ -75,6 +75,11 @@ target_link_libraries(test_frame_structure_detector PRIVATE ultra_core)
 target_include_directories(test_frame_structure_detector PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME FrameStructureDetector COMMAND test_frame_structure_detector)
 
+# LTS-pair frame CFO update (src/ofdm/lts_cfo_update.hpp): derived laws vs Monte Carlo.
+add_executable(test_lts_cfo_update test_lts_cfo_update.cpp)
+target_include_directories(test_lts_cfo_update PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME LtsCfoUpdate COMMAND test_lts_cfo_update)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)

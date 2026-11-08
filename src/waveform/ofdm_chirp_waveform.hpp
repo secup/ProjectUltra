@@ -86,6 +86,7 @@ public:
     bool detectDataSync(SampleSpan samples, SyncResult& result,
                         float known_cfo_hz = 0.0f, float threshold = 0.3f) override;
     bool supportsDataPreamble() const override { return true; }
+    void setCfoPriorCertified(bool certified) override;
     size_t frameStructureSpanSamples() const override;
     bool detectFrameStructure(SampleSpan samples, SyncResult& result, float known_cfo_hz,
                               double false_alarm_budget) override;

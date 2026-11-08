@@ -35,6 +35,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="awgn"
 SNR_DB="20"
+CFO_HZ="0"
 SEED="42"
 EXPECT_RATE="R1/4"
 EXPECT_MOD="16QAM"
@@ -62,6 +63,8 @@ usage() {
   printf 'Channel/options:\n'
   printf '  --channel NAME                 OTASim channel (default: awgn)\n'
   printf '  --snr-db DB                    OTASim SNR (default: 20)\n'
+  printf '  --cfo-hz HZ                    Dial offset between the two radios: ALPHA hears BRAVO\n'
+  printf '                                 at -HZ, BRAVO hears ALPHA at +HZ (default: 0)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
   printf '  --expect-mod MOD               Expected/locked modulation (default: 16QAM)\n'
@@ -173,6 +176,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --channel) CHANNEL="${2:?}"; shift 2 ;;
     --snr-db) SNR_DB="${2:?}"; shift 2 ;;
+    --cfo-hz) CFO_HZ="${2:?}"; shift 2 ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
     --expect-mod) EXPECT_MOD="${2:?}"; shift 2 ;;
@@ -676,6 +680,7 @@ write_summary() {
     echo "SCENARIO_KIND=$SCENARIO_KIND"
     echo "CHANNEL=$CHANNEL"
     echo "SNR_DB=$SNR_DB"
+    echo "CFO_HZ=$CFO_HZ"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -810,6 +815,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   --lobby-channel "$CHANNEL" \
   --lobby-snr-db "$SNR_DB" \
   --lobby-seed "$SEED" \
+  --lobby-rx-cfo-hz "BRAVO:${CFO_HZ},ALPHA:$(awk -v c="$CFO_HZ" 'BEGIN{printf "%g", -c}')" \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

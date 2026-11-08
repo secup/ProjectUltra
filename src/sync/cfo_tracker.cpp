@@ -21,7 +21,8 @@ float CFOTracker::seedFromChirp(float measured_cfo, float correlation, bool conn
         return std::isfinite(known) ? known : 0.0f;
     }
     const auto decision =
-        signal_policy::limitConnectedCFODrift(connected, measured_cfo, known, correlation);
+        signal_policy::limitConnectedCFODrift(connected, measured_cfo, known, correlation,
+                                              established_.load());
     if (decision.clamped) {
         LOG_MODEM(INFO,
                   "[%s] CFO sanity: measured=%.1f, known=%.1f, corr=%.2f, diff=%.1f > %.1f, using known",
@@ -69,7 +70,13 @@ float CFOTracker::seedFromChirpConnectedAnchor(float measured_cfo, float correla
         return std::isfinite(known) ? known : 0.0f;
     }
     const auto seed = signal_policy::connectedAnchorCFOSeed(
-        measured_cfo, known, correlation, pilot_seeded_.load());
+        measured_cfo, known, correlation, pilot_seeded_.load(), established_.load());
+    if (!seed.used_warm && seed.accepted_cfo != measured_cfo) {
+        LOG_MODEM(INFO,
+                  "[%s] Full-anchor CFO sanity: chirp %.2f Hz (corr=%.2f) rejected to "
+                  "measured %.2f Hz",
+                  log_prefix, measured_cfo, correlation, known);
+    }
     if (seed.used_warm) {
         LOG_MODEM(INFO,
                   "[%s] Full-anchor CFO: warm %.2f Hz kept (chirp read %.2f Hz, corr=%.2f)",

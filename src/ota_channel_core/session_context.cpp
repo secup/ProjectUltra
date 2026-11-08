@@ -160,7 +160,7 @@ void SessionContext::setChannel(ChannelConfig config) {
 std::unique_ptr<IChannelModel> SessionContext::createRxChannelLocked(
     std::string_view receiver_id) const {
     return createChannelModel(
-        config_.channelConfig(),
+        config_.channelConfigFor(receiver_id),
         rng_root_,
         streamNameForSession(config_.session_id,
                              std::string("channel:rx:").append(receiver_id)));

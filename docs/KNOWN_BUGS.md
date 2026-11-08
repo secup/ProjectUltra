@@ -1,6 +1,6 @@
 # Known Bugs
 
-Last updated: 2026-08-04
+Last updated: 2026-11-08
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
@@ -8,26 +8,25 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-COHERENT-MODERATE-DOPPLER-FLOOR (open, 2026-11-08) — P1, THROUGHPUT ON MODERATE
+### BUG-TONE-ACK-RETURN-LOSS-ON-FADING (open, 2026-11-08) — P2, costs one RTO per loss
 
-**Symptom.** Coherent QPSK on ITU Moderate has a frame-error FLOOR that RISES with SNR.
-`measure_ack_fer`, production geometry (`--geometry production --preroll-ms 300`), 6 seeds ×
-24 frames: QPSK R1/2 (cw8) 18.1 % @20 dB, 21.5 % @26 dB — a rate-1/2 code at 26 dB.
+On ITU Good@15-20 the 4-FSK tone-burst ACK is sometimes not detected by the sender although the
+receiver delivered the group 5/5 and transmitted it (seen 4× in today's GUI runs, e.g. Good@15
+s42 at 108.6 s, Good@20 structure s42 at 60.8 s; the ACK before the loss already arrived weak,
+normalized peak 0.16). Each loss costs a full RTO (~16-20 s, −11..−21 % goodput on a 21 KB
+transfer). Independent of the acquisition mode and of the CFO work (the tone monitor is
+non-coherent and reads no OFDM CFO state). Candidates: SNR-adaptive ACK duration at the floor of
+the staircase on fading, a second ACK repeat, or a cheaper receiver-side backstop re-ACK.
 
-**Isolated to time variation.** Same Moderate delay profile (1 ms), Doppler swept with
-`ULTRA_CHANNEL_DOPPLER_HZ` (QPSK R1/2, legacy cw4 geometry): 0 Hz 4.2 % (= the then-present
-harness first-frame artifact), 0.1 Hz 2.1 %, 0.25 Hz 14.6 %, 0.5 Hz (Moderate) 22.9 % @26 dB.
-The coherent pilot tracker cannot follow 0.25-0.5 Hz fading inside a ~1.24 s frame.
+### BUG-MODERATE-8PSK-COHERENT-FLOOR (open, 2026-11-08) — P2, the REAL remaining Moderate limit
 
-**What it is NOT.** Not LLR calibration (the measured-noise model left QPSK bit-identical —
-the failing cells land ON wrong constellation points, invisible to any noise model). Not the
-Wiener prior (default is already 0.5 Hz / 1 ms, `channel_equalizer_pilot.cpp:37-51`; the
-"Moderate prior" A/B set exactly the default). `ULTRA_COHERENT_DD_OFF`, `ULTRA_PILOT_DFT_INTERP`
-and disabling the QPSK DD phase path were bit-identical (paths not active for QPSK).
-
-**Planned fix.** Stage 3 of the 2026-11-08 open-modem technique port: time-differential DQPSK/D8PSK on all
-carriers (needs only ~24 ms coherence: 0.5 Hz rotates 0.075 rad per symbol). Root cause of the
-coherent tracker's failure remains open (worth one more look before Stage 3 lands).
+With the CFO-estimation bug fixed (BUG-LTS-CFO-SEED-GATE below), `measure_ack_fer` (production
+geometry, 3 seeds × 48) on ITU Moderate gives 8PSK R2/3 30.6 % / 15.3 % FER at 20 / 26 dB — the
+same as with the sync CFO forced to the true value (29.2 % / 14.6 %), so this residue is NOT a
+CFO error. QPSK R1/2 is 0.0 % there. Candidates: coherent channel tracking at 0.5 Hz Doppler on a
+tighter constellation (8PSK margin 22.5°), and the measured-noise LLR model. The differential
+stage (plan Stage 3) must now be justified against THIS number, not against the retracted QPSK
+"floor".
 
 ### BUG-HARNESS-003: measure_ack_fer first-frame failure + non-production geometry (FIXED 2026-11-08, opt-in)
 
@@ -2354,6 +2353,35 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-LTS-CFO-SEED-GATE (FIXED 2026-11-08) — formerly filed as BUG-COHERENT-MODERATE-DOPPLER-FLOOR
+
+**Symptom.** Coherent QPSK on ITU Moderate had a frame-error floor that did not fall with SNR
+(`measure_ack_fer`: QPSK R1/2 14.6 % @20 dB, 17.4 % @26 dB). Filed the same morning as a Doppler
+tracking limit of coherent PSK — WRONG: a Doppler sweep cannot separate the two causes, because
+a dual-chirp phantom also needs time variation.
+
+**Root cause.** On multipath the dual-chirp CFO estimate (peak-position gap) carries a phantom
+of up to delay_spread / (2 κ) Hz when the dominant path differs between the up- and down-chirp
+(2.4 Hz for Moderate's 1 ms; measured residuals 2.4-3.1 Hz). The LTS pair measures it, but the
+correction was gated on `|chirp CFO| ≥ 0.75 Hz || across-carrier CV < 0.20`: the first branch was
+dead (CFO pre-correction hands the demod 0 Hz), the second false on every fading channel. The
+harness chirp-seeds EVERY frame, so every frame was exposed; in the GUI the exposure is the first
+group after connect and every group after a 0/N revoke (Moderate@20 s43 lost its first group in
+both acquisition modes, F-today).
+
+**Decisive control.** Sync CFO forced to the simulator's true value (`ULTRA_DIAG_FORCE_SYNC_CFO=0`):
+QPSK R1/2 Moderate 0.0 % / 0.0 %.
+
+**Fix.** `src/ofdm/lts_cfo_update.hpp` + `channel_equalizer_lts.cpp`: K·r only for an UNCERTIFIED
+prior and a significant residual (t-quantile of the 3σ level on the coherence-derived σ_r). Result
+= genie on QPSK, within 1-2 frames/144 of genie on 8PSK, AWGN unchanged except the 0.27 %
+false-correction tail. CHANGELOG 2026-11-08; CTest `LtsCfoUpdate`. Five further CFO defects surfaced once the
+simulator applied a real dial offset (OFDM 65-tap pre-correction, chirp guard falling back to an
+unestablished 0 Hz, chirp search floor cutting the up-chirp peak, clamped certification, MC-DPSK
+pre-shift + uncorrected continuations) — all fixed the same day, see the CHANGELOG entry
+"the CFO chain, made correct for a REAL dial offset".
+
 
 - 2026-08-05: BUG-STALE-SNR-SENTINEL-DRIVES-DECISIONS fixed — the "no measurement" marker
   was steering live rate decisions. IONOS rig logged three consecutive demotes

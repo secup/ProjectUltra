@@ -9,6 +9,7 @@
 #include "ultra/timing_profiler.hpp"
 #include "ultra/phy_diagnostics.hpp"
 #include "ofdm/pilot_pattern.hpp"
+#include "ofdm/lts_cfo_update.hpp"
 #include <algorithm>
 #include <sstream>
 #include <cmath>
@@ -355,6 +356,20 @@ void OFDMChirpWaveform::configure(Modulation mod, CodeRate rate) {
     LOG_MODEM(INFO, "OFDMChirpWaveform: configured for %s %s (%d data, %d pilots)",
               modulationToString(mod), codeRateToString(rate),
               data_carriers, pilot_count);
+}
+
+void OFDMChirpWaveform::setCfoPriorCertified(bool certified) {
+    if (!demodulator_) return;
+    if (certified) {
+        demodulator_->setCfoPriorSigmaHz(0.0);
+        return;
+    }
+    // Uncertified: the dual-chirp multipath-phantom sigma for THIS waveform's chirp and CP.
+    const sync::ChirpConfig chirp = getChirpConfig();
+    demodulator_->setCfoPriorSigmaHz(lts_cfo::uncertifiedPriorSigmaHz(
+        static_cast<double>(config_.getCyclicPrefix()), static_cast<double>(chirp.sample_rate),
+        static_cast<double>(chirp.f_start), static_cast<double>(chirp.f_end),
+        static_cast<double>(chirp.duration_ms) / 1000.0));
 }
 
 void OFDMChirpWaveform::setFrequencyOffset(float cfo_hz) {

@@ -195,6 +195,12 @@ public:
     // Check if this waveform supports light/data preamble mode
     virtual bool supportsDataPreamble() const { return false; }
 
+    // Whether the CFO the next frame starts from is CERTIFIED (a decoded frame proved it since
+    // the last reset/revoke; CFOTracker::pilotSeeded()). Certified -> the frame keeps it;
+    // uncertified (fresh chirp / rolled back) -> the LTS pair's measurement takes over. See
+    // src/ofdm/lts_cfo_update.hpp. Default: ignored.
+    virtual void setCfoPriorCertified(bool certified) { (void)certified; }
+
     // Process samples after sync detection
     // Returns true if a complete symbol/frame is ready
     // Call getSoftBits() to retrieve demodulated data

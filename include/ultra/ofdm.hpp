@@ -110,6 +110,11 @@ public:
     // Use when CFO is estimated externally (e.g., from chirp preamble)
     void setFrequencyOffset(float cfo_hz);
 
+    // Standard deviation (Hz) of the prior CFO error for the next frame(s): drives the LTS-pair
+    // MMSE frame correction K = P / (P + R) (src/ofdm/lts_cfo_update.hpp). 0 = certified prior
+    // (no LTS frame correction); +inf (the default) = no prior information.
+    void setCfoPriorSigmaHz(double sigma_hz);
+
     // Set frequency offset with initial phase (for continuous CFO tracking)
     // initial_phase_rad: the accumulated CFO phase at the start of samples
     // This is needed when processing starts at a known position in the audio stream

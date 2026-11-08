@@ -955,9 +955,112 @@ WattersonChannel::Config configForWatterson(ChannelType type,
     return cfg;
 }
 
+namespace {
+constexpr size_t kFrequencyShiftTaps = 4097;
+}  // namespace
+
+size_t FrequencyShiftChannelModel::groupDelaySamples() {
+    return (kFrequencyShiftTaps - 1) / 2;
+}
+
+FrequencyShiftChannelModel::FrequencyShiftChannelModel(std::unique_ptr<IChannelModel> inner,
+                                                       float cfo_hz, uint32_t sample_rate)
+    : inner_(std::move(inner)), cfo_hz_(cfo_hz) {
+    const size_t taps = kFrequencyShiftTaps;
+    std::vector<double> hi(taps, 0.0), hq(taps, 0.0);
+    const double fs = static_cast<double>(sample_rate);
+    const double cutoff = std::min(static_cast<double>(kWattersonAnalyticLowpassHz), 0.45 * fs) / fs;
+    const double omega_c = 2.0 * M_PI * cutoff;
+    const int mid = static_cast<int>(groupDelaySamples());
+    for (int n = 0; n < static_cast<int>(taps); ++n) {
+        const int k = n - mid;
+        if (k == 0) {
+            hi[static_cast<size_t>(n)] = 2.0 * cutoff;
+        } else {
+            hi[static_cast<size_t>(n)] = std::sin(omega_c * k) / (M_PI * k);
+            hq[static_cast<size_t>(n)] = (1.0 - std::cos(omega_c * k)) / (M_PI * k);
+        }
+        const double w = 2.0 * M_PI * n / static_cast<double>(taps - 1);
+        const double window = 0.42 - 0.5 * std::cos(w) + 0.08 * std::cos(2.0 * w);
+        hi[static_cast<size_t>(n)] *= window;
+        hq[static_cast<size_t>(n)] *= window;
+    }
+    // y[n] = sum_i h[i] x[n-i] = sum_m g[m] line[p+1+m] with g[m] = h[taps-1-m].
+    g_inphase_.resize(taps);
+    g_quadrature_.resize(taps);
+    for (size_t m = 0; m < taps; ++m) {
+        g_inphase_[m] = static_cast<float>(hi[taps - 1 - m]);
+        g_quadrature_[m] = static_cast<float>(hq[taps - 1 - m]);
+    }
+    line_.assign(2 * taps, 0.0f);
+    phase_inc_ = 2.0 * M_PI * static_cast<double>(cfo_hz) / fs;
+}
+
+void FrequencyShiftChannelModel::reset() {
+    if (inner_) inner_->reset();
+    std::fill(line_.begin(), line_.end(), 0.0f);
+    idx_ = 0;
+    phase_ = 0.0;
+}
+
+void FrequencyShiftChannelModel::process(std::span<const float> input,
+                                         uint64_t start_sample,
+                                         std::vector<float>& output) {
+    inner_->process(input, start_sample, inner_out_);
+    output.resize(inner_out_.size());
+    const size_t taps = g_inphase_.size();
+    const float* gi = g_inphase_.data();
+    const float* gq = g_quadrature_.data();
+    for (size_t s = 0; s < inner_out_.size(); ++s) {
+        line_[idx_] = inner_out_[s];
+        line_[idx_ + taps] = inner_out_[s];
+        const float* x = line_.data() + idx_ + 1;  // oldest .. newest, contiguous
+        float ai[8] = {0, 0, 0, 0, 0, 0, 0, 0}, aq[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        size_t m = 0;
+        for (; m + 8 <= taps; m += 8) {
+            for (int u = 0; u < 8; ++u) {
+                ai[u] += gi[m + u] * x[m + u];
+                aq[u] += gq[m + u] * x[m + u];
+            }
+        }
+        float in_phase = 0.0f, quadrature = 0.0f;
+        for (; m < taps; ++m) {
+            in_phase += gi[m] * x[m];
+            quadrature += gq[m] * x[m];
+        }
+        for (int u = 0; u < 8; ++u) {
+            in_phase += ai[u];
+            quadrature += aq[u];
+        }
+        idx_ = (idx_ + 1) % taps;
+        output[s] = static_cast<float>(in_phase * std::cos(phase_) - quadrature * std::sin(phase_));
+        phase_ += phase_inc_;
+        if (phase_ > M_PI) phase_ -= 2.0 * M_PI;
+        else if (phase_ < -M_PI) phase_ += 2.0 * M_PI;
+    }
+}
+
+namespace {
+std::unique_ptr<IChannelModel> createChannelModelUnshifted(const ChannelConfig& config,
+                                                           const RngRoot& rng_root,
+                                                           std::string_view stream_name);
+}  // namespace
+
 std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
                                                   const RngRoot& rng_root,
                                                   std::string_view stream_name) {
+    auto model = createChannelModelUnshifted(config, rng_root, stream_name);
+    if (std::abs(config.cfo_hz) > 0.001f) {
+        return std::make_unique<FrequencyShiftChannelModel>(std::move(model), config.cfo_hz,
+                                                            config.sample_rate);
+    }
+    return model;
+}
+
+namespace {
+std::unique_ptr<IChannelModel> createChannelModelUnshifted(const ChannelConfig& config,
+                                                           const RngRoot& rng_root,
+                                                           std::string_view stream_name) {
     switch (config.type) {
         case ChannelType::PASSTHROUGH:
             return std::make_unique<PassthroughChannelModel>();
@@ -989,5 +1092,6 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
             throw std::invalid_argument("unknown channel type");
     }
 }
+}  // namespace
 
 }  // namespace ultra::ota_channel_core

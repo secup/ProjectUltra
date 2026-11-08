@@ -10,6 +10,94 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-08 — FIX: the CFO chain, made correct for a REAL dial offset (6 defects) + the simulator now applies one
+
+**Why now.** Every GUI-gate run until today had exactly 0 Hz carrier offset on both links
+(`ota_channel_core` forced `cfo_hz = 0`). Real SSB transceivers are almost never within a Hz of
+each other, so the whole chirp → LTS → pilot → feedback chain was never exercised the way a radio
+pair exercises it. Giving OTASim a real dial offset (`gui_qso_scenario.sh --cfo-hz D`) exposed
+defects at every stage; each was then localized with a genie arm (`ULTRA_DIAG_FORCE_SYNC_CFO`,
+sync CFO forced to the simulator's true value) and fixed from first principles.
+
+**Simulator fidelity.** `FrequencyShiftChannelModel` (ota_channel_core): streaming 4097-tap
+band-limited Hilbert pair + continuous rotation, chunk-invariant bit for bit, image < −100 dB from
+141 Hz up (CTest `ChannelCoreModels`). `ota_simulator serve --lobby-rx-cfo-hz "BRAVO:D,ALPHA:-D"`;
+`--cfo-hz 0` (default) creates no wrapper ⇒ the 0 Hz path is unchanged. `WattersonChannel::
+applyCFO` is block-wise (one FFT per call, circular at every edge) and stays unused by OTASim.
+`measure_ack_fer --cfo-hz` drives the harness channel's per-burst TX CFO.
+
+**The defects (each invisible at 0 Hz):**
+1. *LTS seed gate (BUG-LTS-CFO-SEED-GATE).* The LTS correction was gated on `|chirp CFO| ≥ 0.75 Hz
+   || across-carrier CV < 0.20`; pre-correction hands the demod 0 Hz (seed branch dead) and CV is
+   ~0.52 on any Rayleigh channel ⇒ a dual-chirp multipath PHANTOM (up to delay_spread/(2·10 Hz⁻¹),
+   2.4 Hz on Moderate) was never corrected. Replaced by `src/ofdm/lts_cfo_update.hpp`: correct
+   K·r only for an UNCERTIFIED prior and a significant residual (t₍ₙ₋₁₎ quantile of the 3σ level,
+   σ_r from the across-carrier coherence; K = P/(P+R), P from the CP-bounded phantom). Harness,
+   Moderate QPSK R1/2 @20/26: 14.6 % / 17.4 % → **0.0 % / 0.0 %** (genie 0 / 0).
+2. *Certification of a clamped value.* A CRC-valid control frame ingested its CFO through the 2 Hz
+   per-update drift clamp and then certified the clamped intermediate (an LTS-corrected 2.7 Hz
+   phantom stored as 0.7 Hz) ⇒ the group's DATA frames started 0.7-0.9 Hz off with a "certified"
+   prior. Verified frames now ingest unclamped (`streaming_ofdm_decode.cpp`, control-first path).
+3. *OFDM time-domain pre-correction (65-tap full-band Hilbert).* Quadrature gain is accurate only
+   above ~2.2 kHz, so every carrier below keeps an image of (1−G)/(1+G) (−1.7 dB at 140 Hz, −11 dB
+   at 1 kHz) that the rotation moves to f + 2·CFO, plus a 32-sample delay and a 32-sample start-up
+   transient. The demod's complex NCO (`toBaseband`) applies CFO exactly, so the pre-correction is
+   now OFF by default (`ULTRA_CFO_PRECORRECT=1` restores it for a rig A/B). Harness, Good@20 QPSK
+   R2/3 at a forced-true 7.3 Hz: 13.5 % with it, **4.2 % without = the 0 Hz baseline**.
+4. *Chirp guard fell back to an UNESTABLISHED 0 Hz.* `limitConnectedCFODrift` replaced any chirp
+   with correlation < 0.85 by the tracker's value — on a fresh tracker the default 0 Hz, which the
+   0 Hz simulator made look like the truth. 27/48 Good@20 frames were forced to 0 at a 7.3 Hz
+   offset (outside the LTS stage's 5 Hz window). `CFOTracker::established()` (a value MEASURED
+   since the last reset) now gates the guard; an unestablished tracker accepts the chirp and the
+   first OFDM frame's LTS corrects any phantom. Tests: `StreamingSignalPolicy` (the old
+   "phantom rejected to tracked 0" case encoded the simulator assumption and is replaced).
+5. *Chirp search window cut off the up-chirp peak.* With a positive CFO the up-chirp's correlation
+   peak PRECEDES the chirp start by κ·CFO samples (κ = 10 samples/Hz); a chirp starting exactly at
+   the post-frame search floor (every FULL-anchored resend group, right after its descriptor) was
+   never found (corr 0.08) ⇒ mistimed light-LTS fallback (−427 samples), group lost, resend
+   repeated (3× in a row, Good@20 at +7.3 Hz; never at −23.5 Hz, where the peak lands later).
+   Chirp searches may now start `kChirpCfoPeakLeadSamples` = κ × 100 Hz = 1000 samples before the
+   floor; the LTS-type full-anchor fallback still skips that lead (the floor's original job).
+6. *MC-DPSK CFO.* A 127-tap Hilbert pre-shift with an UNCOMPENSATED 63-sample group delay (every
+   symbol window slid 63 samples: training SNR read 6.4 dB on a 12.1 dB link ⇒ the connect-time
+   SNR pushed AWGN@12 onto MC-DPSK), and it ZEROED the CFO after use ⇒ data-only burst
+   continuations were demodulated with no correction at all (every 8-CW continuation lost at
+   +7.3 Hz). The CFO is now removed inside the per-carrier correlator (`demodulateOneSymbol`:
+   carrier term restarting per symbol as the modulator does, CFO term continuous across the
+   frame and every continuation). Exposed by the better baseline: the residual jitter tracker's
+   heuristic no-harm gates miss cycle slips (5 Hz-peak jitter at 3 Hz), so the demod now also
+   keeps the UNTRACKED soft bits and `decodeFrame` decodes them when the tracked frame fails
+   (LDPC as the arbiter); `MCDPSKClockOffset` 5 Hz @ 3 Hz: FAIL/FAIL → PASS/PASS.
+
+**Evidence — harness** (`measure_ack_fer`, production geometry, seeds 7+11, 96 frames per cell,
+FER, old → fixed): Good@20 QPSK R2/3 at +7.3 / −23.5 Hz 62.5 % / 56.2 % → **5.2 % / 5.2 %**
+(0 Hz: 5.2 %); Good@20 16QAM R2/3 79.2 % / 74.0 % → 31.2 % / 30.2 % (0 Hz: 28.1 %); Moderate@20
+QPSK R1/2 47.9 % / 42.7 % → **1.0 % / 1.0 %** (0 Hz: 1.0 %); AWGN@12 QPSK R1/2 2.1 % / 1.0 % → 0 / 0.
+The PHY is now CFO-invariant to within one frame per 96. At exactly 0 Hz three cells cost one
+frame/96: the old fallback-to-0 was "right" only because the simulator's truth was 0.
+
+**Evidence — GUI gate** (OTASim, 21 KB, bps; 0 Hz / +7.3 Hz BEFORE today's fixes / +7.3 Hz
+fixed). Good@20 QPSK R2/3 pinned s42: 1740 / 890 / **1700**; Good@20 adaptive s42: 1620 / 1160 /
+**1720**; AWGN@12 QPSK R1/2 s42: 1340 / **FAIL** (connect SNR read 7.2 dB ⇒ MC-DPSK, which then
+decoded nothing) / **1330** (OFDM negotiated); the same in structure mode: 1460 / FAIL / **1510**;
+structure-mode Good@20 adaptive s42: 1950 / 1550 / **1940**; Moderate@20 R1/2 s43: 1340 / 1290 /
+1270; Good@20 adaptive s43 at −23.5 Hz: 1730 → 1720. All PASS, CRC-clean, 0 RTOs in the fixed
+round. 0 Hz sentinel (Good@20 adaptive s42) = 1620, the pre-change value. With the LTS-gate fix
+alone (0 Hz, rung pinned): Moderate@20 R1/2 1140 → 1340 (s42, s43; the session's first group no
+longer lost), adaptive Moderate@20 s43 ~1360 → 1640, structure-mode Moderate s43 1100 → 1480.
+
+**Files.** `src/ofdm/lts_cfo_update.hpp` (new), `channel_equalizer_lts.cpp`, `demodulator_impl.hpp`,
+`ofdm_stream_processor.cpp`, `include/ultra/ofdm.hpp`; `src/waveform/waveform_interface.hpp`,
+`ofdm_chirp_waveform.{hpp,cpp}`, `mc_dpsk_waveform.{hpp,cpp}`; `src/psk/multi_carrier_dpsk.hpp`;
+`src/sync/cfo_tracker.{hpp,cpp}`, `signal_policy.hpp`, `sync_controller.{hpp,cpp}`;
+`src/gui/modem/frame_demodulator.cpp`, `streaming_ofdm_decode.cpp`,
+`streaming_sync_acquisition.cpp`; `src/ota_channel_core/models.{hpp,cpp}`,
+`session_config.hpp`, `session_context.cpp`; `tools/ota_simulator.cpp`, `gui_qso_scenario.sh`,
+`measure_ack_fer.cpp`; tests `test_lts_cfo_update.cpp` (new, CTest `LtsCfoUpdate`),
+`test_channel_core_models.cpp`, `test_streaming_signal_policy.cpp`. ctest 106/106.
+
+---
+
 ## 2026-11-08 — FEAT: preamble-less burst acquisition — `ULTRA_BURST_ACQ=structure` (knob, default `chirp`)
 
 **What / why.** Stage 2 of the open-modem technique port. In connected wideband OFDM every data

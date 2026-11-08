@@ -6,6 +6,7 @@
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
 #include "demodulator_constants.hpp"
+#include <limits>
 #include <atomic>
 #include <mutex>
 #include <string>
@@ -260,6 +261,11 @@ struct OFDMDemodulator::Impl {
     float freq_offset_hz = 0.0f;
     float freq_offset_filtered = 0.0f;
     bool chirp_cfo_estimated = false;  // True if CFO was set externally (e.g., chirp)
+    // Prior sigma (Hz) of the CFO this frame starts from (lts_cfo_update.hpp): 0 = certified
+    // by a decoded frame (no LTS frame correction), +inf = no information (LTS takes over),
+    // otherwise the uncertified dual-chirp phantom sigma. Set per frame by the decoder.
+    double cfo_prior_sigma_hz = std::numeric_limits<double>::infinity();
+    float last_lts_cfo_gain = 0.0f;  // K applied by the last LTS residual update (diagnostic)
     std::vector<Complex> prev_pilot_phases;
     std::vector<size_t> prev_pilot_logical_indices;
     int symbols_since_sync = 0;

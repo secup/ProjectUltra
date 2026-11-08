@@ -64,6 +64,9 @@ public:
     bool detectSync(SampleSpan samples, SyncResult& result, float threshold = 0.15f) override;
     bool process(SampleSpan samples) override;
     std::vector<float> getSoftBits() override;
+    // Untracked soft bits of the last demodulated frame when the residual tracker applied a
+    // correction (else empty); see MultiCarrierDPSKDemodulator::takeUntrackedSoftBits.
+    std::vector<float> takeUntrackedSoftBits();
     void reset() override;
 
     // Demodulate MC-DPSK continuation samples that follow an already-processed

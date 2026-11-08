@@ -50,11 +50,20 @@ admission gates calibrate against impossible silence.
 
 **Implementation (4 stages):**
 ```
-1. Chirp coarse CFO → stored as last_cfo_ (±50 Hz range, ±2 Hz accuracy on fading)
-2. LTS residual fix → corrects freq_offset_hz if residual > 0.3 Hz
+1. Chirp coarse CFO → stored as last_cfo_ (±50 Hz range; on multipath a PHANTOM of up to
+   delay_spread / (2 kappa) Hz, kappa = 10 samples/Hz: ~2.4 Hz on ITU Moderate, 1 ms)
+2. LTS residual fix → K·r when the CFO prior is UNCERTIFIED and |r| > t(n-1, 3 sigma) sigma_r
+   (src/ofdm/lts_cfo_update.hpp); a CERTIFIED prior is never corrected
 3. Pilot tracking → refines freq_offset_hz per data symbol
 4. Feedback loop → propagates corrected CFO back to waveform and StreamingDecoder
 ```
+
+**2026-11-08 corollary (the bug this rule replaced):** never gate the LTS correction on the
+MAGNITUDE of the prior CFO or on channel flatness. The decoder pre-corrects every OFDM frame and
+hands the demod 0 Hz, so a "|seed| ≥ 0.75 Hz" test is dead code, and a flatness test is false on
+every fading channel — together they left a wrong chirp CFO uncorrected on fading (measured
+Moderate QPSK R1/2 14.6 % FER vs 0.0 % with the true CFO). The decision depends only on the
+prior's STATE (certified or not) and the measurement's own significance.
 
 **See `docs/CFO_CORRECTION_FLOW.md` for full details.**
 
@@ -64,6 +73,39 @@ admission gates calibrate against impossible silence.
 - `src/waveform/ofdm_chirp_waveform.cpp` (feedback: `cfo_hz_ = demodulator_->getFrequencyOffset()`)
 - `src/gui/modem/streaming_decoder.cpp` (feedback: `last_cfo_.store(corrected_cfo)`)
 - `src/ofdm/demodulator_impl.hpp` (chirp_cfo_estimated flag)
+
+---
+
+### INV-CFO-004: Never shift a frame with a truncated Hilbert; mix it (2026-11-08)
+
+**Rule:** remove CFO with a complex mix inside the demodulator — the OFDM `toBaseband` NCO, the
+MC-DPSK per-carrier correlator (`demodulateOneSymbol`, CFO term continuous across the frame and
+every burst continuation) — never with a short FIR Hilbert pre-shift of a finite frame block.
+
+**Why:** a 65-tap (OFDM) / 127-tap (MC-DPSK) full-band Hilbert is accurate only above ~3·fs/N
+(2.2 / 1.1 kHz); below that each carrier keeps an image that the shift moves 2·CFO away, the
+filter delay (32 / 63 samples) slides every symbol window, and the MC-DPSK version zeroed the CFO
+after use so burst continuations got no correction at all. Invisible at 0 Hz (the shift is skipped).
+
+### INV-CFO-005: The chirp guard may only fall back to a MEASURED CFO (2026-11-08)
+
+**Rule:** `limitConnectedCFODrift` clamps a chirp to the tracked value only when
+`CFOTracker::established()` (the value came from a measurement since the last reset). An
+unestablished tracker accepts the chirp; the first OFDM frame's LTS stage corrects a phantom.
+
+**Why:** the default 0 Hz is not information. Falling back to it turned a correct 7.3 Hz chirp
+into a 7.3 Hz error on 27/48 Good@20 frames — and looked correct for months because the simulator's
+truth was 0 Hz. Never judge "established" from |CFO| > ε either (a true 0 Hz is established too).
+
+### INV-CHIRP-003: A chirp search must start kappa x CFO_max before the expected chirp
+
+**Rule:** a connected chirp search window may begin `SyncController::kChirpCfoPeakLeadSamples`
+(κ·100 Hz = 1000 samples) before the post-frame search floor; LTS-type detectors on the same
+buffer skip that lead (`SearchWindowResult::pre_floor_lead_samples`).
+
+**Why:** the up-chirp's correlation peak precedes the chirp start by κ·CFO for a positive CFO. A
+chirp starting exactly at the floor (every FULL-anchored resend group, right after its
+descriptor) was never found at +7.3 Hz: mistimed fallback, group lost, resend repeated.
 
 ---
 

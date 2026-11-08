@@ -68,6 +68,7 @@ struct Args {
     // fresh decoder arms the anchor wait mid-burst and misses its chirp (the constant
     // 1-per-run first-frame failure). 0 = legacy behaviour.
     int preroll_ms = 0;
+    float cfo_hz = 0.0f;  // dial offset A->B (both directions shifted by the same TX CFO)
     // Pump the full sample budget every trial so two arms of an A/B stay in lockstep
     // (identical channel samples per frame => paired comparison).
     bool fixed_budget = false;
@@ -276,6 +277,8 @@ Args parseArgs(int argc, char** argv) {
                 throw std::runtime_error("unknown --geometry: " + g);
             }
             args.geometry_production = (g == "production");
+        } else if (key == "--cfo-hz") {
+            args.cfo_hz = std::stof(requireValue("--cfo-hz"));
         } else if (key == "--preroll-ms") {
             args.preroll_ms = std::max(0, std::stoi(requireValue("--preroll-ms")));
         } else if (key == "--fixed-budget") {
@@ -837,6 +840,7 @@ Counts measure(const Args& args) {
     ultra::ota_channel_core::SimulatedChannel channel;
     channel.setSeed(args.seed);
     channel.configure(args.snr_db, args.channel);
+    channel.setTxCFO(args.cfo_hz);
 
     // 2026-07-29 diag: shadow channel + decoder for the perfect-CSI bound. Same
     // seed and channel type => same fade realization; kGenieCleanSnrDb is high
@@ -1124,6 +1128,7 @@ BurstCounts measureBurst(const Args& args) {
     ultra::ota_channel_core::SimulatedChannel channel;
     channel.setSeed(args.seed);
     channel.configure(args.snr_db, args.channel);
+    channel.setTxCFO(args.cfo_hz);
 
     std::mt19937_64 payload_rng(args.seed ^ 0xA6E22C15D9B3F1A5ull);
     BurstCounts bc;

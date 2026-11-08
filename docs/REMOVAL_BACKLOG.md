@@ -387,6 +387,21 @@ cold re-anchor); the LTS pair and the group-start marker (LTS1 negated); the Sch
 correlation primitive (warm LTS); `CFOTracker` + the CFO feedback loop; the anchored-burst
 backstop; the `BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR` mode-hop demotion contract (F164).
 
+### R16. The Hilbert CFO pre-corrector, after one rig A/B — `QUEUED 2026-11-08`
+
+**Why.** `FrameDemodulator::applyCFOPreCorrection` builds an analytic signal with a 65-tap
+full-band Hilbert FIR (image down to −1.7 dB at 140 Hz, 32-sample delay) and is now inert by
+default (`ULTRA_CFO_PRECORRECT=1` opts back in); the demod's complex NCO applies CFO exactly
+(harness: 13.5 % → 4.2 % FER at a true 7.3 Hz, = the 0 Hz baseline).
+
+**Scope (delete after the rig A/B):** `applyCFOPreCorrection` and the `ULTRA_CFO_PRECORRECT`
+knob, `preCorrectionCfo()` / `resetPreCorrection()` and the `pre_correction` argument plumbing at
+the six decode sites (`decode_cfo` then always = the sync/burst CFO).
+
+**KEEP:** the demodulator's `toBaseband` NCO and `setFrequencyOffsetWithPhase` phase reference;
+`CFOTracker::ingestPilotResidual` (with pre-correction 0 it is the absolute-CFO feedback); the
+MC-DPSK correlator CFO term (`corr_cfo_hz_`); `HilbertTransform` itself (detectors use it).
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

@@ -64,6 +64,11 @@ public:
     // last reset. Pilot feedback alone is not proof: failed demodulations also
     // publish residuals and can move the tracked value.
     bool pilotSeeded() const { return pilot_seeded_.load(); }
+    // True once the tracked value came from a MEASUREMENT since the last reset (any accepted
+    // chirp/LTS/pilot estimate or a certified rollback). False after reset() or a no-reference
+    // revoke: the held 0 Hz is then a default, not information (signal_policy::
+    // limitConnectedCFODrift never clamps a measurement back to it).
+    bool established() const { return established_.load(); }
 
     // BUG-ANCHOR-CFO-KILL completion: the warm-keep is only safe while the warm
     // value is PROVEN — burst-frame pilot residuals are ingested before any LDPC
@@ -111,7 +116,7 @@ public:
                 return BurstOutcomeAction::CERTIFIED;
             }
             const bool restored = rollbackToCertifiedLocked();
-            if (!restored) cfo_.store(0.0f);
+            if (!restored) { cfo_.store(0.0f); established_.store(false); }
             pilot_seeded_.store(false);
             return restored ? BurstOutcomeAction::ROLLED_BACK_COLD
                             : BurstOutcomeAction::REVOKED;
@@ -123,6 +128,7 @@ public:
                                 : BurstOutcomeAction::ROLLED_BACK_COLD;
             }
             cfo_.store(0.0f);
+            established_.store(false);
             pilot_seeded_.store(false);
             return BurstOutcomeAction::REVOKED;
         }
@@ -130,7 +136,7 @@ public:
         // pilot walk as the connected-cold drift reference: the cold chirp clamp
         // would otherwise compare against (and potentially retain) the poison.
         const bool restored = rollbackToCertifiedLocked();
-        if (!restored) cfo_.store(0.0f);
+        if (!restored) { cfo_.store(0.0f); established_.store(false); }
         pilot_seeded_.store(false);
         return restored ? BurstOutcomeAction::ROLLED_BACK_COLD
                         : BurstOutcomeAction::REVOKED;
@@ -150,6 +156,7 @@ public:
         // walk here would let connected-cold chirp sanity compare against it and
         // clamp a valid re-acquisition back to the same unproven value.
         cfo_.store(0.0f);
+        established_.store(false);
         pilot_seeded_.store(false);
         return BurstOutcomeAction::REVOKED;
     }
@@ -173,12 +180,14 @@ public:
             return;
         }
         cfo_.store(cfo_hz);
+        established_.store(true);
     }
 
     // Reset to 0 for a new connection / mode change (clears the pilot-refined mark).
     void reset() {
         std::lock_guard<std::mutex> lock(state_mutex_);
         cfo_.store(0.0f);
+        established_.store(false);
         pilot_seeded_.store(false);
         has_certified_.store(false);
         certified_cfo_.store(0.0f);
@@ -206,6 +215,7 @@ private:
             return false;
         }
         cfo_.store(certified);
+        established_.store(true);
         return true;
     }
 
@@ -216,6 +226,7 @@ private:
     mutable std::mutex state_mutex_;
     std::atomic<float> cfo_{0.0f};
     std::atomic<bool> pilot_seeded_{false};
+    std::atomic<bool> established_{false};
     std::atomic<float> certified_cfo_{0.0f};  // last DELIVERED-group CFO (cheap re-anchor)
     std::atomic<bool> has_certified_{false};
 };

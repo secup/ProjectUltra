@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace ultra {
 namespace gui {
@@ -20,7 +21,22 @@ float FrameDemodulator::applyCFOPreCorrection(std::vector<float>& samples, float
     // false per-carrier magnitude ripple on the LTS/pilots. Leave those small
     // offsets for the demodulator's complex baseband correction path.
     constexpr float kMinCFOForHilbertPreCorrectionHz = 0.75f;
-    if (std::abs(cfo_hz) < kMinCFOForHilbertPreCorrectionHz || samples.empty()) {
+    // DEFAULT OFF since 2026-11-08 (ULTRA_CFO_PRECORRECT=1 restores it for a rig A/B). This
+    // pre-corrector builds its analytic signal with a 65-tap full-band Hilbert FIR whose
+    // quadrature gain G is accurate only above ~fs*3/N = 2.2 kHz; across the modem band
+    // (140-2906 Hz) every carrier keeps an image of relative level (1-G)/(1+G) — about -1.7 dB at
+    // 140 Hz, -11 dB at 1 kHz — which the -CFO rotation moves to f + 2 CFO (14.6 Hz from its
+    // carrier at 7.3 Hz: inter-carrier interference over the lower band). It also delays the
+    // frame by 32 samples and corrupts its first 32 with the filter start-up. The demodulator
+    // applies CFO EXACTLY in its complex NCO (toBaseband), so the pre-correction is not needed.
+    // Measured (measure_ack_fer, Good@20 QPSK R2/3, true CFO 7.3 Hz forced): 13.5 % FER with
+    // the pre-correction, 4.2 % without = the 0 Hz baseline. The GUI gate never ran it before
+    // 2026-11-08: OTASim had 0 Hz CFO and the pre-correction skips |CFO| < 0.75 Hz.
+    static const bool kPreCorrect = [] {
+        const char* e = std::getenv("ULTRA_CFO_PRECORRECT");
+        return e && e[0] == '1';
+    }();
+    if (!kPreCorrect || std::abs(cfo_hz) < kMinCFOForHilbertPreCorrectionHz || samples.empty()) {
         pre_correction_cfo_ = 0.0f;
         return 0.0f;  // Skip if negligible
     }

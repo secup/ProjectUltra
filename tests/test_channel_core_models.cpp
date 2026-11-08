@@ -339,7 +339,84 @@ void checkCfoInjectionPreservesBandEdgeTone() {
 
 }  // namespace
 
+// FrequencyShiftChannelModel (2026-11-08): the receiver-side dial offset must be CHUNK-INVARIANT
+// (OTASim feeds ~tick-sized chunks: chunked output must equal a single-call output exactly —
+// that is what "no block-edge artifacts" means), and must move every in-band frequency by
+// exactly +cfo with the image (f - cfo) and the unshifted residual (f) far down. Also: cfo = 0
+// must not wrap the model (byte-identical default path).
+double probeDb(const std::vector<float>& y, size_t b, size_t e, double f_hz) {
+    // Blackman-Harris windowed DFT magnitude at an arbitrary frequency.
+    std::complex<double> acc(0.0, 0.0);
+    double wsum = 0.0;
+    const double len = static_cast<double>(e - b - 1);
+    for (size_t n = b; n < e; ++n) {
+        const double x = 2.0 * M_PI * static_cast<double>(n - b) / len;
+        const double w = 0.35875 - 0.48829 * std::cos(x) + 0.14128 * std::cos(2 * x) -
+                         0.01168 * std::cos(3 * x);
+        acc += w * static_cast<double>(y[n]) *
+               std::polar(1.0, -2.0 * M_PI * f_hz * static_cast<double>(n) / kSampleRate);
+        wsum += w;
+    }
+    return 20.0 * std::log10(std::abs(acc) / wsum + 1e-30);
+}
+
+void checkStreamingCfoAcrossChunks() {
+    using ultra::ota_channel_core::FrequencyShiftChannelModel;
+    constexpr double kCfo = 3.7;
+    for (double tone_hz : {141.0, 1500.0, 2880.0}) {
+        ChannelConfig cfg;
+        cfg.type = ChannelType::PASSTHROUGH;
+        cfg.cfo_hz = static_cast<float>(kCfo);
+        RngRoot root(0x5151u);
+        auto chunked_model = createChannelModel(cfg, root, "cfo-test");
+        auto whole_model = createChannelModel(cfg, root, "cfo-test");
+        assert(dynamic_cast<FrequencyShiftChannelModel*>(chunked_model.get()) != nullptr);
+        const size_t n = 144000;
+        std::vector<float> tone(n);
+        for (size_t i = 0; i < n; ++i) {
+            tone[i] = static_cast<float>(std::sin(2.0 * M_PI * tone_hz * i / kSampleRate));
+        }
+        std::vector<float> chunked;
+        chunked.reserve(n);
+        uint32_t lcg = 12345u;
+        size_t pos = 0;
+        while (pos < n) {
+            lcg = lcg * 1664525u + 1013904223u;
+            const size_t chunk = std::min<size_t>(n - pos, 96 + (lcg >> 8) % 1824);  // 2-40 ms
+            std::vector<float> in(tone.begin() + pos, tone.begin() + pos + chunk), o;
+            chunked_model->process(in, pos, o);
+            chunked.insert(chunked.end(), o.begin(), o.end());
+            pos += chunk;
+        }
+        std::vector<float> whole;
+        whole_model->process(tone, 0, whole);
+        assert(chunked == whole);  // chunk-invariant, bit for bit
+        const size_t b = 2 * FrequencyShiftChannelModel::groupDelaySamples(), e = n;
+        const double wanted = probeDb(chunked, b, e, tone_hz + kCfo);
+        const double image = probeDb(chunked, b, e, tone_hz - kCfo) - wanted;
+        const double residual = probeDb(chunked, b, e, tone_hz) - wanted;
+        double peak_f = tone_hz + kCfo, peak_db = -1e9;
+        for (double f = tone_hz + kCfo - 0.3; f <= tone_hz + kCfo + 0.3; f += 0.01) {
+            const double d = probeDb(chunked, b, e, f);
+            if (d > peak_db) { peak_db = d; peak_f = f; }
+        }
+        std::cout << "streaming_cfo tone_hz=" << tone_hz << " peak_hz=" << peak_f
+                  << " image_db=" << image << " residual_db=" << residual << "\n";
+        assert(std::abs(peak_f - (tone_hz + kCfo)) <= 0.02);
+        assert(image < -40.0 && residual < -40.0);
+    }
+    {
+        ChannelConfig cfg;
+        cfg.type = ChannelType::AWGN;
+        cfg.cfo_hz = 0.0f;
+        RngRoot root(0x5151u);
+        auto model = createChannelModel(cfg, root, "cfo-zero");
+        assert(dynamic_cast<FrequencyShiftChannelModel*>(model.get()) == nullptr);
+    }
+}
+
 int main() {
+    checkStreamingCfoAcrossChunks();
     {
         PassthroughChannelModel model;
         const std::vector<float> input{0.0f, 1.0f, -0.5f, 0.25f};

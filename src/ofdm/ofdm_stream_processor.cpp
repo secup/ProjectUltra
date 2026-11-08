@@ -823,6 +823,10 @@ void OFDMDemodulator::setRXCarrierErasureEnabled(bool enabled) {
     impl_->rx_carrier_erasure_enabled_ = enabled;
 }
 
+void OFDMDemodulator::setCfoPriorSigmaHz(double sigma_hz) {
+    impl_->cfo_prior_sigma_hz = (sigma_hz >= 0.0) ? sigma_hz : 0.0;
+}
+
 void OFDMDemodulator::setFrequencyOffset(float cfo_hz) {
     LOG_DEMOD(INFO, "setFrequencyOffset: CFO=%.2f Hz (was %.2f Hz)", cfo_hz, impl_->freq_offset_hz);
     impl_->freq_offset_hz = cfo_hz;

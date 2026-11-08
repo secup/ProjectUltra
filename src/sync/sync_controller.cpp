@@ -652,17 +652,32 @@ SearchWindowResult SyncController::acquireSearchWindow(
             }
 
             size_t search_start_abs = ring_.ringPosToAbsoluteLocked(search_start);
-            if (search_start_abs < ring_.search_floor_abs_) {
-                if (ring_.total_fed_ - ring_.search_floor_abs_ < min_search) {
+            // CHIRP searches may start up to kChirpCfoPeakLeadSamples BEFORE the floor: with a
+            // positive CFO the up-chirp's correlation peak precedes the chirp's first sample by
+            // kappa * CFO samples, so a chirp that starts exactly at the floor (a FULL-anchored
+            // resend group right after its descriptor) had its peak cut off — never found at
+            // +7.3 Hz (corr 0.08), group lost, resend repeated (measured 2026-11-08, the first
+            // non-zero-CFO GUI runs). The floor guards against false LTS locks in decoded audio;
+            // a chirp correlator cannot lock on OFDM symbols, so the lead is safe for it.
+            const size_t floor_abs = (!use_light_search && connected_data_preamble &&
+                                      ring_.search_floor_abs_ > oldest_abs + kChirpCfoPeakLeadSamples)
+                                         ? ring_.search_floor_abs_ - kChirpCfoPeakLeadSamples
+                                         : ring_.search_floor_abs_;
+            if (search_start_abs < floor_abs) {
+                if (ring_.total_fed_ - floor_abs < min_search) {
                     static int floor_wait_count = 0;
                     if (++floor_wait_count % 50 == 1) {
                         LOG_MODEM(INFO,
                                   "[%s] searchForSync: SKIP post-frame floor, available=%zu < min=%zu",
-                                  log_prefix_.c_str(), ring_.total_fed_ - ring_.search_floor_abs_, min_search);
+                                  log_prefix_.c_str(), ring_.total_fed_ - floor_abs, min_search);
                     }
                     return result;
                 }
-                search_start = ring_.absoluteToRingLocked(ring_.search_floor_abs_);
+                search_start = ring_.absoluteToRingLocked(floor_abs);
+            }
+            const size_t start_abs_final = ring_.ringPosToAbsoluteLocked(search_start);
+            if (start_abs_final < ring_.search_floor_abs_) {
+                result.pre_floor_lead_samples = ring_.search_floor_abs_ - start_abs_final;
             }
         }
 

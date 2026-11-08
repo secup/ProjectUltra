@@ -30,7 +30,6 @@ inline constexpr float kMinLTSSignalPower = 1.0e-3f;
 inline constexpr float kMinLTSChannelMagnitude = 5.0e-2f;
 inline constexpr float kMaxSyncCFODriftHz = 1.0f;
 inline constexpr float kMaxPilotCFODriftHz = 2.0f;
-inline constexpr float kKnownCFOEpsilonHz = 0.01f;
 // Chirp correlation below which the gap-derived CFO is peak-jitter-dominated (a fade manufactures
 // a phantom offset, e.g. -1.25 Hz at corr 0.78 on a zero-CFO channel) and must NOT be trusted to
 // MOVE the tracked CFO. Separates measured phantoms (corr ~0.73-0.79) from clean locks (~0.92-0.95).
@@ -329,12 +328,22 @@ struct CFODriftDecision {
     bool clamped = false;
 };
 
+// known_established: the tracked value came from a MEASUREMENT since the last reset (any accepted
+// chirp, LTS or pilot estimate, or a certified rollback). An unestablished tracker holds the
+// DEFAULT 0 Hz, which is not information: a real radio's dial offset is almost never 0, so
+// "falling back to 0" turns a low-confidence-but-right chirp (e.g. 7.3 Hz at corr 0.80) into a
+// 7.3 Hz error the LTS stage cannot repair (outside its 5 Hz window). Measured 2026-11-08 with the
+// new simulator dial offset: 27/48 Good@20 frames forced to 0 Hz, 62.5 % FER vs 4.2 % at the true
+// CFO. The 0 Hz simulator made that fallback look safe for months. An unestablished tracker
+// therefore ACCEPTS the chirp; a multipath phantom in it (<= CP / (2 kappa) = 4.8 Hz) is
+// corrected by the first OFDM frame's LTS stage (src/ofdm/lts_cfo_update.hpp: uncertified
+// prior).
 inline CFODriftDecision limitConnectedCFODrift(bool connected,
                                                float measured_cfo,
                                                float known_cfo,
                                                float correlation,
+                                               bool known_established,
                                                float max_drift_hz = kMaxSyncCFODriftHz,
-                                               float known_cfo_epsilon_hz = kKnownCFOEpsilonHz,
                                                float min_trust_corr = kChirpTrustCorr) {
     CFODriftDecision decision;
     decision.accepted_cfo = measured_cfo;
@@ -345,14 +354,13 @@ inline CFODriftDecision limitConnectedCFODrift(bool connected,
     //      manufactures a phantom CFO. Gated at EVERY stage, INCLUDING the connected=false PING,
     //      so the phantom never ESTABLISHES in `known` — the root the connected-only clamp could
     //      not reach (by the time we are connected the PING already poisoned `known`).
-    //  (2) the original connected clamp: an established (|known|>eps) CFO is protected from a
+    //  (2) the original connected clamp: an established (MEASURED) CFO is protected from a
     //      drifting chirp even at high correlation.
     // A genuine first acquisition (clean high-corr chirp, even a large real dial offset) is NOT
     // gated: low_confidence is false and there is no established CFO to clamp to, so it's accepted.
     const bool large_drift = std::abs(decision.diff_hz) > max_drift_hz;
     const bool low_confidence = correlation < min_trust_corr;
-    const bool established = connected && std::abs(known_cfo) > known_cfo_epsilon_hz;
-    if (large_drift && (low_confidence || established)) {
+    if (large_drift && known_established && (low_confidence || connected)) {
         decision.accepted_cfo = known_cfo;
         decision.clamped = true;
     }
@@ -381,12 +389,13 @@ struct ConnectedAnchorCFOSeed {
 inline ConnectedAnchorCFOSeed connectedAnchorCFOSeed(float measured_cfo,
                                                      float known_cfo,
                                                      float correlation,
-                                                     bool pilot_seeded) {
+                                                     bool pilot_seeded,
+                                                     bool known_established) {
     if (!pilot_seeded) {
         // No pilot-refined estimate since reset — cold rules apply (chirp
-        // trusted, subject to the standard drift clamp).
-        const auto d =
-            limitConnectedCFODrift(true, measured_cfo, known_cfo, correlation);
+        // trusted, subject to the standard drift clamp against a MEASURED value).
+        const auto d = limitConnectedCFODrift(true, measured_cfo, known_cfo, correlation,
+                                              known_established);
         return {d.accepted_cfo, false};
     }
     return {known_cfo, true};  // warm prior sigma <0.1 Hz >> fading-chirp sigma

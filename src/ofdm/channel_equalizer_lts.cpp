@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 #include <algorithm>
+#include "lts_cfo_update.hpp"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -27,18 +28,6 @@ namespace {
 bool chestNoiseScaleFixEnabled() {
     const char* e = std::getenv("ULTRA_CHEST_NOISE_SCALE");
     return e != nullptr && e[0] != '\0' && e[0] != '0';
-}
-
-bool cfoDebugLogEnabled() {
-    static const bool enabled = [] {
-        const char* cfo = std::getenv("ULTRA_CFO_DEBUG_LOG");
-        const char* harq = std::getenv("ULTRA_HARQ_DEBUG_LOG");
-        auto enabled_env = [](const char* value) {
-            return value && value[0] != '\0' && !(value[0] == '0' && value[1] == '\0');
-        };
-        return enabled_env(cfo) || enabled_env(harq);
-    }();
-    return enabled;
 }
 
 }  // namespace
@@ -404,101 +393,31 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             const float cfo_coherence =
                 std::abs(phase_diff_sum) / static_cast<float>(cfo_valid);
 
-            // LTS channel magnitude coefficient-of-variation across carriers.
-            // Low CV (< 0.20) indicates a flat channel (AWGN territory) where
-            // the false-zero-CFO-from-fading concern that motivated the seed
-            // gate does not apply. High CV indicates frequency-selective fading
-            // where a "common LTS phase step" can genuinely be fading-induced
-            // and the seed gate's caution is warranted.
-            float h_mag_sum = 0.0f;
-            double h_mag_sq_sum = 0.0;
-            size_t h_mag_count = 0;
-            for (size_t i = 0; i < data_carrier_indices.size(); ++i) {
-                Complex h_avg = (h_per_symbol[0][i] + h_per_symbol[1][i]) * 0.5f;
-                if (std::abs(h_avg) > 0.01f) {
-                    float mag = std::abs(h_avg);
-                    h_mag_sum += mag;
-                    h_mag_sq_sum += static_cast<double>(mag) * mag;
-                    ++h_mag_count;
-                }
-            }
-            float lts_channel_cv = 1.0f;  // pessimistic default: assume fading
-            if (h_mag_count > 5) {
-                float mean = h_mag_sum / static_cast<float>(h_mag_count);
-                float mean_sq = static_cast<float>(h_mag_sq_sum / static_cast<double>(h_mag_count));
-                float variance = std::max(0.0f, mean_sq - mean * mean);
-                float stddev = std::sqrt(variance);
-                lts_channel_cv = (mean > 1e-6f) ? stddev / mean : 1.0f;
-            }
-
-            // Apply LTS residual CFO if it is significant, sane, coherent
-            // across carriers, AND either the chirp seed is already trusted OR
-            // the LTS channel looks flat enough that the original fading-
-            // false-CFO concern doesn't apply.
-            //
-            // The seed gate alone was too restrictive: at TX CFO=0 the chirp
-            // typically reports 0.00 Hz and the seed gate blocked all LTS
-            // refinement, including legitimate clock-drift corrections that
-            // matter at low SNR. Allowing zero-seed correction on flat channels
-            // restores the refinement where it is safe.
-            constexpr float kMinTrustedCFOSeedHz = 0.75f;
-            // ULTRA_LTS_CFO_COH (2026-07-29 diag): override the coherence threshold.
-            // cfo_coherence = |sum of unit phase-step vectors| / count is the PHYSICALLY
-            // correct validity test for this estimator -- it measures directly whether the
-            // per-carrier phase steps agree, which is what a genuine common rotation
-            // implies and what noise or per-carrier time-variation destroys. The seed/CV
-            // conditions ANDed with it are not: frequency selectivity cancels exactly in
-            // h1*conj(h0) (= |H|^2, real and positive), so lts_channel_cv gates on the
-            // wrong axis entirely.
-            float kMinResidualCFOCoherence = 0.70f;
-            if (const char* e = std::getenv("ULTRA_LTS_CFO_COH")) {
-                const float v = static_cast<float>(std::atof(e));
-                if (v > 0.0f && v <= 1.0f) {
-                    kMinResidualCFOCoherence = v;
-                }
-            }
-            constexpr float kFlatChannelCvMax = 0.20f;
-            float old_cfo = freq_offset_hz;
-            const bool trusted_cfo_seed = std::abs(old_cfo) >= kMinTrustedCFOSeedHz;
-            const bool coherent_residual = cfo_coherence >= kMinResidualCFOCoherence;
-            const bool flat_lts_channel = lts_channel_cv < kFlatChannelCvMax;
-            // ULTRA_LTS_CFO_SEED_OFF (2026-07-29 diag): bypass the seed gate, keeping
-            // the COHERENCE gate. Hypothesis under test: on a fading channel the LTS
-            // reports a real composite-phase rotation (measured -2.4..-2.6 Hz on FAILED
-            // Moderate frames vs ~0 on passes) which this gate blocks, because
-            // trusted_cfo_seed is false at TX CFO 0 and flat_lts_channel is false on any
-            // Rayleigh channel (across-carrier CV ~0.52 vs a 0.20 threshold). At 24 ms
-            // per symbol, 2.5 Hz is 21.6 deg/symbol and ~560 deg over a 26-symbol payload.
-            const bool seed_gate_disabled = [] {
-                const char* e = std::getenv("ULTRA_LTS_CFO_SEED_OFF");
-                return e != nullptr && e[0] != '\0' && e[0] != '0';
-            }();
-            const bool seed_ok =
-                seed_gate_disabled || trusted_cfo_seed || flat_lts_channel;
-            // ULTRA_LTS_CFO_MIN (2026-07-29 diag): minimum residual worth applying.
-            // The LTS pair measures an INSTANTANEOUS phase slope; applying it as a CFO
-            // extrapolates that slope across the whole payload. Under Gaussian Doppler the
-            // composite phase is a random walk, not a constant offset, so extrapolation is
-            // only worthwhile when the measured rotation is large relative to the
-            // estimator's own uncertainty -- otherwise the correction injects more error
-            // than it removes. Measured: on Moderate residuals reach 2.4-2.6 Hz on frames
-            // that fail, and correcting them removes an 18.75% FER floor entirely; on Good
-            // the true offset is ~0 and correcting costs 2-3 frames per 80.
-            float min_residual_hz = 0.3f;
-            if (const char* e = std::getenv("ULTRA_LTS_CFO_MIN")) {
-                const float v = static_cast<float>(std::atof(e));
-                if (v >= 0.0f && v < 5.0f) {
-                    min_residual_hz = v;
-                }
-            }
-            if (std::abs(residual_cfo) > min_residual_hz &&
-                std::abs(residual_cfo) < 5.0f &&
-                coherent_residual && seed_ok) {
-                freq_offset_hz += residual_cfo;
+            // FRAME-CONSTANT CFO UPDATE (2026-11-08; derivations in src/ofdm/lts_cfo_update.hpp).
+            // Correction K * r only when the prior is UNCERTIFIED (set per frame by the decoder
+            // through setCfoPriorSigmaHz) and r is significant against this LTS pair's own
+            // coherence-derived standard error (|r| > 3 sigma_r); K = P / (P + R) ~ 1. Applied
+            // only when the pair is evidence of a real training pair (chi >= ln 1000). Replaces the seed/flatness gate, which never fired on
+            // fading (its seed branch was dead after CFO pre-correction) and so left a wrong
+            // chirp CFO uncorrected for whole groups. The |r| < 5 Hz sanity bound stays: it is
+            // the uncertified prior's own phantom bound (CP / (2 kappa) = 4.8 Hz) rounded up.
+            const double sigma_r = lts_cfo::residualSigmaHz(
+                cfo_coherence, cfo_valid, static_cast<double>(symbol_duration));
+            const double cfo_gain = lts_cfo::gain(cfo_prior_sigma_hz, sigma_r);
+            const bool pair_evidence = last_lts_pair_chi >= lts_cfo::kEvidenceChi;
+            const float old_cfo = freq_offset_hz;
+            const float applied_cfo = static_cast<float>(
+                lts_cfo::frameCorrectionHz(residual_cfo, sigma_r, cfo_prior_sigma_hz, cfo_valid));
+            last_lts_cfo_gain = applied_cfo != 0.0f ? static_cast<float>(cfo_gain) : 0.0f;
+            if (pair_evidence && applied_cfo != 0.0f && std::abs(residual_cfo) < 5.0f) {
+                freq_offset_hz += applied_cfo;
                 freq_offset_filtered = freq_offset_hz;
 
-                LOG_DEMOD(WARN, "LTS residual CFO: %.2f Hz detected (coh=%.2f, chirp gave %.2f, corrected to %.2f Hz)",
-                          residual_cfo, cfo_coherence, old_cfo, freq_offset_hz);
+                LOG_DEMOD(WARN,
+                          "LTS residual CFO: %.2f Hz detected (coh=%.2f sigma=%.2f Hz, prior "
+                          "sigma=%.2f Hz, K=%.3f) %.2f -> %.2f Hz",
+                          residual_cfo, cfo_coherence, sigma_r, cfo_prior_sigma_hz, cfo_gain,
+                          old_cfo, freq_offset_hz);
 
                 // Re-process training symbols with corrected CFO for accurate channel estimate
                 // Reset mixer to start position and re-run
@@ -549,14 +468,15 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
                 }
 
                 LOG_DEMOD(INFO, "LTS re-processed with corrected CFO=%.2f Hz", freq_offset_hz);
-            } else if (std::abs(residual_cfo) > 0.3f && std::abs(residual_cfo) < 5.0f &&
-                       cfoDebugLogEnabled()) {
-                LOG_DEMOD(WARN,
-                          "LTS residual CFO ignored: %.2f Hz (seed=%.2f Hz, coh=%.2f, valid=%d, min_seed=%.2f, min_coh=%.2f)",
-                          residual_cfo, old_cfo, cfo_coherence, cfo_valid,
-                          kMinTrustedCFOSeedHz, kMinResidualCFOCoherence);
             } else if (std::abs(residual_cfo) > 0.1f) {
-                LOG_DEMOD(DEBUG, "LTS residual CFO: %.2f Hz (below correction threshold)", residual_cfo);
+                LOG_DEMOD(DEBUG,
+                          "LTS residual CFO %.2f Hz NOT applied (%s; coh=%.2f chi=%.1f K=%.3f)",
+                          residual_cfo,
+                          !pair_evidence ? "no pair evidence"
+                              : (cfo_gain <= 0.0 ? "certified prior"
+                                 : (std::abs(residual_cfo) >= 5.0f ? "beyond phantom bound"
+                                                                     : "within LTS noise")),
+                          cfo_coherence, last_lts_pair_chi, cfo_gain);
             }
         }
     }
