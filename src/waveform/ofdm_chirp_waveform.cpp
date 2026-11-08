@@ -8,6 +8,7 @@
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/timing_profiler.hpp"
 #include "ultra/phy_diagnostics.hpp"
+#include "ofdm/pilot_pattern.hpp"
 #include <algorithm>
 #include <sstream>
 #include <cmath>
@@ -406,6 +407,30 @@ Samples OFDMChirpWaveform::generateShortAnchorPreamble() {
     return preamble;
 }
 
+Samples OFDMChirpWaveform::generateSettlingSymbols(size_t count) {
+    if (!modulator_ || count == 0) {
+        return Samples();
+    }
+    // Enough bits for `count` symbols at any profile (all carriers x 4 bits), fixed
+    // SplitMix64 content: deterministic on every platform. The modulator resets its pilot
+    // pattern per call, so this cannot shift the pattern phase of the frame that follows.
+    const size_t symbol_samples = static_cast<size_t>(getSamplesPerSymbol());
+    Bytes bytes((count * config_.num_carriers * 4 + 7) / 8);
+    uint64_t x = 0x5E771E5EEDC0FFEEULL;
+    for (auto& b : bytes) {
+        x += 0x9E3779B97F4A7C15ULL;
+        uint64_t z = x;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        b = static_cast<uint8_t>((z ^ (z >> 31)) & 0xFFu);
+    }
+    Samples s = modulator_->modulate(ByteSpan(bytes.data(), bytes.size()), config_.modulation);
+    if (s.size() > count * symbol_samples) {
+        s.resize(count * symbol_samples);
+    }
+    return s;
+}
+
 Samples OFDMChirpWaveform::generateDataPreamble() {
     if (!modulator_) {
         return Samples();
@@ -650,6 +675,343 @@ bool OFDMChirpWaveform::detectSync(SampleSpan samples, SyncResult& result, float
     }
 
     return result.detected;
+}
+
+namespace {
+// Gamma(K, 1) survival for integer K: P(chi >= T) = e^-T * sum_{i<K} T^i / i!. Bisection.
+double gammaSurvival(int K, double T) {
+    double term = 1.0, sum = 1.0;
+    for (int i = 1; i < K; ++i) {
+        term *= T / i;
+        sum += term;
+    }
+    return std::exp(-T) * sum;
+}
+double gammaSurvivalThreshold(int K, double p_fa) {
+    double lo = 0.0, hi = 400.0;
+    for (int it = 0; it < 200; ++it) {
+        const double mid = 0.5 * (lo + hi);
+        if (gammaSurvival(K, mid) > p_fa) lo = mid; else hi = mid;
+    }
+    return hi;
+}
+inline Complex unitOf(Complex z) {
+    const float m = std::abs(z);
+    return m > 1.0e-20f ? z / m : Complex(0.0f, 0.0f);
+}
+
+constexpr int kStructSyms = 9;      // LTS1, LTS2 + data symbols 0..6
+constexpr int kStructLagGroups = 7;  // lags 2..8 (LTS -> data-pilot pairs)
+
+// Known-pair template for one frame geometry. Pairs are (LTS symbol a, data symbol k) on a
+// carrier that is a PILOT in data symbol k's pattern but a ZADOFF-CHU cell in the LTS, so the
+// known product q = pilot * conj(ZC) is pseudo-random across carriers. That is what makes the
+// statistic immune to STATIONARY signals (a CW tone has the same lagged phase on every bin;
+// multiplying by conj(q) scatters it), the role cell scrambling plays in the reference design.
+// LTS1->LTS2 and pilot->pilot pairs (q = 1) are deliberately excluded for that reason.
+struct StructPair {
+    uint8_t s_lo, s_hi;
+    uint16_t l;
+    Complex qconj;
+};
+struct StructTemplate {
+    int pilot_spacing = -1;
+    std::vector<StructPair> groups[kStructLagGroups];
+    double n[kStructLagGroups] = {};
+    std::vector<Complex> x_lts;  // LTS value per logical carrier (abstract convention)
+};
+
+StructTemplate buildStructTemplate(const ModemConfig& g, const std::vector<int>& bins) {
+    StructTemplate t;
+    t.pilot_spacing = static_cast<int>(g.pilot_spacing);
+    // LTS values in the receiver's own FFT convention, from the modulator's real output.
+    OFDMModulator mod(g);
+    Samples lts = mod.generateTrainingSymbols(1);
+    const int N = static_cast<int>(g.fft_size);
+    const int cp = static_cast<int>(g.getCyclicPrefix());
+    if (static_cast<int>(lts.size()) < cp + N) return t;
+    FFT fft(static_cast<size_t>(N));
+    std::vector<Complex> in(static_cast<size_t>(N)), out(static_cast<size_t>(N));
+    for (int n = 0; n < N; ++n) in[static_cast<size_t>(n)] = Complex(lts[static_cast<size_t>(cp + n)], 0.0f);
+    fft.forward(in, out);
+    const size_t nc = g.num_carriers;
+    std::vector<Complex> x_fft(nc);
+    for (size_t l = 0; l < nc; ++l) x_fft[l] = out[static_cast<size_t>(bins[l])];
+    // Common convention constant c (scale * mixer phase), observed on pattern-0 pilots whose
+    // abstract value is pilotSymbolForLogical(l).
+    Complex c(0, 0);
+    std::vector<uint8_t> p0(nc, 0);
+    for (size_t l = 0; l < nc; ++l) {
+        if (ofdm_pilots::isPilotLogical(g, l, 0)) {
+            p0[l] = 1;
+            c += x_fft[l] * std::conj(ofdm_pilots::pilotSymbolForLogical(l));
+        }
+    }
+    if (std::abs(c) < 1.0e-12f) return t;
+    t.x_lts.resize(nc);
+    for (size_t l = 0; l < nc; ++l) t.x_lts[l] = x_fft[l] / c;
+    for (int k = 0; k + 2 < kStructSyms; ++k) {
+        if ((k % std::max(1, t.pilot_spacing)) == 0) continue;  // pattern 0: pilots equal LTS pilots
+        for (size_t l = 0; l < nc; ++l) {
+            if (p0[l] || !ofdm_pilots::isPilotLogical(g, l, static_cast<size_t>(k))) continue;
+            const Complex x_lts = x_fft[l] / c;
+            const Complex q = ofdm_pilots::pilotSymbolForLogical(l) * std::conj(x_lts);
+            for (int a = 0; a < 2; ++a) {
+                const int s_hi = k + 2;
+                const int lag = s_hi - a;
+                if (lag < 2 || lag > 8) continue;
+                t.groups[lag - 2].push_back({static_cast<uint8_t>(a), static_cast<uint8_t>(s_hi),
+                                             static_cast<uint16_t>(l), std::conj(unitOf(q))});
+            }
+        }
+    }
+    for (int gi = 0; gi < kStructLagGroups; ++gi) t.n[gi] = static_cast<double>(t.groups[gi].size());
+    return t;
+}
+}  // namespace
+
+// PREAMBLE-LESS STRUCTURE ACQUISITION (ULTRA_BURST_ACQ=structure; Stage 2 of the 2026-11-08
+// open-modem technique port). Finds a connected-mode light frame — in particular the burst
+// descriptor that opens every group — WITHOUT a chirp. Called only for the connected
+// GROUP-START search (StreamingDecoder::searchForSync, where the dual-chirp search runs in
+// chirp mode); in-group frames keep detectDataSync's warm light-LTS lock.
+//
+// Statistic. For a same-carrier pair of KNOWN cells, the unit lagged product
+// u = unit(Y_hi * conj(Y_lo)) * conj(q), q = X_hi * conj(X_lo), equals e^{j(common phase)}:
+// per-carrier channel gain/phase, a timing offset inside the CP and a constant CFO cancel or
+// become one common phase per lag. Summing coherently per lag group L,
+//   S_L = sum u,   chi = sum_L |S_L|^2 / n_L,
+// gives chi ~ Gamma(K = #lag groups, 1) when no aligned frame is present, and chi ~ n * rho^2
+// when one is (rho = per-cell coherence; unit normalization makes it amplitude-, AGC- and
+// fade-depth-invariant). Pairs: LTS (Zadoff-Chu) cell -> data-pilot cell (see
+// buildStructTemplate for why only these). Templates: the control profile (every burst
+// descriptor) and the current data geometry (light data frames); the max over both is tested.
+// Threshold: Gamma(K) inverse survival at the per-test probability false_alarm_budget /
+// (candidates x templates) — the caller's per-call budget split by the union bound over every
+// test this call makes; a probability law, not a tuned threshold.
+//
+// Search: the WHOLE window on a hop grid of Ls/20; FFTs are shared across candidates spaced by
+// one symbol. The earliest crossing wins (the first frame in the window), then the local
+// maximum within one symbol, then a 4-sample fine search whose plateau MIDDLE is reported: the
+// plateau spans the cyclic prefix, so its middle centers the FFT window in the ISI-free region.
+size_t OFDMChirpWaveform::frameStructureSpanSamples() const {
+    // One whole template (LTS pair + 7 data symbols) plus one symbol of timing refinement.
+    return static_cast<size_t>(kStructSyms + 1) * static_cast<size_t>(getSamplesPerSymbol());
+}
+
+bool OFDMChirpWaveform::detectFrameStructure(SampleSpan samples, SyncResult& result,
+                                             float known_cfo_hz, double false_alarm_budget) {
+    timing::ScopedTimer _profile_(timing::globalDecoderProfile().detect_data_sync);
+    result.detected = false;
+    result.correlation = 0.0f;
+    result.cfo_hz = known_cfo_hz;
+    result.has_training = true;
+    burst_interleave_latched_ = false;
+    burst_interleaved_detected_ = false;
+
+    const int Ls = getSamplesPerSymbol();
+    const int N = static_cast<int>(config_.fft_size);
+    const int cp = static_cast<int>(config_.getCyclicPrefix());
+    if (Ls <= N || static_cast<int>(samples.size()) < kStructSyms * Ls + Ls) {
+        return false;
+    }
+    data_sync_hilbert_.reset();
+    auto& analytic = data_sync_analytic_scratch_;
+    data_sync_hilbert_.process(samples, analytic);
+    const int L = static_cast<int>(analytic.size());
+
+    const size_t nc = config_.num_carriers;
+    const float bin_hz = static_cast<float>(config_.sample_rate) / static_cast<float>(N);
+    const int fc_bin = static_cast<int>(std::lround(config_.center_freq / bin_hz));
+    std::vector<int> bins(nc);
+    for (size_t l = 0; l < nc; ++l) {
+        const int f = ofdm_pilots::fftIndexForLogical(config_, l);
+        bins[l] = fc_bin + ((f <= N / 2) ? f : f - N);
+    }
+    // Templates (cached per pilot spacing): control profile + current data geometry.
+    static thread_local std::vector<StructTemplate> cache;
+    auto templateFor = [&](int spacing, Modulation mod) -> const StructTemplate& {
+        for (const auto& t : cache) {
+            if (t.pilot_spacing == spacing) return t;
+        }
+        ModemConfig g = config_;
+        g.modulation = mod;
+        g.use_pilots = true;
+        g.pilot_spacing = static_cast<uint32_t>(spacing);
+        cache.push_back(buildStructTemplate(g, bins));
+        return cache.back();
+    };
+    const int ctrl_sp = ofdm_link_adaptation::recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_4);
+    std::vector<const StructTemplate*> tpls;
+    tpls.push_back(&templateFor(ctrl_sp, Modulation::QPSK));
+    if (config_.use_pilots && static_cast<int>(config_.pilot_spacing) != ctrl_sp &&
+        ofdm_link_adaptation::isCoherentModulation(config_.modulation)) {
+        // Re-fetch the control template pointer after a possible reallocation.
+        const StructTemplate& data_t = templateFor(static_cast<int>(config_.pilot_spacing), config_.modulation);
+        tpls.clear();
+        tpls.push_back(&templateFor(ctrl_sp, Modulation::QPSK));
+        tpls.push_back(&data_t);
+    }
+
+    if (!structure_fft_ || structure_fft_in_.size() != static_cast<size_t>(N)) {
+        structure_fft_ = std::make_unique<FFT>(static_cast<size_t>(N));
+        structure_fft_in_.assign(static_cast<size_t>(N), Complex(0, 0));
+        structure_fft_out_.assign(static_cast<size_t>(N), Complex(0, 0));
+    }
+    const double w_cfo = -2.0 * M_PI * static_cast<double>(known_cfo_hz) / config_.sample_rate;
+    const bool rotate = std::abs(known_cfo_hz) > 1.0e-3f;
+    auto carriersAt = [&](int w, std::vector<Complex>& out) -> bool {
+        out.assign(nc, Complex(0, 0));
+        if (w < 0 || w + N > L) return false;
+        if (rotate) {
+            Complex ph(static_cast<float>(std::cos(w_cfo * w)), static_cast<float>(std::sin(w_cfo * w)));
+            const Complex step(static_cast<float>(std::cos(w_cfo)), static_cast<float>(std::sin(w_cfo)));
+            for (int n = 0; n < N; ++n) {
+                structure_fft_in_[static_cast<size_t>(n)] = analytic[static_cast<size_t>(w + n)] * ph;
+                ph *= step;
+            }
+        } else {
+            std::copy(analytic.begin() + w, analytic.begin() + w + N, structure_fft_in_.begin());
+        }
+        structure_fft_->forward(structure_fft_in_, structure_fft_out_);
+        for (size_t l = 0; l < nc; ++l) out[l] = structure_fft_out_[static_cast<size_t>(bins[l])];
+        return true;
+    };
+    // Two marker hypotheses. A group-start frame carries the burst marker: LTS1 negated
+    // (markFirstLTSSymbolForBurstGroup). A lag group mixes LTS1-referenced (a=0) and
+    // LTS2-referenced (a=1) pairs, so on a marked frame the a=0 terms flip sign and CANCEL the
+    // a=1 terms in a single coherent sum (measured: the marked group head was missed while the
+    // unmarked frame after it locked at chi=92). The marker is a known binary modulation of
+    // LTS1, so both hypotheses are tested — chi(+) = sum |B+A|^2/n, chi(-) = sum |B-A|^2/n with
+    // A, B the a=0 / a=1 partial sums — and the union bound counts both. The winning hypothesis
+    // is also the marker decision (it uses every pair, not just LTS1->LTS2).
+    auto chiOf = [&](const std::vector<std::vector<Complex>>& Y, size_t m0, Complex* lts_pair,
+                     const StructTemplate** best_t = nullptr, bool* marker = nullptr) {
+        double best = 0.0;
+        for (const StructTemplate* t : tpls) {
+            double chi_plain = 0.0, chi_marked = 0.0;
+            for (int gi = 0; gi < kStructLagGroups; ++gi) {
+                if (t->n[gi] <= 0.0) continue;
+                Complex a0(0, 0), a1(0, 0);
+                for (const auto& pr : t->groups[gi]) {
+                    const Complex u =
+                        unitOf(Y[m0 + pr.s_hi][pr.l] * std::conj(Y[m0 + pr.s_lo][pr.l])) * pr.qconj;
+                    if (pr.s_lo == 0) a0 += u; else a1 += u;
+                }
+                chi_plain += std::norm(a1 + a0) / t->n[gi];
+                chi_marked += std::norm(a1 - a0) / t->n[gi];
+            }
+            const double chi = std::max(chi_plain, chi_marked);
+            if (chi > best) {
+                best = chi;
+                if (best_t) *best_t = t;
+                if (marker) *marker = chi_marked > chi_plain;
+            }
+        }
+        if (lts_pair) {  // LTS1 -> LTS2 sum: only for the burst-marker sign, never for detection
+            Complex sl(0, 0);
+            for (size_t l = 0; l < nc; ++l) sl += unitOf(Y[m0 + 1][l] * std::conj(Y[m0][l]));
+            *lts_pair = sl;
+        }
+        return best;
+    };
+
+    const int hop = std::max(1, Ls / 20);
+    struct Cand { int p; double chi; };
+    std::vector<Cand> cands;
+    std::vector<std::vector<Complex>> Y;
+    for (int phase = 0; phase < Ls; phase += hop) {
+        Y.clear();
+        for (int w = phase + cp; w + N <= L; w += Ls) {
+            Y.emplace_back();
+            carriersAt(w, Y.back());
+        }
+        for (size_t m0 = 0; m0 + kStructSyms <= Y.size(); ++m0) {
+            cands.push_back({phase + static_cast<int>(m0) * Ls, chiOf(Y, m0, nullptr)});
+        }
+    }
+    if (cands.empty()) return false;
+    // Union bound over every test of this call. Cached: the candidate count only changes with
+    // the window size, the template count with the data geometry.
+    static thread_local struct { size_t tests = 0; double budget = -1.0, T = 0.0; } thr;
+    const size_t tests = cands.size() * tpls.size() * 2;  // x2 marker hypotheses
+    if (tests != thr.tests || false_alarm_budget != thr.budget) {
+        const double p_test = std::clamp(false_alarm_budget, 1.0e-300, 0.5) / static_cast<double>(tests);
+        thr = {tests, false_alarm_budget, gammaSurvivalThreshold(kStructLagGroups, p_test)};
+    }
+    const double kThreshold = thr.T;
+    std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.p < b.p; });
+    double best_any = 0.0;
+    int first = -1;
+    for (size_t i = 0; i < cands.size(); ++i) {
+        best_any = std::max(best_any, cands[i].chi);
+        if (first < 0 && cands[i].chi >= kThreshold) first = static_cast<int>(i);
+    }
+    if (first < 0) {
+        result.correlation = static_cast<float>(std::min(1.0, best_any / (2.0 * kThreshold)));
+        return false;
+    }
+    Cand coarse = cands[static_cast<size_t>(first)];
+    const int first_p = cands[static_cast<size_t>(first)].p;
+    for (size_t i = static_cast<size_t>(first); i < cands.size() && cands[i].p < first_p + Ls; ++i) {
+        if (cands[i].chi > coarse.chi) coarse = cands[i];
+    }
+    // Fine timing from the LTS channel estimate's phase ramp (standard OFDM fine timing).
+    // A window late by d samples multiplies carrier k by e^{+j 2 pi k d / N}; arg of
+    // sum_l H_{l+1} conj(H_l) over frequency-adjacent carriers is 2 pi d / N per bin. On
+    // multipath it centres on the channel's delay centroid. Uses LTS2 only (LTS1 may carry
+    // the group-start sign flip). The chi decision above is unaffected.
+    std::vector<std::vector<Complex>> Yc(kStructSyms);
+    bool ok = true;
+    for (int sidx = 0; sidx < kStructSyms && ok; ++sidx) {
+        ok = carriersAt(coarse.p + cp + sidx * Ls, Yc[static_cast<size_t>(sidx)]);
+    }
+    if (!ok) return false;
+    Complex slts;
+    const StructTemplate* best_t = tpls.front();
+    bool marked = false;
+    const double peak = chiOf(Yc, 0, &slts, &best_t, &marked);
+    Complex ramp(0, 0);
+    if (best_t->x_lts.size() == nc) {
+        for (size_t l = 0; l + 1 < nc; ++l) {
+            if (bins[l + 1] - bins[l] != 1) continue;  // skip the DC gap
+            const Complex h0 = Yc[1][l] * std::conj(best_t->x_lts[l]);  // LTS2: never marked
+            const Complex h1 = Yc[1][l + 1] * std::conj(best_t->x_lts[l + 1]);
+            ramp += h1 * std::conj(h0);
+        }
+    }
+    const double late = std::arg(ramp) * static_cast<double>(N) / (2.0 * M_PI);
+    // Report the start that puts the FFT window in the middle of the CP's ISI-free region.
+    const int start = std::max(0, coarse.p - static_cast<int>(std::lround(late)) - cp / 2);
+
+    // LTS1->LTS2 phase (sign-corrected for the marker) for the residual-CFO log only.
+    const double resid_cfo =
+        std::arg(marked ? -slts : slts) / (2.0 * M_PI * Ls / config_.sample_rate);
+    burst_interleaved_detected_ = marked;  // LTS1 negated = group-start marker
+    burst_interleave_latched_ = burst_interleaved_detected_;
+    // Per-cell coherence estimate: E[chi] = rho^2 * n + K * (1 - rho^2) for unit phasors of
+    // coherence rho, so rho^2 = (chi - K) / (n - K). Reported as the sync correlation.
+    double n_tot = 0.0;
+    int k_used = 0;
+    for (int gi = 0; gi < kStructLagGroups; ++gi) {
+        if (best_t->n[gi] > 0.0) {
+            n_tot += best_t->n[gi];
+            ++k_used;
+        }
+    }
+    const double rho2 = n_tot > k_used ? (peak - k_used) / (n_tot - k_used) : 0.0;
+    result.detected = true;
+    result.start_sample = start;
+    result.correlation = static_cast<float>(std::sqrt(std::clamp(rho2, 0.0, 1.0)));
+    training_start_sample_ = static_cast<size_t>(start);
+    synced_ = true;
+    last_cfo_ = known_cfo_hz;
+    LOG_MODEM(INFO,
+              "OFDMChirpWaveform: STRUCTURE sync at %d chi=%.1f (T=%.1f, %zu tests) rho=%.2f "
+              "ramp_late=%+.1f resid_cfo=%+.2f Hz (known %.1f)%s",
+              start, peak, kThreshold, tests, result.correlation, late, resid_cfo, known_cfo_hz,
+              burst_interleaved_detected_ ? " [BURST-INTERLEAVED]" : "");
+    return true;
 }
 
 bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,

@@ -92,6 +92,13 @@ chirp_sync.detectDualChirp() → result.cfo_hz
   → Demodulator stores as freq_offset_hz, sets chirp_cfo_estimated = true
 ```
 
+**Structure acquisition (`ULTRA_BURST_ACQ=structure`, 2026-11-08).** Connected group starts
+carry no chirp, so there is no chirp CFO for them. The structure lock reports the TRACKED CFO
+(`cfo_tracker_.tracked()`) as its CFO and uses it as the detector's known CFO (the χ statistic
+tolerates a ±3 Hz unknown residual, test `FrameStructureDetector` §4);
+`seedFromChirpConnectedAnchor` keeps the warm value, and Stage 2 below refines it per frame
+exactly as after a warm chirp lock. Cold acquisition is unchanged (handshake chirps).
+
 ### Stage 2: LTS Residual CFO Correction (Per Frame)
 
 **When:** Every frame, during `processPresynced()` → `estimateChannelFromLTS()`

@@ -543,11 +543,11 @@ SearchWindowResult SyncController::acquireSearchWindow(
         // this gate only keeps silence from burning CPU.
         const size_t rms_probe_pos = used_warm_timed_window ? search_start : ring_.correlation_pos_;
         float rms = 0.0f;
-        for (size_t i = 0; i < 1000; i++) {
+        for (size_t i = 0; i < kRmsProbeSamples; i++) {
             float s = ring_.buffer_[ring_.wrapRingIndexLocked(rms_probe_pos + i)];
             rms += s * s;
         }
-        rms = std::sqrt(rms / 1000.0f);
+        rms = std::sqrt(rms / static_cast<float>(kRmsProbeSamples));
 
         if (disconnected_mc_dpsk) {
             float max_slice_rms = rms;
@@ -624,7 +624,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
         // in the lead-in silence. The TX lead-in is ~150ms (7200 samples), so we should
         // back up at least that much to ensure the chirp START is in our search window.
         // FIX: We may have skipped past the chirp start during low-RMS phases.
-        constexpr size_t SEARCH_BACKTRACK = 9600; // Back up slightly more than lead-in
+        constexpr size_t SEARCH_BACKTRACK = kSearchBacktrackSamples; // slightly more than lead-in
 
         if (!used_warm_timed_window) {
             if (ring_.correlation_pos_ >= SEARCH_BACKTRACK) {
@@ -791,6 +791,28 @@ bool SyncController::detectConnectedLightSync(
 // `if (!found && use_full_ofdm_anchor_search)` block of searchForSync's else branch. Same trace,
 // detector call, control-threshold evaluation, streak update, weak-accept logs, and accept — same
 // order → byte-identical; only the data_sync_accepted_callback_ fire stays in the decoder.
+FullAnchorFallbackResult SyncController::detectStructureAnchor(
+    IWaveform* waveform, const float* search_data, size_t search_len, bool connected,
+    float known_cfo, double false_alarm_budget, SyncResult& sync_result) {
+    FullAnchorFallbackResult result;
+    // Half-duplex: while this station awaits the peer's tone-burst ACK the peer cannot be
+    // sending OFDM, so no group start can be on the air. Same gate as the DATA fallback below
+    // (the structure statistic is tone-immune by construction; the gate also saves the CPU).
+    if (ack_listen_suppress_data_sync_ && connected) {
+        return result;
+    }
+    SyncResult structure_result;
+    if (waveform->detectFrameStructure(SampleSpan(search_data, search_len), structure_result,
+                                       known_cfo, false_alarm_budget)) {
+        result.found = true;
+        sync_result = structure_result;
+        LOG_MODEM(INFO,
+                  "[%s] Group start acquired by frame structure (rho=%.2f, no chirp)",
+                  log_prefix_.c_str(), sync_result.correlation);
+    }
+    return result;
+}
+
 FullAnchorFallbackResult SyncController::detectFullAnchorFallback(
     IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
     size_t min_search, bool is_narrowband, bool connected, float corr_detect_threshold,

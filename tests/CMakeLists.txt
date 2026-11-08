@@ -69,6 +69,12 @@ target_link_libraries(test_turbo_data_frame PRIVATE ultra_core)
 target_include_directories(test_turbo_data_frame PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME TurboDataFrame COMMAND test_turbo_data_frame)
 
+# Preamble-less structure acquisition (chi detector on the production descriptor geometry).
+add_executable(test_frame_structure_detector test_frame_structure_detector.cpp)
+target_link_libraries(test_frame_structure_detector PRIVATE ultra_core)
+target_include_directories(test_frame_structure_detector PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME FrameStructureDetector COMMAND test_frame_structure_detector)
+
 add_executable(test_real_hf_loop_channel test_real_hf_loop_channel.cpp)
 target_link_libraries(test_real_hf_loop_channel PRIVATE ota_channel_core)
 add_test(NAME RealHfLoopChannel COMMAND test_real_hf_loop_channel)

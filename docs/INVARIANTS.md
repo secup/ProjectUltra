@@ -160,6 +160,53 @@ where: cfo_to_samples = sample_rate / chirp_rate = 48000 / 4800 = 10 samples/Hz
 
 ---
 
+## Structure Acquisition Invariants (`ULTRA_BURST_ACQ=structure`, 2026-11-08)
+
+### INV-SYNC-STRUCT-001: Structure detection is for GROUP STARTS only
+
+**Rule:** `IWaveform::detectFrameStructure` runs only in the connected group-start search
+(`searchForSync`, `structure_anchor_search` — where chirp mode waits for the dual chirp). Never
+route `detectDataSync`, warm windows or the generic light search through it.
+
+**Why:** its template spans 10 symbols (11 200 samples); the warm narrow window is 4 416 and the
+light window 9 600 samples, so it can never fire there. The first build hooked it into
+`detectDataSync` and stalled every transfer at 6 % (no data frame was ever acquired → RTO loop).
+
+**Location:** `streaming_sync_acquisition.cpp` `searchForSync`; test `FrameStructureDetector` §5.
+
+### INV-SYNC-STRUCT-002: Test BOTH marker hypotheses
+
+**Rule:** a group-start frame carries LTS1 negated (`markFirstLTSSymbolForBurstGroup`). Any
+coherent statistic that sums LTS1-referenced and LTS2-referenced pairs together must evaluate
+both signs (χ₊ = Σ|B+A|²/n, χ₋ = Σ|B−A|²/n) and count both in the union bound.
+
+**Why:** the single sum cancels on marked frames: the marked head was missed, the unmarked
+frame 2 locked as a "group start", and every member was dropped as HEADNULL.
+
+**Location:** `ofdm_chirp_waveform.cpp` `detectFrameStructure` (`chiOf`); test §6.
+
+### INV-SYNC-STRUCT-003: The search window is derived, not chosen
+
+**Rule:** window = template span + `SyncController::kSearchBacktrackSamples` +
+`kRmsProbeSamples` (`structureSearchWindowSamples`). Once the RMS probe sees a frame, the window
+starts one backtrack before the cursor, so the frame can begin up to backtrack + probe into it.
+Change the backtrack or the probe only through those constants.
+
+### INV-SYNC-STRUCT-004: The threshold comes from a false-lock budget
+
+**Rule:** per-pass budget = (false locks per hour) × `CORRELATION_STEP` / (3600 · fs), split by
+the detector over candidates × templates × 2 marker hypotheses; threshold = Gamma(K,1) inverse
+survival. Never replace it with a tuned χ number.
+
+### INV-SYNC-STRUCT-005: Where the chirp stays
+
+**Rule:** handshake (PING/PONG/CONNECT), MC-DPSK, OFDM_NARROW, the session-first burst and the
+handshake-confirmation window (the half-open MC-DPSK CONNECT fallback needs a dual-chirp lock),
+and RTO resends (no ACK evidence ⇒ cold re-anchor). A chirp-less burst start gets the settling
+lead-in fill (30 ms silent T/R floor first).
+
+---
+
 ## Sample Position Invariants
 
 ### INV-POS-001: detectSync() Returns TRAINING Start, Not Data Start

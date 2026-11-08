@@ -4,6 +4,7 @@
 #include <chrono>
 #include "connection.hpp"
 #include "connection_policy.hpp"
+#include "sync/acquisition_mode.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
@@ -9172,22 +9173,29 @@ void Connection::flushBurstBuffer(bool retransmission_required,
         });
     const bool descriptor_bearing_burst =
         burst_tx_buffer_.size() > 1 && on_transmit_burst_;
+    // Structure acquisition (ULTRA_BURST_ACQ=structure): an ACK-revealed repair or a
+    // descriptor-committed rung switch no longer needs a chirp — the receiver ACKed (so it is
+    // acquiring), and the descriptor is the same control-profile template on every rung. Only
+    // the RTO path (transmitFrameBatch: no ACK evidence at all) keeps the full chirp.
+    const bool structure_acq = sync::structureAcquisitionEnabled();
     const bool desc_switch_anchor =
-        descriptor_bearing_burst && desc_switch_full_anchor_pending_;
+        descriptor_bearing_burst && desc_switch_full_anchor_pending_ && !structure_acq;
     const bool use_descriptor_only_partial_repair =
         partial_sack_descriptor_repair_enabled_ &&
         descriptor_bearing_burst && retransmission_required &&
         descriptor_only_partial_repair && !desc_switch_anchor;
     const bool force_full_group_start =
-        descriptor_bearing_burst &&
+        descriptor_bearing_burst && !structure_acq &&
         ((retransmission_required && !use_descriptor_only_partial_repair) ||
          desc_switch_anchor);
-    const uint8_t anchor_reason = use_descriptor_only_partial_repair
-        ? kAnchorReasonProvenPartialRepair
-        : (retransmission_required
-               ? kAnchorReasonResend
-               : (desc_switch_anchor ? kAnchorReasonModeSwitch
-                                     : kAnchorReasonNone));
+    const uint8_t anchor_reason = structure_acq
+        ? kAnchorReasonNone
+        : (use_descriptor_only_partial_repair
+               ? kAnchorReasonProvenPartialRepair
+               : (retransmission_required
+                      ? kAnchorReasonResend
+                      : (desc_switch_anchor ? kAnchorReasonModeSwitch
+                                            : kAnchorReasonNone)));
     const uint32_t queue_delay_ms = noteDataBurstKeydown(
         burst_tx_buffer_, force_full_group_start);
     const uint32_t round_timeout_ms = finalizeUnifiedBurstWindow(

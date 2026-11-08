@@ -365,6 +365,28 @@ measured truth.
 erasure flags — they are per-CARRIER evidence the frame-wide measured model cannot see; the
 DD-EVM accumulators (`evm_dd_accum_` …) — they feed the radio-agnostic EVM SNR meter, not LLRs.
 
+### R15. Chirp-anchor workaround machinery, once structure acquisition is rig-validated — `BLOCKED 2026-11-08` (on a rig A/B of `ULTRA_BURST_ACQ=structure`)
+
+**Why.** `ULTRA_BURST_ACQ=structure` finds every connected group start by its known LTS→pilot
+structure (χ, Gamma law, 1 false lock/hour), so the per-group chirp — and the layers built to
+skip, shrink, announce and re-force it — become redundant. Measured in the sim (CHANGELOG
+2026-11-08); the real-radio part (ALC/AGC settle with no chirp, CFO drift) is the blocker.
+
+**Scope (delete after the rig A/B, one commit, both ends):** the #69 anchor-skip schedule
+(`ULTRA_ANCHOR_SKIP_K`, `burst_anchor_ordinal_`, `BURST_FLAG_NEXT_LIGHT_ANCHOR` emission + RX
+stash, `ULTRA_ANCHOR_SKIP_CLEAN_STREAK`, the K-gated §16.4 fast escalation),
+`ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH`, the short-anchor descriptor
+(`ULTRA_SHORT_ANCHOR_DESCRIPTOR_MS`, `ULTRA_REACTIVE_SHORT_CHIRP`, `short_anchor_chirp_sync_`),
+the per-repair / per-switch full-anchor forcing in `connection.cpp`; then re-evaluate
+`detectFullAnchorFallback` (the light-LTS fallback inside the chirp window) once structure is
+the only group-start detector; then the `chirp` arm of `ULTRA_BURST_ACQ` itself.
+
+**KEEP (anti-footgun):** `ChirpSync` and every handshake chirp (cold acquisition, ±50 Hz CFO,
+wide/narrow dual-listen, MC-DPSK's only sync); the RTO-resend full anchor (no ACK evidence ⇒
+cold re-anchor); the LTS pair and the group-start marker (LTS1 negated); the Schmidl-Cox
+correlation primitive (warm LTS); `CFOTracker` + the CFO feedback loop; the anchored-burst
+backstop; the `BURST_FLAG_CURRENT_GROUP_FULL_ANCHOR` mode-hop demotion contract (F164).
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

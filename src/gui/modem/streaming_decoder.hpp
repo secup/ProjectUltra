@@ -1117,6 +1117,8 @@ private:
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;
+    // The current sync came from the structure detector (ULTRA_BURST_ACQ=structure).
+    bool sync_from_structure_anchor_ = false;
     // Lever #3 (ULTRA_CRATER_REANCHOR_HOLD): consecutive 0-CW crater re-anchor
     // triggers since the last decoded frame. The sync layer forces a full
     // chirp+LTS re-anchor on the FIRST crater; the RATE controller learned long ago

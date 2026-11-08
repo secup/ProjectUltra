@@ -3,6 +3,7 @@
 // Mirrors StreamingDecoder to ensure TX/RX use identical configurations.
 
 #include "streaming_encoder.hpp"
+#include "sync/acquisition_mode.hpp"
 #include "streaming_control_profile.hpp"
 #include "streaming_frame_policy.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -203,6 +204,28 @@ void StreamingEncoder::setBurstInterleaveGroupSize(int size) {
 }
 
 // R4: the adaptive short-chirp re-anchor was removed (superseded by warm-handoff, now default).
+std::vector<float> StreamingEncoder::settlingLeadInFill(size_t samples) {
+    if (!waveform_ || samples == 0) {
+        return {};
+    }
+    const size_t symbol_samples =
+        static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()));
+    const size_t count = (samples + symbol_samples - 1) / symbol_samples;
+    Samples symbols = waveform_->generateSettlingSymbols(count);
+    if (symbols.size() < samples) {
+        return {};
+    }
+    std::vector<float> fill(symbols.end() - static_cast<std::ptrdiff_t>(samples), symbols.end());
+    // Raised-cosine ramp-up (5 ms): no key-click splatter at the fill start; the ALC sees a
+    // smooth rise to the data level.
+    const size_t ramp = std::min(fill.size(), static_cast<size_t>(48000 * 5 / 1000));
+    for (size_t i = 0; i < ramp; ++i) {
+        const double w = 0.5 - 0.5 * std::cos(M_PI * static_cast<double>(i) / static_cast<double>(ramp));
+        fill[i] = static_cast<float>(fill[i] * w);
+    }
+    return fill;
+}
+
 Samples StreamingEncoder::connectedDataPreambleForFrame() {
     if (!waveform_) {
         return {};
@@ -500,6 +523,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         return {};
     }
 
+    last_burst_starts_chirpless_ = false;
     const bool current_group_full_anchor =
         anchor_options.force_full_group_start;
     const bool current_group_keep_skip_streak =
@@ -674,7 +698,12 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
             !(force_full_preamble_once_ || current_descriptor_full_anchor);
         static const int kAnchorSkipK = [] {
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_K");
-            return (e && *e) ? std::max(1, std::atoi(e)) : 1;  // reliability default; =2 opt-in
+            if (e && *e) return std::max(1, std::atoi(e));
+            // Structure acquisition (ULTRA_BURST_ACQ=structure): the receiver no longer needs
+            // the chirp to find a warm descriptor, so every warm descriptor goes chirp-less
+            // (K effectively infinite; the full chirp stays for cold-start / resends / the
+            // reactive gate below).
+            return sync::structureAcquisitionEnabled() ? (1 << 30) : 1;  // reliability default; =2 opt-in
         }();
         // REACTIVE GATE (2026-06-20, radio-agnostic) — the gate that lets the skip default-on safely.
         // The IONOS rig DISPROVED a PREDICTED coherence label: a Moderate channel read clean-Good for
@@ -691,7 +720,11 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         // the skip and reverts the instant it craters. The streak-reset IS the cooldown.
         static const uint32_t kReactiveCleanStreak = [] {
             const char* e = std::getenv("ULTRA_ANCHOR_SKIP_CLEAN_STREAK");
-            return (e && *e) ? static_cast<uint32_t>(std::max(0, std::atoi(e))) : 4u;
+            if (e && *e) return static_cast<uint32_t>(std::max(0, std::atoi(e)));
+            // Under structure acquisition the descriptor is always the same control-profile
+            // template, so a post-switch group is no harder to acquire: one clean group is
+            // enough evidence. The legacy LTS-only light sync needed 4.
+            return sync::structureAcquisitionEnabled() ? 1u : 4u;
         }();
         // THE RECOOL DOES DOUBLE DUTY — do not "fix" it again (2026-07-26, measured
         // HARMFUL; CHANGELOG). ULTRA_ANCHOR_SKIP_KEEP_STREAK_ON_SWITCH stays default OFF
@@ -725,6 +758,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         const bool skip_chirp_descriptor =
             reactive_skip_enabled && warm_descriptor &&
             (static_cast<int>(anchor_ordinal % static_cast<uint32_t>(kAnchorSkipK)) != 0);
+        last_burst_starts_chirpless_ = skip_chirp_descriptor;  // the descriptor leads the burst
         // Credit the prior clean delivery represented by warm_descriptor before deciding what this
         // descriptor announces for the NEXT group.  The current group's own anchor decision above
         // intentionally uses the pre-credit streak: it may only go LIGHT when the PREVIOUS descriptor

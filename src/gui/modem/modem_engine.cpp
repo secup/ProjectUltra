@@ -729,7 +729,19 @@ std::vector<float> ModemEngine::transmitBurst(
         LOG_MODEM(WARN, "TXLAT audio_ready us=%lld n=%zu",
                   static_cast<long long>(now_us), samples.size());
     }
-    auto processed = postProcessTx(samples);
+    // Chirp-less burst start: fill the key-up lead-in (after the silent T/R-relay floor) with
+    // settling symbols so a real radio's ALC / the peer's AGC settle before the first LTS.
+    std::vector<float> settling_fill;
+    if (streaming_encoder_->lastBurstStartsChirpless()) {
+        const size_t lead = static_cast<size_t>(protocol::connection_policy::txGuardSamplesForMs(
+            protocol::connection_policy::configuredTxLeadInMs()));
+        const size_t floor = static_cast<size_t>(protocol::connection_policy::txGuardSamplesForMs(
+            protocol::connection_policy::kTxRelaySilentFloorMs));
+        if (lead > floor) {
+            settling_fill = streaming_encoder_->settlingLeadInFill(lead - floor);
+        }
+    }
+    auto processed = postProcessTx(samples, -1, -1, settling_fill.empty() ? nullptr : &settling_fill);
     if (protocol::isOFDMMode(waveform_mode_) && streaming_decoder_) {
         const size_t turn_samples =
             static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
@@ -830,7 +842,8 @@ std::vector<float> ModemEngine::transmitPong() {
 // ============================================================================
 
 std::vector<float> ModemEngine::postProcessTx(const std::vector<float>& samples,
-                                              int lead_in_ms, int tail_ms) {
+                                              int lead_in_ms, int tail_ms,
+                                              const std::vector<float>* lead_in_fill) {
     // TX guard timing (#68). The lead-in is purely TX/PA-side margin (PTT relay + PA ramp + ALC
     // settling) so the chirp/signal isn't clipped during key-up — the RECEIVER does not need it
     // (the chirp detector searches). The legacy fixed 150ms is early-project (Jan/Feb 2026)
@@ -856,6 +869,11 @@ std::vector<float> ModemEngine::postProcessTx(const std::vector<float>& samples,
     std::vector<float> output;
     output.reserve(LEAD_IN_SAMPLES + samples.size() + TAIL_SAMPLES);
     output.resize(LEAD_IN_SAMPLES, 0.0f);
+    if (lead_in_fill && !lead_in_fill->empty()) {
+        const size_t n = std::min(lead_in_fill->size(), LEAD_IN_SAMPLES);
+        std::copy(lead_in_fill->end() - static_cast<std::ptrdiff_t>(n), lead_in_fill->end(),
+                  output.begin() + static_cast<std::ptrdiff_t>(LEAD_IN_SAMPLES - n));
+    }
     output.insert(output.end(), samples.begin(), samples.end());
     output.resize(output.size() + TAIL_SAMPLES, 0.0f);
 

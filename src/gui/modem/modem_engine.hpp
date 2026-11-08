@@ -612,8 +612,11 @@ private:
     // Post-process TX samples (lead-in, filter, scale, stats). lead_in_ms/tail_ms < 0 → use the
     // configurable defaults (ULTRA_TX_LEADIN_MS / ULTRA_TX_TAIL_MS, default 150/50). The ACK path
     // passes a shorter lead-in (ACKs are tiny + low PA-thermal) — see transmitToneBurstAck.
+    // lead_in_fill (optional): settling fill written over the END of the lead-in (key-up
+    // airtime unchanged); see StreamingEncoder::settlingLeadInFill.
     std::vector<float> postProcessTx(const std::vector<float>& samples,
-                                     int lead_in_ms = -1, int tail_ms = -1);
+                                     int lead_in_ms = -1, int tail_ms = -1,
+                                     const std::vector<float>* lead_in_fill = nullptr);
 };
 
 } // namespace gui

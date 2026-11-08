@@ -164,6 +164,10 @@ inline constexpr uint32_t kWideOFDMFullAnchorExtraMs =
 // half-duplex play-head cannot acquire two different definitions of key-down.
 inline constexpr int kDefaultTxLeadInMs = 150;
 inline constexpr int kDefaultTxTailMs = 50;
+// Leading part of the lead-in that always stays ZERO, even when the rest carries a settling
+// fill (chirp-less burst start): the slowest common transceiver T/R relay (IC-7300 ~15 ms,
+// FT-891 ~20 ms; 5-30 ms range) must never switch under RF.
+inline constexpr int kTxRelaySilentFloorMs = 30;
 
 inline int configuredTxLeadInMs() {
     static const int value = [] {

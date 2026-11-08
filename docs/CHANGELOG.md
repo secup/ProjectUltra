@@ -10,6 +10,95 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-08 — FEAT: preamble-less burst acquisition — `ULTRA_BURST_ACQ=structure` (knob, default `chirp`)
+
+**What / why.** Stage 2 of the open-modem technique port. In connected wideband OFDM every data
+group opened with a ~1.2 s dual chirp (≈13 % of a QPSK burst cycle) whose only connected-mode job
+is to tell the receiver where the group starts. The receiver can find that start from the frame's
+own known structure instead: the burst descriptor is always the same control-profile light frame
+(LTS pair + 7 data symbols with known scattered pilots).
+
+**Receiver (`OFDMChirpWaveform::detectFrameStructure`).** Unit lagged products of KNOWN cells —
+an LTS (Zadoff-Chu) cell → a data-pilot cell of a non-zero pattern on the same carrier —
+de-rotated by the known product q, which is pseudo-random across carriers (so CW tones and other
+stationary signals, which are coherent across bins, are scattered: tone-immune by construction;
+LTS1→LTS2 and pilot→pilot pairs have q = 1 and are excluded for that reason). Summed coherently
+per lag group: χ = Σ_L |S_L|²/n_L ~ Gamma(K,1) on noise; channel gain/phase, a timing offset
+inside the CP and a constant CFO cancel or become one phase per lag. Both burst-marker hypotheses
+are tested (group heads carry LTS1 negated). Threshold = Gamma⁻¹ at the per-pass false-lock budget
+(1 per hour of continuous searching at one pass per `CORRELATION_STEP`), split by the union bound
+over candidates × templates × 2 hypotheses — a probability law, no tuned constant. Templates:
+control profile (descriptor) + current data geometry. Timing: earliest crossing → local maximum →
+LTS phase-ramp fine timing; the reported start puts the FFT window in the middle of the CP's
+ISI-free region.
+
+**Integration.** Only the connected GROUP-START search runs it (`searchForSync`, the search that
+waits for the dual chirp in chirp mode), on a window of template span + search backtrack + RMS
+probe = 21 800 samples (`SyncController::structureSearchWindowSamples`; every frame is wholly
+inside the first two windows that see it) instead of 120 000. In-group frames keep the warm
+light-LTS lock (`detectDataSync` untouched). The handshake-confirmation window keeps the chirp
+search (the half-open MC-DPSK CONNECT fallback needs a dual-chirp lock); the half-duplex
+ACK-listen suppression is honoured. A structure lock takes the expected-full-anchor contract
+(backstop, LLR-hold immunity); readiness waits for the full member frame when a structure lock is
+an unmarked member of an in-flight group, so the HEADNULL late-join can run. Sender: warm
+descriptors go chirp-less (K → ∞, clean streak 1), ACK-revealed repairs and descriptor-committed
+switches no longer force a chirp; the session-first burst and RTO resends keep it. A chirp-less
+burst start gets a SETTLING lead-in fill: the first 30 ms of the 150 ms lead-in stay silent (T/R
+relay, `kTxRelaySilentFloorMs`), the rest carries random-data OFDM symbols at the data profile
+with a 5 ms raised-cosine ramp, so a real radio's ALC and the peer's AGC settle before the first
+LTS (the chirp's other job). Airtime unchanged. Default path byte-identical (sentinel below).
+
+**Bring-up bugs (new code only, never on a default path).**
+1. *Stall at 6 % resending* (operator-observed): the first build hooked the detector into
+   `detectDataSync` for EVERY light search; its 11 200-sample template never fits the 4 416-sample
+   warm window or the 9 600-sample light window, so no data frame was ever acquired → RTO loop.
+   Fixed by the single `searchForSync` dispatch (INV-SYNC-STRUCT-001) + regression test.
+2. *Post-switch RTO loop / rate churn* (operator: "a lot of mode changes"): one coherent sum mixed
+   LTS1- and LTS2-referenced pairs and CANCELLED on marked group heads, so after every rate switch
+   the head was missed, frame 2 locked as a "group start" and every member was dropped as
+   HEADNULL → RTO → rate demote → re-climb (×6 per run). Fixed by the two-hypothesis statistic
+   (INV-SYNC-STRUCT-002) + regression test. The default controller is calm (1 switch per 21 KB on
+   Good@20 in 5/5 earlier runs).
+3. *HEADNULL drops after a missed head* (Moderate@20, 4 drops): a structure lock lands ~0.45 s
+   into a 1.24 s member, the late-join requires the whole member in the ring and gave up. Fixed in
+   readiness (see Integration).
+
+**Evidence (`tools/gui_qso_scenario.sh`, OTASim, 21 KB, rung PINNED with `ULTRA_FORCE_DATA_MOD/
+RATE` + `ULTRA_LOCK_RATE=1` + `ULTRA_RX_RATE_AUTHORITY=0` so rate churn cannot confound the A/B;
+goodput bps, chirp → structure).** Good@20 QPSK R2/3: s42 1740 → 1980 (+13.8 %), s43 1530 → 2060
+(+34.6 %), s44 1480 → 2060 (+39.2 %). QPSK R1/2: AWGN@12 s42 1340 → 1460 (+9.0 %); Good@15 s42
+1250 → 1240 (tie: one tone ACK lost on the reverse link cost an RTO in the structure arm — that
+path is identical in both modes), s43 1140 → 1220 (+7.0 %); Moderate@20 s42 1140 → 1220 (+7.0 %,
+after fix 3; 1260 with 4 HEADNULL drops before it), s43 1140 → 1100 (−3.5 %: the session's first
+group — chirp-acquired in BOTH arms — read a 2.7 Hz chirp CFO on fading (true 0) and the LTS
+residual correction was blocked by the pre-existing seed gate, CHANGELOG 2026-07-29; it survived in
+one fade realization and not the other). 8 pairs: mean +13.3 %, 6 wins / 2 losses, both losses
+explained by mechanisms independent of the acquisition mode. Adaptive (default
+controller) Good@20: s42 1620 → 1950, s43 1480 → 1980. All PASS, both CRCs; structure arms 9-15
+chirp-less descriptors per transfer, 0 RTO except the lost ACK. Default-path sentinel Good@20 s42
+= 1620 bps, identical to the pre-change build. Unit: `FrameStructureDetector` (detection/timing
+0-20 dB, 0/60 noise false alarms, CW-tone immunity, ±3 Hz unknown CFO, marked heads, warm-window
+`detectDataSync` regression, settling fill never triggers) + 18 related suites green.
+
+**Not validated / why default stays `chirp`.** Real radio: ALC/AGC with no chirp (the settling
+fill is the mitigation; the sim has no ALC/AGC model), CFO drift with no chirp re-estimate (the
+tracked CFO + LTS residual stage carry it; the GUI sim has no per-station CFO/ppm yet — plan
+Stage 0.3), n = 1-3 seeds per cell. Rig A/B recipe: set `ULTRA_BURST_ACQ=structure` on BOTH
+stations. Demolition of the chirp-skip workarounds after the rig: REMOVAL_BACKLOG R15.
+
+**Files.** `src/sync/acquisition_mode.hpp` (new); `src/waveform/waveform_interface.hpp`,
+`ofdm_chirp_waveform.{hpp,cpp}` (`detectFrameStructure`, `frameStructureSpanSamples`,
+`generateSettlingSymbols`); `src/sync/sync_controller.{hpp,cpp}` (`detectStructureAnchor`,
+window constants — byte-identical refactor); `src/gui/modem/streaming_sync_acquisition.cpp`
+(dispatch, readiness); `streaming_decoder.{hpp,cpp}`; `streaming_encoder.{hpp,cpp}`
+(chirp-less schedule, settling fill); `modem_engine.{hpp,cpp}` (`postProcessTx` fill);
+`src/protocol/connection.cpp` (anchor reasons), `connection_policy.hpp`
+(`kTxRelaySilentFloorMs`); `tests/test_frame_structure_detector.cpp` (new, CTest
+`FrameStructureDetector`). Docs: INVARIANTS (INV-SYNC-STRUCT-001..005), CFO_CORRECTION_FLOW,
+MODEM_INFRASTRUCTURE_MAP, REMOVAL_BACKLOG R15.
+
+---
+
 ## 2026-11-08 — FEAT: measured-noise LLRs (default ON) + one-codeword-per-frame turbo FEC (knob, default LDPC)
 
 Stages 0-1 of porting the high-speed techniques of an open-source (MIT) HF modem that runs

@@ -1,6 +1,7 @@
 // StreamingDecoder module
 
 #include "streaming_decoder.hpp"
+#include "sync/acquisition_mode.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_decoder_debug.hpp"
@@ -470,6 +471,21 @@ void StreamingDecoder::searchForSync() {
     last_sync_expected_full_anchor_ = false;
     bool use_light_search = connected_data_preamble && !use_full_ofdm_anchor_search;
     bool used_full_anchor_fallback = false;
+    // STRUCTURE ACQUISITION (ULTRA_BURST_ACQ=structure, lockstep with the sender's chirp-less
+    // groups). The connected GROUP-START search — the one that waits for a dual chirp in chirp
+    // mode — instead runs the chi frame-structure detector on a SHORT window
+    // (SyncController::structureSearchWindowSamples: every frame is wholly inside the first
+    // two windows that see it), so a group start is acquired ~0.45 s after it begins instead of
+    // after a 2.5 s chirp-search window. In-group frames keep the warm light-LTS path unchanged.
+    // The handshake-confirmation window keeps the chirp search: the half-open MC-DPSK CONNECT
+    // fallback needs a real dual-chirp lock (MC-DPSK has no OFDM structure to detect).
+    const size_t structure_span =
+        (use_full_ofdm_anchor_search && sync::structureAcquisitionEnabled())
+            ? waveform_->frameStructureSpanSamples()
+            : 0;
+    const bool structure_anchor_search =
+        structure_span > 0 && !handshake_confirmation_pending_.load(std::memory_order_acquire);
+    bool used_structure_anchor = false;
     // (R4: the adaptive short-chirp re-anchor was removed — superseded by warm-handoff,
     // which is now the default. The light/full-anchor search are the only group-boundary paths.)
     //
@@ -483,9 +499,12 @@ void StreamingDecoder::searchForSync() {
     //    detectDualChirp reports "down NOT found" and MISSes despite a 0.99 up-chirp.
     //    This stranded the post-burst Winlink-B2F FF/turnaround frame (BUG-TNC-B2F turnaround).
     //  - disconnected chirp: the existing chirp_min_search (no lag at connect time).
-    size_t min_search = use_light_search
-                            ? LIGHT_SEARCH_SIZE
-                            : (use_full_ofdm_anchor_search ? CHIRP_MAX_SEARCH : chirp_min_search);
+    size_t min_search =
+        use_light_search
+            ? LIGHT_SEARCH_SIZE
+            : (structure_anchor_search
+                   ? sync::SyncController::structureSearchWindowSamples(structure_span)
+                   : (use_full_ofdm_anchor_search ? CHIRP_MAX_SEARCH : chirp_min_search));
     const size_t data_symbol_samples =
         (use_light_search && waveform_)
             ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))
@@ -620,6 +639,19 @@ void StreamingDecoder::searchForSync() {
             cfo_tracker_.tracked(), sync_result);
         // Short re-anchor fallback is enabled only by negotiated fading class;
         // otherwise the connected path remains LTS-only.
+    } else if (structure_anchor_search) {
+        // One search pass per CORRELATION_STEP of new audio: a per-pass false-lock budget of
+        // step / (1 h of audio) bounds false group-start locks to one per hour of continuous
+        // connected searching (a probability constant; the detector splits it over its tests).
+        constexpr double kStructureFalseLocksPerHour = 1.0;
+        const double false_alarm_budget =
+            kStructureFalseLocksPerHour * static_cast<double>(CORRELATION_STEP) /
+            (3600.0 * static_cast<double>(protocol::connection_policy::kOFDMSampleRate));
+        auto st = sync_controller_.detectStructureAnchor(
+            waveform_.get(), search_buffer.data(), search_buffer.size(), connected_,
+            cfo_tracker_.tracked(), false_alarm_budget, sync_result);
+        found = st.found;
+        used_structure_anchor = st.found;
     } else {
         // Use full sync detection with chirp (wideband)
         found = waveform_->detectSync(
@@ -962,7 +994,7 @@ void StreamingDecoder::searchForSync() {
         // training origin.  Retain only a REAL expected dual-chirp lock (never a
         // weak LTS/data fallback); processBuffer will make one bounded raw-ring
         // MC decode after all four fixed codewords have arrived.
-        if (last_sync_expected_full_anchor_ &&
+        if (last_sync_expected_full_anchor_ && !used_structure_anchor &&
             handshake_confirmation_pending_.load(std::memory_order_acquire)) {
             MultiCarrierDPSKConfig fallback_config = mc_dpsk_config_;
             fallback_config.bits_per_symbol = 1;  // fixed handshake profile = DBPSK
@@ -1045,6 +1077,7 @@ void StreamingDecoder::searchForSync() {
         pending_total_cw_ = 0;
         sync_from_warm_timed_window_ = used_warm_timed_window;
         sync_from_full_anchor_fallback_ = used_full_anchor_fallback;
+        sync_from_structure_anchor_ = used_structure_anchor;
 
         state_ = DecoderState::SYNC_FOUND;
         stampRxSignal();  // F129: sync itself is RX evidence
@@ -1190,6 +1223,17 @@ void StreamingDecoder::checkIfReadyToDecode() {
         ofdm_control_samples,
         full_frame_samples,
         control_frame_samples);
+    // Structure acquisition: a structure lock lands ~0.45 s into a frame (its window is the
+    // template span + backtrack + probe), long before a 2.5 s chirp-window lock would. When it
+    // is NOT a group head (no marker) while a descriptor-declared group is in flight, it is a
+    // member found after a missed head; the HEADNULL late-join needs that member's WHOLE frame
+    // in the ring, so wait for it here instead of failing the join and dropping every member
+    // (measured Moderate@20: one missed head -> 4 HEADNULL drops). Readiness only: the decode
+    // slice and the group geometry are unchanged.
+    if (sync_from_structure_anchor_ && !burst_latched &&
+        sync_controller_.have_burst_descriptor_ && full_frame_samples > requirement.samples) {
+        requirement.samples = full_frame_samples;
+    }
 
     static constexpr int kAudioSampleRateHz = 48000;
     const int required_audio_ms = static_cast<int>(

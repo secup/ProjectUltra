@@ -61,6 +61,7 @@ public:
 
     Samples generatePreamble() override;
     Samples generateDataPreamble() override;  // Training only, no chirp
+    Samples generateSettlingSymbols(size_t count) override;
     Samples modulate(const Bytes& encoded_data) override;
     void setCarrierMask(uint64_t active_mask) override;
     uint64_t getCarrierMask() const override { return carrier_mask_; }
@@ -85,6 +86,9 @@ public:
     bool detectDataSync(SampleSpan samples, SyncResult& result,
                         float known_cfo_hz = 0.0f, float threshold = 0.3f) override;
     bool supportsDataPreamble() const override { return true; }
+    size_t frameStructureSpanSamples() const override;
+    bool detectFrameStructure(SampleSpan samples, SyncResult& result, float known_cfo_hz,
+                              double false_alarm_budget) override;
     void setAbsoluteTrainingPosition(size_t pos) override;
     bool process(SampleSpan samples) override;
     std::vector<float> getSoftBits() override;
@@ -197,6 +201,10 @@ private:
     std::unique_ptr<sync::ChirpSync> short_anchor_chirp_sync_;  // short dual chirp (warm descriptor)
     HilbertTransform data_sync_hilbert_{65};
     std::vector<Complex> data_sync_analytic_scratch_;
+    // Preamble-less structure acquisition (ULTRA_BURST_ACQ=structure): see
+    // detectFrameStructure() in the .cpp for the statistic and its noise law.
+    std::unique_ptr<FFT> structure_fft_;
+    std::vector<Complex> structure_fft_in_, structure_fft_out_;
     std::vector<Complex> data_sync_template_analytic_;
     float data_sync_template_energy_ = 0.0f;
     int data_sync_template_symbol_samples_ = 0;

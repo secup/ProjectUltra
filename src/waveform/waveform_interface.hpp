@@ -113,6 +113,16 @@ public:
     // Default: falls back to full preamble for waveforms that don't support it
     virtual Samples generateDataPreamble() { return generatePreamble(); }
 
+    // Key-up SETTLING fill for a burst that starts WITHOUT a chirp (structure acquisition /
+    // anchor skip): `count` OFDM symbols of fixed pseudo-random data at the current data
+    // profile's spectrum and crest factor. On a real radio the TX ALC and the peer's RX AGC
+    // settle on these (the job the 1.2 s chirp did for chirp-led bursts) instead of on the
+    // first structured frame's LTS. Carries no information; default: unsupported (empty).
+    virtual Samples generateSettlingSymbols(size_t count) {
+        (void)count;
+        return {};
+    }
+
     // 2026-06-12 Phase 2a: SHORT single-chirp WARM re-anchor for the per-burst BURST_HEADER
     // descriptor. When sync is warm the CFO is already tracked, so the full up+down dual chirp
     // (needed only for cold CFO estimation) can collapse to a single short up-chirp — reclaiming
@@ -164,6 +174,23 @@ public:
     }
 
     // (R4: detectShortDataSync removed — short re-anchor superseded by warm-handoff.)
+
+    // Preamble-less FRAME-STRUCTURE acquisition (ULTRA_BURST_ACQ=structure): finds a
+    // connected-mode light frame (LTS pair + data symbols) anywhere in `samples` without a
+    // chirp, for a GROUP START whose arrival time is uncertain (the role the dual chirp plays
+    // in chirp mode). In-group frames keep detectDataSync. `false_alarm_budget` is the
+    // probability of a false detection allowed for this call (the caller derives it from its
+    // search cadence). frameStructureSpanSamples() is the minimum window that holds one whole
+    // structure template plus its timing refinement; 0 means unsupported.
+    virtual size_t frameStructureSpanSamples() const { return 0; }
+    virtual bool detectFrameStructure(SampleSpan samples, SyncResult& result,
+                                      float known_cfo_hz, double false_alarm_budget) {
+        (void)samples;
+        (void)result;
+        (void)known_cfo_hz;
+        (void)false_alarm_budget;
+        return false;
+    }
 
     // Check if this waveform supports light/data preamble mode
     virtual bool supportsDataPreamble() const { return false; }

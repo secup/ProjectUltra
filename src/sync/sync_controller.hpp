@@ -214,6 +214,26 @@ public:
     // so real control frames in fading aren't rejected before the robust decoder sees them. The
     // waveform is PASSED; sync_result carries the failed-chirp correlation in (for the §16 phase-5
     // trace) and the accepted fallback out. The decoder fires its callback when found.
+    // Search-window geometry (acquireSearchWindow): once the RMS presence probe at the cursor
+    // passes, the extracted window starts kSearchBacktrackSamples BEFORE the cursor.
+    static constexpr size_t kSearchBacktrackSamples = 9600;
+    static constexpr size_t kRmsProbeSamples = 1000;
+
+    // Window for the connected group-start STRUCTURE search (ULTRA_BURST_ACQ=structure). The
+    // first pass whose RMS probe sees a frame has the cursor in (x - probe, x - probe + step]
+    // for a frame starting at x, so the frame can begin up to backtrack + probe samples into
+    // the extracted window; the window must still hold the detector's whole template span
+    // after that. (The next pass, one step later, then also holds it: two chances per frame.)
+    static size_t structureSearchWindowSamples(size_t structure_span_samples) {
+        return structure_span_samples + kSearchBacktrackSamples + kRmsProbeSamples;
+    }
+
+    // Connected group-start acquisition by frame STRUCTURE (no chirp): see
+    // IWaveform::detectFrameStructure. Honours the half-duplex ACK-listen suppression.
+    FullAnchorFallbackResult detectStructureAnchor(
+        IWaveform* waveform, const float* search_data, size_t search_len, bool connected,
+        float known_cfo, double false_alarm_budget, SyncResult& sync_result);
+
     FullAnchorFallbackResult detectFullAnchorFallback(
         IWaveform* waveform, const float* search_data, size_t search_len, size_t search_start,
         size_t min_search, bool is_narrowband, bool connected, float corr_detect_threshold,

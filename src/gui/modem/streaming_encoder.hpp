@@ -249,6 +249,15 @@ private:
                                     bool is_control_frame,
                                     const char* label);
     Samples connectedDataPreambleForFrame();
+public:
+    // True when the last encodeBurstLight() output STARTS with a chirp-less frame (a LIGHT
+    // descriptor): the caller then fills the key-up lead-in with settling symbols.
+    bool lastBurstStartsChirpless() const { return last_burst_starts_chirpless_; }
+    // `samples` of settling fill (the LAST samples of whole settling symbols, so the fill
+    // ends on a symbol boundary right before the burst), raised-cosine ramped at its start.
+    std::vector<float> settlingLeadInFill(size_t samples);
+private:
+    bool last_burst_starts_chirpless_ = false;
 
     // ========================================================================
     // STATE (mirrors StreamingDecoder)

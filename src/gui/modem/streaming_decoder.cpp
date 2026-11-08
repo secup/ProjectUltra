@@ -973,6 +973,7 @@ bool StreamingDecoder::resetFalseOFDMStateAfterRecoveredConnect(
     deferred_future_sync_ = {};
     sync_from_warm_timed_window_ = false;
     sync_from_full_anchor_fallback_ = false;
+    sync_from_structure_anchor_ = false;
     last_sync_expected_full_anchor_ = false;
     cg_snapshot_ = CommandedGeometry{};
     cg_snapshot_sync_pos_ = 0;
