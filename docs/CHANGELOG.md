@@ -54,8 +54,8 @@ jobs, and each run took 1 h 39 min:
   not found" in run 42635197212), and skips the 5-min
   disk cleanup on a warm cache; the sanitizer job skips label `slow` (their code paths run under
   ASan in the faster MC-DPSK / OFDM / tone-ACK tests); the bundle build no longer waits for the
-  tests (the tag release still needs every job); docs-only pushes do not build (no test reads
-  `docs/`; tag pushes always build).
+  tests (the tag release still needs every job). (A docs-only push filter was tried and removed
+  the same day: a commit without a run shows no status, so main looked unbuilt.)
 
 **Verification.** Local Release `ctest --test-dir build -j8`: 107/107 pass in 172 s, including
 the five tests whose asserts are now live; the slow four take 26-88 s optimized.

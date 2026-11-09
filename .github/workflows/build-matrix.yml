@@ -5,20 +5,14 @@ on:
   pull_request:
     branches:
       - main
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+  # Every push builds, docs-only ones included: a commit without a run shows no status on GitHub,
+  # so a docs-only HEAD made main look unbuilt (2026-11-09, a0eb5aa). A warm run is ~14 min.
   push:
     branches:
       - main
     tags:
       - "v*"
       - "0.2.0-alpha*"
-    # Docs-only pushes do not build: no test reads docs/ (checked 2026-11-09; the docs/ paths in
-    # tests are comments). Path filters are not evaluated for tag pushes, so tags always build.
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
 
 permissions:
   contents: read
