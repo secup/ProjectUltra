@@ -5,12 +5,20 @@ on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   push:
     branches:
       - main
     tags:
       - "v*"
       - "0.2.0-alpha*"
+    # Docs-only pushes do not build: no test reads docs/ (checked 2026-11-09; the docs/ paths in
+    # tests are comments). Path filters are not evaluated for tag pushes, so tags always build.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
 
 permissions:
   contents: read
@@ -19,23 +27,32 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Windows dependencies come from vcpkg. Release-only triplet: every build here is Release, and
+  # the default x64-windows triplet built each package twice (debug + release) — the cold gRPC
+  # build took 89 min in run 42605639627. The test and build jobs install the SAME set so they
+  # share one binary cache.
+  VCPKG_TRIPLET: x64-windows-release
+
+# Speed notes (2026-11-09, run 42605639627 took 1 h 39 min wall clock and failed):
+#  - Tests build optimized (Release). The suite's cost was four Monte-Carlo calibration tests
+#    running unoptimized (MCDPSKSnrCalibration alone: 16 min Linux, 23 min macOS, 27 min ASan).
+#    Release is also what ships and what the local gate runs. Test asserts stay live in every
+#    build type (tests/CMakeLists.txt add_compile_options(-UNDEBUG)).
+#  - ccache (Linux/macOS) carries compiler output between runs through actions/cache.
+#  - The bundle build no longer waits for the test jobs; only the tag release waits for all.
+#  - The vcpkg cache is saved right after the install, not by the post-job hook, which only
+#    runs when the whole job succeeds: run 42605639627 finished an 89-min gRPC build, failed in
+#    a later step, and discarded it.
+#  - GitHub-hosted runners for public repositories: Linux and Windows 4 vCPU / 16 GB,
+#    macOS arm64 3 vCPU / 7 GB. The old --parallel 2 caps dated from the 7 GB Linux runner.
+
 jobs:
   test:
     name: Test (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
-    # Windows dominates this budget: "Install Test Dependencies (Windows)" builds
-    # grpc:x64-windows from source whenever the vcpkg binary cache misses.
-    #
-    # 2026-08-02: 90 was NOT enough. Run 30771798808 was cancelled at exactly 90:06
-    # still inside that step, having never reached Build Tests. The old "~59 min
-    # worst case" note was measured on runs that finished at ~61 min, i.e. already
-    # within ~30 min of the cap, so one slow runner was always going to breach it.
-    #
-    # The failure is self-perpetuating: the cache is written by "Post Cache vcpkg
-    # Binaries", which never runs when the job is cancelled, so a timed-out cold run
-    # leaves the next run equally cold. 150 buys enough room for one cold gRPC build
-    # to COMPLETE and repopulate the cache; warm runs return in ~12 min regardless.
-    # Still far below GitHub's 6-hour default, so a genuine hang still fails fast.
+    # Windows dominates when its vcpkg cache misses (a runner-image vcpkg update changes every
+    # package hash): one cold gRPC build must be able to finish and save the cache.
     timeout-minutes: 150
     strategy:
       fail-fast: false
@@ -43,10 +60,21 @@ jobs:
         include:
           - os: ubuntu-latest
             target: linux
+            jobs: 4
           - os: macos-latest
             target: macos
+            jobs: 3
           - os: windows-latest
             target: windows
+            # --parallel 2: vcpkg's z-applocal post-build step copies the SAME runtime DLLs into
+            # the shared tests output dir for every test target; two concurrent post-builds keep
+            # the copy race improbable (run 28949911161). /MP (CL env below) parallelises the
+            # compiles inside each project instead.
+            jobs: 2
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
 
     steps:
       - name: Checkout
@@ -59,6 +87,7 @@ jobs:
         if: runner.os == 'Linux'
         run: >
           sudo apt-get update && sudo apt-get install -y
+          ccache
           libhamlib-dev
           libgrpc++-dev
           libprotobuf-dev
@@ -70,7 +99,18 @@ jobs:
 
       - name: Install Test Dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install hamlib grpc protobuf abseil c-ares
+        run: brew install ccache hamlib grpc protobuf abseil c-ares
+
+      - name: Restore ccache
+        if: runner.os != 'Windows'
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.target }}-test-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-test-
+            ccache-${{ matrix.target }}-
 
       - name: Read vcpkg Version (Windows)
         if: runner.os == 'Windows'
@@ -80,17 +120,19 @@ jobs:
           $sha = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
           "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Cache vcpkg Binaries (Windows)
+      - name: Restore vcpkg Binaries (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg-cache
-          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-${{ hashFiles('.github/workflows/build-matrix.yml', 'CMakeLists.txt') }}
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-${{ steps.vcpkg-version.outputs.sha }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-
+            vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-
 
       - name: Free Disk Space (Windows)
-        if: runner.os == 'Windows'
+        # Only a cold vcpkg build needs the room (5 min of deletions); a warm restore does not.
+        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
@@ -114,21 +156,32 @@ jobs:
           }
           Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
 
-      - name: Install Test Dependencies (Windows)
+      - name: Install Dependencies (Windows)
         if: runner.os == 'Windows'
+        id: vcpkg-install
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
           New-Item -ItemType Directory -Force "D:/vcpkg-bt" | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
-          vcpkg install grpc:x64-windows --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
+          vcpkg install "sdl2:${{ env.VCPKG_TRIPLET }}" "grpc:${{ env.VCPKG_TRIPLET }}" --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Save vcpkg Binaries (Windows)
+        if: runner.os == 'Windows' && steps.vcpkg-install.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Configure CMake (Linux/macOS)
         if: runner.os != 'Windows'
         run: >
           cmake -S . -B build
-          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DULTRA_BUILD_TESTS=ON
           -DULTRA_BUILD_TOOLS=OFF
           -DULTRA_BUILD_GUI=OFF
@@ -146,24 +199,26 @@ jobs:
           -DULTRA_USE_FFTW=OFF
           -DULTRA_FETCH_GRPC=OFF
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-          -DVCPKG_TARGET_TRIPLET=x64-windows
+          -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
 
       - name: Build Tests (Linux/macOS)
         if: runner.os != 'Windows'
-        # --parallel 2: the ubuntu runner (2 vCPU / ~7 GB) OOM-kills cc1plus
-        # when two heavy test TUs build concurrently (test_watterson_proof +
-        # test_ofdm_snr_calibration, each compiling the full streaming-decoder
-        # set — 2026-07-08 run 28916672556). Same bound as the sanitizer job.
-        run: cmake --build build --parallel 2
+        run: |
+          cmake --build build --parallel ${{ matrix.jobs }}
+          ccache --show-stats
+
+      - name: Save ccache
+        if: always() && runner.os != 'Windows' && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.target }}-test-${{ github.sha }}
 
       - name: Build Tests (Windows)
         if: runner.os == 'Windows'
-        # --parallel 2: vcpkg's z-applocal post-build step copies the SAME
-        # runtime DLLs into the shared tests/Debug output dir for every test
-        # target — at full parallelism two copies collide ("file is being used
-        # by another process", run 28949911161). Two concurrent post-builds
-        # make the race effectively improbable; same bound as Linux.
-        run: cmake --build build --config Debug --parallel 2
+        env:
+          CL: /MP
+        run: cmake --build build --config Release --parallel ${{ matrix.jobs }}
 
       - name: Run CTest (Linux/macOS)
         if: runner.os != 'Windows'
@@ -171,12 +226,16 @@ jobs:
 
       - name: Run CTest (Windows)
         if: runner.os == 'Windows'
-        run: ctest --test-dir build -C Debug --output-on-failure --parallel 4
+        run: ctest --test-dir build -C Release --output-on-failure --parallel 4
 
   sanitizer:
     name: Sanitizer (linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 75  # measured ~37 min
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
 
     steps:
       - name: Checkout
@@ -188,6 +247,7 @@ jobs:
       - name: Install Dependencies
         run: >
           sudo apt-get update && sudo apt-get install -y
+          ccache
           libhamlib-dev
           libgrpc++-dev
           libprotobuf-dev
@@ -197,10 +257,21 @@ jobs:
           libc-ares-dev
           libre2-dev
 
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-linux-sanitizer-${{ github.sha }}
+          restore-keys: |
+            ccache-linux-sanitizer-
+
       - name: Configure ASAN/UBSAN
         run: >
           cmake -S . -B build-sanitizer
           -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DULTRA_BUILD_TESTS=ON
           -DULTRA_BUILD_TOOLS=OFF
           -DULTRA_BUILD_GUI=OFF
@@ -210,25 +281,38 @@ jobs:
           -DCMAKE_C_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g1"
           -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
 
-      # -O1/-g1 + capped parallelism: the full-parallel -O0/-g ASan build of the
-      # large DSP TUs OOM-killed cc1plus on the 7 GB runner ("Killed signal
-      # terminated program cc1plus", runs 28613422376 / 28634356779). -O1 is the
-      # standard ASan operating point (halves cc1plus RSS and the test wall
-      # time); -j2 bounds concurrent peak.
+      # -O1/-g1: the -O0/-g ASan build of the large DSP TUs OOM-killed cc1plus on the old 7 GB
+      # runner (runs 28613422376 / 28634356779); -O1 is the standard ASan operating point.
       - name: Build ASAN/UBSAN Tests
-        run: cmake --build build-sanitizer --parallel 2
+        run: |
+          cmake --build build-sanitizer --parallel 4
+          ccache --show-stats
 
+      - name: Save ccache
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-linux-sanitizer-${{ github.sha }}
+
+      # -LE slow: the four Monte-Carlo calibration gates (label "slow", tests/CMakeLists.txt) took
+      # 52 of this job's 99 test-minutes; their code paths also run under ASan in the faster
+      # MC-DPSK / OFDM / tone-ACK tests, and the Release test jobs run them in full.
       - name: Run ASAN/UBSAN CTest
         env:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
           LSAN_OPTIONS: suppressions=${{ github.workspace }}/tests/lsan_suppressions.txt:print_suppressions=0
-        run: ctest --test-dir build-sanitizer --output-on-failure --parallel 4
+        run: ctest --test-dir build-sanitizer --output-on-failure --parallel 4 -LE slow
 
   coverage:
     name: Coverage (linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 75  # measured ~38 min
+    timeout-minutes: 75
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
 
     steps:
       - name: Checkout
@@ -241,6 +325,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            ccache \
             clang \
             llvm \
             libhamlib-dev \
@@ -252,26 +337,39 @@ jobs:
             libc-ares-dev \
             libre2-dev
 
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-linux-coverage-${{ github.sha }}
+          restore-keys: |
+            ccache-linux-coverage-
+
       - name: Run Coverage Gate
         env:
           CC: clang
           CXX: clang++
           LLVM_COV: llvm-cov
           LLVM_PROFDATA: llvm-profdata
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
         run: ./scripts/coverage_report.sh
+
+      - name: Save ccache
+        if: always() && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-linux-coverage-${{ github.sha }}
 
   build:
     name: Build (${{ matrix.target }})
-    needs:
-      - test
-      - sanitizer
-      - coverage
     runs-on: ${{ matrix.os }}
-    # Measured: linux ~4 min, macos ~3 min, windows ~12 min. A Windows vcpkg/Qt GUI
-    # dependency install HUNG here for >1h30m on 2026-07-26 (run 30201252621) while every
-    # test job passed; with no timeout it rides GitHub's 6-hour default and burns runner
-    # minutes for nothing. 45 is ~4x the observed Windows worst case.
-    timeout-minutes: 45
+    # Measured before 2026-11-09: linux ~4 min, macos ~3 min, windows ~12 min with a warm vcpkg
+    # cache. A Windows vcpkg/GUI dependency install HUNG for >1h30m on 2026-07-26 (run
+    # 30201252621); the cap must still let one cold gRPC build finish and save the cache.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -282,6 +380,10 @@ jobs:
             target: macos
           - os: windows-latest
             target: windows
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
 
     steps:
       - name: Checkout
@@ -295,6 +397,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            ccache \
             libsdl2-dev \
             libgl1-mesa-dev \
             libhamlib-dev \
@@ -308,7 +411,18 @@ jobs:
 
       - name: Install macOS GUI Dependencies
         if: runner.os == 'macOS'
-        run: brew install sdl2 hamlib grpc protobuf abseil c-ares
+        run: brew install ccache sdl2 hamlib grpc protobuf abseil c-ares
+
+      - name: Restore ccache
+        if: runner.os != 'Windows'
+        id: ccache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.target }}-build-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-build-
+            ccache-${{ matrix.target }}-
 
       - name: Read vcpkg Version (Windows)
         if: runner.os == 'Windows'
@@ -318,17 +432,18 @@ jobs:
           $sha = git -C $env:VCPKG_INSTALLATION_ROOT rev-parse HEAD
           "sha=$sha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Cache vcpkg Binaries (Windows)
+      - name: Restore vcpkg Binaries (Windows)
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg-cache
-          key: vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-${{ hashFiles('.github/workflows/build-matrix.yml', 'CMakeLists.txt') }}
+          key: vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-${{ steps.vcpkg-version.outputs.sha }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-${{ steps.vcpkg-version.outputs.sha }}-
+            vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-
 
       - name: Free Disk Space (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           Get-PSDrive C, D | Format-Table -Property Name, @{n="FreeGB";e={[math]::Round($_.Free/1GB,1)}}, @{n="UsedGB";e={[math]::Round($_.Used/1GB,1)}}
@@ -354,19 +469,30 @@ jobs:
 
       - name: Install Windows GUI Dependencies
         if: runner.os == 'Windows'
+        id: vcpkg-install
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
           New-Item -ItemType Directory -Force "D:/vcpkg-bt" | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
-          vcpkg install sdl2:x64-windows grpc:x64-windows --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
+          vcpkg install "sdl2:${{ env.VCPKG_TRIPLET }}" "grpc:${{ env.VCPKG_TRIPLET }}" --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Save vcpkg Binaries (Windows)
+        if: runner.os == 'Windows' && steps.vcpkg-install.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-cache
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Configure CMake (Linux/macOS)
         if: runner.os != 'Windows'
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DULTRA_BUILD_TESTS=OFF
           -DULTRA_BUILD_GUI=ON
           -DULTRA_USE_FFTW=OFF
@@ -383,14 +509,25 @@ jobs:
           -DULTRA_USE_FFTW=OFF
           -DULTRA_FETCH_GRPC=OFF
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
-          -DVCPKG_TARGET_TRIPLET=x64-windows
+          -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
 
       - name: Build (Linux/macOS)
         if: runner.os != 'Windows'
-        run: cmake --build build --parallel
+        run: |
+          cmake --build build --parallel
+          ccache --show-stats
+
+      - name: Save ccache
+        if: always() && runner.os != 'Windows' && steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ccache-${{ matrix.target }}-build-${{ github.sha }}
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
+        env:
+          CL: /MP
         run: cmake --build build --config Release --parallel
 
       - name: Collect Bundle Files
@@ -436,7 +573,11 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: build
+    needs:
+      - test
+      - sanitizer
+      - coverage
+      - build
     permissions:
       contents: write
 

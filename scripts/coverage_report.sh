@@ -67,6 +67,10 @@ if [[ -z "$LLVM_PROFDATA" ]]; then
   fi
 fi
 
+# -O1: source-based coverage counters are inserted by the front end, before optimisation, so
+# the counts do not depend on the optimisation level; -O0 made the Monte-Carlo calibration
+# tests the whole cost of this gate (35 min in CI, 2026-11-09). ULTRA_COVERAGE_BUILD tells
+# tests that assert wall-clock bounds of optimised code to only report them.
 cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Debug \
   -DULTRA_BUILD_GUI=OFF \
@@ -74,8 +78,8 @@ cmake -S "$PROJECT_DIR" -B "$BUILD_DIR" \
   -DULTRA_USE_FFTW=OFF \
   -DCMAKE_C_COMPILER="$CC_BIN" \
   -DCMAKE_CXX_COMPILER="$CXX_BIN" \
-  "-DCMAKE_C_FLAGS=-fprofile-instr-generate -fcoverage-mapping" \
-  "-DCMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping" \
+  "-DCMAKE_C_FLAGS=-fprofile-instr-generate -fcoverage-mapping -O1 -DULTRA_COVERAGE_BUILD=1" \
+  "-DCMAKE_CXX_FLAGS=-fprofile-instr-generate -fcoverage-mapping -O1 -DULTRA_COVERAGE_BUILD=1" \
   "-DCMAKE_EXE_LINKER_FLAGS=-fprofile-instr-generate"
 
 cmake --build "$BUILD_DIR" --parallel "$CTEST_JOBS"

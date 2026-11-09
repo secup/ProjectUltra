@@ -1,5 +1,11 @@
 # Test suite for ProjectUltra
 
+# Test assertions stay live in EVERY build type. CI and the local default build are
+# optimized (NDEBUG), and a test whose assert() compiles away passes without checking
+# anything; ultra_enable_test_warnings() below re-enabled asserts only for the files on its
+# list. Directory-scoped: production targets are defined at the top level and keep NDEBUG.
+add_compile_options(${ULTRA_TEST_ASSERT_OPTION})
+
 # Layer-by-layer OFDM primitive verification.
 add_executable(test_layers test_layers.cpp)
 target_link_libraries(test_layers PRIVATE ultra_core)
@@ -968,3 +974,10 @@ ultra_enable_test_warnings(
     test_idle_noise_snr_calibration.cpp
     ../tools/test_throughput.cpp
 )
+
+# Long Monte-Carlo calibration gates (seed ensembles over SNR grids: 8-27 min each in the
+# 2026-11-09 CI Debug/ASan runs, minutes in an optimized build). Label "slow": the sanitizer
+# job skips them (ctest -LE slow) because their code paths also run, under ASan, in the
+# faster MC-DPSK / OFDM / tone-ACK tests; every other job runs them.
+set_property(TEST MCDPSKSnrCalibration OFDMSnrCalibration EVMSnrCalibration ToneBurstAckWatterson
+    APPEND PROPERTY LABELS slow)

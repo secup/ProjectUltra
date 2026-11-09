@@ -71,6 +71,26 @@ int countFailures(int cw, int bpc, double ebn0_db, int frames, uint64_t seed) {
 }
 }  // namespace
 
+// The 250 ms generation bound is a property of the OPTIMIZED generator: the tables are built
+// on first use, at a mid-transfer rung switch, by the shipped (optimized) binary. Unoptimized,
+// sanitizer and coverage builds are 10-40x slower and only print the time (same tables: the
+// digests below are checked in every build). Measured: 16.7 ms optimized on an M-series Mac,
+// 535 ms in the CI Debug build, K = 7712.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define ULTRA_TEST_SANITIZED 1
+#endif
+#endif
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define ULTRA_TEST_SANITIZED 1
+#endif
+#if (defined(__OPTIMIZE__) || (defined(_MSC_VER) && !defined(_DEBUG))) && \
+    !defined(ULTRA_TEST_SANITIZED) && !defined(ULTRA_COVERAGE_BUILD)
+constexpr bool kTimingBoundsApply = true;
+#else
+constexpr bool kTimingBoundsApply = false;
+#endif
+
 int main() {
     // CRC-32C check value.
     {
@@ -119,8 +139,10 @@ int main() {
         check(sys_missing == 0 && tails_ok && total == N, msg);
         std::snprintf(msg, sizeof(msg), "%s: kept parity matches E1/E2 (+repeats)", g.name);
         check((tb.R == 0 && p1 == tb.E1 && p2 == tb.E2) || (tb.R > 0 && p1 >= tb.E1 && p2 >= tb.E2), msg);
-        std::snprintf(msg, sizeof(msg), "%s: table generation < 250 ms on this host", g.name);
-        check(ms < 250.0, msg);
+        if (kTimingBoundsApply) {
+            std::snprintf(msg, sizeof(msg), "%s: table generation < 250 ms on this host", g.name);
+            check(ms < 250.0, msg);
+        }
     }
 
     // Pinned digests: the code is a WIRE contract between two stations that may run on

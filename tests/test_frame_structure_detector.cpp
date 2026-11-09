@@ -16,6 +16,7 @@
 //     must not be (the first statistic cancelled itself on marked frames and locked frame 2);
 //  7. settling lead-in (chirp-less burst start): the settling symbols alone never trigger, and
 //     a descriptor that directly follows them is still found inside its CP plateau.
+#include "env_compat.hpp"  // setenv on MSVC
 #include "protocol/frame_v2.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "ultra/types.hpp"

@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FIX(ci): GitHub build red on every job; CI 1 h 39 min -> optimized tests, ccache, saved vcpkg cache
+
+**What was broken.** Run 42605639627 (the push of the 2026-11-08/09 work) failed on all five
+jobs, and each run took 1 h 39 min:
+- `TurboCodec` failed on Linux, macOS, ASan and coverage: its "table generation < 250 ms" check
+  is a property of the optimized generator (16.7 ms at K = 7712 in Release on an M-series Mac),
+  but CI ran it unoptimized (535 ms). The tables were right: every pinned digest matched.
+- Windows did not compile `test_frame_structure_detector.cpp`: raw `setenv` (C3861; MSVC has no
+  POSIX `setenv`). `tests/env_compat.hpp` exists for exactly this.
+- Time: the four Monte-Carlo calibration tests ran unoptimized (MCDPSKSnrCalibration 16 min
+  Linux, 23 macOS, 27 ASan; with EVMSnrCalibration, ToneBurstAckWatterson and
+  OFDMSnrCalibration 78 % of the Linux test time). Windows spent 89 min building gRPC from
+  source in vcpkg (cache miss after a runner-image vcpkg update), then failed in a later step,
+  and the post-job cache save, which runs only on job success, threw that build away, so the
+  next run would start cold again. The bundle build waited for every test job.
+- Found on the way: five assert()-based tests (AudioPacket, AuthAllowlist, ChannelBusyDetector,
+  AudioPlaneOrdering, SessionHalfDuplexBlackout) were not on the `-UNDEBUG` list, so in the
+  local Release build their asserts compiled away and they passed without checking anything.
+
+**What changed.**
+- `tests/test_turbo_codec.cpp`: the 250 ms bound applies only to optimized, uninstrumented
+  builds (`__OPTIMIZE__` or MSVC non-`_DEBUG`, no sanitizer, no `ULTRA_COVERAGE_BUILD`); other
+  builds print the time. The digest checks run everywhere.
+- `tests/test_frame_structure_detector.cpp`: includes `env_compat.hpp`.
+- `tests/CMakeLists.txt`: `add_compile_options(${ULTRA_TEST_ASSERT_OPTION})` for the whole tests
+  directory (test asserts live in every build type; production targets keep NDEBUG); the four
+  calibration tests get label `slow`.
+- `scripts/coverage_report.sh`: builds at `-O1` (front-end source-based counters do not depend on
+  the optimization level) and defines `ULTRA_COVERAGE_BUILD`.
+- `.github/workflows/build-matrix.yml`: test jobs build Release (what ships and what the local
+  gate runs); ccache on Linux/macOS through actions/cache; Linux `--parallel 4` (public-repo
+  runners are 4 vCPU / 16 GB; the `--parallel 2` caps dated from the 7 GB runner), macOS 3;
+  Windows uses the release-only `x64-windows-release` vcpkg triplet (one build per package instead
+  of debug + release), `/MP`, saves the vcpkg cache right after the install, and skips the 5-min
+  disk cleanup on a warm cache; the sanitizer job skips label `slow` (their code paths run under
+  ASan in the faster MC-DPSK / OFDM / tone-ACK tests); the bundle build no longer waits for the
+  tests (the tag release still needs every job); docs-only pushes do not build (no test reads
+  `docs/`; tag pushes always build).
+
+**Verification.** Local Release `ctest --test-dir build -j8`: 107/107 pass in 172 s, including
+the five tests whose asserts are now live; the slow four take 26-88 s optimized.
+`actionlint .github/workflows/build-matrix.yml` clean. CI timings: see the next run on main.
+
 ## 2026-11-09 — FEAT: measured AWGN OFDM entry floor (6 dB) in `ULTRA_FAST`; `ULTRA_OFDM_FLOOR_AWGN_DB`
 
 **Why.** The AWGN OFDM entry floor (8 dB, "floor likely lower" in its own comment) sends 5-8 dB
