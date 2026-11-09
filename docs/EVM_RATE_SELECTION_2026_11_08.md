@@ -121,7 +121,14 @@ handling see CHANGELOG 2026-11-09 BUG-GUI-DISPLAY-SLEEP-STALL):
 Every AWGN@8 failure in both arms is BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE: the connect reading falls
 7.8 or 8.0 dB on the 8 dB OFDM entry floor; at 7.8 the link takes MC-DPSK DQPSK R1/4, whose file
 transfer then hard-fails at ~344 s. The profile changes neither the connect decision nor MC-DPSK;
-when the link comes up in OFDM it doubles the default (2320-2360 vs 1160-1180 bps).
+when the link comes up in OFDM it doubles the default (2320-2360 vs 1160-1180 bps). (The MC-DPSK
+failure itself was found and fixed the same night — every MC-DPSK file ACK was being dropped,
+BUG-MCDPSK-ACK-DROPPED; AWGN@8 MC-DPSK 2 KB transfers now pass 3/3.)
+
+**Longer transfers (50 KB, seeds 42-46):** Good@20 default 1776 vs `ULTRA_FAST` 3288 (+85 %;
+3800 / 3180 / 2960 / 3620 / 2880 — the 3620 is a solo re-run of a run whose script was killed
+externally at 40 s; it passed on re-run), Moderate@20 1676 vs 2390 (+43 %, 5/5 PASS). The gains
+hold, and grow on Good, for longer files.
 
 C includes the structure-mode switch-pricing fix (2026-11-08): structure acquisition never
 anchors a descriptor-committed switch, so the selector no longer prices one; with it C reaches
