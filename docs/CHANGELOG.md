@@ -59,7 +59,17 @@ jobs, and each run took 1 h 39 min:
 
 **Verification.** Local Release `ctest --test-dir build -j8`: 107/107 pass in 172 s, including
 the five tests whose asserts are now live; the slow four take 26-88 s optimized.
-`actionlint .github/workflows/build-matrix.yml` clean. CI timings: see the next run on main.
+`actionlint .github/workflows/build-matrix.yml` clean. CI, warm caches (run 42649159224, all green):
+13 min 44 s wall clock (was 1 h 38 min and red; the last green runs took 1 h 13-1 h 26):
+
+| job | before (run 42605639627) | after (warm) |
+|---|---|---|
+| Test linux / macos / windows | 21.5 / 33.5 / 98.5 min (red) | 3.3 / 5.6 / 13.7 min |
+| Sanitizer / Coverage | 44.8 / 36.5 min (red) | 11.9 / 6.8 min |
+| Build linux / macos / windows | waited for tests, then ~4 / 3 / 12 | 0.8 / 1.7 / 5.8 min, in parallel |
+
+A cold Windows vcpkg cache (after a runner-image vcpkg/MSVC update or 7 days unused) costs one
+~53-70 min gRPC build, saved immediately; every later run restores it.
 
 ## 2026-11-09 — FEAT: measured AWGN OFDM entry floor (6 dB) in `ULTRA_FAST`; `ULTRA_OFDM_FLOOR_AWGN_DB`
 
