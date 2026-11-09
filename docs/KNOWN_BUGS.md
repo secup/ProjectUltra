@@ -51,6 +51,33 @@ mean, i.e. the window is short against Good's slow fade epochs. The shipped use 
 (an upward move only when the higher rung is predicted to decode >= 90 % of recent frames). A fix
 for FULL needs a longer memory or a posterior over the EVM distribution, not a shorter window.
 
+### BUG-SCO-NOT-TRACKED-IN-BURST (open, 2026-11-09) — P1
+
+**Symptom (found by the new simulator clock offset, `gui_qso_scenario.sh --clock-ppm`).** With the
+two soundcards 100 ppm apart, each in-burst frame's LTS timing offset steps ~6 samples
+(= 100e-6 x 1.2 s x 48 kHz) and the frame's EVM SNR falls with it. AWGN@20, default stack,
+`--clock-ppm -100` (data receiver hears +100 ppm), 8-frame 16QAM R2/3 burst: offset +3.3 -> -2.4
+-> -9.2 -> -15.1 -> -20.7 -> -25.2 -> -32.5 -> -38.6 samples, EVM 17.7 -> 16.5 -> 14.8 -> 13.8 ->
+13.3 -> 11.8 -> 11.2 -> 10.8 dB (no drift: 17-18.4 dB flat). The last frames sit below the
+16QAM R2/3 threshold. The `ULTRA_FAST=0` arm shows the same decay (4-frame QPSK burst: -2 -> -7
+-> -14 -> -37 samples, 14.5 -> 9.7 dB), so it predates the 2026-11-09 flip; the default's longer
+bursts and denser rungs are more exposed.
+
+**Cost measured (GUI gate, 21 KB, seed 42, 7.3 Hz):** AWGN@20 default 3610 -> 3180 bps at +-100
+ppm (no frame lost: the EVM climb holds 8PSK R2/3 two groups longer); `ULTRA_FAST=0` Good@20
+1710 -> 1630; default Good@20 3060 -> 3220 / 3010 (inside the fading spread).
+
+**Cause (to confirm in code).** In-burst frame positions do not absorb the measured drift: the
+LTS phase slope reports the offset, the channel estimate absorbs it as a phase ramp, and the
+error grows frame after frame. The EVM falls already at ~10 samples, far inside the 128-sample CP,
+so it is not ISI; likely the LTS/pilot channel smoothing (which assumes the impulse response near
+delay 0) or the per-symbol timing tracking. Real soundcards differ by 20-50 ppm (cheap USB
+dongles ~100): a rig-relevant loss the 0-ppm simulator could never show.
+
+**Fix direction.** Sample-clock-offset tracking: estimate the drift from successive frames'
+LTS timing (and the descriptor), re-centre each next frame's FFT window, and feed the per-symbol
+timing slope to pilot tracking. Verify with `--clock-ppm +-50/+-100` on AWGN and Good.
+
 ### BUG-TEST-GAP-FAST-DEFAULT (open, 2026-11-09) — P2
 
 **What.** Flipping `ULTRA_FAST` on by default left two suites testing the pre-flip baseline only:

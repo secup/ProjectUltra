@@ -36,6 +36,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANNEL="awgn"
 SNR_DB="20"
 CFO_HZ="0"
+CLOCK_PPM="0"
 RECORD=0
 SEED="42"
 EXPECT_RATE="R1/4"
@@ -66,6 +67,9 @@ usage() {
   printf '  --snr-db DB                    OTASim SNR (default: 20)\n'
   printf '  --cfo-hz HZ                    Dial offset between the two radios: ALPHA hears BRAVO\n'
   printf '                                 at -HZ, BRAVO hears ALPHA at +HZ (default: 0)\n'
+  printf '  --clock-ppm PPM                Soundcard clock offset between the two stations: BRAVO\n'
+  printf '                                 runs PPM fast, so ALPHA hears BRAVO time-compressed by\n'
+  printf '                                 PPM and BRAVO hears ALPHA stretched (default: 0)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
@@ -179,6 +183,7 @@ while [[ $# -gt 0 ]]; do
     --channel) CHANNEL="${2:?}"; shift 2 ;;
     --snr-db) SNR_DB="${2:?}"; shift 2 ;;
     --cfo-hz) CFO_HZ="${2:?}"; shift 2 ;;
+    --clock-ppm) CLOCK_PPM="${2:?}"; shift 2 ;;
     --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
@@ -684,6 +689,7 @@ write_summary() {
     echo "CHANNEL=$CHANNEL"
     echo "SNR_DB=$SNR_DB"
     echo "CFO_HZ=$CFO_HZ"
+    echo "CLOCK_PPM=$CLOCK_PPM"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -826,6 +832,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   --lobby-snr-db "$SNR_DB" \
   --lobby-seed "$SEED" \
   --lobby-rx-cfo-hz "BRAVO:${CFO_HZ},ALPHA:$(awk -v c="$CFO_HZ" 'BEGIN{printf "%g", -c}')" \
+  --lobby-rx-clock-ppm "ALPHA:${CLOCK_PPM},BRAVO:$(awk -v c="$CLOCK_PPM" 'BEGIN{printf "%g", -c}')" \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

@@ -150,6 +150,9 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
   --cfo-hz D` (ALPHA hears −D, BRAVO +D) via the streaming `FrequencyShiftChannelModel`
   (4097-tap Hilbert pair, chunk-invariant); `WattersonChannel::applyCFO` is block-wise (FFT per
   call) and is NOT used by OTASim. The GUI gate ran with 0 Hz CFO on every link until 2026-11-08.
+  Soundcard clock offset: `--clock-ppm P` (BRAVO's clock P ppm fast; `ClockOffsetChannelModel`,
+  windowed-sinc time scaling, chunk-invariant). Until 2026-11-09 both simulated stations shared
+  one sample clock.
 - Per-symbol pilot tracking is active in `channel_equalizer.cpp` (LS pilot H update,
   alpha-smoothed, residual CFO + timing recovery; pilots ~every 10 carriers).
 - **Recommendation:** OFDM_CHIRP with DQPSK; rate auto via `selectOFDMCodeRate()`.

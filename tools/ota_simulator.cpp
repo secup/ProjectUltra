@@ -45,6 +45,7 @@ struct ServeOptions {
     uint64_t lobby_seed = 42;
     uint32_t lobby_station_cap = 16;
     std::map<std::string, float> lobby_rx_cfo_hz;  // --lobby-rx-cfo-hz "BRAVO:2.5,ALPHA:-2.5"
+    std::map<std::string, float> lobby_rx_clock_ppm;  // --lobby-rx-clock-ppm "BRAVO:50,ALPHA:-50"
     uint32_t shutdown_deadline_seconds = 60;
     std::filesystem::path noise_bed_wav;
 };
@@ -54,7 +55,8 @@ void usage() {
         << "Usage:\n"
         << "  ota_simulator gen --frame FRAME --callsign CALL [--peer-callsign CALL] --out FILE.wav\n"
         << "  ota_simulator serve --bind HOST:PORT --tokens FILE [--udp-bind HOST:PORT]\n"
-        << "      [--noise-bed-wav FILE.wav]\n";
+        << "      [--noise-bed-wav FILE.wav]\n"
+        << "      [--lobby-rx-cfo-hz RX:HZ,...] [--lobby-rx-clock-ppm RX:PPM,...]\n";
 }
 
 void handleStopSignal(int signal) {
@@ -159,6 +161,22 @@ ServeOptions parseServeOptions(int argc, char** argv) {
                 if (comma == std::string::npos) break;
                 pos = comma + 1;
             }
+        } else if (arg == "--lobby-rx-clock-ppm") {
+            // Comma-separated RECEIVER:HZ pairs (receiver = station callsign).
+            std::string spec = requireValue(i, argc, argv, arg);
+            size_t pos = 0;
+            while (pos < spec.size()) {
+                const size_t comma = spec.find(',', pos);
+                const std::string item =
+                    spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+                const size_t colon = item.find(':');
+                if (colon == std::string::npos || colon == 0) {
+                    throw std::runtime_error("--lobby-rx-clock-ppm expects RECEIVER:PPM[,RECEIVER:PPM]");
+                }
+                options.lobby_rx_clock_ppm[item.substr(0, colon)] = std::stof(item.substr(colon + 1));
+                if (comma == std::string::npos) break;
+                pos = comma + 1;
+            }
         } else if (arg == "--lobby-station-cap") {
             options.lobby_station_cap = parseUint32(
                 requireValue(i, argc, argv, arg), 1024, arg);
@@ -209,6 +227,7 @@ int runServe(int argc, char** argv) {
     lobby.seed = options.lobby_seed;
     lobby.station_cap = options.lobby_station_cap;
     lobby.rx_cfo_hz = options.lobby_rx_cfo_hz;
+    lobby.rx_clock_ppm = options.lobby_rx_clock_ppm;
     lobby.real_hf_loop_noise = real_hf_loop_noise;
 
     service::OtaSimulatorServiceConfig config;
@@ -249,6 +268,14 @@ int runServe(int argc, char** argv) {
                      for (const auto& [rx, hz] : options.lobby_rx_cfo_hz) {
                          if (!out.empty()) out += ',';
                          out += rx + ":" + std::to_string(hz);
+                     }
+                     return out.empty() ? std::string("none") : out;
+                 }()
+              << " lobby_rx_clock_ppm=" << [&] {
+                     std::string out;
+                     for (const auto& [rx, ppm] : options.lobby_rx_clock_ppm) {
+                         if (!out.empty()) out += ',';
+                         out += rx + ":" + std::to_string(ppm);
                      }
                      return out.empty() ? std::string("none") : out;
                  }()

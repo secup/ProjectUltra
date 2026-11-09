@@ -45,6 +45,10 @@ struct ChannelConfig {
     // error minus the receiver's (SSB dial offset). 0 = no shift (byte-identical models). A
     // non-zero value wraps the model in FrequencyShiftChannelModel (streaming, continuous).
     float cfo_hz = 0.0f;
+    // Sample-clock offset (ppm) the RECEIVER sees on this path: the sender's soundcard clock
+    // error minus the receiver's. 0 = no time scaling (byte-identical models). A non-zero value
+    // wraps the model (outermost) in ClockOffsetChannelModel.
+    float clock_ppm = 0.0f;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
@@ -119,6 +123,59 @@ private:
     std::vector<float> g_quadrature_;
     std::vector<float> line_;          // doubled delay line, length 2 x taps
     size_t idx_ = 0;
+    std::vector<float> inner_out_;
+};
+
+// Streaming SAMPLE-CLOCK offset between two soundcards, applied to the OUTPUT of any channel
+// model. Receiver sample n reads the sender's stream at position p0 + n * (1 + ppm * 1e-6): a
+// sender clock that runs fast by ppm delivers its stream time-compressed (a 10 s burst at
+// +50 ppm arrives 24 samples short, its symbol timing drifts 0.5 ms across the burst) and every
+// tone shifted up by f * ppm * 1e-6. That drift — not the tiny tone shift — is what a modem's
+// timing recovery and burst-start prediction must survive on two real radios.
+//
+// Interpolator: 32-tap Kaiser(beta 8) windowed sinc, 512 phases blended linearly; each phase is
+// normalized to unit DC gain. The modem band (< 3 kHz at 48 kHz) sits far inside its passband.
+// The read position is computed from the absolute output count (p0 + n * step), so the output
+// does not depend on how the stream is cut into process() calls and no rounding accumulates.
+//
+// Latency: the link starts kGuard samples late. For ppm > 0 the read position catches up with
+// the stream at ppm * 1e-6 samples per sample, so the guard holds kClockOffsetMaxSessionS of
+// drift (900 s: 2160 samples = 45 ms at +50 ppm); past it the model re-establishes the guard
+// (counted in slips(), an xrun-like discontinuity). For ppm < 0 the latency grows instead. The
+// reverse link of a two-station session drifts the opposite way, so a round trip is constant to
+// first order. Per-RECEIVER convention like cfo_hz: exact for two stations.
+class ClockOffsetChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+
+    static constexpr int kHalfTaps = 16;
+    static constexpr int kPhases = 512;
+    static constexpr double kClockOffsetMaxSessionS = 900.0;
+
+    ClockOffsetChannelModel(std::unique_ptr<IChannelModel> inner, float ppm,
+                            uint32_t sample_rate);
+
+    void reset() override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
+
+    float ppm() const { return ppm_; }
+    size_t initialLatencySamples() const { return guard_; }
+    uint64_t slips() const { return slips_; }
+
+private:
+    std::unique_ptr<IChannelModel> inner_;
+    float ppm_ = 0.0f;
+    double step_ = 1.0;
+    size_t guard_ = 0;
+    std::vector<float> table_;   // (kPhases + 1) rows of 2 * kHalfTaps taps
+    std::vector<float> buf_;     // inner samples [buf_base_, written_)
+    int64_t buf_base_ = 0;
+    int64_t written_ = 0;
+    double origin_ = 0.0;        // read position of output sample 0 (moves only on a slip)
+    int64_t out_count_ = 0;
+    uint64_t slips_ = 0;
     std::vector<float> inner_out_;
 };
 

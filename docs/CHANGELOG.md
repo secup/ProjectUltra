@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FEAT(sim): soundcard clock offset in OTASim (`--clock-ppm`)
+
+**Why.** Every simulated link shared one sample clock, so nothing ever exercised what two real
+soundcards do (20-50 ppm apart, cheap USB ones ~100): a burst arrives time-compressed or
+stretched and its symbol timing drifts across the burst. Chirp-less group starts and long
+16QAM bursts are exactly what that could break, and the rig A/B is weeks away.
+
+**What changed.** `ClockOffsetChannelModel` (`ota_channel_core/models.{hpp,cpp}`): receiver
+sample n reads the sender's stream at p0 + n(1 + ppm 1e-6); 32-tap Kaiser windowed sinc, 512
+blended phases, position from the absolute output count (chunk-invariant bit-for-bit). It wraps
+each receiver's channel model outermost when `ChannelConfig::clock_ppm != 0` (0 = byte-identical).
+`SessionConfig::rx_clock_ppm`, `ota_simulator serve --lobby-rx-clock-ppm RX:PPM,...`,
+`gui_qso_scenario.sh --clock-ppm P` (BRAVO's clock P ppm fast: ALPHA hears +P, BRAVO -P;
+`CLOCK_PPM` in summary.env). Latency starts at a guard (18 samples, plus 900 s of drift for
+positive ppm) and drifts by ppm per sample, the reverse link the other way.
+
+**Verification.** New CTest `ClockOffsetModel`: 0 ppm is an exact 18-sample delay; tones at
+300/1500/2900 Hz at +-100 and +50 ppm match the time-scaled reference to -86..-110 dB; two clicks
+480000 samples apart arrive 479976.00 apart at +50 ppm; random chunking is bit-identical; the
+factory wraps only for non-zero ppm; SessionConfig routes per receiver. GUI gate at +-100 ppm
+(21 KB, seed 42): all six runs PASS; it found BUG-SCO-NOT-TRACKED-IN-BURST (AWGN@20 3610 -> 3180).
+
 ## 2026-11-09 — CHANGE: `ULTRA_FAST` is ON by default; `ULTRA_FAST=0` is the baseline
 
 **Why.** Operator decision (2026-11-09): no stations are deployed, so lockstep wire changes need

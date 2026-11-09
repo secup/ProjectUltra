@@ -1041,6 +1041,109 @@ void FrequencyShiftChannelModel::process(std::span<const float> input,
 }
 
 namespace {
+double besselI0(double x) {
+    double sum = 1.0, term = 1.0;
+    const double q = 0.25 * x * x;
+    for (int k = 1; k < 64; ++k) {
+        term *= q / (static_cast<double>(k) * static_cast<double>(k));
+        sum += term;
+        if (term < 1e-17 * sum) break;
+    }
+    return sum;
+}
+}  // namespace
+
+ClockOffsetChannelModel::ClockOffsetChannelModel(std::unique_ptr<IChannelModel> inner, float ppm,
+                                                 uint32_t sample_rate)
+    : inner_(std::move(inner)), ppm_(ppm) {
+    step_ = 1.0 + static_cast<double>(ppm) * 1e-6;
+    const double ahead = std::max(0.0, static_cast<double>(ppm) * 1e-6) *
+                         static_cast<double>(sample_rate) * kClockOffsetMaxSessionS;
+    guard_ = static_cast<size_t>(kHalfTaps) + 2u + static_cast<size_t>(std::ceil(ahead));
+    // Row j holds h(k - j/kPhases) for k = -kHalfTaps+1 .. kHalfTaps (tap index k + kHalfTaps - 1).
+    constexpr int taps = 2 * kHalfTaps;
+    constexpr double beta = 8.0;
+    const double i0_beta = besselI0(beta);
+    table_.assign(static_cast<size_t>(kPhases + 1) * taps, 0.0f);
+    for (int j = 0; j <= kPhases; ++j) {
+        const double frac = static_cast<double>(j) / kPhases;
+        double row[taps];
+        double sum = 0.0;
+        for (int t = 0; t < taps; ++t) {
+            const double x = static_cast<double>(t - kHalfTaps + 1) - frac;
+            const double sinc = (std::abs(x) < 1e-12) ? 1.0 : std::sin(M_PI * x) / (M_PI * x);
+            const double r = x / static_cast<double>(kHalfTaps);
+            const double w = (std::abs(r) >= 1.0) ? 0.0
+                                                   : besselI0(beta * std::sqrt(1.0 - r * r)) / i0_beta;
+            row[t] = sinc * w;
+            sum += row[t];
+        }
+        for (int t = 0; t < taps; ++t) {
+            table_[static_cast<size_t>(j) * taps + static_cast<size_t>(t)] =
+                static_cast<float>(row[t] / sum);
+        }
+    }
+    reset();
+}
+
+void ClockOffsetChannelModel::reset() {
+    if (inner_) inner_->reset();
+    buf_.clear();
+    buf_base_ = 0;
+    written_ = 0;
+    origin_ = -static_cast<double>(guard_);
+    out_count_ = 0;
+    slips_ = 0;
+}
+
+void ClockOffsetChannelModel::process(std::span<const float> input,
+                                      uint64_t start_sample,
+                                      std::vector<float>& output) {
+    inner_->process(input, start_sample, inner_out_);
+    buf_.insert(buf_.end(), inner_out_.begin(), inner_out_.end());
+    written_ += static_cast<int64_t>(inner_out_.size());
+    output.resize(inner_out_.size());
+    constexpr int taps = 2 * kHalfTaps;
+    for (size_t n = 0; n < output.size(); ++n) {
+        double pos = origin_ + static_cast<double>(out_count_) * step_;
+        int64_t i = static_cast<int64_t>(std::floor(pos));
+        if (i + kHalfTaps >= written_) {
+            // The read position caught up with the stream (positive drift past the guard):
+            // re-establish the guard, as a real capture buffer would after an xrun.
+            origin_ -= static_cast<double>(guard_);
+            ++slips_;
+            pos = origin_ + static_cast<double>(out_count_) * step_;
+            i = static_cast<int64_t>(std::floor(pos));
+        }
+        const double phase = (pos - static_cast<double>(i)) * kPhases;
+        int j = static_cast<int>(phase);
+        if (j >= kPhases) j = kPhases - 1;
+        const float a = static_cast<float>(phase - j);
+        const float* r0 = &table_[static_cast<size_t>(j) * taps];
+        const float* r1 = r0 + taps;
+        float acc = 0.0f;
+        const int64_t first = i - kHalfTaps + 1;
+        for (int t = 0; t < taps; ++t) {
+            const int64_t idx = first + t;
+            if (idx < buf_base_ || idx >= written_) continue;  // before the stream began: silence
+            const float h = r0[t] + a * (r1[t] - r0[t]);
+            acc += h * buf_[static_cast<size_t>(idx - buf_base_)];
+        }
+        output[n] = acc;
+        ++out_count_;
+    }
+    // Keep kHalfTaps of history behind the next read position.
+    const double next = origin_ + static_cast<double>(out_count_) * step_;
+    const int64_t keep_from = static_cast<int64_t>(std::floor(next)) - kHalfTaps;
+    if (keep_from > buf_base_) {
+        const int64_t drop = std::min<int64_t>(keep_from - buf_base_,
+                                               static_cast<int64_t>(buf_.size()));
+        buf_.erase(buf_.begin(), buf_.begin() + static_cast<std::ptrdiff_t>(drop));
+        buf_base_ += drop;
+    }
+}
+
+namespace {
 std::unique_ptr<IChannelModel> createChannelModelUnshifted(const ChannelConfig& config,
                                                            const RngRoot& rng_root,
                                                            std::string_view stream_name);
@@ -1051,8 +1154,12 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
                                                   std::string_view stream_name) {
     auto model = createChannelModelUnshifted(config, rng_root, stream_name);
     if (std::abs(config.cfo_hz) > 0.001f) {
-        return std::make_unique<FrequencyShiftChannelModel>(std::move(model), config.cfo_hz,
-                                                            config.sample_rate);
+        model = std::make_unique<FrequencyShiftChannelModel>(std::move(model), config.cfo_hz,
+                                                             config.sample_rate);
+    }
+    if (std::abs(config.clock_ppm) > 0.001f) {
+        model = std::make_unique<ClockOffsetChannelModel>(std::move(model), config.clock_ppm,
+                                                          config.sample_rate);
     }
     return model;
 }

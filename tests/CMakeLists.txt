@@ -27,6 +27,11 @@ add_executable(test_channel_core_models test_channel_core_models.cpp)
 target_link_libraries(test_channel_core_models PRIVATE ota_channel_core)
 add_test(NAME ChannelCoreModels COMMAND test_channel_core_models)
 
+# OTASim sample-clock offset between two soundcards (gui_qso_scenario.sh --clock-ppm).
+add_executable(test_clock_offset_model test_clock_offset_model.cpp)
+target_link_libraries(test_clock_offset_model PRIVATE ota_channel_core)
+add_test(NAME ClockOffsetModel COMMAND test_clock_offset_model)
+
 add_executable(test_watterson_channel test_watterson_channel.cpp)
 target_link_libraries(test_watterson_channel PRIVATE ota_channel_core)
 add_test(NAME WattersonChannel COMMAND test_watterson_channel)
