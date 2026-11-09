@@ -10,6 +10,69 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FEAT(sim) + FIX: a real station's TX levels in OTASim; PAPR-corrected connect pick (INV-SNR-PAPR-001)
+
+**What was missing / broken.**
+- The default simulator scales every burst to the same AVERAGE level; a real station (and our
+  hardware TX path, `normalizeTxBurstForHardware`) scales to the same PEAK. OFDM has the higher
+  peak-to-average ratio, so on a real radio the OFDM data arrives weaker than the MC-DPSK CONNECT
+  that the connect SNR is measured on. Measured on the production encoder at the hardware peak
+  target, in-band level vs the simulator reference: PING -6.1 dB, CONNECT -7.7 dB, OFDM data
+  -10.5 dB (chirp-anchored) / -11.6 dB (chirp-less). The receiver confirmed it: at the same dial
+  the MC-DPSK CONNECT read 8.4 dB and the OFDM data `channel 5.1±0.7` dB, a 3.3 dB gap.
+- The connect pick compared that MC-DPSK SNR against OFDM floors measured in OFDM's own SNR, so a
+  real station entered OFDM about 3.4 dB below its floor. Shown on the gate: with the hardware TX
+  model at dial 15 (CONNECT 7.4 dB, OFDM about 4 dB) the uncorrected link entered OFDM QPSK R1/4
+  and never delivered a byte in 290 s (see BUG-ASYNC-ACK-ALWAYS-DROPPED for the stall).
+- OTASim had no model of the sending radio's ALC or PA.
+
+**What changed.**
+- `ota_channel_core`: `TxPaAlcChannelModel` (the sender's ALC and PA, applied to its audio before
+  fading and noise). ALC: envelope gain with attack/release (2 / 300 ms) holding drive x |a(t)|
+  at the PEP; PA: Rapp AM/AM (p 2, saturation 3 dB above PEP). Both are real-valued gains on the
+  analytic envelope, so the output is the input delayed 127 samples times one gain; the 255-tap
+  Hilbert only estimates the envelope. `TxPaConfig`, `parseTxPaSpec`, `ChannelConfig::tx_pa`,
+  `SessionConfig::tx_pa`; `ota_simulator serve --lobby-tx-pa SPEC`;
+  `gui_qso_scenario.sh --tx-pa SPEC` and `--tx-model sim|hardware` (hardware sets
+  `ULTRA_SIM_PAPR_PENALTY=1` on both stations: every burst at the same peak). TX_MODEL / TX_PA in
+  `summary.env`.
+- `connection_policy::selectLadderRungPaprCorrected`: OFDM candidacy and its entry rate are judged
+  at the measured MC-DPSK SNR minus the TX PAPR offset; the MC-DPSK rungs keep the measured SNR.
+  If the corrected pick leaves OFDM, the best MC-DPSK rung below the OFDM floor is taken.
+  `ofdmEntryFloorFor(channel)` is now the single floor lookup (`selectLadderRung` uses it too).
+- The offset: `App::noteTxBurstLevelForPapr` measures the station's own CONNECT/CONNECT_ACK and OFDM
+  data bursts after TX normalization (EMA per class, leaf mutex: the TX path runs on the main and
+  RX threads) and hands the difference to `Connection::setTxPaprOffsetDb` (atomic store; the TX
+  path can run inside a Connection callback). Prior before both are measured: 0 for the default
+  simulator (average-level normalization), `kPeakNormalizedOfdmBelowMcDpskDb` = 3.4 dB for a
+  peak-normalized TX. `ultra_tnc` sets the prior (0 with `--sim-audio`). The responder applies its
+  own offset to the peer's CONNECT: both stations run the same waveforms and normalization.
+- Knob `ULTRA_PAPR_SNR_CORRECTION` (default on; `0` disables). Turn it off on a bench whose noise
+  tracks the signal level (IONOS): there the gap does not reach the receiver's SNR.
+
+**Verification.**
+- CTest `TxPaAlcModel` (new): linear below PEP (output = delayed input), overdriven tone held at
+  PEP with the predicted Rapp gain, ALC attack/release constants, a 59-tone signal driven 3 dB into
+  ALC loses 0.4 dB of PAPR and gains 1.1 dB of average power, chunk invariance, parser, factory.
+  `ConnectionPolicy` 443/443 (5 new checks: zero offset = plain ladder at every SNR; the floor
+  shifts by the offset on AWGN and Good; below the floor the MC-DPSK pick is unchanged). Full
+  `ctest` 110/110.
+- GUI gate, AWGN, seed 42, 7.3 Hz, 2 KB, `--tx-model hardware`, correction on vs off:
+
+  | Dial | CONNECT SNR | on | off |
+  |---|---|---|---|
+  | 15 | 7.4 dB | MC-DPSK, PASS 90 bps | OFDM QPSK R1/4, **FAIL, 0 bytes in 290 s** |
+  | 16 | 8.4 dB | MC-DPSK, PASS 90 bps | OFDM, PASS 770 bps |
+  | 18 | 10.4 dB | OFDM, PASS 960 bps | OFDM, PASS 980 bps |
+
+  Default simulator AWGN@7 4 KB: PASS 1170 bps (offset 0, pick unchanged). Good@20 21 KB with
+  `--tx-model hardware --tx-pa drive_db=3`: PASS 1920 bps.
+- **Cost, by design:** at dial 16 the OFDM SNR is about 5 dB, inside the floor's documented 2 dB
+  margin (QPSK R1/4 reaches 10 % FER at 4.0 dB; the floor adds 2 dB for the connect estimate and
+  the control plane). The corrected pick applies that margin as the default simulator already does
+  at dial 5; the margin is the lever to revisit once BUG-ASYNC-ACK-ALWAYS-DROPPED is fixed. Not
+  validated on hardware.
+
 ## 2026-11-09 — RELEASE: v0.6.0-pre-alpha
 
 Version 0.5.1 -> 0.6.0 in `CMakeLists.txt` (the binaries, TNC `VERSION` reply and OTASim report

@@ -4,6 +4,7 @@
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
 #include "connection_policy.hpp"
+#include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
 #include "goodput_rate_controller.hpp"
@@ -637,6 +638,21 @@ public:
     // group's ACK carries uses it; consumed once.
     void setBurstFrameEvms(const std::vector<float>& evm_db) {
         burst_obs_frame_evm_db_ = evm_db;
+    }
+
+    // PEAK-LIMITED TX (connection_policy::selectLadderRungPaprCorrected): how much weaker this
+    // station's OFDM data bursts leave its transmitter than its MC-DPSK handshake frames, in dB of
+    // average in-band power at the same peak, measured by the audio TX path on its own bursts.
+    // The responder applies it to the PEER's CONNECT: the gap is a property of the waveforms and
+    // of the TX normalization, which both stations share (same modem build, both hardware or both
+    // simulator), so our own offset stands in for the peer's.
+    // Lock-free (an atomic store): the TX path can run inside a Connection callback that already
+    // holds the protocol mutex. 0 = no correction; ULTRA_PAPR_SNR_CORRECTION=0 forces 0.
+    void setTxPaprOffsetDb(float db) { tx_papr_offset_db_.store(db, std::memory_order_relaxed); }
+    float txPaprOffsetDb() const {
+        return connection_policy::paprSnrCorrectionEnabled()
+                   ? tx_papr_offset_db_.load(std::memory_order_relaxed)
+                   : 0.0f;
     }
 
     // RX-AUTHORITY PREDICTIVE: the group's per-carrier linear-SNR snapshot
@@ -1421,6 +1437,7 @@ private:
     // This group's per-data-frame EVM SNR (dB, NaN = not measured), fed by the modem binding
     // before onBurstGroupReceived and consumed by the selector exactly once.
     std::vector<float> burst_obs_frame_evm_db_;
+    std::atomic<float> tx_papr_offset_db_{0.0f};
     // The automatic connect selector's coherent rung BEFORE the conservative
     // first-group cap.  The cap controls only what goes on air; it must not tell
     // the outcome estimator that a strong link was initially believed weak.

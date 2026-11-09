@@ -14,6 +14,7 @@
 #include "ptt/ptt_driver.hpp"
 #include "protocol/protocol_engine.hpp"
 
+#include <limits>
 #include <vector>
 #include <complex>
 #include <random>
@@ -504,6 +505,16 @@ private:
     bool queueRealTxSamples(const std::vector<float>& samples, const char* context,
                             bool in_qso_data = false,
                             bool disconnect_control = false);
+    // PEAK-LIMITED TX PAPR correction (connection_policy::selectLadderRungPaprCorrected): the
+    // in-band level of this station's own MC-DPSK CONNECT/CONNECT_ACK bursts and OFDM data bursts
+    // after TX normalization (dB, EMA over bursts); their difference feeds the connect-time pick.
+    // Guarded by tx_papr_mutex_ (a leaf lock): the TX path runs on the main thread and, from
+    // protocol callbacks, on the modem RX thread.
+    std::mutex tx_papr_mutex_;
+    float tx_level_mcdpsk_db_ = std::numeric_limits<float>::quiet_NaN();
+    float tx_level_ofdm_db_ = std::numeric_limits<float>::quiet_NaN();
+    float txPaprPriorDb() const;
+    void noteTxBurstLevelForPapr(const std::vector<float>& normalized, const char* context);
     bool doQueueRealTxSamples(const std::vector<float>& samples, const char* context,
                               bool disconnect_control = false);
     bool shouldDeferInQsoDataForTx() const;

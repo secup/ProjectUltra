@@ -145,6 +145,9 @@ public:
     void onBurstOutcomeUnknown();
     void setBurstCarrierGammas(const std::vector<float>& gammas);
     void setBurstFrameEvms(const std::vector<float>& evm_db);  // ULTRA_RATE_EVM
+    // Lock-free on purpose (atomic store in Connection): callable from the TX path while a
+    // Connection callback holds the engine mutex.
+    void setTxPaprOffsetDb(float db) { connection_.setTxPaprOffsetDb(db); }
     void onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_per_frame);
 
     // §15 step 4d-ii: hand a tone-burst ACK detection from the receiver's

@@ -392,6 +392,12 @@ private:
 
     void configureModem() {
         engine_.setLocalCallsign(cfg_.callsign);
+        // Peak-limited TX PAPR correction: the hardware path scales every burst to the same peak,
+        // so OFDM data rides below the MC-DPSK handshake the peer measures; --sim-audio scales to
+        // the same average level (no gap). The measured prior; the GUI refines it live.
+        engine_.setTxPaprOffsetDb(cfg_.sim_audio
+                                      ? 0.0f
+                                      : ultra::protocol::connection_policy::kPeakNormalizedOfdmBelowMcDpskDb);
         engine_.setMeasuredSNR(cfg_.snr_db, ultra::SNRSource::NONE);
         // Inbound bulk transfers (the peer's accumulated data-port stream, shipped as a
         // modem file transfer) reconstruct here; TNCBridge::onFileReceived reads the wire

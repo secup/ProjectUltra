@@ -35,6 +35,22 @@ enum class ChannelType {
     REAL_HF_LOOP
 };
 
+// SSB transmitter chain (ALC + PA) of the SENDING radio, applied to its audio before the channel
+// (TxPaAlcChannelModel). `pep` is the RF-envelope amplitude at full PEP in audio units: the radio's
+// ALC holds the envelope there; `drive_db` is the radio's audio gain relative to the level that
+// just reaches PEP (> 0 drives the modem's peaks into ALC and compression).
+struct TxPaConfig {
+    bool enabled = false;
+    float pep = 0.5f;           // ALC threshold = the hardware TX path's default peak target
+    float drive_db = 0.0f;
+    float rapp_p = 2.0f;        // PA AM/AM smoothness (Rapp); 2-3 for solid-state HF PAs
+    float sat_db = 3.0f;        // PA saturation above the ALC threshold
+    float attack_ms = 2.0f;     // radio ALC attack (1-5 ms typical)
+    float release_ms = 300.0f;  // radio ALC release (100-500 ms typical)
+};
+// "pep=0.5,drive_db=3,p=2,sat_db=3,attack_ms=2,release_ms=300" (any subset; "on" = defaults).
+std::optional<TxPaConfig> parseTxPaSpec(std::string_view spec);
+
 struct ChannelConfig {
     ChannelType type = ChannelType::PASSTHROUGH;
     float snr_db = 20.0f;
@@ -49,6 +65,8 @@ struct ChannelConfig {
     // error minus the receiver's. 0 = no time scaling (byte-identical models). A non-zero value
     // wraps the model (outermost) in ClockOffsetChannelModel.
     float clock_ppm = 0.0f;
+    // The sending radio's ALC/PA; disabled = byte-identical models.
+    TxPaConfig tx_pa;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
@@ -177,6 +195,48 @@ private:
     int64_t out_count_ = 0;
     uint64_t slips_ = 0;
     std::vector<float> inner_out_;
+};
+
+// The sending radio's ALC and PA, applied to its audio BEFORE the wrapped channel (fading and
+// noise). SSB maps the audio's analytic envelope onto the RF envelope, so both act on |a(t)|:
+//   - ALC: gain g(t) pulled down with the attack time constant whenever drive * |a| * g exceeds
+//     the PEP, released back toward 1 with the release constant (a real radio's level loop, not a
+//     per-burst normalizer: a burst start overshoots for a few ms, a strong segment depresses the
+//     next few hundred ms);
+//   - PA: Rapp AM/AM, u -> u / (1 + (u / A_sat)^(2p))^(1/(2p)), A_sat = PEP * 10^(sat_db/20).
+// Both are real-valued gains on the envelope, so the output is the delayed input times one
+// time-varying gain: the Hilbert filter (255-tap Blackman) only estimates the envelope and its
+// limited low-frequency accuracy never reaches the signal path. Below PEP with drive_db <= 0 the
+// output is the input delayed by kDelaySamples. Chunk-invariant.
+class TxPaAlcChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+    static constexpr int kHilbertTaps = 255;
+    static constexpr int kDelaySamples = (kHilbertTaps - 1) / 2;
+
+    TxPaAlcChannelModel(std::unique_ptr<IChannelModel> inner, const TxPaConfig& config,
+                        uint32_t sample_rate);
+
+    void reset() override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
+
+    const TxPaConfig& config() const { return config_; }
+    float alcGain() const { return static_cast<float>(gain_); }
+
+private:
+    std::unique_ptr<IChannelModel> inner_;
+    TxPaConfig config_;
+    double drive_ = 1.0;
+    double a_att_ = 0.0;
+    double a_rel_ = 0.0;
+    double sat_ = 0.0;
+    double gain_ = 1.0;
+    std::vector<float> hq_;     // reversed Hilbert taps
+    std::vector<float> line_;   // doubled delay line
+    size_t idx_ = 0;
+    std::vector<float> pa_out_;
 };
 
 class PassthroughChannelModel final : public IChannelModel {

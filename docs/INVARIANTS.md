@@ -362,6 +362,16 @@ The slope is applied only when significant against the between-group spread (>= 
 standard errors), so a fading trend never moves a slice. The model belongs to the soundcard pair:
 reset at session end, not on the per-turnaround decoder reset. `ULTRA_SCO_TRACK=0` measures but
 never corrects.
+
+### INV-SNR-PAPR-001: an SNR measured on one waveform is converted before judging another
+
+**Rule:** the connect SNR is measured on the peer's MC-DPSK CONNECT frames. A transmitter that
+scales every burst to the same PEAK (the hardware TX path; any real PA) sends OFDM data weaker in
+average power, by the station's measured TX PAPR offset. Judge OFDM candidacy and its entry rate at
+`measured - offset` (`selectLadderRungPaprCorrected`); never shift the MC-DPSK rungs, which were
+measured on MC-DPSK. The offset comes from the station's own normalized bursts (0 when the TX
+normalizes average power, as the default simulator does), is handed to `Connection` lock-free, and
+is disabled with `ULTRA_PAPR_SNR_CORRECTION=0` on a bench whose noise tracks the signal level.
 ---
 
 ## Sample Position Invariants

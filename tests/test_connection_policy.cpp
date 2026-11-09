@@ -1600,6 +1600,33 @@ void test_scripted_disconnect_quit_requires_protocol_completion() {
           "an observed disconnect may quit exactly at the log-grace boundary");
 }
 
+void test_ladder_papr_correction() {
+    // Peak-limited TX: OFDM judged at measured - offset, MC-DPSK at the measured SNR.
+    const float awgn_floor = ofdmEntryFloorAwgnDb();
+    const float awgn = 0.0f;   // fading index -> AWGN class
+    const float good = 0.30f;  // -> GOOD class
+    bool same = true;
+    for (float snr = 0.0f; snr <= 30.0f; snr += 0.5f) {
+        same = same &&
+               selectLadderRungPaprCorrected(snr, awgn, 0.0f).id == selectLadderRung(snr, awgn).id &&
+               selectLadderRungPaprCorrected(snr, good, 0.0f).id == selectLadderRung(snr, good).id;
+    }
+    CHECK(same, "PAPR correction: a zero offset reproduces the plain ladder at every SNR");
+    CHECK(selectLadderRung(awgn_floor + 1.0f, awgn).id == LadderRungId::OFDM_CHIRP &&
+              selectLadderRungPaprCorrected(awgn_floor + 1.0f, awgn, 3.4f).id == LadderRungId::ROBUST,
+          "PAPR correction: AWGN 1 dB over the OFDM floor with a 3.4 dB offset stays MC-DPSK DQPSK");
+    CHECK(selectLadderRungPaprCorrected(awgn_floor + 3.5f, awgn, 3.4f).id == LadderRungId::OFDM_CHIRP,
+          "PAPR correction: OFDM still entered once it clears its floor after the offset");
+    CHECK(selectLadderRungPaprCorrected(kOFDMEntryFloorGoodDb + 2.0f, good, 3.4f).waveform ==
+                  WaveformMode::MC_DPSK &&
+              selectLadderRungPaprCorrected(kOFDMEntryFloorGoodDb + 4.0f, good, 3.4f).waveform ==
+                  WaveformMode::OFDM_CHIRP,
+          "PAPR correction: the Good floor shifts by the offset the same way");
+    CHECK(selectLadderRungPaprCorrected(awgn_floor - 2.0f, awgn, 3.4f).id ==
+              selectLadderRung(awgn_floor - 2.0f, awgn).id,
+          "PAPR correction: below the OFDM floor the MC-DPSK pick is the measured-SNR one");
+}
+
 int main() {
     // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
     // function-local static on the first policy call — pin it to the disabled
@@ -1628,6 +1655,7 @@ int main() {
 
     test_fading_labels_and_capabilities();
     test_ladder_rung_selection();
+    test_ladder_papr_correction();
     test_wide_ofdm_timing_and_timeout();
     test_narrow_ofdm_timing_and_timeout();
     test_mc_dpsk_window_timing();

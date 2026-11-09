@@ -1181,6 +1181,17 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
                                  connectAffineBasisEnabled());
 }
 
+// The wideband OFDM entry floor per channel class (dB, in-band SNR of the OFDM data itself).
+inline float ofdmEntryFloorFor(ChannelClassification channel) {
+    switch (channel) {
+        case ChannelClassification::AWGN: return ofdmEntryFloorAwgnDb();
+        case ChannelClassification::GOOD: return kOFDMEntryFloorGoodDb;
+        case ChannelClassification::MODERATE: return kOFDMEntryFloorModerateDb;
+        case ChannelClassification::POOR: return kOFDMEntryFloorPoorDb;
+    }
+    return 10.0f;
+}
+
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
     // DIAGNOSTIC force (ULTRA_FORCE_MCDPSK_RUNG=LOW|MID|ROBUST|STANDARD): pin the
     // MC-DPSK rung, bypassing the SNR thresholds, to MEASURE each rung's real floor
@@ -1194,7 +1205,7 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
         if (s == "ROBUST")   return ladderRungForId(LadderRungId::ROBUST);
         if (s == "STANDARD") return ladderRungForId(LadderRungId::STANDARD);
     }
-    float ofdm_floor = 10.0f;
+    const float ofdm_floor = ofdmEntryFloorFor(channel);
     float robust_mid_floor = 5.0f;  // DBPSK R1/4 floor (the robust MC-DPSK fallback)
 
     // OFDM entry floors are the SINGLE source in waveform_selection.hpp
@@ -1203,19 +1214,15 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
     // DBPSK floor, local to this ladder.
     switch (channel) {
         case ChannelClassification::AWGN:
-            ofdm_floor = ofdmEntryFloorAwgnDb();
             robust_mid_floor = 5.0f;
             break;
         case ChannelClassification::GOOD:
-            ofdm_floor = kOFDMEntryFloorGoodDb;
             robust_mid_floor = 6.0f;
             break;
         case ChannelClassification::MODERATE:
-            ofdm_floor = kOFDMEntryFloorModerateDb;
             robust_mid_floor = 7.0f;
             break;
         case ChannelClassification::POOR:
-            ofdm_floor = kOFDMEntryFloorPoorDb;
             robust_mid_floor = 9.0f;
             break;
     }
@@ -1276,6 +1283,39 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
 
 inline LadderRung selectLadderRung(float snr_db, float fading_index) {
     return selectLadderRung(snr_db, classifyChannel(fading_index));
+}
+
+// PEAK-LIMITED TRANSMITTER: PAPR CORRECTION OF THE CONNECT-TIME PICK (ULTRA_PAPR_SNR_CORRECTION,
+// default on). The connect SNR is measured on the peer's MC-DPSK handshake frames. A transmitter
+// that scales every burst to the same PEAK (the hardware TX path, normalizeTxBurstForHardware; a
+// real PA is peak-limited too) sends OFDM data ofdm_offset_db weaker in average in-band power,
+// because OFDM's peak-to-average ratio is higher (2026-11-09, production encoder at the hardware
+// peak target: MC-DPSK CONNECT -7.7 dB, OFDM data bursts -10.5..-11.6 dB vs the sim reference).
+// The OFDM floors and anchors are in OFDM's own SNR, so OFDM candidacy and its entry rate are
+// judged at snr_db - ofdm_offset_db; the MC-DPSK rungs keep the measured SNR, which was measured
+// on MC-DPSK. ofdm_offset_db is 0 when the transmitter normalizes average power (the default
+// simulator), so the pick is unchanged there.
+inline bool paprSnrCorrectionEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_PAPR_SNR_CORRECTION");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return on;
+}
+
+// Prior for a peak-normalized transmitter before this station has measured its own bursts:
+// midpoint of the chirp-anchored (2.9 dB) and chirp-less (3.9 dB) OFDM bursts above.
+inline constexpr float kPeakNormalizedOfdmBelowMcDpskDb = 3.4f;
+
+inline LadderRung selectLadderRungPaprCorrected(float snr_db, float fading_index,
+                                                float ofdm_offset_db) {
+    const ChannelClassification channel = classifyChannel(fading_index);
+    const LadderRung measured = selectLadderRung(snr_db, channel);
+    if (!(ofdm_offset_db > 0.0f) || !isOFDMMode(measured.waveform)) return measured;
+    const LadderRung corrected = selectLadderRung(snr_db - ofdm_offset_db, channel);
+    if (isOFDMMode(corrected.waveform)) return corrected;
+    // OFDM would land below its floor: the best MC-DPSK rung at the MEASURED SNR.
+    return selectLadderRung(std::min(snr_db, ofdmEntryFloorFor(channel) - 0.01f), channel);
 }
 
 inline uint8_t modeToCapabilityBit(WaveformMode mode) {

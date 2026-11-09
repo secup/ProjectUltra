@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <fstream>
@@ -1143,6 +1144,92 @@ void ClockOffsetChannelModel::process(std::span<const float> input,
     }
 }
 
+std::optional<TxPaConfig> parseTxPaSpec(std::string_view spec) {
+    TxPaConfig c;
+    c.enabled = true;
+    if (spec.empty() || spec == "on" || spec == "1") return c;
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        const size_t comma = spec.find(',', pos);
+        const std::string_view item =
+            spec.substr(pos, comma == std::string_view::npos ? std::string_view::npos : comma - pos);
+        const size_t eq = item.find('=');
+        if (eq == std::string_view::npos || eq == 0) return std::nullopt;
+        const std::string key(item.substr(0, eq));
+        const std::string val(item.substr(eq + 1));
+        char* end = nullptr;
+        const float v = std::strtof(val.c_str(), &end);
+        if (end == val.c_str() || *end != '\0' || !std::isfinite(v)) return std::nullopt;
+        if (key == "pep" && v > 0.0f && v <= 1.0f) c.pep = v;
+        else if (key == "drive_db" && v >= -40.0f && v <= 40.0f) c.drive_db = v;
+        else if (key == "p" && v >= 0.5f && v <= 20.0f) c.rapp_p = v;
+        else if (key == "sat_db" && v >= 0.0f && v <= 20.0f) c.sat_db = v;
+        else if (key == "attack_ms" && v > 0.0f && v <= 1000.0f) c.attack_ms = v;
+        else if (key == "release_ms" && v > 0.0f && v <= 10000.0f) c.release_ms = v;
+        else return std::nullopt;
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+    return c;
+}
+
+TxPaAlcChannelModel::TxPaAlcChannelModel(std::unique_ptr<IChannelModel> inner,
+                                         const TxPaConfig& config, uint32_t sample_rate)
+    : inner_(std::move(inner)), config_(config) {
+    const double fs = static_cast<double>(sample_rate);
+    drive_ = std::pow(10.0, static_cast<double>(config_.drive_db) / 20.0);
+    a_att_ = 1.0 - std::exp(-1.0 / (static_cast<double>(config_.attack_ms) * 1e-3 * fs));
+    a_rel_ = 1.0 - std::exp(-1.0 / (static_cast<double>(config_.release_ms) * 1e-3 * fs));
+    sat_ = static_cast<double>(config_.pep) * std::pow(10.0, static_cast<double>(config_.sat_db) / 20.0);
+    // Band-limited Hilbert transformer (envelope estimate only), Blackman window.
+    const double cutoff = std::min(static_cast<double>(kWattersonAnalyticLowpassHz), 0.45 * fs) / fs;
+    const double omega_c = 2.0 * M_PI * cutoff;
+    std::vector<double> h(kHilbertTaps, 0.0);
+    for (int n = 0; n < kHilbertTaps; ++n) {
+        const int k = n - kDelaySamples;
+        if (k != 0) h[static_cast<size_t>(n)] = (1.0 - std::cos(omega_c * k)) / (M_PI * k);
+        const double w = 2.0 * M_PI * n / static_cast<double>(kHilbertTaps - 1);
+        h[static_cast<size_t>(n)] *= 0.42 - 0.5 * std::cos(w) + 0.08 * std::cos(2.0 * w);
+    }
+    hq_.resize(kHilbertTaps);
+    for (int m = 0; m < kHilbertTaps; ++m) {
+        hq_[static_cast<size_t>(m)] = static_cast<float>(h[static_cast<size_t>(kHilbertTaps - 1 - m)]);
+    }
+    reset();
+}
+
+void TxPaAlcChannelModel::reset() {
+    if (inner_) inner_->reset();
+    line_.assign(2 * static_cast<size_t>(kHilbertTaps), 0.0f);
+    idx_ = 0;
+    gain_ = 1.0;
+}
+
+void TxPaAlcChannelModel::process(std::span<const float> input, uint64_t start_sample,
+                                  std::vector<float>& output) {
+    const size_t taps = static_cast<size_t>(kHilbertTaps);
+    pa_out_.resize(input.size());
+    const double pep = static_cast<double>(config_.pep);
+    const double two_p = 2.0 * static_cast<double>(config_.rapp_p);
+    for (size_t s = 0; s < input.size(); ++s) {
+        // Doubled delay line: the newest `taps` samples are contiguous at line_[idx_+1 ..].
+        line_[idx_] = input[s];
+        line_[idx_ + taps] = input[s];
+        const float* win = &line_[idx_ + 1];
+        double q = 0.0;
+        for (size_t m = 0; m < taps; ++m) q += static_cast<double>(hq_[m]) * win[m];
+        const double i = static_cast<double>(win[taps - 1 - static_cast<size_t>(kDelaySamples)]);
+        idx_ = (idx_ + 1) % taps;
+        const double env = drive_ * std::sqrt(i * i + q * q);
+        const double want = (env * gain_ > pep && env > 0.0) ? pep / env : 1.0;
+        gain_ += (want < gain_ ? a_att_ : a_rel_) * (want - gain_);
+        const double u = gain_ * env;
+        const double rapp = (u > 0.0) ? 1.0 / std::pow(1.0 + std::pow(u / sat_, two_p), 1.0 / two_p) : 1.0;
+        pa_out_[s] = static_cast<float>(drive_ * gain_ * rapp * i);
+    }
+    inner_->process(std::span<const float>(pa_out_.data(), pa_out_.size()), start_sample, output);
+}
+
 namespace {
 std::unique_ptr<IChannelModel> createChannelModelUnshifted(const ChannelConfig& config,
                                                            const RngRoot& rng_root,
@@ -1153,6 +1240,11 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
                                                   const RngRoot& rng_root,
                                                   std::string_view stream_name) {
     auto model = createChannelModelUnshifted(config, rng_root, stream_name);
+    if (config.tx_pa.enabled) {
+        // The sender's ALC/PA acts on its audio BEFORE fading and noise.
+        model = std::make_unique<TxPaAlcChannelModel>(std::move(model), config.tx_pa,
+                                                      config.sample_rate);
+    }
     if (std::abs(config.cfo_hz) > 0.001f) {
         model = std::make_unique<FrequencyShiftChannelModel>(std::move(model), config.cfo_hz,
                                                              config.sample_rate);

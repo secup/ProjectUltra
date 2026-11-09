@@ -32,6 +32,11 @@ add_executable(test_clock_offset_model test_clock_offset_model.cpp)
 target_link_libraries(test_clock_offset_model PRIVATE ota_channel_core)
 add_test(NAME ClockOffsetModel COMMAND test_clock_offset_model)
 
+# OTASim: the sending radio's ALC and PA (gui_qso_scenario.sh --tx-pa).
+add_executable(test_tx_pa_alc_model test_tx_pa_alc_model.cpp)
+target_link_libraries(test_tx_pa_alc_model PRIVATE ota_channel_core)
+add_test(NAME TxPaAlcModel COMMAND test_tx_pa_alc_model)
+
 # Session clock-drift model behind in-burst member slicing (BUG-SCO-NOT-TRACKED-IN-BURST).
 add_executable(test_sco_tracker test_sco_tracker.cpp)
 target_include_directories(test_sco_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)

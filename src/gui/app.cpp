@@ -489,6 +489,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
     }
     if (!local_call.empty()) {
         protocol_.setLocalCallsign(local_call);
+        protocol_.setTxPaprOffsetDb(txPaprPriorDb());
         modem_.setLogPrefix(local_call);
     }
 
@@ -3899,6 +3900,56 @@ void App::flushDeferredTxIfReady() {
     doQueueRealTxSamples(samples, front.context.c_str());
 }
 
+namespace {
+// ULTRA_SIM_PAPR_PENALTY=1 (gui_qso_scenario.sh --tx-model hardware): the sim TX scales every
+// burst to the same PEAK like the hardware path instead of the same average level.
+bool simPaprPenaltyEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_SIM_PAPR_PENALTY");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+}  // namespace
+
+float App::txPaprPriorDb() const {
+    // Average-level normalization (the default simulator) leaves no gap between the waveforms;
+    // peak normalization (the hardware path, or the sim with ULTRA_SIM_PAPR_PENALTY=1) does.
+    return (simulation_enabled_ && !simPaprPenaltyEnabled())
+               ? 0.0f
+               : protocol::connection_policy::kPeakNormalizedOfdmBelowMcDpskDb;
+}
+
+void App::noteTxBurstLevelForPapr(const std::vector<float>& normalized, const char* context) {
+    // MC-DPSK CONNECT / CONNECT_ACK ("TX audio" before the link is up; PING/PONG have their own
+    // contexts) are the frames the peer measures the connect SNR on; "TX burst audio" is the OFDM
+    // data that follows. The state is the atomic cache (this can run on the RX thread); a
+    // DISCONNECT sent while DISCONNECTING is in the session's waveform and is not counted.
+    const auto state = conn_state_cached_.load(std::memory_order_relaxed);
+    const bool ofdm_data = context && std::strcmp(context, "TX burst audio") == 0;
+    const bool handshake = context && std::strcmp(context, "TX audio") == 0 &&
+                           (state == protocol::ConnectionState::DISCONNECTED ||
+                            state == protocol::ConnectionState::PROBING ||
+                            state == protocol::ConnectionState::CONNECTING);
+    float rms = 0.0f;
+    if (ofdm_data || handshake) {
+        rms = ultra::sim::measureTxBurstInBandRms(normalized).in_band_rms;
+    }
+    float offset = 0.0f;
+    {
+        std::lock_guard<std::mutex> lock(tx_papr_mutex_);
+        if (rms > 0.0f && std::isfinite(rms)) {
+            const float db = 20.0f * std::log10(rms);
+            float& slot = ofdm_data ? tx_level_ofdm_db_ : tx_level_mcdpsk_db_;
+            slot = std::isfinite(slot) ? slot + 0.3f * (db - slot) : db;
+        }
+        offset = (std::isfinite(tx_level_mcdpsk_db_) && std::isfinite(tx_level_ofdm_db_))
+                     ? std::max(0.0f, tx_level_mcdpsk_db_ - tx_level_ofdm_db_)
+                     : txPaprPriorDb();
+    }
+    protocol_.setTxPaprOffsetDb(offset);  // lock-free (atomic store in Connection)
+}
+
 bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* context,
                                bool disconnect_control) {
     if (samples.empty()) {
@@ -3937,11 +3988,7 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
         // reference, so the data frames' effective SNR drops by exactly their PAPR back-off
         // (~10.26 dB measured for coherent QPSK R2/3) — reproducing the IONOS burst stall
         // rig-free. Knob off => byte-identical to today.
-        static const bool kSimPaprPenalty = [] {
-            const char* e = std::getenv("ULTRA_SIM_PAPR_PENALTY");
-            return e && e[0] == '1';
-        }();
-        if (kSimPaprPenalty) {
+        if (simPaprPenaltyEnabled()) {
             // ULTRA_SIM_TX_PEAK optionally overrides the peak target (default = the operator
             // tx_drive). Dialing it low (e.g. 0.12) reproduces the LOW RX operating level of a
             // weak/cheap TX (real IONOS Pi5 card) so the absolute-vs-relative erasure gate can
@@ -3994,6 +4041,7 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
         }
 
         std::string error;
+        noteTxBurstLevelForPapr(sim_samples, context);
         if (!ota_audio_->queueTxSamples(sim_samples, &error)) {
             tx_in_progress_ = false;
             guiLog("%s: OTASim TX failed: %s",
@@ -4052,6 +4100,7 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
     const float requested_peak = effectiveTxDriveForContext(context);
     const auto measurement = ultra::sim::normalizeTxBurstForHardware(
         hardware_samples, requested_peak);
+    noteTxBurstLevelForPapr(hardware_samples, context);
     if (protocol::connection_policy::softwareAlcEnabled() && context &&
         std::strcmp(context, "TX burst audio") == 0) {
         // This is the last software boundary before the samples enter the audio

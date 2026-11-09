@@ -282,9 +282,23 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // with no prior OFDM data, honors the pool), then the Good/Moderate coherence verdict.
         const float rate_fading = connection_policy::coherenceAdjustedFadingIndex(
             entry_fading, coherence_score_, coherence_valid_);
+        // Peak-limited transmitter: OFDM is judged at the SNR it will actually get, the MC-DPSK
+        // rungs at the measured one (connection_policy::selectLadderRungPaprCorrected).
+        const float papr_offset_db = txPaprOffsetDb();
+        const float ofdm_selection_snr_db = selection_snr_db - papr_offset_db;
         const auto selected_rung = rate_selection_snr_valid
-            ? connection_policy::selectLadderRung(selection_snr_db, rate_fading)
+            ? connection_policy::selectLadderRungPaprCorrected(selection_snr_db, rate_fading,
+                                                               papr_offset_db)
             : connection_policy::ladderRungForId(LadderRungId::ROBUST);
+        if (rate_selection_snr_valid && papr_offset_db > 0.0f) {
+            const auto uncorrected =
+                connection_policy::selectLadderRung(selection_snr_db, rate_fading);
+            LOG_MODEM(INFO,
+                      "Connection: PAPR correction %.1f dB (peak-limited TX): OFDM judged at "
+                      "%.1f dB, measured %.1f dB -> %s%s",
+                      papr_offset_db, ofdm_selection_snr_db, selection_snr_db, selected_rung.name,
+                      uncorrected.id != selected_rung.id ? " (uncorrected pick would be OFDM)" : "");
+        }
         const bool ladder_selected =
             rate_selection_snr_valid &&
             !forced_profile && !forced_waveform &&
@@ -354,8 +368,9 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
 
         // Get recommended mode based on SNR, fading AND the negotiated waveform
         // This ensures MC-DPSK uses R1/4, OFDM uses appropriate rate, etc.
-        recommendDataModeForWaveform(selection_snr_db, snr_source, rate_fading,
-                                     negotiated_mode_, rec_mod, rec_rate);
+        recommendDataModeForWaveform(isOFDMMode(negotiated_mode_) ? ofdm_selection_snr_db
+                                                                  : selection_snr_db,
+                                     snr_source, rate_fading, negotiated_mode_, rec_mod, rec_rate);
 
         LadderRungId rung_id = LadderRungId::UNKNOWN;
         if (ladder_selected) {
@@ -372,7 +387,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // borderline; ULTRA_ENTRY_CAP_R34 (default OFF) lets a data-aided reading that
         // clears the R3/4 anchor by >= 1 sigma enter at R3/4 (waveform_selection.hpp).
         if (isOFDMMode(negotiated_mode_)) {
-            CodeRate capped = capInitialOFDMRate(selection_snr_db, rate_fading, rec_rate, rec_mod,
+            CodeRate capped = capInitialOFDMRate(ofdm_selection_snr_db, rate_fading, rec_rate, rec_mod,
                                                  selection_snr_data_aided);
             if (capped != rec_rate) {
                 LOG_MODEM(INFO, "Connection: Bootstrap cap %s -> %s for initial OFDM setup (SNR=%.1f (%s), fading=%.2f)",

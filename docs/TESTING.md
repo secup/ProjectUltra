@@ -55,6 +55,11 @@ tools/gui_qso_scenario.sh --channel good --snr-db 20 --seed 42 --file-kb 21 --ou
 # The two radios' dial offset and soundcard clock offset (ALPHA hears -D Hz / +P ppm)
 tools/gui_qso_scenario.sh --channel awgn --snr-db 20 --cfo-hz 7.3 --clock-ppm 50 --out /tmp/X
 
+# A real station's TX levels: every burst at the same PEAK (high-PAPR OFDM rides below MC-DPSK),
+# plus the radio's ALC/PA driven 3 dB hot. The dial stays referenced to the simulator's reference
+# level, so the CONNECT arrives ~7.7 dB and OFDM data ~10.5-11.6 dB below the dial.
+tools/gui_qso_scenario.sh --channel good --snr-db 20 --tx-model hardware --tx-pa drive_db=3 --out /tmp/X
+
 # Force a specific PHY rung (measurement only — bypasses rate control)
 ULTRA_FORCE_DATA_MOD=QAM8 ULTRA_FORCE_DATA_RATE=R2_3 ULTRA_LOCK_RATE=1 \
   tools/gui_qso_scenario.sh --channel good --snr-db 20 --out /tmp/X
@@ -88,8 +93,8 @@ EOF
 ```
 
 Channel models: AWGN and ITU-R F.1487 Watterson Good (0.1 Hz / 0.5 ms), Moderate (0.5 Hz / 1 ms)
-and Poor (1 Hz / 2 ms), plus a per-receiver dial offset (`--lobby-rx-cfo-hz`) and soundcard clock
-offset (`--lobby-rx-clock-ppm`).
+and Poor (1 Hz / 2 ms), plus a per-receiver dial offset (`--lobby-rx-cfo-hz`), soundcard clock
+offset (`--lobby-rx-clock-ppm`) and the sending radios' ALC/PA (`--lobby-tx-pa`).
 
 ## Hardware testing (two stations)
 

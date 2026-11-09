@@ -37,6 +37,8 @@ CHANNEL="awgn"
 SNR_DB="20"
 CFO_HZ="0"
 CLOCK_PPM="0"
+TX_PA=""
+TX_MODEL="sim"
 RECORD=0
 SEED="42"
 EXPECT_RATE="R1/4"
@@ -70,6 +72,11 @@ usage() {
   printf '  --clock-ppm PPM                Soundcard clock offset between the two stations: BRAVO\n'
   printf '                                 runs PPM fast, so ALPHA hears BRAVO time-compressed by\n'
   printf '                                 PPM and BRAVO hears ALPHA stretched (default: 0)\n'
+  printf '  --tx-model sim|hardware        sim: every burst at the same average level (default);\n'
+  printf '                                 hardware: same PEAK level as a real station, so high-PAPR\n'
+  printf '                                 OFDM rides lower than MC-DPSK (sets ULTRA_SIM_PAPR_PENALTY=1)\n'
+  printf '  --tx-pa SPEC                   Senders'"'"' radio ALC/PA: on, or pep=0.5,drive_db=3,p=2,sat_db=3,\n'
+  printf '                                 attack_ms=2,release_ms=300 (default: none)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
@@ -184,6 +191,8 @@ while [[ $# -gt 0 ]]; do
     --snr-db) SNR_DB="${2:?}"; shift 2 ;;
     --cfo-hz) CFO_HZ="${2:?}"; shift 2 ;;
     --clock-ppm) CLOCK_PPM="${2:?}"; shift 2 ;;
+    --tx-model) TX_MODEL="${2:?}"; shift 2 ;;
+    --tx-pa) TX_PA="${2:?}"; shift 2 ;;
     --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
@@ -690,6 +699,8 @@ write_summary() {
     echo "SNR_DB=$SNR_DB"
     echo "CFO_HZ=$CFO_HZ"
     echo "CLOCK_PPM=$CLOCK_PPM"
+    echo "TX_MODEL=$TX_MODEL"
+    echo "TX_PA=$TX_PA"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -796,6 +807,14 @@ if command -v caffeinate >/dev/null 2>&1; then
   echo "CAFFEINATE_PID=$!" | tee -a "$SUMMARY"
 fi
 
+case "$TX_MODEL" in
+  sim) ;;
+  # Both stations scale every burst to the same PEAK like the hardware TX path
+  # (normalizeTxBurstForHardware), so high-PAPR OFDM data rides below MC-DPSK.
+  hardware) export ULTRA_SIM_PAPR_PENALTY=1 ;;
+  *) echo "--tx-model must be sim or hardware" >&2; exit 2 ;;
+esac
+
 pkill -f "$ROOT/build/ultra_gui" 2>/dev/null || true
 pkill -f "$ROOT/build/ota_simulator serve" 2>/dev/null || true
 sleep 2
@@ -833,6 +852,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   --lobby-seed "$SEED" \
   --lobby-rx-cfo-hz "BRAVO:${CFO_HZ},ALPHA:$(awk -v c="$CFO_HZ" 'BEGIN{printf "%g", -c}')" \
   --lobby-rx-clock-ppm "ALPHA:${CLOCK_PPM},BRAVO:$(awk -v c="$CLOCK_PPM" 'BEGIN{printf "%g", -c}')" \
+  ${TX_PA:+--lobby-tx-pa "$TX_PA"} \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

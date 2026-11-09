@@ -24,6 +24,18 @@ more often, the ACK falls into this path, and the sender retries to its cap.
 connect read 2.0 dB): 15 dropped, `seq=13 failed after 10 retries`. The MC-DPSK version of the
 same trap was total (BUG-MCDPSK-ACK-DROPPED, fixed by giving the tail completed-turn provenance).
 
+**Deterministic reproduction (2026-11-09, peak-limited TX model).** `tools/gui_qso_scenario.sh
+--channel awgn --snr-db 15 --seed 42 --cfo-hz 7.3 --file-kb 2 --tx-model hardware` with
+`ULTRA_PAPR_SNR_CORRECTION=0` (the correction keeps this link on MC-DPSK; without it OFDM runs at
+about 4 dB): 0 bytes in 290 s. The first burst decodes 6 data slices (turbo, 1 iteration, mean
+|LLR| 1.2) but its descriptor/CRC tail is lost: `Unproven burst marker abandoned ... no group
+callback/synchronous ACK emitted`, so the decoded frames are discarded. BRAVO then sends an ACK for
+the previous group (`group_seq=63 frame_mask=0x0000`) about 16.2 s after each of ALPHA's burst
+starts; it lasts 0.85 s and ALPHA's ACK window closes at 16.98 s, so every one of the 13 ACKs ends
+after the window (`armed window EXPIRED undetected`). ALPHA's resends (full chirp) then fail to
+decode (mean |LLR| 0.1), and the cycle repeats every 17 s. Here the ACK is sent, not dropped, but it
+is late for the same reason: the turn has no provenance.
+
 **Fix direction (needs rig evidence — the listen-before-ACK guards exist because keying over an
 incoming burst was measured to cost craters: F124/F127/F129/F176).** Decide at the deadline on
 NEW decoder evidence since the deferral (the peer is still transmitting) rather than on evidence
