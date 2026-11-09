@@ -10,6 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — RELEASE: v0.6.0-pre-alpha
+
+Version 0.5.1 -> 0.6.0 in `CMakeLists.txt` (the binaries, TNC `VERSION` reply and OTASim report
+it; the last tag was v0.5.2.1 while the build still said 0.5.1). Minor bump because the
+over-the-air protocol is not compatible with 0.5.x: turbo data frames and chirp-less group
+starts are on by default and not negotiated, so both stations must upgrade. Contents since
+v0.5.2.1 (49 commits): the speed stack on by default (`ULTRA_FAST`), MC-DPSK ACK fix, display-sleep
+fix, CFO-chain and tone-ACK fixes, clock-drift tracking, OTASim dial and clock offsets, message
+restore and idempotent resend, stale-SNR sentinel fixes, CI rework, README rewrite. Validated on
+the software channel simulator and CI only; hardware validation and Pi 5 turbo timing pending.
+
 ## 2026-11-09 — FIX(sync): in-burst sample-clock-offset tracking (BUG-SCO-NOT-TRACKED-IN-BURST)
 
 **What was broken.** Burst members were sliced at the fixed frame stride from one group-start
