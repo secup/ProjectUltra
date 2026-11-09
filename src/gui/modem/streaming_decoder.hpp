@@ -47,6 +47,7 @@
 #include "sync/sync_controller.hpp"   // SyncController — sync/z state owner (refactor §7)
 #include "sync/sync_ring_buffer.hpp"  // SyncRingBuffer — the shared audio ring (refactor §7 C3)
 #include "sync/cfo_tracker.hpp"       // CFOTracker — the tracked-CFO state (refactor §7 C-CFO)
+#include "sync/sco_tracker.hpp"       // ScoTracker — session clock-drift model for member slicing
 #include "frame_demodulator.hpp"      // FrameDemodulator — per-frame demod stage(s) (refactor §7 C-FD)
 #include "frame_decoder.hpp"          // FrameDecoder — soft-bits→frame FEC decode (refactor §7 C-FDec)
 #include "streaming_decode_policy.hpp"  // commandedGeometryEnabled / cadence constant
@@ -1562,6 +1563,14 @@ private:
     size_t burst_diag_group_start_abs_ = 0;
     size_t burst_next_pos_ = 0;          // buffer position for next continuation frame
     size_t burst_min_block_ = 0;         // samples per frame (cached from first frame)
+    // BUG-SCO-NOT-TRACKED-IN-BURST: members are sliced at the fixed stride PLUS the session
+    // clock-drift model's correction for their nominal distance from the group anchor
+    // (sync/sco_tracker.hpp). sco_applied_ is the correction already inside burst_next_pos_.
+    sync::ScoTracker sco_tracker_;
+    double sco_slice_dt_ = 0.0;
+    long sco_applied_ = 0;
+    void scoBeginGroup(double first_member_dt, double anchor_offset, bool anchor_reliable);
+    size_t scoAdvanceSlice(size_t pos);
     float burst_snr_ = 0.0f;             // Chirp sync-quality score
     float burst_cfo_ = 0.0f;             // CFO (updated per frame from pilot tracking)
     float burst_anchor_rms_ = 0.0f;      // group anchor (chirp-dominated, low-PAPR) sample

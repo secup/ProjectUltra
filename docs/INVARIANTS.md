@@ -351,6 +351,17 @@ lockstep: both stations run the same profile. Since 2026-11-09 the profile is ON
 that encodes a pre-flip contract pins it explicitly (ctest `ENVIRONMENT`, or the member's
 `set...ForTesting`), never by relying on the process default.
 
+
+### INV-SCO-001: in-burst members follow the session drift model, never their own estimate
+
+**Rule:** a burst member is sliced at the fixed frame stride plus `ScoTracker::correctionSamples`
+(the session clock-drift slope x the member's nominal distance from the group anchor). A member's
+own LTS timing estimate is evidence for the model, never a re-slice of that member: on fading a
+single faded frame's estimate is wrong, and per-frame re-slicing lost ~50 % of bursts (§14.25).
+The slope is applied only when significant against the between-group spread (>= 2 groups, 3
+standard errors), so a fading trend never moves a slice. The model belongs to the soundcard pair:
+reset at session end, not on the per-turnaround decoder reset. `ULTRA_SCO_TRACK=0` measures but
+never corrects.
 ---
 
 ## Sample Position Invariants

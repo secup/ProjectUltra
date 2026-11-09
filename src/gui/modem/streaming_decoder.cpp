@@ -1125,6 +1125,8 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     mode_ = mode;
     connected_ = connected;
     if (ending_connected_session) {
+        // The clock offset belongs to this soundcard pair; the next session's peer has its own.
+        sco_tracker_.reset();
         // Rung geometry is wire truth for one peer/session, not a durable modem
         // capability. Retaining it across disconnect lets a new same-rung Z27
         // session inherit the old peer's cw/Z81 tuple; reset() cannot clear this

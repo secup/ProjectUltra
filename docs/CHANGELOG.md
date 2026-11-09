@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FIX(sync): in-burst sample-clock-offset tracking (BUG-SCO-NOT-TRACKED-IN-BURST)
+
+**What was broken.** Burst members were sliced at the fixed frame stride from one group-start
+sync, so the two soundcards' clock difference accumulated member after member: at 100 ppm each
+59 360-sample frame slipped ~6 samples, the FFT window walked late into the next symbol, and member
+EVM fell 17.7 -> 10.8 dB across an 8-frame 16QAM R2/3 group (AWGN@20). Pre-existing (also on
+`ULTRA_FAST=0`); exposed by the new OTASim `--clock-ppm`. Re-slicing each member from its own LTS
+timing estimate is not the fix: that was disabled in May (§14.25) because a faded member's noisy
+estimate cut it at a wrong position and lost ~50 % of bursts on Good fading.
+
+**What changed.** `src/sync/sco_tracker.hpp` (`ScoTracker`, header-only): per-group Theil-Sen
+line through the members' (nominal distance from the anchor, total timing offset) points; the
+session slope is the mean of the last 8 group slopes, applied only when |slope| exceeds 3
+standard errors of the between-group spread (or the within-group error if larger) with at least
+two groups. A clock offset is the same in every group; a fading channel's mean-delay wander is
+not, so it never moves a slice. Decoder: `scoBeginGroup` at the group arm and late join,
+`scoAdvanceSlice` at every member advance (stride + round(slope x distance), whole samples),
+points after each member's demodulation, reset at session end. `ULTRA_SCO_TRACK=0` measures but
+never corrects. INV-SCO-001; map rows; CLAUDE.md OFDM invariants.
+
+**Verification.** CTest `ScoTracker` (100 ppm found and corrected from group 2, -99.5 ppm; a
+faded member does not tilt the fit; sign-flipping fading trends never corrected; 0 ppm with
+3-sample timing noise: 0 of 160 decisions corrected; guards). ctest 109/109. GUI gate (seed 42,
+7.3 Hz): estimates -102.2 +- 1.8 ppm and +98.7 +- 1.1 ppm on AWGN; corrected groups hold member
+offsets within ~3 samples and EVM 17.3-18.5 dB through member 8. Deterministic AWGN pairs,
+`ULTRA_SCO_TRACK=0` vs default: 50 KB @20 dB -100 ppm 3660 -> 4030 bps (+10 %); 21 KB @20 dB +100
+ppm 3170 -> 3490 (+10 %); 21 KB @15 dB -100 ppm 2720 (held 8PSK R2/3) -> 2840 (reaches 16QAM
+R2/3); 21 KB @20 dB -100 ppm 3180 = 3180 (its loss is in the first two groups, which stay
+uncorrected by design). No drift: AWGN@20 3610 (unchanged), Good@20 3200, Moderate@20 2680, with
+zero corrections applied at 0 ppm on AWGN, Good and Moderate.
+
 ## 2026-11-09 — FEAT(sim): soundcard clock offset in OTASim (`--clock-ppm`)
 
 **Why.** Every simulated link shared one sample clock, so nothing ever exercised what two real

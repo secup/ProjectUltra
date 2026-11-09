@@ -2430,6 +2430,10 @@ void StreamingDecoder::decodeCurrentFrame() {
             LOG_MODEM(WARN, "[%s] Burst group timing correction: %.1f samples, next_pos=%zu",
                       log_prefix_.c_str(), burst_timing_offset, burst_next_pos_);
         }
+        // Clock drift between the two soundcards (BUG-SCO-NOT-TRACKED-IN-BURST): the members
+        // follow the session drift model, never one frame's own estimate.
+        scoBeginGroup(static_cast<double>(frame_len), burst_timing_offset,
+                      std::abs(burst_timing_offset) <= sync::ScoTracker::kMaxPointOffsetSamples);
 
         // BUG-BURST-STALE-GEOMETRY: cadence reference for the commanded-geometry
         // guard. Stamped on EVERY group start (armed or not) — a run of missed

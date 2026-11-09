@@ -32,6 +32,11 @@ add_executable(test_clock_offset_model test_clock_offset_model.cpp)
 target_link_libraries(test_clock_offset_model PRIVATE ota_channel_core)
 add_test(NAME ClockOffsetModel COMMAND test_clock_offset_model)
 
+# Session clock-drift model behind in-burst member slicing (BUG-SCO-NOT-TRACKED-IN-BURST).
+add_executable(test_sco_tracker test_sco_tracker.cpp)
+target_include_directories(test_sco_tracker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+add_test(NAME ScoTracker COMMAND test_sco_tracker)
+
 add_executable(test_watterson_channel test_watterson_channel.cpp)
 target_link_libraries(test_watterson_channel PRIVATE ota_channel_core)
 add_test(NAME WattersonChannel COMMAND test_watterson_channel)

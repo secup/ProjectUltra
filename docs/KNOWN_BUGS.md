@@ -51,33 +51,6 @@ mean, i.e. the window is short against Good's slow fade epochs. The shipped use 
 (an upward move only when the higher rung is predicted to decode >= 90 % of recent frames). A fix
 for FULL needs a longer memory or a posterior over the EVM distribution, not a shorter window.
 
-### BUG-SCO-NOT-TRACKED-IN-BURST (open, 2026-11-09) — P1
-
-**Symptom (found by the new simulator clock offset, `gui_qso_scenario.sh --clock-ppm`).** With the
-two soundcards 100 ppm apart, each in-burst frame's LTS timing offset steps ~6 samples
-(= 100e-6 x 1.2 s x 48 kHz) and the frame's EVM SNR falls with it. AWGN@20, default stack,
-`--clock-ppm -100` (data receiver hears +100 ppm), 8-frame 16QAM R2/3 burst: offset +3.3 -> -2.4
--> -9.2 -> -15.1 -> -20.7 -> -25.2 -> -32.5 -> -38.6 samples, EVM 17.7 -> 16.5 -> 14.8 -> 13.8 ->
-13.3 -> 11.8 -> 11.2 -> 10.8 dB (no drift: 17-18.4 dB flat). The last frames sit below the
-16QAM R2/3 threshold. The `ULTRA_FAST=0` arm shows the same decay (4-frame QPSK burst: -2 -> -7
--> -14 -> -37 samples, 14.5 -> 9.7 dB), so it predates the 2026-11-09 flip; the default's longer
-bursts and denser rungs are more exposed.
-
-**Cost measured (GUI gate, 21 KB, seed 42, 7.3 Hz):** AWGN@20 default 3610 -> 3180 bps at +-100
-ppm (no frame lost: the EVM climb holds 8PSK R2/3 two groups longer); `ULTRA_FAST=0` Good@20
-1710 -> 1630; default Good@20 3060 -> 3220 / 3010 (inside the fading spread).
-
-**Cause (to confirm in code).** In-burst frame positions do not absorb the measured drift: the
-LTS phase slope reports the offset, the channel estimate absorbs it as a phase ramp, and the
-error grows frame after frame. The EVM falls already at ~10 samples, far inside the 128-sample CP,
-so it is not ISI; likely the LTS/pilot channel smoothing (which assumes the impulse response near
-delay 0) or the per-symbol timing tracking. Real soundcards differ by 20-50 ppm (cheap USB
-dongles ~100): a rig-relevant loss the 0-ppm simulator could never show.
-
-**Fix direction.** Sample-clock-offset tracking: estimate the drift from successive frames'
-LTS timing (and the descriptor), re-centre each next frame's FFT window, and feed the per-symbol
-timing slope to pilot tracking. Verify with `--clock-ppm +-50/+-100` on AWGN and Good.
-
 ### BUG-TEST-GAP-FAST-DEFAULT (open, 2026-11-09) — P2
 
 **What.** Flipping `ULTRA_FAST` on by default left two suites testing the pre-flip baseline only:
@@ -2421,6 +2394,38 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-SCO-NOT-TRACKED-IN-BURST (FIXED 2026-11-09) — soundcard clock drift walked in-burst frames late
+
+**Symptom** (found by the OTASim clock offset, `gui_qso_scenario.sh --clock-ppm`). A burst group
+is synchronized once and its members were sliced at the fixed frame stride, so the stations'
+clock difference accumulated member after member: at 100 ppm each 59 360-sample frame slipped ~6
+samples, the FFT window walked late into the next symbol (no CP protection on that side), and
+member EVM fell 17.7 -> 10.8 dB across one 8-frame 16QAM R2/3 group (AWGN@20). Same on the
+`ULTRA_FAST=0` arm (4-frame QPSK group: 14.5 -> 9.7 dB). Real soundcards differ by 20-50 ppm,
+cheap USB dongles ~100.
+
+**Why not just re-slice each member from its own LTS estimate:** that was tried and disabled in
+May (§14.25) — on Good fading a deep-faded member's noisy estimate re-cut it at a wrong position
+and took whole interleaved groups down (~50 % burst loss).
+
+**Fix** (`src/sync/sco_tracker.hpp`, `ULTRA_SCO_TRACK`, default on). Each group's members give
+(nominal distance from the anchor, total timing offset) points; a Theil-Sen line per group gives
+the drift; the session slope is the mean over the last 8 groups and is applied only when it is
+significant at 3 standard errors against the BETWEEN-group spread, with at least two groups.
+Members are sliced at stride + round(slope x distance). A clock offset is identical in every group
+and passes; a fading channel's mean-delay wander changes from group to group and does not.
+Wiring: `scoBeginGroup` at the group start (`streaming_ofdm_decode.cpp`) and late join,
+`scoAdvanceSlice` at every member advance, points added after each member's demodulation
+(`streaming_burst_interleave.cpp`), reset at session end (`streaming_decoder.cpp setMode`).
+
+**Verified** (GUI gate, seed 42, 7.3 Hz): tracker estimates -102.2 +- 1.8 ppm at -100 and
++98.7 +- 1.1 at +100 (AWGN); corrected groups hold member offsets within ~3 samples and EVM at
+17.3-18.5 dB through member 8. AWGN@20 +100 ppm 3170 -> 3490 bps; AWGN@20 -100 ppm 50 KB 3660 -> 4030 (`ULTRA_SCO_TRACK=0` vs on); AWGN@15 -100 ppm 2720 -> 2840 (reaches 16QAM R2/3);
+Moderate@20 +100 ppm 2340 -> 2510; no-drift AWGN@20 3610 (unchanged), Good@20 3200, Moderate@20
+2680, with ZERO corrections applied at 0 ppm on AWGN, Good and Moderate. The first two groups of
+a session stay uncorrected by design (significance needs two groups), so a short transfer whose
+loss sits in its first groups (AWGN@20 -100 ppm, 21 KB: 3180) does not move. CTest `ScoTracker`.
 
 ### BUG-MCDPSK-ACK-DROPPED (FIXED 2026-11-09) — was BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE: every MC-DPSK file ACK was dropped
 

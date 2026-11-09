@@ -645,6 +645,9 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     headnull_resync_drop_count_ = 0;
     burst_next_pos_ =
         sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + data_block);
+    // Late join: no anchor evidence (the head was missed); the members still follow, and feed,
+    // the session clock-drift model.
+    scoBeginGroup(static_cast<double>(data_block), 0.0, /*anchor_reliable=*/false);
     // F176/F221 ack gate (late-join: head unknown — conservative full-group
     // extent from THIS member's actual frame length; refreshed per frame).
     burst_data_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
@@ -843,6 +846,51 @@ void StreamingDecoder::finalizeGroupEvmSnr(bool geometry_proven,
     last_evm_snr_db_valid_.store(true);
 }
 
+void StreamingDecoder::scoBeginGroup(double first_member_dt, double anchor_offset,
+                                     bool anchor_reliable) {
+    const size_t folds_before = sco_tracker_.folds();
+    sco_tracker_.beginGroup();
+    if (sco_tracker_.folds() != folds_before) {
+        const auto& fit = sco_tracker_.lastFit();
+        {
+            LOG_MODEM(INFO,
+                      "[%s] SCO: last group %s slope=%+.1f ppm se=%.1f (%zu pts) | session "
+                      "%+.1f ppm se=%.1f over %zu groups -> %s",
+                      log_prefix_.c_str(), fit.valid ? "fit" : "rejected", fit.slope * 1e6,
+                      fit.se * 1e6, fit.points, sco_tracker_.slope() * 1e6,
+                      std::isfinite(sco_tracker_.standardError())
+                          ? sco_tracker_.standardError() * 1e6
+                          : -1.0,
+                      sco_tracker_.groups(),
+                      !sync::scoTrackingEnabled()
+                          ? "OFF (ULTRA_SCO_TRACK=0)"
+                          : (sco_tracker_.significant() ? "CORRECTING" : "not significant"));
+        }
+    }
+    if (anchor_reliable) sco_tracker_.addFrame(0.0, anchor_offset);
+    LOG_MODEM(DEBUG, "[%s] SCO-PT anchor offset=%.1f reliable=%d first_member_dt=%.0f stride=%zu",
+              log_prefix_.c_str(), anchor_offset, anchor_reliable ? 1 : 0, first_member_dt,
+              burst_min_block_);
+    sco_slice_dt_ = first_member_dt;
+    sco_applied_ = sco_tracker_.correctionSamples(sco_slice_dt_);
+    if (sco_applied_ != 0) {
+        const long long cap =
+            static_cast<long long>(sync_controller_.ring_.buffer_capacity_samples_);
+        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(static_cast<size_t>(
+            static_cast<long long>(burst_next_pos_) + cap + sco_applied_));
+    }
+}
+
+size_t StreamingDecoder::scoAdvanceSlice(size_t pos) {
+    sco_slice_dt_ += static_cast<double>(burst_min_block_);
+    const long want = sco_tracker_.correctionSamples(sco_slice_dt_);
+    const long delta = want - sco_applied_;
+    sco_applied_ = want;
+    const long long cap = static_cast<long long>(sync_controller_.ring_.buffer_capacity_samples_);
+    return sync_controller_.ring_.wrapRingIndexLocked(static_cast<size_t>(
+        static_cast<long long>(pos) + static_cast<long long>(burst_min_block_) + cap + delta));
+}
+
 StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame() {
     const int burst_group_size = std::max(2, burst_group_size_);
     // channel_evidence_ok: the burst path's REAL per-frame decode verdict. The metrics
@@ -982,7 +1030,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        0.0f, 0.0f, burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/false);
-        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        burst_next_pos_ = scoAdvanceSlice(burst_next_pos_);
         refreshBurstAirEnd();
         return BurstFrameResult::SUCCESS;
     }
@@ -1047,13 +1095,21 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                        burst_pre_cfo, 0.0f, burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/false);
-        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        burst_next_pos_ = scoAdvanceSlice(burst_next_pos_);
         refreshBurstAirEnd();
         return BurstFrameResult::SUCCESS;
     }
     captureConstellationSnapshot();
 
     const float timing_offset = waveform_->getLastTimingOffsetSamples();
+    // Clock-drift evidence: this member's TOTAL offset from its nominal stride position is the
+    // correction already applied plus what its LTS still measures. A residual beyond the bound is a
+    // mislock or a deep fade, not drift, and is left out (sync/sco_tracker.hpp).
+    if (std::abs(timing_offset) <= sync::ScoTracker::kMaxPointOffsetSamples) {
+        sco_tracker_.addFrame(sco_slice_dt_, static_cast<double>(sco_applied_) + timing_offset);
+    }
+    LOG_MODEM(DEBUG, "[%s] SCO-PT member dt=%.0f applied=%ld measured=%.1f stride=%zu",
+              log_prefix_.c_str(), sco_slice_dt_, sco_applied_, timing_offset, burst_min_block_);
     // Per-frame timing correction is DISABLED within a burst group. The group is
     // contiguous and sliced at a FIXED stride (burst_min_block_) off the single
     // group-start anchor, so each frame's own LTS phase-slope timing estimate —
@@ -1136,7 +1192,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
                                        waveform_ ? waveform_->estimatedCFO() : 0.0f,
                                        burst_cfo_,
                                        /*erasure=*/true, /*process_ok=*/true);
-        burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + burst_min_block_);
+        burst_next_pos_ = scoAdvanceSlice(burst_next_pos_);
         refreshBurstAirEnd();
         return BurstFrameResult::SUCCESS;
     }
@@ -1236,7 +1292,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     appendBurstPhysicalDiagnostics(abs_burst, burst_soft_buffer_.back(), next_rms,
                                    burst_pre_cfo, residual_cfo, cfo_update.accepted_cfo,
                                    /*erasure=*/false, /*process_ok=*/true);
-    burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(block_start_pos + burst_min_block_);
+    burst_next_pos_ = scoAdvanceSlice(block_start_pos);
 
     LOG_MODEM(INFO, "[%s] Burst frame %zu/%d demodulated, RMS=%.4f",
               log_prefix_.c_str(), burst_soft_buffer_.size(),

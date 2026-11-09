@@ -69,6 +69,7 @@ results; see docs/CHANGELOG.md):
   Never gate it on |CFO| magnitude or channel flatness (the 2026-11-08 BUG-LTS-CFO-SEED-GATE)
 - After demodulation, corrected CFO propagates back to cached `last_cfo_`
 - NEVER remove the feedback in `ofdm_chirp_waveform.cpp:process()` or `streaming_decoder.cpp` — without it, wrong chirp CFO re-injects every frame → progressive phase drift → CW failures
+- Soundcard clock drift: burst members are sliced at stride + the session drift model (`sync/sco_tracker.hpp`, INV-SCO-001); NEVER re-slice a member from its own LTS timing estimate (§14.25: lost ~50 % of bursts on fading)
 
 **Testing invariants:**
 - SINGLE ModemEngine instance for the entire audio stream (continuous RX)
