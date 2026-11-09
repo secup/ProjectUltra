@@ -187,21 +187,37 @@ if [[ "$TARGET" == "windows" ]]; then
     vcpkg_install_roots+=("$vcpkg_installed")
   fi
 
+  # vcpkg triplet of the dependencies, requested one first: CI exports VCPKG_TRIPLET
+  # (x64-windows-release since 2026-11-09); a local vcpkg build usually uses x64-windows.
+  declare -a vcpkg_triplets=()
+  [[ -n "${VCPKG_TARGET_TRIPLET:-}" ]] && vcpkg_triplets+=("$VCPKG_TARGET_TRIPLET")
+  [[ -n "${VCPKG_TRIPLET:-}" ]] && vcpkg_triplets+=("$VCPKG_TRIPLET")
+  vcpkg_triplets+=("x64-windows" "x64-windows-release")
+
   if [[ -n "${VCPKG_ROOT:-}" ]]; then
     vcpkg_unix="$VCPKG_ROOT"
     if command -v cygpath >/dev/null 2>&1; then
       vcpkg_unix=$(cygpath -u "$VCPKG_ROOT")
     fi
-    vcpkg_install_roots+=("${vcpkg_unix}/installed/x64-windows")
+    for triplet in "${vcpkg_triplets[@]}"; do
+      vcpkg_install_roots+=("${vcpkg_unix}/installed/${triplet}")
+    done
   fi
 
-  vcpkg_install_roots+=("/c/vcpkg/installed/x64-windows")
-
-  for vcpkg_root in "${vcpkg_install_roots[@]}"; do
-    dll_candidates+=("${vcpkg_root}/bin/SDL2.dll")
-    dll_candidates+=("${vcpkg_root}/bin/SDL2d.dll")
+  for triplet in "${vcpkg_triplets[@]}"; do
+    vcpkg_install_roots+=("/c/vcpkg/installed/${triplet}")
   done
-  dll_candidates+=("C:/SDL2/lib/x64/SDL2.dll")
+
+  # First root that has SDL2 wins (its debug DLL rides along when present), so a machine with
+  # two triplets installed cannot ship a mixed pair.
+  for vcpkg_root in "${vcpkg_install_roots[@]}"; do
+    if [[ -f "${vcpkg_root}/bin/SDL2.dll" ]]; then
+      dll_candidates+=("${vcpkg_root}/bin/SDL2.dll")
+      [[ -f "${vcpkg_root}/bin/SDL2d.dll" ]] && dll_candidates+=("${vcpkg_root}/bin/SDL2d.dll")
+      break
+    fi
+  done
+  [[ "${#dll_candidates[@]}" -eq 0 ]] && dll_candidates+=("C:/SDL2/lib/x64/SDL2.dll")
 
   for dll in "${dll_candidates[@]}"; do
     if [[ -f "$dll" ]]; then
@@ -225,7 +241,7 @@ if [[ "$TARGET" == "windows" ]]; then
   done
 
   if [[ -z "$grpc_root" ]]; then
-    echo "gRPC/protobuf runtime DLLs were not found. Expected from vcpkg x64-windows." >&2
+    echo "gRPC/protobuf runtime DLLs were not found. Expected from vcpkg (${vcpkg_triplets[*]})." >&2
     echo "Searched vcpkg roots:" >&2
     for vcpkg_root in "${vcpkg_install_roots[@]}"; do
       echo "  $vcpkg_root" >&2
@@ -294,7 +310,7 @@ if [[ "$TARGET" == "windows" ]]; then
     exit 1
   fi
 
-  # --- MSVC runtime — the app is built /MD against vcpkg's x64-windows triplet, so it needs
+  # --- MSVC runtime — the app is built /MD against vcpkg's x64-windows(-release) triplet, so it needs
   #     the Visual C++ redistributable DLLs at runtime (vcruntime140*.dll, msvcp140*.dll). A
   #     FRESH Windows 11 does not ship VCRUNTIME140_1.dll, so ultra_gui.exe fails with
   #     "VCRUNTIME140_1.dll was not found". Bundle them so no VC++ Redist install is required.

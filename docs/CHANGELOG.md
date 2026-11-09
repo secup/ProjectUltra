@@ -49,7 +49,9 @@ jobs, and each run took 1 h 39 min:
   (`--host-triplet`, `VCPKG_HOST_TRIPLET`; one release build per package instead of debug +
   release — a host left at the default x64-windows makes gRPC/protobuf/abseil build twice, which
   run 42622892678 hit: still in the cold install after 75 min), `/MP` with `--parallel 2`, saves
-  the vcpkg cache right after the install, and skips the 5-min
+  the vcpkg cache right after the install (`packaging/package_operator_bundle.sh` now searches
+  `installed/$VCPKG_TRIPLET` first — it hard-coded `x64-windows` and failed "SDL2 runtime DLL was
+  not found" in run 42635197212), and skips the 5-min
   disk cleanup on a warm cache; the sanitizer job skips label `slow` (their code paths run under
   ASan in the faster MC-DPSK / OFDM / tone-ACK tests); the bundle build no longer waits for the
   tests (the tag release still needs every job); docs-only pushes do not build (no test reads
