@@ -75,6 +75,7 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "ultra/fast_profile.hpp"
 #include "waveform_selection.hpp"
 
 namespace ultra {
@@ -274,8 +275,13 @@ inline std::atomic<int>& latentMeasuredAnchorsFlag() {
 inline bool latentMeasuredAnchorsEnabled() {
     int v = latentMeasuredAnchorsFlag().load(std::memory_order_relaxed);
     if (v < 0) {
+        // Explicit ULTRA_LATENT_ANCHORS wins; unset, the ULTRA_FAST profile selects measured.
         const char* e = std::getenv("ULTRA_LATENT_ANCHORS");
-        v = (e != nullptr && (std::strcmp(e, "measured") == 0 || std::strcmp(e, "1") == 0)) ? 1 : 0;
+        if (e != nullptr) {
+            v = (std::strcmp(e, "measured") == 0 || std::strcmp(e, "1") == 0) ? 1 : 0;
+        } else {
+            v = fastProfileEnabled() ? 1 : 0;
+        }
         latentMeasuredAnchorsFlag().store(v, std::memory_order_relaxed);
     }
     return v == 1;
@@ -423,6 +429,10 @@ public:
         float useful_bytes_per_frame = 0.0f;
         int frames_per_cycle = 0;
         float cycle_s = 0.0f;
+        // Airtime of ONE data frame (s): a round carrying m < frames_per_cycle frames lasts
+        // cycle_s - (frames_per_cycle - m) * frame_airtime_s. 0 = unknown (a partial round is
+        // then priced as a full cycle). Used by the effective-SNR selector's time-to-finish.
+        float frame_airtime_s = 0.0f;
 
         bool valid() const {
             return useful_bytes_per_frame > 0.0f &&

@@ -8,22 +8,35 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-GUI-DISPLAY-SLEEP-STALL (open, 2026-11-08) — P1 for unattended stations
+### BUG-HARNESS-TURBO-NO-RESULT (open, 2026-11-09) — P3, measurement tooling
 
-`ultra_gui` drains RX audio into the modem from its RENDER loop (`App::pollRadioRx` /
-`pollOtaRx`, once per frame), and with vsync on (`SDL_GL_SetSwapInterval(1)`,
-`main_gui.cpp:920`) `SDL_GL_SwapWindow` blocks on the display link while the macOS display is
-asleep. Observed: both GUI-gate stations stopped feeding audio ~2 s after start (one `feed:
-audio` line, then nothing; `sample` showed the main thread in `Cocoa_GL_SwapWindow →
-SDL_CondWait` at 0 % CPU; `system_profiler` "Display Asleep: Yes"). The GUI's own
-`SDL_DisableScreenSaver` assertion only prevents IDLE sleep — a display already asleep, or put to
-sleep by the operator, freezes RX (and anything else ticked per frame) on a real radio too. The
-gate script now wakes and holds the display for every run (`caffeinate -dimsu -w $$`; it used to
-skip that whenever ANY caffeinate was running, e.g. an agent's `caffeinate -i`). Real fix: move
-the audio drain (and protocol tick) off the render thread, or render without blocking vsync when
-the window is occluded. The headless `ultra_tnc` is unaffected.
+`tools/measure_ack_fer` (classic single-frame path) emits no `DecodeResult` for a turbo data
+frame that fails to decode, and none for an LDPC frame whose header codeword fails, so
+`--frame-log` records those frames as unmeasured (`has_evm=0`) instead of as low-EVM failures.
+LDPC EVM thresholds are only slightly affected (they agree with the GUI's burst-path frames to
+0.1-0.4 dB, the harness on the conservative side); turbo thresholds cannot be fitted at all — use
+GUI-gate frames (`docs/EVM_RATE_SELECTION_2026_11_08.md`). Fix: publish the frame's metrics
+(EVM included) on the failure path too.
 
-### BUG-LATENT-CLASS-SPACING (open, 2026-11-08) — P2, blocks defaulting the measured anchors
+### BUG-EVM-FULL-CHASES-WINDOW (open, 2026-11-09) — P3, experimental knob only
+
+`ULTRA_RATE_EVM=1` (the effective-SNR selector deciding every rung) measured Good@20 -11..-15 %
+against the latent controller on the GUI gate although its per-rung forecasts are calibrated on
+average (8PSK R2/3 0.92 -> 0.97 realized, 16QAM R2/3 0.80 -> 0.73). It climbs right after a strong
+spell of its 20-frame (~35 s) window, and the next group is on average worse — regression to the
+mean, i.e. the window is short against Good's slow fade epochs. The shipped use is `=climb`
+(an upward move only when the higher rung is predicted to decode >= 90 % of recent frames). A fix
+for FULL needs a longer memory or a posterior over the EVM distribution, not a shorter window.
+
+### BUG-LATENT-CLASS-SPACING (open, 2026-11-08; MITIGATED 2026-11-09 within `ULTRA_FAST`) — P2
+
+**2026-11-09 status.** Within the `ULTRA_FAST` stack the Moderate deficit is gone: Moderate@20
+2304 bps with turbo (arm D) vs 1668 default and 1572 for the measured anchors alone (GUI gate,
+5 seeds), because turbo recovers the dense rungs' Moderate losses and chirp-less group starts no
+longer charge an anchor per loss. The underlying model limit stands for the anchors used alone.
+The principled exit is the EVM domain: per-frame EVM decode thresholds are the SAME on Good and
+Moderate (`docs/EVM_RATE_SELECTION_2026_11_08.md`), so a selector in that domain
+(`ULTRA_RATE_EVM`) needs no class-aware table and no classifier.
 
 The latent controller has ONE operating point x with ONE theta per rung, calibrated on ITU Good.
 That absorbs a common offset between channel classes, not a class-dependent SPACING — and the
@@ -2379,6 +2392,23 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-GUI-DISPLAY-SLEEP-STALL (FIXED 2026-11-09) — was P1 for unattended stations
+
+`ultra_gui` drains RX audio into the modem from its RENDER loop (`App::pollRadioRx` /
+`pollOtaRx`, once per frame), and with vsync on (`SDL_GL_SetSwapInterval(1)`) SDL's Cocoa backend
+waits for each swap on a CVDisplayLink, which stops while the display sleeps: both GUI-gate
+stations stopped feeding audio ~2 s after start (main thread parked in
+`Cocoa_GL_SwapWindow -> SDL_CondWait`, "Display Asleep: Yes"). **Fix** (`main_gui.cpp`): swap
+interval 0 (and no `SDL_RENDERER_PRESENTVSYNC` on the software path); the loop paces itself at
+~60 Hz with `SDL_Delay`, so nothing on the RX path waits on the display. **Verified:**
+`gui_qso_scenario.sh` AWGN@20 s42 PASS 1720 bps, the vsync build's goodput (modem timing
+untouched); A/B with the display ASLEEP for both runs (`pmset displaysleepnow`; gate copy holding
+`caffeinate -ims`, i.e. without waking the display): vsync build FAIL, 0 bps, no audio fed; fixed
+build PASS 1720 bps. (A locked but awake screen does not stall even the vsync build; the
+2026-11-09 01:40 `freeze_guard` batch failures were 16 simultaneous GUI launches missing the
+gate's 12 s liveness check, fixed in the batch runner by staggering lanes.) The headless
+`ultra_tnc` was never affected.
 
 ### BUG-TONE-ACK-CLEAN-MISS (FIXED 2026-11-08) — a clean ACK lost to a Costas alias in its own payload
 

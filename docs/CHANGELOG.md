@@ -10,6 +10,109 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FIX: `ultra_gui` froze its receiver while the display slept (BUG-GUI-DISPLAY-SLEEP-STALL)
+
+**What was broken.** The GUI drains RX audio into the modem from its render loop, and with vsync
+on, SDL's Cocoa backend waits for every swap on a CVDisplayLink — which stops while the display
+sleeps. An unattended station's receiver therefore stopped (main thread
+parked in `Cocoa_GL_SwapWindow -> SDL_CondWait`, "Display Asleep: Yes"; 2026-11-08). (A batch of
+`freeze_guard` failures at 01:40 on 2026-11-09 was NOT this: 16 GUIs launched at once behind a
+locked screen took ~10 s to create their windows and missed the gate's 12 s liveness check; a
+locked — not sleeping — screen does not stall the old binary either. The batch runner now
+staggers lane starts.)
+
+**What changed** (`src/gui/main_gui.cpp`). Swap interval 0 on the GL path, no
+`SDL_RENDERER_PRESENTVSYNC` on the software path, and the main loop paces itself at ~60 Hz
+(`SDL_GetPerformanceCounter` + `SDL_Delay`), so nothing on the RX path waits on the display.
+INV-GUI-LOOP-001.
+
+**Verification.** `tools/gui_qso_scenario.sh --channel awgn --snr-db 20 --seed 42 --cfo-hz 7.3
+--file-kb 21` PASS at 1720 bps, the same goodput as the vsync build (the modem's timing is
+untouched). A/B with the display ASLEEP for both runs (`pmset displaysleepnow`; gate copy holding `caffeinate -ims`, i.e. without waking the display): vsync build FAIL, 0 bps, no audio fed; fixed build PASS 1720 bps.
+
+## 2026-11-09 — FEAT: effective-SNR rate selection (`ULTRA_RATE_EVM`), the `ULTRA_FAST` speed profile, structure-mode switch pricing
+
+**Measured finding.** A burst data frame decodes iff its decision-directed EVM SNR (the
+demodulator's own gain-corrected constellation scatter) clears a per-rung threshold, and the
+threshold does not depend on the channel: QPSK R2/3 6.5 dB on ITU Good vs 6.3 on Moderate, 8PSK
+R2/3 9.55 vs 9.45 (7131 GUI-gate frames; 10-90 % in 1-1.5 dB). In the channel-SNR domain the same
+rungs differ by 2-4 dB between the classes. The EVM already contains fading, Doppler-induced
+estimation error and implementation loss, so no channel classifier is needed — the reference
+open-source HF modem adapts the same way (per-frame measured SNR + per-level thresholds +
+outer-loop margin, no classification). `docs/EVM_RATE_SELECTION_2026_11_08.md`.
+
+**What changed.**
+- `src/protocol/evm_rate_selector.hpp` (new): per-rung counterfactual success over the last 20
+  frames' EVM, `P_r = mean logistic(3 /dB (e - eta_r - m))`; eta per rung and per data-frame FEC
+  (LDPC table measured with the harness, turbo shifted by its measured gain, both cross-checked
+  on GUI frames); a common-mode outer-loop margin m moved only by UNPREDICTED losses (a fade the
+  frames' EVM predicted does not move it); a time-to-finish objective (exact expected time to
+  deliver the remaining bytes, tail rounds included) for the full mode.
+  `ULTRA_RATE_EVM=1` (FULL: the selector decides) or `=climb` (CLIMB: the latent controller
+  decides; the selector may only lift its pick to a rung predicted to decode >= kCapProb of the
+  recent frames). Plumbing: decoder `getLastGroupEvmSnrFrames` -> `ModemEngine` ->
+  `modem_protocol_binding` -> `Connection::setBurstFrameEvms` -> latent path of
+  `updateRxAuthorityCommand`.
+- `connection.cpp`: with structure acquisition the latent selector no longer prices a
+  descriptor-switch anchor (`flushBurstBuffer` never sends one in that mode) — a phantom ~25 %
+  switching penalty that kept the controller off 16QAM R2/3.
+- `include/ultra/fast_profile.hpp` (new): `ULTRA_FAST=1` sets the defaults of
+  `ULTRA_BURST_ACQ=structure`, `ULTRA_LATENT_ANCHORS=measured`, `ULTRA_DATA_FEC=turbo` and
+  `ULTRA_RATE_EVM=climb`; any member knob set explicitly wins. Lockstep, both stations.
+- `tools/measure_ack_fer.cpp`: `--frame-log PATH` writes `evm_db,has_evm,pass` per frame.
+- `LatentRateController::RungGeometry::frame_airtime_s` (partial-round pricing).
+
+**Rejected (measured, reverted or kept off).**
+- Renewal pricing of the latent controller (each rung's long-run rate under the protocol's own
+  re-anchor rule, switch anchor charged once): GUI Good@20 -3 %, Good@15 -5 %, Moderate@20 -7 %
+  against the shipped pricing; reverted. It left a lossy 8PSK R2/3 for QPSK R2/3, which then
+  lost ~20 % of frames in the same fades — a channel-SNR model over-predicts the lower rung
+  inside a fade; the shipped incumbent bias was hedging that.
+- `ULTRA_RATE_EVM=1` (full selector), long-run or time-to-finish objective: AWGN@20 +12 % but
+  Good@20 -11..-15 % against the latent controller. Its forecasts are calibrated on average
+  (8PSK 0.92 -> 0.97 realized, 16QAM 0.80 -> 0.73) but it climbs right after a strong spell of the
+  20-frame window, and the next group is on average worse (regression to the mean); the
+  posterior's long memory does not chase. Kept as an experiment; CLIMB is the shipped use.
+
+**GUI gate** (21 KB, 7.3 Hz dial offset, seeds 42-46, mean bps; every run PASS, CRC-clean):
+
+| arm | Good@20 | Good@15 | Moderate@20 | AWGN@20 |
+|---|---|---|---|---|
+| A default | 1700 | 1526 | 1668 | 1720 |
+| B measured anchors | 2154 | 1648 | 1572 | 2660 |
+| C B + structure acq | 2868 | 2138 | 1870 | 3220 |
+| D C + turbo | 2782 | 2448 | 2304 | 3218 |
+| E3 C + EVM climb | 2952 | 2150 | 1918 | 3620 |
+| F3 D + EVM climb = `ULTRA_FAST` | 2880 | 2556 | 2114 | 3618 |
+| G measured + turbo (chirp mode) | 2302 | 1914 | 1680 | 2660 |
+
+**Broad matrix, `ULTRA_FAST=1` vs default** (same gate, seeds 42-46, the fixed GUI build):
+
+| cell | default | `ULTRA_FAST=1` | |
+|---|---|---|---|
+| Good@12 | 1002 (1 timeout: stuck on QPSK R2/3) | 1724, 5/5 PASS | +72 % |
+| Good@25 | 1710 | 3142 | +84 % |
+| Moderate@15 | 1226 | 1656 | +35 % |
+| Moderate@25 | 1694 | 2490 | +47 % |
+| AWGN@12 | 1670 | 2930 | +75 % |
+| AWGN@8 | 702 (2/5 FAIL) | 936 (3/5 FAIL) | pre-existing |
+
+Every AWGN@8 failure in both arms is BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE: the connect reading falls
+7.8 or 8.0 dB on the 8 dB OFDM entry floor; at 7.8 the link takes MC-DPSK DQPSK R1/4, whose file
+transfer then hard-fails at ~344 s. The profile changes neither the connect decision nor MC-DPSK;
+when the link comes up in OFDM it doubles the default (2320-2360 vs 1160-1180 bps).
+
+**Shipping state.** Defaults unchanged. The biggest contributor, chirp-less group starts, is
+rig-dependent (real ALC/AGC settling, CFO drift between groups) and per the sim-only decision
+ships default-off; the profile keeps the rig A/B to one switch on both stations. Rig A/B:
+`ULTRA_FAST=1` vs default, interleaved, MPG@20 and MPM@20, n >= 8 pairs.
+
+**Tests.** New `EvmRateSelector` (29 checks: margin visible from any rung, rung-independent fades,
+outer loop moves on calibration error only, window/readiness, time-to-finish exactness and
+monotonicity, climb rule, threshold ordering). Targeted ctest subset (LatentRate, EvmRate, Turbo,
+ConnectionAdaptive, ConnectionPolicy, FrameStructure, StreamingDecodePolicy, SyncController) 9/9.
+Full `ctest --output-on-failure -j4`: 107/107 pass (TNCSession disabled by project configuration).
+
 ## 2026-11-08 — FEAT: latent rate-controller anchors re-measured on the current PHY (`ULTRA_LATENT_ANCHORS=measured`, opt-in)
 
 **Why.** The latent controller's per-rung thetas (50 %-FER points; only their SPACING matters)

@@ -13,13 +13,17 @@
 #include <cstdlib>
 #include <string>
 
+#include "ultra/fast_profile.hpp"
+
 namespace ultra {
 namespace sync {
 
+// Explicit ULTRA_BURST_ACQ wins; unset, the ULTRA_FAST profile selects structure.
 inline bool structureAcquisitionEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_BURST_ACQ");
-        return e && std::string(e) == "structure";
+        if (e != nullptr) return std::string(e) == "structure";
+        return fastProfileEnabled();
     }();
     return on;
 }

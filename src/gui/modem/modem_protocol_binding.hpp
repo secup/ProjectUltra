@@ -155,6 +155,8 @@ inline void wireModemToProtocol(ModemEngine& modem,
             // the survivor-bias kill). Must land BEFORE onBurstGroupReceived:
             // the verdict this group's ACK carries consumes it.
             protocol.setBurstCarrierGammas(modem.getLastGroupCarrierGammas());
+            // ULTRA_RATE_EVM: the group's per-frame effective SNR for the rate selector.
+            protocol.setBurstFrameEvms(modem.getLastGroupEvmSnrFrames());
             protocol.onBurstGroupReceived(group_seq, frames, all_ok, quality, frame_mask,
                                           interleaved, group_size, geometry_proven);
         });

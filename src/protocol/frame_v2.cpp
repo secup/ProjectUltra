@@ -1,4 +1,5 @@
 #include "frame_v2.hpp"
+#include "ultra/fast_profile.hpp"
 #include "ultra/fec.hpp"  // LDPC encoder/decoder + ChannelInterleaver
 #include "../fec/frame_interleaver.hpp"  // Frame-level interleaving
 #include "../fec/ldpc_codec.hpp"  // For getRecommendedIterations
@@ -2110,7 +2111,8 @@ DataFrameFec ofdmDataFrameFec() {
             if (s == "ldpc" || s == "LDPC") return DataFrameFec::LDPC;
             LOG_MODEM(WARN, "ULTRA_DATA_FEC='%s' not recognised (ldpc|turbo); using default", e);
         }
-        return DataFrameFec::LDPC;
+        // Unset (or unrecognised): the ULTRA_FAST profile selects turbo.
+        return fastProfileEnabled() ? DataFrameFec::TURBO : DataFrameFec::LDPC;
     }();
     return fec;
 }

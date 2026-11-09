@@ -3460,6 +3460,13 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
         if (geometry_known) {
             latent_ctl_.observe(cur, k, M);
         }
+        // ULTRA_RATE_EVM: this group's frames join the effective-SNR window (and calibrate
+        // its margin against what they delivered). Consumed once per group.
+        const bool evm_rate = evmRateSelectionEnabled();
+        if (evm_rate && geometry_known) {
+            evm_selector_.observeGroup(cur, burst_obs_frame_evm_db_, k, M);
+        }
+        burst_obs_frame_evm_db_.clear();
         // Forget at the rate the ionosphere actually moves. THE ONE FREE PARAMETER; see the
         // header. Too small freezes the controller and looks perfect on OTASim (stationary
         // Watterson, no ITV) while failing on the rig.
@@ -3500,7 +3507,12 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             // anchor.  It consumes both airtime and enough of the first cycle's PA
             // ceiling to reduce N on several profiles, so a non-incumbent must be
             // priced as the first burst the sender will actually emit.
-            const bool force_full_group_start = r != cur;
+            // Structure acquisition never anchors a descriptor-committed switch
+            // (flushBurstBuffer: desc_switch_anchor requires chirp mode), so pricing
+            // one there would be a phantom switching penalty (one frame of budget plus
+            // 1.2 s per cycle, ~25 % at 8PSK R2/3).
+            const bool force_full_group_start =
+                r != cur && !sync::structureAcquisitionEnabled();
             const auto physical = latentRateCandidateGeometryFor(
                 candidate.mod, candidate.rate, force_full_group_start);
             candidate_logical_cw[r] = physical.logical_cw;
@@ -3512,7 +3524,42 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
         const uint8_t latent_ceiling = latentConfiguredRungCeiling();
         const auto best = latent_ctl_.best(
             geometry, latent_ceiling, latentTieBreakProbeEnabled());
-        uint8_t lat_cmd = (best.rung != kRungIdxNone) ? best.rung : cur;
+        // EFFECTIVE-SNR DECISION (ULTRA_RATE_EVM): when the window holds enough measured
+        // frames, the rung comes from every rung's counterfactual success on them, priced on
+        // the same geometry. The latent posterior keeps learning and remains the fallback.
+        bool evm_decided = false;
+        LatentRateController::Pick evm_pick;
+        if (evm_rate && evm_selector_.ready()) {
+            // What is left of this transfer, when the receiver knows it: the selector then
+            // minimises the time to deliver it (tail rounds included) instead of the long-run
+            // rate, which over-values a lossy rung on a transfer of a few groups.
+            float remaining = 0.0f;
+            if (file_transfer_.getState() == FileTransferState::RECEIVING) {
+                const auto progress = file_transfer_.getProgress();
+                if (progress.total_bytes > progress.received_bytes) {
+                    remaining = static_cast<float>(progress.total_bytes - progress.received_bytes);
+                }
+            }
+            if (evmRateSelectionMode() == EvmRateMode::Full) {
+                evm_pick = evm_selector_.best(geometry, latent_ceiling, remaining);
+                evm_decided = evm_pick.rung != kRungIdxNone;
+            } else {
+                // CLIMB: lift the latent pick only to a rung the recent frames say decodes as
+                // reliably as the controller ever credits any rung.
+                const uint8_t latent_rung = best.rung != kRungIdxNone ? best.rung : cur;
+                const uint8_t up = evm_selector_.bestReliable(
+                    geometry, latent_ceiling, LatentRateController::kCapProb);
+                if (up != kRungIdxNone && up > latent_rung) {
+                    evm_pick.rung = up;
+                    evm_pick.goodput = geometry[up].useful_bytes_per_frame *
+                                       static_cast<float>(geometry[up].frames_per_cycle) *
+                                       LatentRateController::kCapProb / geometry[up].cycle_s;
+                    evm_decided = true;
+                }
+            }
+        }
+        uint8_t lat_cmd = evm_decided ? evm_pick.rung
+                                      : ((best.rung != kRungIdxNone) ? best.rung : cur);
         if (lat_cmd != cur) {
             const uint8_t snapped = snapRungIndexDownToEnabled(lat_cmd);
             lat_cmd = (snapped != kRungIdxNone) ? snapped : cur;
@@ -3522,6 +3569,13 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             // posterior may recover after clean base groups, but it may not silently
             // recreate the exploration that was promised to happen only once.
             lat_cmd = kRungIdxQpskR12;
+        }
+
+        if (evm_decided && !latent_startup_probe_waiting_ &&
+            !latent_startup_probe_rollback_pending_) {
+            // The one-shot probe exists only because a clean R1/2 cannot reveal its margin to
+            // an outcome-only estimator. The effective-SNR window sees that margin directly.
+            latent_startup_probe_spent_ = true;
         }
 
         // BOUNDED STARTUP EXPLORATION.  R1/2 successes saturate the likelihood, so the
@@ -3655,11 +3709,27 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
             }
         }
         rx_authority_cmd_ = lat_cmd;
+        std::string evm_note;
+        if (evm_rate) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf),
+                          " EVM-RATE%s n=%zu m=%+.1f P[Q12 %.2f Q23 %.2f Q34 %.2f 8P23 %.2f "
+                          "16Q23 %.2f]",
+                          evm_decided ? "" : (evm_selector_.ready() ? "(latent)" : "(not ready)"),
+                          evm_selector_.frames(),
+                          evm_selector_.marginDb(),
+                          evm_selector_.successProb(kRungIdxQpskR12),
+                          evm_selector_.successProb(kRungIdxQpskR23),
+                          evm_selector_.successProb(kRungIdxQpskR34),
+                          evm_selector_.successProb(kRungIdxQam8R23),
+                          evm_selector_.successProb(kRungIdxQam16R23));
+            evm_note = buf;
+        }
         LOG_MODEM(INFO,
                   "Connection: LATENT-RATE idx %u -> %u  x_p25=%.1f mean=%.1f sd=%.1f "
                   "obs=%d  k=%d/%d  group=%.1fs  candidate_LCW=%d "
                   "candidate_CW=%d candidate_Z=%d candidate_N=%d candidate_FULL=%d  "
-                  "predicted=%.0fB/s%s%s  "
+                  "predicted=%.0fB/s%s%s%s  "
                   "(NO SNR CONSUMED)",
                   cur, lat_cmd, best.x_used, latent_ctl_.posteriorMean(),
                   latent_ctl_.spreadDb(), latent_ctl_.observations(), k, M, group_s,
@@ -3667,7 +3737,8 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                   candidate_physical_cw[lat_cmd], candidate_z[lat_cmd],
                   geometry[lat_cmd].frames_per_cycle,
                   candidate_full_anchor[lat_cmd] ? 1 : 0,
-                  best.goodput, best.tie_break_probe ? " probe" : "", startup_note);
+                  evm_decided ? evm_pick.goodput : best.goodput,
+                  best.tie_break_probe ? " probe" : "", startup_note, evm_note.c_str());
         return;
     }
 
@@ -7861,6 +7932,10 @@ LatentRateCandidateGeometry Connection::latentRateCandidateGeometryFor(
         static_cast<int>(out.frames_per_cycle),
         static_cast<float>(out.burst_airtime_ms + kMedianNonDataCycleMs) / 1000.0f,
     };
+    out.value.frame_airtime_s =
+        static_cast<float>(connection_policy::wideOFDMFrameTiming(
+                               mod, rate, out.physical_cw, out.lifting_z).data_ms) /
+        1000.0f;
     return out;
 }
 
@@ -8784,6 +8859,8 @@ void Connection::resetAdaptiveDecisionState() {
     // inherit the every-Nth probe phase, an already-escalated eight-frame burst streak,
     // a saturated collapse-escape episode, or the preceding QSO's rung-dwell clock.
     latent_ctl_.reset();
+    evm_selector_.reset();
+    burst_obs_frame_evm_db_.clear();
     latent_startup_probe_allowed_ = true;
     latent_startup_probe_waiting_ = false;
     latent_startup_probe_spent_ = false;

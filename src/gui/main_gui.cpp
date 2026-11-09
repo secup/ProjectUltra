@@ -877,7 +877,8 @@ int main(int argc, char* argv[]) {
 
     if (using_software_renderer) {
         writeStartupLog("Creating SDL renderer (accelerated + vsync)");
-        sdl_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        // No PRESENTVSYNC for the same reason as the GL path (BUG-GUI-DISPLAY-SLEEP-STALL).
+        sdl_renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
         if (!sdl_renderer) {
             writeStartupLog("Accelerated SDL renderer unavailable: %s", SDL_GetError());
             writeStartupLog("Falling back to SDL software renderer");
@@ -916,12 +917,18 @@ int main(int argc, char* argv[]) {
         }
         writeStartupLog("SDL_GL_MakeCurrent succeeded");
 
-        writeStartupLog("Calling SDL_GL_SetSwapInterval(1)");
-        if (SDL_GL_SetSwapInterval(1) != 0) {
+        // NO VSYNC (BUG-GUI-DISPLAY-SLEEP-STALL). SDL's Cocoa backend implements a swap
+        // interval by waiting on a CVDisplayLink, which stops while the display sleeps — and this
+        // loop also drains RX audio into the modem (App::render ->
+        // pollOtaRx / pollRadioRx), so a vsync wait froze the receiver of an unattended station
+        // (GUI gate: one `feed: audio` line, then nothing). The loop paces itself instead
+        // (kFramePeriod below), which never waits on the display.
+        writeStartupLog("Calling SDL_GL_SetSwapInterval(0)");
+        if (SDL_GL_SetSwapInterval(0) != 0) {
             // Non-fatal on some drivers; keep running but record detail.
-            writeStartupLog("SDL_GL_SetSwapInterval failed/non-vsync: %s", SDL_GetError());
+            writeStartupLog("SDL_GL_SetSwapInterval(0) failed: %s", SDL_GetError());
         } else {
-            writeStartupLog("SDL_GL_SetSwapInterval succeeded");
+            writeStartupLog("SDL_GL_SetSwapInterval(0) succeeded");
         }
     }
 
@@ -977,7 +984,11 @@ int main(int argc, char* argv[]) {
     ultra::gui::App app(opts);
     writeStartupLog("App initialized");
 
-    // Main loop
+    // Main loop. Self-paced at ~60 Hz (no vsync, see above): the per-frame RX drain keeps
+    // running whether or not the display is awake.
+    const Uint64 perf_hz = SDL_GetPerformanceFrequency();
+    const Uint64 kFramePeriod = perf_hz / 60;
+    Uint64 frame_start = SDL_GetPerformanceCounter();
     bool running = true;
     bool first_frame = true;
     while (running) {
@@ -1038,6 +1049,12 @@ int main(int argc, char* argv[]) {
         if (first_frame) {
             first_frame = false;
         }
+        const Uint64 now = SDL_GetPerformanceCounter();
+        const Uint64 elapsed = now - frame_start;
+        if (elapsed < kFramePeriod) {
+            SDL_Delay(static_cast<Uint32>(((kFramePeriod - elapsed) * 1000) / perf_hz));
+        }
+        frame_start = SDL_GetPerformanceCounter();
     }
 
     // Cleanup

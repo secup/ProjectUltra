@@ -73,9 +73,10 @@ results; see docs/CHANGELOG.md):
 **Testing invariants:**
 - SINGLE ModemEngine instance for the entire audio stream (continuous RX)
 - Buffer limit: `MAX_PENDING_SAMPLES = 960000` (20 s at 48 kHz)
-- The GUI gate needs an AWAKE display: `ultra_gui` feeds RX audio from its render loop and its
-  vsync swap blocks while macOS sleeps the display (BUG-GUI-DISPLAY-SLEEP-STALL) — the script holds
-  `caffeinate -dimsu -w $$`; a run whose logs stop after one `feed: audio` line is this, not the modem
+- `ultra_gui` feeds RX audio from its render loop, so that loop must never wait on the display: no
+  vsync, self-paced at ~60 Hz (BUG-GUI-DISPLAY-SLEEP-STALL, fixed 2026-11-09 — with vsync, a sleeping
+  display froze the receiver). The gate script still holds `caffeinate -dimsu -w $$`
+  against system sleep; a run whose logs stop after one `feed: audio` line means something blocks that loop
 - DEFAULT gate: `ctest --test-dir build --output-on-failure -j4`
 - `tools/gui_qso_scenario.sh` is the faithful full-protocol + fade/throughput gate (two real `ultra_gui -sim` stations over `ota_simulator serve`, real-time). It REPLACED `cli_simulator` (retired 2026-05-30), which was CPU-paced AND used a divergent PHY wrapper (SimulatedStation) — both made it unfaithful. ALL fade/throughput/full-protocol claims go through the GUI gate.
 
@@ -313,6 +314,11 @@ unvalidated on hardware" caveat.
 **Priority 2 (per subsystem):** `docs/CFO_CORRECTION_FLOW.md` (**CRITICAL** — 4-stage CFO, fading fix, feedback loop) · `docs/PROTOCOL_V2.md` · `docs/GUI_ARCHITECTURE.md` · `docs/AUDIO_SYSTEM.md` · `docs/CONFIGURATION_SYSTEM.md` · `docs/BUILD_SYSTEM.md` · `docs/ADAPTIVITY_AUDIT_2026_05_29.md` (subsystem adaptivity register)
 
 **Priority 2.5 (measured truth — read before theorising):** `docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md` — per-rung FER on ITU Good (= MPG). **(Its "3000 bps is a channel limit" verdict is SUPERSEDED for the current PHY:** `docs/LATENT_ANCHOR_MEASUREMENT_2026_11_08.md` measures 16QAM R2/3 at ~3.3 kbps (frame model) @24 dB Good after the measured-noise LLRs + CFO fixes, and the GUI gate reached 2660 bps @AWGN20 / 2154 mean @Good20 with `ULTRA_LATENT_ANCHORS=measured` — the rate controller, not the channel, was the gate.) Also: 8PSK R3/4's demanded fading validation was RUN and FAILED (38.9% FER @24 dB — keep it disabled), and 16QAM R2/3's Good anchor of 20.0 measures **51.4% FER** — that one wrong anchor is the mechanism behind the crater/churn behaviour. Reproduce: `tools/sweep_fading_anchors.sh`.
+
+**Priority 2.5 (rate selection truth, 2026-11-09):** `docs/EVM_RATE_SELECTION_2026_11_08.md` — a burst frame
+decodes iff its decision-directed EVM SNR clears a per-rung threshold that is the SAME on ITU Good and Moderate
+(0.1-0.3 dB); channel-SNR thresholds differ 2-4 dB between classes. Rate logic that needs a channel class is in the
+wrong domain. GUI-gate speed stack: `ULTRA_FAST=1` (both stations) — opt-in pending a rig A/B.
 
 **Priority 2.5 (hardware truth):** `docs/ANALOG_CHAIN_VERIFIED_2026_07_26.md` — the Pi5→IONOS→Mac
 analog chain MEASURED CLEAN (tilt 0.7 dB, SNDR 30.7 dB = 0.36 dB at dial 20, PAPR 9.7 dB normal).

@@ -72,6 +72,7 @@ struct Args {
     // Pump the full sample budget every trial so two arms of an A/B stay in lockstep
     // (identical channel samples per frame => paired comparison).
     bool fixed_budget = false;
+    std::string frame_log;   // --frame-log PATH: one "evm_db,has_evm,pass" line per frame
     std::string mod_name = "qpsk";
     std::string rate_name = "r1_4";
     std::string channel_name = "awgn";
@@ -283,6 +284,8 @@ Args parseArgs(int argc, char** argv) {
             args.preroll_ms = std::max(0, std::stoi(requireValue("--preroll-ms")));
         } else if (key == "--fixed-budget") {
             args.fixed_budget = std::stoi(requireValue("--fixed-budget")) != 0;
+        } else if (key == "--frame-log") {
+            args.frame_log = requireValue("--frame-log");
         } else if (key == "--help" || key == "-h") {
             usage(argv[0]);
             std::exit(0);
@@ -551,7 +554,22 @@ bool bytesMatch(const Bytes& a, const Bytes& b) {
     return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
 }
 
+// Per-frame effective-SNR log (--frame-log): the decision-directed EVM the demodulator
+// measured on this frame, and whether the frame decoded. Feeds the EVM-domain decode
+// thresholds of the rate selector (protocol/evm_rate_selector.hpp).
+std::ofstream& frameLog() {
+    static std::ofstream f;
+    return f;
+}
+
 void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts) {
+    if (frameLog().is_open()) {
+        const bool pass = outcome.saw_result && outcome.result.success &&
+                          bytesMatch(outcome.result.frame_data, expected);
+        const bool has = outcome.saw_result && outcome.result.has_evm_snr_db;
+        frameLog() << (has ? outcome.result.evm_snr_db : 0.0f) << "," << (has ? 1 : 0)
+                   << "," << (pass ? 1 : 0) << "\n";
+    }
     if (outcome.saw_result) {
         if (outcome.result.success && bytesMatch(outcome.result.frame_data, expected)) {
             ++counts.pass;
@@ -1364,6 +1382,10 @@ int main(int argc, char** argv) {
         }
         ultra::setLogLevel(log_level);
         const Args args = parseArgs(argc, argv);
+        if (!args.frame_log.empty()) {
+            frameLog().open(args.frame_log, std::ios::app);
+            if (!frameLog()) throw std::runtime_error("cannot open --frame-log " + args.frame_log);
+        }
 
         // 2026-05-29 diag: enable the true per-symbol data-aided channel genie
         // (H=Y/X) process-wide. Off unless ULTRA_GENIE_DATA_AIDED=1. Both the

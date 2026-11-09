@@ -1117,6 +1117,11 @@ float ModemEngine::getFadingIndex() const {
     return 0.0f;
 }
 
+std::vector<float> ModemEngine::getLastGroupEvmSnrFrames() const {
+    return streaming_decoder_ ? streaming_decoder_->getLastGroupEvmSnrFrames()
+                              : std::vector<float>{};
+}
+
 float ModemEngine::getDopplerCoherenceScore() const {
     return streaming_decoder_ ? streaming_decoder_->getLastDopplerCoherenceScore() : 0.0f;
 }

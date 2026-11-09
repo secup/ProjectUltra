@@ -451,6 +451,11 @@ void ProtocolEngine::setBurstCarrierGammas(const std::vector<float>& gammas) {
     connection_.setBurstCarrierGammas(gammas);
 }
 
+void ProtocolEngine::setBurstFrameEvms(const std::vector<float>& evm_db) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setBurstFrameEvms(evm_db);
+}
+
 void ProtocolEngine::onAnchoredBurstNoGroup(bool payload_seen) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.noteAnchoredBurstNoGroup(payload_seen);

@@ -292,6 +292,52 @@ loses its ACK whenever the alias outscores the preamble (BUG-TONE-ACK-CLEAN-MISS
 
 ---
 
+## Rate Selection Invariants (2026-11-09)
+
+### INV-RATE-EVM-001: EVM decode thresholds belong to ONE PHY configuration
+
+**Rule:** `evmDecodeThresholdLdpcDb` / `evmDecodeThresholdTurboDb` are the per-frame EVM SNR at
+which each rung's frame decodes half the time, for the CURRENT pilot pattern, codeword geometry,
+equalizer and LLR model, per data-frame FEC. Any change to one of those moves them: re-measure
+with `measure_ack_fer --frame-log` (Good fits) AND the GUI gate's own burst frames (the only
+source for turbo, BUG-HARNESS-TURBO-NO-RESULT) before trusting `ULTRA_RATE_EVM`. Never derive
+them from the channel-SNR waterfall: EVM and channel SNR differ by fading- and rung-dependent
+amounts, and only the EVM-domain threshold is channel-independent.
+**Test:** `EvmRateSelector` (`test_thresholds_are_ordered`).
+
+### INV-RATE-EVM-002: the outer-loop margin calibrates; it never tracks fades
+
+**Rule:** the margin moves only by a group's residual between delivered frames and the success
+its OWN frames' EVMs predicted, on fully measured groups. A loss the EVM predicted (a fade) leaves
+it unchanged; making it react to raw losses (as an SNR-driven outer loop must) would make the
+selector chase fades.
+**Test:** `EvmRateSelector` (`test_margin_moves_on_calibration_error_only`).
+
+### INV-RATE-PRICE-001: price only the anchors the sender will actually emit
+
+**Rule:** the latent selector's candidate geometry charges the descriptor-switch full anchor only
+when `flushBurstBuffer` sends one — chirp acquisition. Structure acquisition never anchors a
+switch; pricing one there is a ~25 % phantom penalty that kept the controller off 16QAM R2/3.
+**Test:** GUI gate arm C (`docs/EVM_RATE_SELECTION_2026_11_08.md` §4).
+
+### INV-GUI-LOOP-001: the GUI loop never waits on the display
+
+**Rule:** `ultra_gui` drains RX audio and ticks the protocol from its render loop, so nothing in
+that loop may block on the display: no vsync swap interval, no `SDL_RENDERER_PRESENTVSYNC`. The
+loop paces itself (`main_gui.cpp`, ~60 Hz). SDL's Cocoa vsync waits on a CVDisplayLink that stops
+while the display sleeps — an unattended station's receiver froze
+(BUG-GUI-DISPLAY-SLEEP-STALL).
+**Test:** `tools/gui_qso_scenario.sh` with the display asleep (`pmset displaysleepnow`, gate copy
+without `caffeinate -d/-u`).
+
+### INV-FAST-001: `ULTRA_FAST` sets defaults, never overrides
+
+**Rule:** `fastProfileEnabled()` is consulted ONLY when the member knob is unset
+(`ULTRA_BURST_ACQ`, `ULTRA_LATENT_ANCHORS`, `ULTRA_DATA_FEC`, `ULTRA_RATE_EVM`), so a component can
+be A/B'd inside the profile. Its members are lockstep: both stations run the same profile.
+
+---
+
 ## Sample Position Invariants
 
 ### INV-POS-001: detectSync() Returns TRAINING Start, Not Data Start

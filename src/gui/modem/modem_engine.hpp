@@ -135,6 +135,9 @@ public:
     bool isFading() const;         // True if fading_index > 0.65
     // Doppler coherence (Good/Moderate discriminator) from the OFDM demodulator.
     float getDopplerCoherenceScore() const;
+    // ULTRA_RATE_EVM: every data frame's EVM SNR of the group just delivered to the
+    // group callback (NaN where unmeasured). Decode-thread / group-callback scope.
+    std::vector<float> getLastGroupEvmSnrFrames() const;
     bool getDopplerCoherenceValid() const;
     // RMS Doppler (Hz) from the same estimator — SECONDARY/approximate readout (fixed
     // nominal cadence), 0 when not estimable. Rides the coherence feed into the protocol

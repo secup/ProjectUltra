@@ -432,6 +432,22 @@ Moderate (GUI −5.8 %) and no rig A/B exists yet.
 **KEEP:** the measured table and its tests, the anchor-consistent seed, the all-dead fallback,
 `tools/latent_anchor_sweep.py` / `latent_anchor_fit.py` and the sweep CSV.
 
+**2026-11-09:** BUG-LATENT-CLASS-SPACING is mitigated within `ULTRA_FAST` (R19); the remaining
+blocker is the rig A/B.
+
+### R19. The `ULTRA_FAST` umbrella, once its rig A/B passes — `BLOCKED 2026-11-09` (on a rig A/B of `ULTRA_FAST=1` vs default, MPG@20 + MPM@20, n >= 8 interleaved pairs)
+
+**Why.** `include/ultra/fast_profile.hpp` exists only to make the rig A/B one switch on both
+stations. Once it passes, its members become the defaults and the umbrella is noise.
+
+**Scope (after the A/B):** flip the defaults of `ULTRA_BURST_ACQ` (structure),
+`ULTRA_LATENT_ANCHORS` (measured), `ULTRA_DATA_FEC` (turbo) and `ULTRA_RATE_EVM` (climb); delete
+`fastProfileEnabled()` and its four call sites; then proceed with R15 and R18.
+
+**KEEP:** every member knob as an explicit opt-out (rollback and per-component A/B), the
+`ULTRA_RATE_EVM=1` FULL mode while BUG-EVM-FULL-CHASES-WINDOW is open (an experiment, not a
+default), `measure_ack_fer --frame-log`.
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

@@ -8,6 +8,7 @@
 #include "rate_controller.hpp"
 #include "goodput_rate_controller.hpp"
 #include "latent_rate_controller.hpp"
+#include "evm_rate_selector.hpp"
 #include "file_transfer.hpp"
 #include "ultra/types.hpp"
 #include "fec/soft_combine.hpp"
@@ -630,6 +631,12 @@ public:
     }
     void clearBurstEvmObservation() {
         burst_obs_evm_snr_db_ = -1.0f;
+    }
+    // ULTRA_RATE_EVM: every data frame's EVM SNR for THIS group (decoder-ordered; NaN where a
+    // frame was not measured). Fed BEFORE onBurstGroupReceived so the rung command this
+    // group's ACK carries uses it; consumed once.
+    void setBurstFrameEvms(const std::vector<float>& evm_db) {
+        burst_obs_frame_evm_db_ = evm_db;
     }
 
     // RX-AUTHORITY PREDICTIVE: the group's per-carrier linear-SNR snapshot
@@ -1408,6 +1415,12 @@ private:
     // ULTRA_LATENT_RATE: outcome-fitted latent state; consumes no SNR, so no calibration
     // offset can reach the rate decision.
     LatentRateController latent_ctl_;
+    // ULTRA_RATE_EVM: effective-SNR selector — per-rung counterfactual success from the
+    // decision-directed EVM of recently received frames (evm_rate_selector.hpp).
+    EvmRateSelector evm_selector_;
+    // This group's per-data-frame EVM SNR (dB, NaN = not measured), fed by the modem binding
+    // before onBurstGroupReceived and consumed by the selector exactly once.
+    std::vector<float> burst_obs_frame_evm_db_;
     // The automatic connect selector's coherent rung BEFORE the conservative
     // first-group cap.  The cap controls only what goes on air; it must not tell
     // the outcome estimator that a strong link was initially believed weak.
