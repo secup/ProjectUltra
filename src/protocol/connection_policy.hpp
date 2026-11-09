@@ -1203,7 +1203,7 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
     // DBPSK floor, local to this ladder.
     switch (channel) {
         case ChannelClassification::AWGN:
-            ofdm_floor = kOFDMEntryFloorAwgnDb;
+            ofdm_floor = ofdmEntryFloorAwgnDb();
             robust_mid_floor = 5.0f;
             break;
         case ChannelClassification::GOOD:

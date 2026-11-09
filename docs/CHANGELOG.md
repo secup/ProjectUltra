@@ -10,6 +10,29 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FEAT: measured AWGN OFDM entry floor (6 dB) in `ULTRA_FAST`; `ULTRA_OFDM_FLOOR_AWGN_DB`
+
+**Why.** The AWGN OFDM entry floor (8 dB, "floor likely lower" in its own comment) sends 5-8 dB
+AWGN links to MC-DPSK at 45-90 bps although OFDM QPSK R1/4 on the current PHY reaches 10 % FER at
+4.0 dB (2026-11-08 production-geometry sweep). At AWGN@8 the connect reading falls 7.8 or 8.0 dB,
+so the same channel ran at 90 bps or 1160 bps by coin flip.
+
+**Measured** (`tools/gui_qso_scenario.sh`, 4 KB, 7.3 Hz, 3 seeds unless noted):
+
+| cell | 8 dB floor (default) | floor lowered |
+|---|---|---|
+| AWGN@7 | 90 bps (MC-DPSK DQPSK R1/4) | 700-710 (5.5 dB floor, QPSK R1/2); 1150-1170 with `ULTRA_FAST` (2 seeds) |
+| AWGN@6 | FAIL 3/3: MC-DPSK DBPSK R1/4 too slow for 4 KB in 480 s (0 ACKs dropped) | 510-720 (5.5 dB floor); 1040-1060 with `ULTRA_FAST` |
+| AWGN@5 | — | 490-640 (4 dB floor, 3/3); `ULTRA_FAST` 1030 and one FAIL (every ACK lost to BUG-ASYNC-ACK-ALWAYS-DROPPED) |
+| AWGN@4 | — | 4 dB floor: 2 seeds read < 4 and took MC-DPSK (PASS 90); one entered OFDM and stalled after a R1/4 -> R1/2 climb |
+
+**What changed** (`waveform_selection.hpp`, `connection_policy.hpp`). `ofdmEntryFloorAwgnDb()`
+feeds both entry decisions: `ULTRA_OFDM_FLOOR_AWGN_DB` if set, else 6 dB under `ULTRA_FAST`
+(`kOFDMEntryFloorAwgnMeasuredDb` = the 10 %-FER point + 2 dB for the connect estimate and the
+control plane), else the unchanged 8 dB. Default behaviour is unchanged.
+`include/ultra/fast_profile.hpp` lists the new member. KNOWN_BUGS: BUG-ASYNC-ACK-ALWAYS-DROPPED
+(the async-ACK hold drops every ACK without completed-turn provenance — why the floor is 6, not 5).
+
 ## 2026-11-09 — FIX: every MC-DPSK file ACK was dropped by listen-before-ACK (BUG-MCDPSK-ACK-DROPPED)
 
 **What was broken.** MC-DPSK file transfers (the mode below the OFDM floors) could not complete:

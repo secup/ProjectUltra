@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <string>
+#include "ultra/fast_profile.hpp"
 
 namespace ultra {
 namespace protocol {
@@ -36,6 +37,30 @@ inline constexpr float kOFDMEntryFloorGoodDb = 8.0f;    // 2026-07-07: lowered 1
                                                         // rescues connected sessions that fade down. QAM8/8PSK R1/4 measured DOMINATED by QPSK
                                                         // R1/2 (equal FER, -33% capacity) — do not add low-rate dense rungs.
 inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
+// The AWGN OFDM entry floor consulted by the two entry decisions (recommendWaveformAndRate,
+// selectLadderRung). Below the ladder's lowest anchor selectCoherentOFDM already returns QPSK
+// R1/4, so lowering it only moves the OFDM-vs-MC-DPSK boundary.
+//
+// MEASURED FLOOR (2026-11-09): QPSK R1/4 on AWGN reaches 10 % FER at 4.0 dB (measure_ack_fer
+// --geometry production, 7.3 Hz, 2026-11-08 sweep); the floor adds 2 dB for the connect
+// estimate AND for the control plane, which is weaker than the data rung at the edge. GUI gate,
+// 4 KB: OFDM entered at AWGN@6/7 passes 10/10 at 510-1170 bps (plain stack and ULTRA_FAST),
+// against MC-DPSK's 45-90 bps there (8 dB floor: AWGN@7 90 bps, AWGN@6 too slow to finish 4 KB in
+// 480 s). At AWGN@5 the data passes (4/5) but one ULTRA_FAST run lost every ACK to the async-ACK
+// hold (BUG-ASYNC-ACK-ALWAYS-DROPPED) and a true 4 dB entry stalled — hence 6, not 5. Rig-dependent
+// (a real radio's distortion moves the OFDM waterfall), so it is the ULTRA_FAST default, not the
+// plain default. ULTRA_OFDM_FLOOR_AWGN_DB overrides. Read once.
+inline constexpr float kOFDMEntryFloorAwgnMeasuredDb = 6.0f;
+inline float ofdmEntryFloorAwgnDb() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_OFDM_FLOOR_AWGN_DB")) {
+            const float f = std::strtof(e, nullptr);
+            if (f >= 0.0f && f <= 20.0f) return f;
+        }
+        return fastProfileEnabled() ? kOFDMEntryFloorAwgnMeasuredDb : kOFDMEntryFloorAwgnDb;
+    }();
+    return v;
+}
 // Poor HF (fading >= 1.10: fast Doppler / heavy multipath) routes to MC-DPSK, NEVER
 // OFDM (thread A, 2026-05-31). Coherent OFDM phase tracking breaks on fast fading and
 // the OFDM band is now coherent-only; the decision doc + the long-standing "Poor HF:
@@ -1084,7 +1109,7 @@ inline CodeRate capInitialOFDMRate(float snr_db,
 inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fading_index) {
     WaveformRecommendation rec;
     const float ofdm_floor =
-        (fading_index < kFadingAwgnMax) ? kOFDMEntryFloorAwgnDb :
+        (fading_index < kFadingAwgnMax) ? ofdmEntryFloorAwgnDb() :
         (fading_index < kFadingGoodMax) ? kOFDMEntryFloorGoodDb :
         (fading_index < kFadingModerateMax) ? kOFDMEntryFloorModerateDb : kOFDMEntryFloorPoorDb;
 

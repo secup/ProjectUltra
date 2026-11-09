@@ -441,7 +441,8 @@ blocker is the rig A/B.
 stations. Once it passes, its members become the defaults and the umbrella is noise.
 
 **Scope (after the A/B):** flip the defaults of `ULTRA_BURST_ACQ` (structure),
-`ULTRA_LATENT_ANCHORS` (measured), `ULTRA_DATA_FEC` (turbo) and `ULTRA_RATE_EVM` (climb); delete
+`ULTRA_LATENT_ANCHORS` (measured), `ULTRA_DATA_FEC` (turbo), `ULTRA_RATE_EVM` (climb) and the AWGN
+OFDM entry floor (6 dB, `kOFDMEntryFloorAwgnMeasuredDb`); delete
 `fastProfileEnabled()` and its four call sites; then proceed with R15 and R18.
 
 **KEEP:** every member knob as an explicit opt-out (rollback and per-component A/B), the

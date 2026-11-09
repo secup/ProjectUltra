@@ -8,6 +8,29 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-ASYNC-ACK-ALWAYS-DROPPED (open, 2026-11-09) — P1 near the floor: an ACK without completed-turn provenance can never be sent
+
+**Mechanism.** `App`'s listen-before-ACK defers a tone ACK whose `inbound_group_complete` is false
+when the decoder has RX evidence within `kDescriptorLostReverseTxHoldMs` (13 s), and at the defer
+deadline (`ULTRA_ACK_CCA_DEFER_MS`, 2.5 s, or the declared remaining airtime + 0.5 s) it DROPS the
+ACK if that evidence is still within the hold. The evidence is normally the frame being ACKed,
+decoded milliseconds earlier, so the hold always outlasts the deadline: every asynchronous ACK is
+dropped by construction. At high SNR almost every ACK has provenance (descriptor-proven groups,
+marked tails) and this never shows; near the floor the descriptor or the turn's last frame is lost
+more often, the ACK falls into this path, and the sender retries to its cap.
+
+**Evidence (GUI gate, 4 KB, 7.3 Hz).** `ULTRA_FAST` AWGN@5 s43 (OFDM QPSK R1/4): 13 ACKs dropped,
+0 received, 112 retransmissions, `Frame seq=0 failed after 15 retries`. Good@6 s42 (MC-DPSK,
+connect read 2.0 dB): 15 dropped, `seq=13 failed after 10 retries`. The MC-DPSK version of the
+same trap was total (BUG-MCDPSK-ACK-DROPPED, fixed by giving the tail completed-turn provenance).
+
+**Fix direction (needs rig evidence — the listen-before-ACK guards exist because keying over an
+incoming burst was measured to cost craters: F124/F127/F129/F176).** Decide at the deadline on
+NEW decoder evidence since the deferral (the peer is still transmitting) rather than on evidence
+age; or hold until the evidence hold expires, bounded by the peer's ACK window, then send if the
+channel is quiet. Until then the `ULTRA_FAST` AWGN entry floor stays at 6 dB, not the 5 dB the
+data rung alone would allow.
+
 ### BUG-HARNESS-TURBO-NO-RESULT (open, 2026-11-09) — P3, measurement tooling
 
 `tools/measure_ack_fer` (classic single-frame path) emits no `DecodeResult` for a turbo data
