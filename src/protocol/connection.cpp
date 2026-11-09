@@ -3427,7 +3427,7 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                 latent_bootstrap_rung_ != kRungIdxNone
                     ? latent_bootstrap_rung_
                     : cur;
-            latent_ctl_.seedPrior(latentThetaForRung(seed_rung), 3.0f);
+            latent_ctl_.seedPrior(latentSeedXForRung(seed_rung), 3.0f);
             latent_bootstrap_rung_ = kRungIdxNone;
         }
 

@@ -68,6 +68,7 @@
 // SCOPE. Pure logic, no I/O, no clock, no RNG.
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -157,38 +158,130 @@ inline bool latentStartupProbeAllowedByOperator() {
 // arbitrary units as the latent x. The absolute scale is IRRELEVANT (it cancels); only the
 // spacing carries information.
 //
-// MEASURED rungs come from the ITU-Good FER waterfall in
-// docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md §1 (6 seeds x 24 frames x 5 SNR points),
-// fitted as a logistic in dB over the 20-70% FER band — outside that band the curve flattens
-// into the fading error floor, which a logistic cannot represent and must not be fitted to:
+// RE-MEASURED 2026-11-08 FOR EVERY RUNG on the current PHY (measured-noise LLRs default ON;
+// the CFO chain made correct for a real dial offset) at PRODUCTION geometry — measure_ack_fer
+// --geometry production (QPSK cw8 / 8PSK cw12 / 16QAM cw16, MEDIUM CP) --preroll-ms 300
+// --cfo-hz 7.3, ITU-R F.1487 Good, 6 seeds x 24 frames x 9 SNR points (2 dB) per rung;
+// theta = the logit-interpolated 50 %-FER point (= the 20-70 % band logistic fit to 0.1-0.3 dB):
 //
-//     rung          fitted slope   theta      (research cross-check)
-//     QPSK R3/4        0.403       13.0            12.5
-//     8PSK R2/3        0.449       15.9            15.8
-//     8PSK R3/4        0.148       20.5            20.1
-//     16QAM R2/3       0.219       20.3            20.1
+//     rung          theta  slope   (2026-07-26, 4-CW / LONG-CP harness)
+//     QPSK R1/4      4.9   0.39    -2.0 derived
+//     QPSK R1/2      7.3   0.49     3.0 derived
+//     QPSK R2/3     10.3   0.42     8.0 derived
+//     QPSK R3/4     12.3   0.37    13.0
+//     8PSK R2/3     14.7   0.41    15.9
+//     8PSK R3/4     17.1   0.39    20.5
+//     16QAM R1/2    13.7   0.45    17.0 derived
+//     16QAM R2/3    17.8   0.40    20.3
+//     16QAM R3/4    22.0   0.13    26.0 derived   (20 % error floor: never usable on Good)
 //
-// DERIVED rungs (QPSK R1/4..R2/3) were not in that sweep. Their spacing is taken from the
-// ladder's own within-QPSK anchor differences (R3/4 20.0, R2/3 15.0, R1/2 10.0 on Good —
-// internally consistent, measured by measure_ack_fer sweeps), anchored to the MEASURED
-// QPSK R3/4 theta. Any error common to all of them cancels; only their spacing matters, and
-// that spacing is the measured part.
-inline constexpr float kLatentSlopePerDb = 0.35f;  // shared; per-rung fits 0.15-0.45, and
-                                                   // the tails are error-floor artefacts
+// The derived QPSK spacing (5 dB per code rate) was the large error: on fading the waterfall is
+// shaped by fades as much as by coding, so adjacent code rates sit 2-3 dB apart. That error is
+// also why the controller stalled on QPSK R2/3 at Good@20: R2/3 successes saturate the
+// likelihood at theta + ln(0.965/0.035)/slope (old 17.5), at the old 8PSK crossover (17.0).
+// The dense rungs gained 2.5-3.4 dB from the measured-noise LLRs (no more clipped LLRs).
+//
+// VALIDATION. With production geometry the argmax of this table switches QPSK R1/2 -> R2/3 at
+// 11.5, -> 8PSK R2/3 at 16.0, -> 16QAM R2/3 at 19.5 dB; the MEASURED delivered-goodput argmax
+// of the same sweep switches at ~11.9 / ~15.8 / ~19.8 dB (the old table: 10.0 / 17.0 / 22.5).
+// QPSK R3/4 is never the argmax — and never the measured best either (R2/3 below 15 dB, 8PSK
+// R2/3 above), so that is physics at production geometry, not a model defect.
+//
+// CHANNEL CLASSES. One latent x absorbs a COMMON offset, not a class-dependent SPACING. Relative
+// to QPSK R1/2 the dense rungs sit further out on Moderate (8PSK R2/3 +9.5 vs +7.4 dB on Good,
+// 16QAM R2/3 +14.0 vs +10.5) and carry 17-31 % error floors there (coherent tracking at 0.5 Hz
+// Doppler, BUG-MODERATE-8PSK-COHERENT-FLOOR); AWGN compresses it. Offline controller Monte-Carlo
+// with outcomes drawn from the measured per-rung success (60 transfers x 20 groups per cell),
+// fraction of the best fixed rung, old -> new table: Good 18 dB 87 -> 98 %, 24 dB 94 -> 100 %;
+// AWGN 12 dB 65 -> 74 %, 16 dB 55 -> 85 %; Moderate 15-24 dB 96-100 % -> 97-99 % (more rung
+// switches there, which the rung-change anchor cost in the production geometry damps).
+//
+// SHIPPING STATE: OPT-IN (ULTRA_LATENT_ANCHORS=measured, both stations). The measured set — this
+// table, slope 0.41 and the anchor-consistent prior seed below — is one coherent calibration and
+// switches as a unit. GUI gate (21 KB, 7.3 Hz CFO, 5 seeds per cell, all PASS) against the
+// 2026-07 set: Good@20 +26.7 % (5/5 pairs up, paired t 3.7), AWGN@20 +54.7 %, Good@15 +8 % (n.s.),
+// Moderate@20 -5.8 % (2/5 up, n.s.) with 5 craters vs 0 — the class-dependent spacing above:
+// on Moderate the Good thetas over-state 8PSK R2/3, the posterior settles where it still looks
+// as good as QPSK R3/4, and the GUI's failure cost (resends, anchors, craters) exceeds the frame
+// model's. The table without the seed regressed every cell (-2 .. -9 %). It stays opt-in until a
+// rig A/B (rate-controller A/Bs on the seeded simulator have reversed on the rig before); the
+// Moderate fix is class-aware thetas (the Moderate column above), not a different Good table.
+inline bool latentMeasuredAnchorsEnabled();
+
+inline constexpr float kLatentSlopePerDbJuly2026 = 0.35f;  // 2026-07 set: per-rung fits 0.15-0.45
+inline constexpr float kLatentSlopePerDbMeasured = 0.41f;  // median of the 8 usable 2026-11 fits
+                                                            // (0.37-0.49; 16QAM R3/4's 0.13 = floor)
+inline float latentSlopePerDb() {
+    return latentMeasuredAnchorsEnabled() ? kLatentSlopePerDbMeasured : kLatentSlopePerDbJuly2026;
+}
 
 inline float latentThetaForRung(uint8_t idx) {
-    switch (idx) {
+    if (latentMeasuredAnchorsEnabled()) {
+        switch (idx) {  // 2026-11-08, measured for every rung (table above)
+            case kRungIdxQpskR14: return  4.9f;
+            case kRungIdxQpskR12: return  7.3f;
+            case kRungIdxQpskR23: return 10.3f;
+            case kRungIdxQpskR34: return 12.3f;
+            case kRungIdxQam8R23: return 14.7f;
+            case kRungIdxQam8R34: return 17.1f;
+            case kRungIdxQam16R12: return 13.7f;
+            case kRungIdxQam16R23: return 17.8f;
+            case kRungIdxQam16R34: return 22.0f;
+            default: return 99.0f;
+        }
+    }
+    switch (idx) {  // 2026-07-26 set (default): 4 measured on the 4-CW harness, the rest derived
         case kRungIdxQpskR14: return -2.0f;   // derived: R1/2 - 5 dB (ladder spacing)
         case kRungIdxQpskR12: return  3.0f;   // derived: R3/4 - 10 dB
         case kRungIdxQpskR23: return  8.0f;   // derived: R3/4 - 5 dB
-        case kRungIdxQpskR34: return 13.0f;   // MEASURED
-        case kRungIdxQam8R23: return 15.9f;   // MEASURED
-        case kRungIdxQam8R34: return 20.5f;   // MEASURED — and DOMINATED, see below
+        case kRungIdxQpskR34: return 13.0f;   // measured
+        case kRungIdxQam8R23: return 15.9f;   // measured
+        case kRungIdxQam8R34: return 20.5f;   // measured
         case kRungIdxQam16R12: return 17.0f;  // derived: between 8PSK R2/3 and 8PSK R3/4
-        case kRungIdxQam16R23: return 20.3f;  // MEASURED
+        case kRungIdxQam16R23: return 20.3f;  // measured
         case kRungIdxQam16R34: return 26.0f;  // derived: unmeasured, deliberately pessimistic
         default: return 99.0f;
     }
+}
+
+// PRIOR SEED. The connect-time automatic pick is a rung the ladder expects to WORK: its anchors
+// sit at FER <= ~10 % (QPSK: floor + margin) or at the throughput crossover (8PSK Good). With
+// theta measured as the 50 %-FER point, seeding x at theta(pick) — the pre-2026-11-08 rule,
+// written when theta were relative ladder positions — starts the posterior ~5 dB below what the
+// pick asserts, and the p25 decision a further ~2 dB below that: at Good@20 the controller then
+// needs a whole 21 KB transfer to leave QPSK R2/3, and the slower exit from R1/2 arms the
+// one-shot startup probe, whose failure on a fading channel (any lost frame) pins R1/2 for the
+// QSO (GUI gate Moderate@20 s43: 15 of 16 groups at R1/2, 1280 vs 1690 bps). The consistent seed
+// is the x at which the pick succeeds with the anchor's probability:
+//     x0 = theta(pick) + logit(p) / slope.
+// With the measured set the seed uses p = 0.9 (x0 = theta + 5.4 dB); the 2026-07 set keeps
+// x0 = theta(pick), the rule its relative thetas were tuned with.
+inline constexpr float kLatentSeedSuccessMeasured = 0.9f;
+
+inline float latentSeedXForRung(uint8_t idx) {
+    if (!latentMeasuredAnchorsEnabled()) return latentThetaForRung(idx);
+    const float p = kLatentSeedSuccessMeasured;
+    return latentThetaForRung(idx) + std::log(p / (1.0f - p)) / latentSlopePerDb();
+}
+
+// ULTRA_LATENT_ANCHORS=measured (or 1) selects the 2026-11-08 measured set; read once, with a
+// test override. A WIRE-INVISIBLE but behaviour-defining choice: set it on both stations (the
+// receiver holds rate authority).
+inline std::atomic<int>& latentMeasuredAnchorsFlag() {
+    static std::atomic<int> flag{-1};
+    return flag;
+}
+inline bool latentMeasuredAnchorsEnabled() {
+    int v = latentMeasuredAnchorsFlag().load(std::memory_order_relaxed);
+    if (v < 0) {
+        const char* e = std::getenv("ULTRA_LATENT_ANCHORS");
+        v = (e != nullptr && (std::strcmp(e, "measured") == 0 || std::strcmp(e, "1") == 0)) ? 1 : 0;
+        latentMeasuredAnchorsFlag().store(v, std::memory_order_relaxed);
+    }
+    return v == 1;
+}
+inline void setLatentMeasuredAnchorsForTesting(bool on) {
+    latentMeasuredAnchorsFlag().store(on ? 1 : 0, std::memory_order_relaxed);
 }
 
 // FADING ERROR FLOOR. On a Rayleigh channel no rung reaches P=1: deep nulls destroy frames
@@ -351,6 +444,9 @@ public:
         Pick out;
         float g_by_rung[kRungIdxCount] = {};
         out.x_used = percentile(kDecilePessimism);
+        // Most robust candidate (highest predicted success), for when every rung is dead.
+        uint8_t robust = kRungIdxNone;
+        float robust_p = -1.0f, robust_g = 0.0f;
         for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
             const CoherentPick cp = coherentRungFromIndex(r);
             if (!coherentRungLocallyEnabled(cp.mod, cp.rate)) continue;
@@ -358,6 +454,12 @@ public:
             const auto& physical = geometry[r];
             if (!physical.valid()) continue;
             float p = successProb(out.x_used, latentThetaForRung(r));
+            if (p > robust_p) {
+                robust_p = p;
+                robust = r;
+                robust_g = physical.useful_bytes_per_frame *
+                           static_cast<float>(physical.frames_per_cycle) * p / physical.cycle_s;
+            }
             if (p < kDeadProb) continue;              // dead, not merely bad
             p = std::min(p, kCapProb);                // never reward a lucky streak
             const float useful_bytes = physical.useful_bytes_per_frame *
@@ -365,6 +467,15 @@ public:
             const float g = useful_bytes * p / physical.cycle_s;
             if (g > out.goodput) { out.goodput = g; out.rung = r; }
             g_by_rung[r] = g;
+        }
+        // EVERY rung predicted dead (p < kDeadProb): command the most robust one rather than
+        // returning none, which made the caller hold the incumbent — on a collapsing link that
+        // froze a dense rung in place. With the 2026-11-08 measured thetas this happens below
+        // x ~ -0.5 (QPSK R1/4's 10 % point); the old derived R1/4 theta (-2) kept it alive to
+        // x ~ -8, outside the posterior range, which is why the case was never reached.
+        if (out.rung == kRungIdxNone && robust != kRungIdxNone) {
+            out.rung = robust;
+            out.goodput = robust_g;
         }
 
         // TIE-BREAK UPWARD. Walk DOWN from the top so we find the HIGHEST rung that is
@@ -416,7 +527,7 @@ public:
     int decisions() const { return decisions_; }
 
     static float successProb(float x, float theta) {
-        const float z = kLatentSlopePerDb * (x - theta);
+        const float z = latentSlopePerDb() * (x - theta);
         const float p = 1.0f / (1.0f + std::exp(-std::clamp(z, -40.0f, 40.0f)));
         return std::clamp(p, kLatentMinSuccess, kLatentMaxSuccess);
     }

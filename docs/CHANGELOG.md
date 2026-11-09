@@ -10,6 +10,42 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-08 — FEAT: latent rate-controller anchors re-measured on the current PHY (`ULTRA_LATENT_ANCHORS=measured`, opt-in)
+
+**Why.** The latent controller's per-rung thetas (50 %-FER points; only their SPACING matters)
+were 4 rungs measured on the 4-CW / LONG-CP harness before the measured-noise LLRs and the CFO
+fixes, plus 5 derived at 5 dB per QPSK code rate. Its effect in the GUI gate: at 20 dB the
+controller never left QPSK R2/3 on ANY channel (R2/3 successes saturate the likelihood at x =
+17.5, the old 8PSK switch point).
+
+**Measurement** (`docs/LATENT_ANCHOR_MEASUREMENT_2026_11_08.md`, data
+`docs/data/latent_anchor_sweep_2026_11_08.csv`, `tools/latent_anchor_sweep.py` +
+`tools/latent_anchor_fit.py fit|best|sim`): 9 rungs x Good/Moderate/AWGN x 9 SNR x 6 seeds x 24
+frames, production geometry, 7.3 Hz CFO. Good thetas 4.9 / 7.3 / 10.3 / 12.3 (QPSK R1/4..R3/4),
+14.7 / 17.1 (8PSK R2/3, R3/4), 13.7 / 17.8 / 22.0 (16QAM R1/2..R3/4); slopes 0.37-0.49 (median
+0.41). QPSK code rates sit 2-3 dB apart on fading, not 5; dense rungs gained 2.5-3.4 dB; 16QAM
+R1/2 beats 8PSK R2/3 by 1 dB at equal bits/carrier. The new table's argmax reproduces the
+measured best-rung switches on Good (11.5 / 16.0 / 19.5 dB vs measured 11.9 / 15.8 / 19.8; old
+10.0 / 17.0 / 22.5). Moderate spreads the dense rungs 2-4 dB further and adds 17-31 % floors.
+
+**What changed** (`src/protocol/latent_rate_controller.hpp`, `connection.cpp` seed site).
+- `ULTRA_LATENT_ANCHORS=measured` (default OFF) switches, as one set, the measured theta table,
+  slope 0.41 and an anchor-consistent prior seed (`latentSeedXForRung`: theta(pick) +
+  logit(0.9)/slope — the ladder picks a rung it expects to work, not its 50 % point; the old seed
+  rule was written for relative thetas and is kept for the default set).
+- `best()`: when EVERY rung is predicted dead, command the most robust one instead of none (which
+  made the caller hold the incumbent). Unreachable with the default set (its R1/4 theta keeps it
+  alive to x ~ -8); reachable below x ~ -0.5 with the measured set.
+
+**GUI gate** (21 KB, 7.3 Hz, seeds 42-46, all 60 runs PASS): measured set vs default — Good@20
+2154 vs 1700 (+26.7 %, 5/5, t 3.7), AWGN@20 2660 vs 1720 (+54.7 %), Good@15 +8 % (n.s.),
+Moderate@20 −5.8 % (2/5, n.s., 5 craters vs 0 — over-commit to 8PSK R2/3 where the Good thetas
+over-state it). The measured table WITHOUT the seed regressed every cell (−2 .. −9 %; the slower
+R1/2 exit arms the startup probe, whose failure pins R1/2 for the QSO). Opt-in until a rig A/B;
+BUG-LATENT-CLASS-SPACING filed for the Moderate fix (class-aware thetas). Tests:
+`LatentRateController` 57/57 (default ordering + measured ordering + all-dead fallback),
+`ConnectionAdaptive`, ctest 106/106.
+
 ## 2026-11-08 — FIX: tone-ACK timing candidates — a Costas alias in the payload hid a clean ACK (BUG-TONE-ACK-CLEAN-MISS)
 
 **What was broken.** GUI gate Good@15 s42: the group-42 ACK was missed in 4 of 13 runs (old and

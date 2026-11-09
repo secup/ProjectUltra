@@ -23,6 +23,19 @@ skip that whenever ANY caffeinate was running, e.g. an agent's `caffeinate -i`).
 the audio drain (and protocol tick) off the render thread, or render without blocking vsync when
 the window is occluded. The headless `ultra_tnc` is unaffected.
 
+### BUG-LATENT-CLASS-SPACING (open, 2026-11-08) — P2, blocks defaulting the measured anchors
+
+The latent controller has ONE operating point x with ONE theta per rung, calibrated on ITU Good.
+That absorbs a common offset between channel classes, not a class-dependent SPACING — and the
+spacing is class-dependent: relative to QPSK R1/2, 8PSK R2/3 sits +7.4 dB on Good but +9.5 on
+Moderate, 16QAM R2/3 +10.5 vs +14.0, with 17-31 % error floors on Moderate
+(`docs/LATENT_ANCHOR_MEASUREMENT_2026_11_08.md`). With the measured set
+(`ULTRA_LATENT_ANCHORS=measured`) the controller holds 8PSK R2/3 on Moderate@20 at 70-74 %
+delivery: GUI −5.8 % mean, 5 craters vs 0. Fix direction: per-class thetas (the measured
+Moderate column) selected by the coherence discriminator, or a failure-cost term (resend /
+anchor / crater) in the objective — the frame model calls 8PSK R2/3 vs QPSK R3/4 a near-tie on
+Moderate that the GUI does not.
+
 ### BUG-TONE-ACK-PREAMBLE-FADE (open, 2026-11-08) — P3, physical
 
 The tone-ACK timing search keys on the 4 Costas symbols at the START of the burst only. On

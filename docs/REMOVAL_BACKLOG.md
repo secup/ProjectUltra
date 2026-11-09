@@ -418,6 +418,20 @@ and the detector's band loop (bands becomes the constant 2), the `combine` facto
 square-law combiner, the carrier-offset prior and the prefix-sum sweep (both independent of
 diversity), `kSymbolMsWeakSNR` (detector-level tests only — never a staircase rung).
 
+### R18. The 2026-07 latent-anchor set, after a rig A/B of the measured set — `BLOCKED 2026-11-08` (on BUG-LATENT-CLASS-SPACING + a rig A/B)
+
+**Why.** `latentThetaForRung`'s default table (4 rungs measured on the 4-CW harness, 5 derived at
+5 dB per QPSK code rate), `kLatentSlopePerDbJuly2026` and the theta(pick) seed are superseded by
+the 2026-11-08 measurement; they stay the default only because the measured set over-commits on
+Moderate (GUI −5.8 %) and no rig A/B exists yet.
+
+**Scope (after both):** the July `switch`, the slope constant and the default branch of
+`latentSeedXForRung`; the `ULTRA_LATENT_ANCHORS` knob and `setLatentMeasuredAnchorsForTesting`;
+`test_ranking_matches_measured_ordering` (July ordering).
+
+**KEEP:** the measured table and its tests, the anchor-consistent seed, the all-dead fallback,
+`tools/latent_anchor_sweep.py` / `latent_anchor_fit.py` and the sweep CSV.
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):

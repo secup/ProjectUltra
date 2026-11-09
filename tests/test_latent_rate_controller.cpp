@@ -227,6 +227,7 @@ void test_exact_production_geometry_and_no_eta_double_count() {
 }
 
 // ── 4. Ranking reproduces the measured waterfall ordering ─────────────────────
+// Default (2026-07) set: the ordering its 4-CW-harness measurement pinned.
 void test_ranking_matches_measured_ordering() {
     // At the bench's dial 20 the measured delivered throughput ordering is
     //   8PSK R2/3 (2450) > QPSK R3/4 (2066) > 16QAM R2/3 (1890) > 8PSK R3/4 (1618)
@@ -254,6 +255,55 @@ void test_ranking_matches_measured_ordering() {
           "exact geometry at x~16 stays on reliable QPSK R2/3");
     CHECK(pick(x22).rung == kRungIdxQam8R23,
           "exact geometry at x~22 prefers 8PSK R2/3 over fragile 16QAM R2/3");
+}
+
+void test_ranking_matches_measured_ordering_measured_set() {
+    setLatentMeasuredAnchorsForTesting(true);
+    // RE-MEASURED 2026-11-08 (production geometry, current PHY, ITU Good, 6 seeds x 24 frames;
+    // latent_rate_controller.hpp "RE-MEASURED"): measured delivered useful bytes/s per rung,
+    //   14 dB: QPSK R2/3 182 > QPSK R3/4 147
+    //   18 dB: 8PSK R2/3 264 > 16QAM R2/3 234
+    //   22 dB: 16QAM R2/3 368 > 8PSK R2/3 324     (the 2026-07-26 4-CW harness had 8PSK
+    //                                             first at 20-22: superseded)
+    // Points sit >= 2 dB from each measured switch (11.9 / 15.8 / 19.8 dB) so the check pins
+    // the ordering, not a boundary.
+    auto at = [](float x_p25) {
+        LatentRateController c;
+        c.seedPrior(x_p25 + 0.2f, 0.2f);  // p25 ~= x_p25
+        return pick(c).rung;
+    };
+    CHECK(at(14.0f) == kRungIdxQpskR23, "x~14: QPSK R2/3, the measured best (got "
+                                            << static_cast<int>(at(14.0f)) << ")");
+    CHECK(at(18.0f) == kRungIdxQam8R23, "x~18: 8PSK R2/3, the measured best (got "
+                                            << static_cast<int>(at(18.0f)) << ")");
+    CHECK(at(22.0f) == kRungIdxQam16R23, "x~22: 16QAM R2/3, the measured best (got "
+                                             << static_cast<int>(at(22.0f)) << ")");
+
+    // A poor link must fall back, and a strong one must not sit at the floor.
+    LatentRateController lo, hi;
+    lo.seedPrior(6.0f, 1.0f);
+    hi.seedPrior(24.0f, 1.0f);
+    CHECK(pick(lo).rung < kRungIdxQam8R23, "a weak link drops below 8PSK R2/3");
+    CHECK(pick(hi).rung >= kRungIdxQam8R23, "a strong link does not sit below it");
+    setLatentMeasuredAnchorsForTesting(false);
+}
+
+// When EVERY rung is predicted dead the controller must still command the most robust one;
+// returning none made the caller hold the incumbent, freezing a dense rung on a collapsing
+// link (reachable since the 2026-11-08 measured thetas put QPSK R1/4's 10 % point at x ~ -0.5).
+void test_all_dead_falls_back_to_most_robust_rung() {
+    setLatentMeasuredAnchorsForTesting(true);
+    LatentRateController c;
+    c.seedPrior(-4.0f, 0.25f);
+    const auto p = pick(c);
+    CHECK(p.rung == kRungIdxQpskR14,
+          "all rungs dead at x~-4: command the most robust rung, QPSK R1/4 (got "
+              << static_cast<int>(p.rung) << ")");
+    CHECK(LatentRateController::successProb(c.percentile(0.25f),
+                                            latentThetaForRung(kRungIdxQpskR14)) <
+              LatentRateController::kDeadProb,
+          "the scenario really is all-dead (else this test checks nothing)");
+    setLatentMeasuredAnchorsForTesting(false);
 }
 
 // ── 5. Minstrel's two clamps, and why ─────────────────────────────────────────
@@ -474,6 +524,8 @@ int main() {
     test_common_mode_calibration_error_cancels();
     test_exact_production_geometry_and_no_eta_double_count();
     test_ranking_matches_measured_ordering();
+    test_ranking_matches_measured_ordering_measured_set();
+    test_all_dead_falls_back_to_most_robust_rung();
     test_dead_and_capped_probabilities();
     test_relax_widens_and_is_the_only_forgetting();
     test_correlated_frames_are_tempered();
