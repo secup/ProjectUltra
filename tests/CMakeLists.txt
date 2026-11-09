@@ -981,3 +981,17 @@ ultra_enable_test_warnings(
 # faster MC-DPSK / OFDM / tone-ACK tests; every other job runs them.
 set_property(TEST MCDPSKSnrCalibration OFDMSnrCalibration EVMSnrCalibration ToneBurstAckWatterson
     APPEND PROPERTY LABELS slow)
+
+# Hang guards scale with sanitizer instrumentation. The explicit TIMEOUTs above were sized on
+# optimized or plain Debug runs; ASan/UBSan runs the DSP tests 20-45x slower than the optimized
+# build (BurstStaleGeometry: 4 s Release, 177-180 s ASan against its 180 s guard, 2026-11-09).
+if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=")
+    get_property(_ultra_tests DIRECTORY PROPERTY TESTS)
+    foreach(_ultra_test IN LISTS _ultra_tests)
+        get_test_property(${_ultra_test} TIMEOUT _ultra_timeout)
+        if(_ultra_timeout)
+            math(EXPR _ultra_timeout "${_ultra_timeout} * 4")
+            set_tests_properties(${_ultra_test} PROPERTIES TIMEOUT ${_ultra_timeout})
+        endif()
+    endforeach()
+endif()

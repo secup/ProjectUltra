@@ -30,8 +30,10 @@ concurrency:
 env:
   # Windows dependencies come from vcpkg. Release-only triplet: every build here is Release, and
   # the default x64-windows triplet built each package twice (debug + release) — the cold gRPC
-  # build took 89 min in run 42605639627. The test and build jobs install the SAME set so they
-  # share one binary cache.
+  # build took 89 min in run 42605639627. The HOST triplet (protoc, grpc_cpp_plugin) must be the
+  # same: it defaults to x64-windows, and a host != target split builds gRPC, protobuf and abseil
+  # twice (run 42622892678 was still in the cold install after 75 min). The test and build jobs
+  # install the SAME set so they share one binary cache.
   VCPKG_TRIPLET: x64-windows-release
 
 # Speed notes (2026-11-09, run 42605639627 took 1 h 39 min wall clock and failed):
@@ -126,9 +128,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg-cache
-          key: vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-${{ steps.vcpkg-version.outputs.sha }}
+          key: vcpkg-v2-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-${{ steps.vcpkg-version.outputs.sha }}
           restore-keys: |
-            vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-
+            vcpkg-v2-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-
 
       - name: Free Disk Space (Windows)
         # Only a cold vcpkg build needs the room (5 min of deletions); a warm restore does not.
@@ -164,7 +166,7 @@ jobs:
           New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
           New-Item -ItemType Directory -Force "D:/vcpkg-bt" | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
-          vcpkg install "sdl2:${{ env.VCPKG_TRIPLET }}" "grpc:${{ env.VCPKG_TRIPLET }}" --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
+          vcpkg install "sdl2:${{ env.VCPKG_TRIPLET }}" "grpc:${{ env.VCPKG_TRIPLET }}" --host-triplet=${{ env.VCPKG_TRIPLET }} --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -200,6 +202,7 @@ jobs:
           -DULTRA_FETCH_GRPC=OFF
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
+          -DVCPKG_HOST_TRIPLET=${{ env.VCPKG_TRIPLET }}
 
       - name: Build Tests (Linux/macOS)
         if: runner.os != 'Windows'
@@ -369,7 +372,7 @@ jobs:
     # Measured before 2026-11-09: linux ~4 min, macos ~3 min, windows ~12 min with a warm vcpkg
     # cache. A Windows vcpkg/GUI dependency install HUNG for >1h30m on 2026-07-26 (run
     # 30201252621); the cap must still let one cold gRPC build finish and save the cache.
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -438,9 +441,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg-cache
-          key: vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-${{ steps.vcpkg-version.outputs.sha }}
+          key: vcpkg-v2-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-${{ steps.vcpkg-version.outputs.sha }}
           restore-keys: |
-            vcpkg-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-
+            vcpkg-v2-${{ env.VCPKG_TRIPLET }}-sdl2-grpc-
 
       - name: Free Disk Space (Windows)
         if: runner.os == 'Windows' && steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -475,7 +478,7 @@ jobs:
           New-Item -ItemType Directory -Force "${{ github.workspace }}/vcpkg-cache" | Out-Null
           New-Item -ItemType Directory -Force "D:/vcpkg-bt" | Out-Null
           $env:VCPKG_BINARY_SOURCES = "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
-          vcpkg install "sdl2:${{ env.VCPKG_TRIPLET }}" "grpc:${{ env.VCPKG_TRIPLET }}" --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
+          vcpkg install "sdl2:${{ env.VCPKG_TRIPLET }}" "grpc:${{ env.VCPKG_TRIPLET }}" --host-triplet=${{ env.VCPKG_TRIPLET }} --x-buildtrees-root=D:/vcpkg-bt --clean-after-build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -510,6 +513,7 @@ jobs:
           -DULTRA_FETCH_GRPC=OFF
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=${{ env.VCPKG_TRIPLET }}
+          -DVCPKG_HOST_TRIPLET=${{ env.VCPKG_TRIPLET }}
 
       - name: Build (Linux/macOS)
         if: runner.os != 'Windows'
@@ -526,9 +530,11 @@ jobs:
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
+        # /MP compiles each project's files in parallel (4 at a time); two projects at once keeps
+        # the peak at ~8 cl.exe on the 16 GB runner (unbounded --parallel with /MP could reach 16).
         env:
           CL: /MP
-        run: cmake --build build --config Release --parallel
+        run: cmake --build build --config Release --parallel 2
 
       - name: Collect Bundle Files
         shell: bash

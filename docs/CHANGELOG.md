@@ -36,14 +36,20 @@ jobs, and each run took 1 h 39 min:
 - `tests/test_frame_structure_detector.cpp`: includes `env_compat.hpp`.
 - `tests/CMakeLists.txt`: `add_compile_options(${ULTRA_TEST_ASSERT_OPTION})` for the whole tests
   directory (test asserts live in every build type; production targets keep NDEBUG); the four
-  calibration tests get label `slow`.
+  calibration tests get label `slow`; under `-fsanitize=` every explicit per-test TIMEOUT (a hang
+  guard sized on optimized/Debug runs) is scaled 4x. First CI run of this change: BurstStaleGeometry
+  (4 s Release) took 180.07 s under ASan against its 180 s guard and timed out; it had passed at
+  177 s the run before.
 - `scripts/coverage_report.sh`: builds at `-O1` (front-end source-based counters do not depend on
   the optimization level) and defines `ULTRA_COVERAGE_BUILD`.
 - `.github/workflows/build-matrix.yml`: test jobs build Release (what ships and what the local
   gate runs); ccache on Linux/macOS through actions/cache; Linux `--parallel 4` (public-repo
   runners are 4 vCPU / 16 GB; the `--parallel 2` caps dated from the 7 GB runner), macOS 3;
-  Windows uses the release-only `x64-windows-release` vcpkg triplet (one build per package instead
-  of debug + release), `/MP`, saves the vcpkg cache right after the install, and skips the 5-min
+  Windows uses the release-only `x64-windows-release` vcpkg triplet for target AND host
+  (`--host-triplet`, `VCPKG_HOST_TRIPLET`; one release build per package instead of debug +
+  release — a host left at the default x64-windows makes gRPC/protobuf/abseil build twice, which
+  run 42622892678 hit: still in the cold install after 75 min), `/MP` with `--parallel 2`, saves
+  the vcpkg cache right after the install, and skips the 5-min
   disk cleanup on a warm cache; the sanitizer job skips label `slow` (their code paths run under
   ASan in the faster MC-DPSK / OFDM / tone-ACK tests); the bundle build no longer waits for the
   tests (the tag release still needs every job); docs-only pushes do not build (no test reads
