@@ -435,15 +435,19 @@ Moderate (GUI −5.8 %) and no rig A/B exists yet.
 **2026-11-09:** BUG-LATENT-CLASS-SPACING is mitigated within `ULTRA_FAST` (R19); the remaining
 blocker is the rig A/B.
 
-### R19. The `ULTRA_FAST` umbrella, once its rig A/B passes — `BLOCKED 2026-11-09` (on a rig A/B of `ULTRA_FAST=1` vs default, MPG@20 + MPM@20, n >= 8 interleaved pairs)
+### R19. The `ULTRA_FAST` umbrella, once its rig A/B passes — `DEFAULTS FLIPPED 2026-11-09; deletion BLOCKED` (on a rig A/B of the default vs `ULTRA_FAST=0`, MPG@20 + MPM@20, n >= 8 interleaved pairs)
 
 **Why.** `include/ultra/fast_profile.hpp` exists only to make the rig A/B one switch on both
-stations. Once it passes, its members become the defaults and the umbrella is noise.
+stations. The defaults were flipped ahead of the A/B on 2026-11-09 (operator decision: no deployed
+stations, rig weeks away); `ULTRA_FAST=0` is now the baseline arm. Once the A/B passes, the
+baseline arm and the umbrella are noise.
 
-**Scope (after the A/B):** flip the defaults of `ULTRA_BURST_ACQ` (structure),
-`ULTRA_LATENT_ANCHORS` (measured), `ULTRA_DATA_FEC` (turbo), `ULTRA_RATE_EVM` (climb) and the AWGN
-OFDM entry floor (6 dB, `kOFDMEntryFloorAwgnMeasuredDb`); delete
-`fastProfileEnabled()` and its four call sites; then proceed with R15 and R18.
+**Scope (after the A/B):** make the member defaults unconditional (`ULTRA_BURST_ACQ` structure,
+`ULTRA_LATENT_ANCHORS` measured, `ULTRA_DATA_FEC` turbo, `ULTRA_RATE_EVM` climb, AWGN OFDM entry
+floor 6 dB `kOFDMEntryFloorAwgnMeasuredDb`); delete `fastProfileEnabled()` and its five call sites
+and the ctest `ENVIRONMENT` pins of ConnectionAdaptive (`ULTRA_FAST=0`) and BurstStaleGeometry
+(`ULTRA_BURST_ACQ=chirp;ULTRA_DATA_FEC=ldpc`) — rewrite those suites' pre-flip contracts against
+the new defaults first (BUG-TEST-GAP-FAST-DEFAULT); then proceed with R15 and R18.
 
 **KEEP:** every member knob as an explicit opt-out (rollback and per-component A/B), the
 `ULTRA_RATE_EVM=1` FULL mode while BUG-EVM-FULL-CHASES-WINDOW is open (an experiment, not a

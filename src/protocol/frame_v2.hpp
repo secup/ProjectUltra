@@ -1219,7 +1219,7 @@ Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count,
 Bytes encodeFixedFrame(const Bytes& frame_data, CodeRate rate, bool use_channel_interleave, size_t bits_per_symbol = 106);
 
 /**
- * OFDM DATA-frame FEC selection (2026-11-08, Stage 1 of the open-modem technique port).
+ * OFDM DATA-frame FEC selection (2026-11-08, Stage 1 of the speed plan).
  *
  * LDPC: today's N independent 648-bit (or 1944-bit) codewords per frame.
  * TURBO: ONE turbo codeword over the whole frame (fec/turbo_codec.hpp). The air

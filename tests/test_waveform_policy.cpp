@@ -387,14 +387,16 @@ void test_entry_cap_r34() {
 }
 
 void test_waveform_recommendations() {
-    // AWGN entry floor lowered to 8 (R1/4 clean @ AWGN 8, measured 2026-06-02).
-    auto low = recommendWaveformAndRate(7.9f, 0.00f);
-    CHECK(low.waveform == WaveformMode::MC_DPSK, "AWGN below in-band SNR8 should use MC-DPSK");
+    // AWGN OFDM entry floor = ofdmEntryFloorAwgnDb(): 6 dB under ULTRA_FAST (default since
+    // 2026-11-09), 8 dB with ULTRA_FAST=0 (R1/4 clean @ AWGN 8, measured 2026-06-02).
+    const float awgn_ofdm_floor = ofdmEntryFloorAwgnDb();
+    auto low = recommendWaveformAndRate(awgn_ofdm_floor - 0.1f, 0.00f);
+    CHECK(low.waveform == WaveformMode::MC_DPSK, "AWGN below the OFDM entry floor should use MC-DPSK");
     CHECK(low.rate == CodeRate::R1_4, "MC-DPSK recommendation should be R1/4");
 
-    auto awgn_floor = recommendWaveformAndRate(8.0f, 0.00f);
-    CHECK(awgn_floor.waveform == WaveformMode::OFDM_CHIRP, "AWGN in-band SNR8 should use OFDM_CHIRP");
-    CHECK(awgn_floor.rate == CodeRate::R1_4, "AWGN in-band SNR8 should recommend R1/4 (floor)");
+    auto awgn_floor = recommendWaveformAndRate(awgn_ofdm_floor, 0.00f);
+    CHECK(awgn_floor.waveform == WaveformMode::OFDM_CHIRP, "AWGN at the OFDM entry floor should use OFDM_CHIRP");
+    CHECK(awgn_floor.rate == CodeRate::R1_4, "AWGN at the OFDM entry floor should recommend R1/4");
 
     auto awgn = recommendWaveformAndRate(10.0f, 0.00f);
     CHECK(awgn.waveform == WaveformMode::OFDM_CHIRP, "AWGN in-band SNR10 should use OFDM_CHIRP");

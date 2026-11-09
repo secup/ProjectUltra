@@ -2,8 +2,7 @@
 
 // Frame-level turbo code for OFDM data frames: ONE codeword per frame.
 //
-// Technique adopted from an open-source HF modem (one long PCCC codeword per data
-// frame instead of several short LDPC codewords); re-derived here, no code copied.
+// One long PCCC codeword per data frame instead of several short LDPC codewords.
 // Physics: a frame of 8-16 independent 648-bit LDPC codewords fails if ANY codeword
 // fails, and each short code sits ~2 dB from capacity. One codeword spanning the whole
 // frame (K = 2.6-7.7 kbit) removes the N-fold multiplier and gains ~1-1.5 dB of coding.

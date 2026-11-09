@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — CHANGE: `ULTRA_FAST` is ON by default; `ULTRA_FAST=0` is the baseline
+
+**Why.** Operator decision (2026-11-09): no stations are deployed, so lockstep wire changes need
+no compatibility path, and the rig A/B is weeks away. Everything built and tested from here,
+CI included, now runs on the stack that is meant to ship. The rig risk is unchanged and
+documented (chirp-less group starts under real ALC/AGC and clock drift; turbo CPU on a Pi 5).
+
+**What changed.**
+- `include/ultra/fast_profile.hpp`: `fastProfileEnabled()` is true unless `ULTRA_FAST=0`. Member
+  knobs still win when set (`ULTRA_BURST_ACQ=chirp`, `ULTRA_LATENT_ANCHORS=july`,
+  `ULTRA_DATA_FEC=ldpc`, `ULTRA_RATE_EVM=0`, `ULTRA_OFDM_FLOOR_AWGN_DB=8`).
+- Tests: WaveformPolicy and ConnectionPolicy check the AWGN boundaries against the active floor
+  (`ofdmEntryFloorAwgnDb()`); LatentRateController pins the 2026-07 set in its 2026-07 ordering
+  test; ConnectionAdaptive's 6/8-geometry reference is seeded with `latentSeedXForRung` like
+  production. ConnectionAdaptive (`ULTRA_FAST=0`) and BurstStaleGeometry
+  (`ULTRA_BURST_ACQ=chirp;ULTRA_DATA_FEC=ldpc`) encode pre-flip contracts and are pinned to the
+  baseline arm through ctest `ENVIRONMENT` (gap filed as BUG-TEST-GAP-FAST-DEFAULT).
+- Docs: map rows 🟡 -> 🟢 for the five members and the umbrella, INV-FAST-001, R19 (defaults
+  flipped, deletion still blocked on the rig A/B), CLAUDE.md (Mode 2 sync, AWGN floor, speed stack).
+
+**Verification.** ctest 107/107 with the new default AND 107/107 with `ULTRA_FAST=0`. GUI gate,
+21 KB, 7.3 Hz, seed 42, no environment variables: Good@20 PASS 3060 bps, AWGN@20 PASS 3610
+(16QAM R2/3 both; `ULTRA_FAST=1` seed 42 gave 3080 / 3620), Moderate@20 PASS 1850 on 8PSK R2/3
+(`ULTRA_FAST=1` seeds 42-46 ranged 1660-2440; same code path, the seeded fading gate is not
+run-to-run deterministic); `ULTRA_FAST=0` Good@20 PASS 1710 on
+QPSK R2/3 with a chirp before all 11 groups (the old default measured 1700). Concurrent
+`gui_qso_scenario.sh` runs from one checkout kill each other's GUIs (the script `pkill`s
+`$ROOT/build/ultra_gui` at start); parallel runs need isolated roots.
+
 ## 2026-11-09 — FIX(ci): GitHub build red on every job; CI 1 h 39 min -> optimized tests, ccache, saved vcpkg cache
 
 **What was broken.** Run 42605639627 (the push of the 2026-11-08/09 work) failed on all five
@@ -152,9 +181,8 @@ demodulator's own gain-corrected constellation scatter) clears a per-rung thresh
 threshold does not depend on the channel: QPSK R2/3 6.5 dB on ITU Good vs 6.3 on Moderate, 8PSK
 R2/3 9.55 vs 9.45 (7131 GUI-gate frames; 10-90 % in 1-1.5 dB). In the channel-SNR domain the same
 rungs differ by 2-4 dB between the classes. The EVM already contains fading, Doppler-induced
-estimation error and implementation loss, so no channel classifier is needed — the reference
-open-source HF modem adapts the same way (per-frame measured SNR + per-level thresholds +
-outer-loop margin, no classification). `docs/EVM_RATE_SELECTION_2026_11_08.md`.
+estimation error and implementation loss, so no channel classifier is needed: per-frame measured SNR against per-level thresholds plus an
+outer-loop margin (standard outer-loop link adaptation), no classification. `docs/EVM_RATE_SELECTION_2026_11_08.md`.
 
 **What changed.**
 - `src/protocol/evm_rate_selector.hpp` (new): per-rung counterfactual success over the last 20
@@ -479,7 +507,7 @@ longer lost), adaptive Moderate@20 s43 ~1360 → 1640, structure-mode Moderate s
 
 ## 2026-11-08 — FEAT: preamble-less burst acquisition — `ULTRA_BURST_ACQ=structure` (knob, default `chirp`)
 
-**What / why.** Stage 2 of the open-modem technique port. In connected wideband OFDM every data
+**What / why.** Stage 2 of the 2026-11-08 speed plan. In connected wideband OFDM every data
 group opened with a ~1.2 s dual chirp (≈13 % of a QPSK burst cycle) whose only connected-mode job
 is to tell the receiver where the group starts. The receiver can find that start from the frame's
 own known structure instead: the burst descriptor is always the same control-profile light frame
@@ -568,8 +596,7 @@ MODEM_INFRASTRUCTURE_MAP, REMOVAL_BACKLOG R15.
 
 ## 2026-11-08 — FEAT: measured-noise LLRs (default ON) + one-codeword-per-frame turbo FEC (knob, default LDPC)
 
-Stages 0-1 of porting the high-speed techniques of an open-source (MIT) HF modem that runs
-our exact OFDM geometry. Techniques re-derived for this stack; no code copied.
+Stages 0-1 of the 2026-11-08 speed plan.
 
 ### What was broken
 

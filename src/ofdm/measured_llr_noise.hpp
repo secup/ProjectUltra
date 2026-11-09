@@ -2,9 +2,8 @@
 
 // Measured total-error LLR noise model (ULTRA_LLR_MEASURED_NV).
 //
-// Technique adopted from an open-source HF modem's receiver, which sets its LLR
-// noise variance from the frame's own decision residual instead of a thermal
-// model; generalized here to a Gaussian SCALE MIXTURE so that heavy-tailed
+// The LLR noise variance comes from the frame's own decision residual instead of a
+// thermal model, as a Gaussian SCALE MIXTURE so that heavy-tailed
 // (channel-estimate-error) residuals are handled from the data, with no
 // tuned constant.
 //

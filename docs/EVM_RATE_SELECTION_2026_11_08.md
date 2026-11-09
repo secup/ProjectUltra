@@ -1,7 +1,8 @@
 # Effective-SNR rate selection: measurement and design (2026-11-08)
 
-`src/protocol/evm_rate_selector.hpp`, knob `ULTRA_RATE_EVM=1` (opt-in, receiver = rate authority;
-set it on both stations). Supersedes the per-channel-class theta idea filed as
+`src/protocol/evm_rate_selector.hpp`, knob `ULTRA_RATE_EVM` (receiver = rate authority; same setting
+on both stations). `=climb` is the default since 2026-11-09 through `ULTRA_FAST` (§4, arm F3);
+`=1` (FULL) is an experiment, `=0` off. Supersedes the per-channel-class theta idea filed as
 BUG-LATENT-CLASS-SPACING: the selector needs no channel classifier.
 
 ## 1. The measurement
@@ -69,8 +70,8 @@ outcome-only estimator cannot see a clean rung's margin.
 **Outer loop.** m is one common-mode margin, moved after every fully-measured group by
 2 dB x (predicted - delivered) / M on that group's own frames, clamped to [-3, +6] dB. A fade does
 not move it (the faded frames' EVMs predicted the losses); a mismatch between this radio's EVM and
-the thresholds does. This is the outer-loop margin the reference open-source HF modem uses with its
-per-frame measured SNR, there driven by every lost frame; here only by unpredicted ones.
+the thresholds does. This is standard outer-loop link adaptation (OLLA) on a per-frame measured SNR, usually
+driven by every lost frame; here only by unpredicted ones.
 
 ## 3. Why not the alternatives tried first
 

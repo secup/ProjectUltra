@@ -2308,12 +2308,14 @@ void test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso() {
     c.setBurstChannelObservation(20.0f, 0.30f, 0.8f, true, 0.1f);
 
     const uint8_t rung = coherentRungIndexFor(Modulation::QPSK, CodeRate::R2_3);
+    // Seeded exactly like production (latentSeedXForRung), so the check is about the 6/8
+    // geometry and holds under either latent calibration set.
     LatentRateController exact_reference;
-    exact_reference.seedPrior(latentThetaForRung(rung), 3.0f);
+    exact_reference.seedPrior(latentSeedXForRung(rung), 3.0f);
     exact_reference.observe(rung, /*k=*/6, /*M=*/8);
     exact_reference.relax(0.35f);
     LatentRateController old_rounded_reference;
-    old_rounded_reference.seedPrior(latentThetaForRung(rung), 3.0f);
+    old_rounded_reference.seedPrior(latentSeedXForRung(rung), 3.0f);
     old_rounded_reference.observe(rung, /*k=*/4, /*M=*/5);
     old_rounded_reference.relax(0.35f);
 

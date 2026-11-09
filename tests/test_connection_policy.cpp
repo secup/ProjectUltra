@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "env_compat.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/selective_repeat_arq_policy.hpp"
@@ -101,18 +102,26 @@ void test_ladder_rung_selection() {
               LadderRungId::OFDM_CHIRP,
           "Moderate in-band 14 dB boundary selects OFDM_CHIRP");
 
-    // AWGN entry floor lowered 10->8 (R1/4 clean @ AWGN 8, measured 2026-06-02).
-    // #71: AWGN robust_mid_floor=5 -> dqpsk_floor=min(5+1.0, 8-0.5)=6.0, ofdm_floor=8
-    // (lowered from +2.5=7.5: DQPSK window spiral fixed + rig-validated DQPSK>=DBPSK).
-    CHECK(selectLadderRung(5.9f, ChannelClassification::AWGN).id ==
-              LadderRungId::ROBUST_MID,
-          "AWGN below DQPSK floor stays Robust-Mid (DBPSK)");
-    CHECK(selectLadderRung(6.0f, ChannelClassification::AWGN).id ==
-              LadderRungId::ROBUST,
-          "AWGN at DQPSK floor selects Robust (DQPSK)");
-    CHECK(selectLadderRung(8.0f, ChannelClassification::AWGN).id ==
-              LadderRungId::OFDM_CHIRP,
-          "AWGN in-band 8 dB boundary selects OFDM_CHIRP");
+    // AWGN OFDM entry floor = ofdmEntryFloorAwgnDb(): 6 dB under ULTRA_FAST (default since
+    // 2026-11-09), 8 dB with ULTRA_FAST=0 (R1/4 clean @ AWGN 8, measured 2026-06-02).
+    // #71: AWGN robust_mid_floor=5 -> dqpsk_floor=min(5+1.0, ofdm_floor-0.5) (6.0 at the
+    // 8 dB floor, 5.5 at 6 dB). The checks follow whichever floor is active.
+    {
+        const float awgn_ofdm_floor = ofdmEntryFloorAwgnDb();
+        const float awgn_dqpsk_floor = std::min(5.0f + 1.0f, awgn_ofdm_floor - 0.5f);
+        CHECK(selectLadderRung(awgn_dqpsk_floor - 0.1f, ChannelClassification::AWGN).id ==
+                  LadderRungId::ROBUST_MID,
+              "AWGN below DQPSK floor stays Robust-Mid (DBPSK)");
+        CHECK(selectLadderRung(awgn_dqpsk_floor, ChannelClassification::AWGN).id ==
+                  LadderRungId::ROBUST,
+              "AWGN at DQPSK floor selects Robust (DQPSK)");
+        CHECK(selectLadderRung(awgn_ofdm_floor - 0.1f, ChannelClassification::AWGN).id ==
+                  LadderRungId::ROBUST,
+              "AWGN just below the OFDM entry floor stays Robust (DQPSK)");
+        CHECK(selectLadderRung(awgn_ofdm_floor, ChannelClassification::AWGN).id ==
+                  LadderRungId::OFDM_CHIRP,
+              "AWGN at the OFDM entry floor selects OFDM_CHIRP");
+    }
     // Good entry floor lowered 12->10 (R1/2 reliable @ Good 10, measured).
     // #71: Good robust_mid_floor=6 -> dqpsk_floor=min(6+1.0, 9.5)=7.0, ofdm_floor=10
     // (lowered from +2.5=8.5: DQPSK window spiral fixed + rig-validated DQPSK>=DBPSK @MPG9).

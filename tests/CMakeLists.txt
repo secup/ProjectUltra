@@ -291,6 +291,11 @@ add_test(NAME ConnectionPolicy COMMAND test_connection_policy)
 add_executable(test_connection_adaptive test_connection_adaptive.cpp)
 target_link_libraries(test_connection_adaptive PRIVATE ultra_core)
 add_test(NAME ConnectionAdaptive COMMAND test_connection_adaptive)
+# Its anchor-policy checks (full anchor on every DESC-SWITCH / ACK-revealed repair, 0/N crater
+# repairs) and its probe/prior checks encode the chirp-mode + 2026-07 calibration contracts, which
+# ULTRA_FAST (default since 2026-11-09) changes by design: structure acquisition anchors only on an
+# RTO, and the measured set seeds the prior differently. Pinned to the ULTRA_FAST=0 baseline arm.
+set_tests_properties(ConnectionAdaptive PROPERTIES ENVIRONMENT "ULTRA_FAST=0")
 
 add_executable(test_connection_call_collision test_connection_call_collision.cpp)
 target_link_libraries(test_connection_call_collision PRIVATE ultra_core)
@@ -558,7 +563,10 @@ target_include_directories(test_burst_stale_geometry PRIVATE
 )
 target_link_libraries(test_burst_stale_geometry PRIVATE ultra_core ota_channel_core)
 add_test(NAME BurstStaleGeometry COMMAND test_burst_stale_geometry)
-set_tests_properties(BurstStaleGeometry PROPERTIES TIMEOUT 180)
+set_tests_properties(BurstStaleGeometry PROPERTIES TIMEOUT 180
+    # Exercises the chirp-per-group receive path and per-codeword LDPC decode accounting: the
+    # ULTRA_FAST=0 baseline arm, still shipped behind the switch until the rig A/B.
+    ENVIRONMENT "ULTRA_BURST_ACQ=chirp;ULTRA_DATA_FEC=ldpc")
 
 add_executable(test_streaming_buffer_policy test_streaming_buffer_policy.cpp)
 target_include_directories(test_streaming_buffer_policy PRIVATE

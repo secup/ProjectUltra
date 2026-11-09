@@ -51,6 +51,24 @@ mean, i.e. the window is short against Good's slow fade epochs. The shipped use 
 (an upward move only when the higher rung is predicted to decode >= 90 % of recent frames). A fix
 for FULL needs a longer memory or a posterior over the EVM distribution, not a shorter window.
 
+### BUG-TEST-GAP-FAST-DEFAULT (open, 2026-11-09) — P2
+
+**What.** Flipping `ULTRA_FAST` on by default left two suites testing the pre-flip baseline only:
+ConnectionAdaptive runs with `ULTRA_FAST=0` and BurstStaleGeometry with
+`ULTRA_BURST_ACQ=chirp;ULTRA_DATA_FEC=ldpc` (ctest `ENVIRONMENT`, tests/CMakeLists.txt). Their
+contracts are chirp-mode anchor rules (full anchor on every DESC-SWITCH / ACK-revealed repair,
+0/N crater repairs), July-set probe and prior timing, and per-codeword LDPC decode accounting,
+which the new default changes by design (structure acquisition anchors only on an RTO; the
+measured set seeds the prior at theta + logit(0.9)/slope; turbo decodes the frame as one block).
+The shipping path's equivalents have no unit test: the structure-mode anchor policy
+(connection.cpp `structure_acq` in the burst flush), the measured-set startup-probe behaviour
+("one trusted clean R1/2 group must not launch the startup probe" fails under the new default)
+and turbo decode-call accounting in the stale-geometry machinery. They are covered only by the
+GUI gate.
+
+**Fix.** Write the new-default contracts as tests (a second registration of each suite or new
+cases), decide the startup-probe question on evidence, then drop the pins with R19.
+
 ### BUG-LATENT-CLASS-SPACING (open, 2026-11-08; MITIGATED 2026-11-09 within `ULTRA_FAST`) — P2
 
 **2026-11-09 status.** Within the `ULTRA_FAST` stack the Moderate deficit is gone: Moderate@20

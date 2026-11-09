@@ -229,6 +229,9 @@ void test_exact_production_geometry_and_no_eta_double_count() {
 // ── 4. Ranking reproduces the measured waterfall ordering ─────────────────────
 // Default (2026-07) set: the ordering its 4-CW-harness measurement pinned.
 void test_ranking_matches_measured_ordering() {
+    // The 2026-07 calibration set (the ULTRA_FAST=0 baseline); the measured set, the default
+    // since 2026-11-09, has its own ordering test below.
+    setLatentMeasuredAnchorsForTesting(false);
     // At the bench's dial 20 the measured delivered throughput ordering is
     //   8PSK R2/3 (2450) > QPSK R3/4 (2066) > 16QAM R2/3 (1890) > 8PSK R3/4 (1618)
     // so a posterior concentrated near 20 must prefer 8PSK R2/3.

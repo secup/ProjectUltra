@@ -344,8 +344,12 @@ without `caffeinate -d/-u`).
 ### INV-FAST-001: `ULTRA_FAST` sets defaults, never overrides
 
 **Rule:** `fastProfileEnabled()` is consulted ONLY when the member knob is unset
-(`ULTRA_BURST_ACQ`, `ULTRA_LATENT_ANCHORS`, `ULTRA_DATA_FEC`, `ULTRA_RATE_EVM`), so a component can
-be A/B'd inside the profile. Its members are lockstep: both stations run the same profile.
+(`ULTRA_BURST_ACQ`, `ULTRA_LATENT_ANCHORS`, `ULTRA_DATA_FEC`, `ULTRA_RATE_EVM`,
+`ULTRA_OFDM_FLOOR_AWGN_DB`), so a component can be A/B'd inside the profile. Its members are
+lockstep: both stations run the same profile. Since 2026-11-09 the profile is ON unless
+`ULTRA_FAST=0`, which restores every member's pre-flip default (the rig A/B baseline arm). A test
+that encodes a pre-flip contract pins it explicitly (ctest `ENVIRONMENT`, or the member's
+`set...ForTesting`), never by relying on the process default.
 
 ---
 

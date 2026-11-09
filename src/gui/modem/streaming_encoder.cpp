@@ -1374,8 +1374,8 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
     // and announced in BURST_HEADER payload[5] so the RX matches.
     const int ldpc_z = static_cast<int>(ldpc_lifting_z_);
 
-    // Stage 1 (open-modem technique port): ONE turbo codeword over the whole frame when the
-    // lockstep ULTRA_DATA_FEC=turbo knob is set; same air geometry and capacity.
+    // Stage 1 of the 2026-11-08 speed plan: ONE turbo codeword over the whole frame when the
+    // lockstep data-frame FEC is turbo (ULTRA_DATA_FEC / ULTRA_FAST); same air geometry and capacity.
     Bytes encoded = (v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO)
         ? v2::encodeTurboFixedFrame(tx_data, code_rate_, frame_cw_count, ldpc_z)
         : v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,

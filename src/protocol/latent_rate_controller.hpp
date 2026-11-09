@@ -197,16 +197,18 @@ inline bool latentStartupProbeAllowedByOperator() {
 // AWGN 12 dB 65 -> 74 %, 16 dB 55 -> 85 %; Moderate 15-24 dB 96-100 % -> 97-99 % (more rung
 // switches there, which the rung-change anchor cost in the production geometry damps).
 //
-// SHIPPING STATE: OPT-IN (ULTRA_LATENT_ANCHORS=measured, both stations). The measured set — this
+// SHIPPING STATE: DEFAULT via ULTRA_FAST since 2026-11-09 (ULTRA_FAST=0 or
+// ULTRA_LATENT_ANCHORS=july restores the 2026-07 set; both stations). The measured set — this
 // table, slope 0.41 and the anchor-consistent prior seed below — is one coherent calibration and
 // switches as a unit. GUI gate (21 KB, 7.3 Hz CFO, 5 seeds per cell, all PASS) against the
 // 2026-07 set: Good@20 +26.7 % (5/5 pairs up, paired t 3.7), AWGN@20 +54.7 %, Good@15 +8 % (n.s.),
 // Moderate@20 -5.8 % (2/5 up, n.s.) with 5 craters vs 0 — the class-dependent spacing above:
 // on Moderate the Good thetas over-state 8PSK R2/3, the posterior settles where it still looks
 // as good as QPSK R3/4, and the GUI's failure cost (resends, anchors, craters) exceeds the frame
-// model's. The table without the seed regressed every cell (-2 .. -9 %). It stays opt-in until a
-// rig A/B (rate-controller A/Bs on the seeded simulator have reversed on the rig before); the
-// Moderate fix is class-aware thetas (the Moderate column above), not a different Good table.
+// model's. The table without the seed regressed every cell (-2 .. -9 %). Inside the ULTRA_FAST
+// stack (structure acquisition + turbo + EVM climb) the Moderate deficit is gone (Moderate@20
+// 2114 vs 1668 bps); a rig A/B of ULTRA_FAST vs ULTRA_FAST=0 is still pending (rate-controller
+// A/Bs on the seeded simulator have reversed on the rig before).
 inline bool latentMeasuredAnchorsEnabled();
 
 inline constexpr float kLatentSlopePerDbJuly2026 = 0.35f;  // 2026-07 set: per-rung fits 0.15-0.45

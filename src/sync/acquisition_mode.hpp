@@ -1,6 +1,6 @@
 #pragma once
 
-// Burst acquisition mode (Stage 2 of the 2026-11-08 open-modem technique port).
+// Burst acquisition mode (Stage 2 of the 2026-11-08 speed plan).
 //
 // ULTRA_BURST_ACQ=structure: the connected wideband GROUP-START search runs the
 // preamble-less chi structure detector (IWaveform::detectFrameStructure, dispatched from

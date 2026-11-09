@@ -722,7 +722,7 @@ constexpr int kStructLagGroups = 7;  // lags 2..8 (LTS -> data-pilot pairs)
 // carrier that is a PILOT in data symbol k's pattern but a ZADOFF-CHU cell in the LTS, so the
 // known product q = pilot * conj(ZC) is pseudo-random across carriers. That is what makes the
 // statistic immune to STATIONARY signals (a CW tone has the same lagged phase on every bin;
-// multiplying by conj(q) scatters it), the role cell scrambling plays in the reference design.
+// multiplying by conj(q) scatters it), the role per-cell scrambling plays in preamble-less designs.
 // LTS1->LTS2 and pilot->pilot pairs (q = 1) are deliberately excluded for that reason.
 struct StructPair {
     uint8_t s_lo, s_hi;
@@ -786,7 +786,7 @@ StructTemplate buildStructTemplate(const ModemConfig& g, const std::vector<int>&
 }  // namespace
 
 // PREAMBLE-LESS STRUCTURE ACQUISITION (ULTRA_BURST_ACQ=structure; Stage 2 of the 2026-11-08
-// open-modem technique port). Finds a connected-mode light frame — in particular the burst
+// speed plan). Finds a connected-mode light frame — in particular the burst
 // descriptor that opens every group — WITHOUT a chirp. Called only for the connected
 // GROUP-START search (StreamingDecoder::searchForSync, where the dual-chirp search runs in
 // chirp mode); in-group frames keep detectDataSync's warm light-LTS lock.

@@ -48,8 +48,8 @@ inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
 // against MC-DPSK's 45-90 bps there (8 dB floor: AWGN@7 90 bps, AWGN@6 too slow to finish 4 KB in
 // 480 s). At AWGN@5 the data passes (4/5) but one ULTRA_FAST run lost every ACK to the async-ACK
 // hold (BUG-ASYNC-ACK-ALWAYS-DROPPED) and a true 4 dB entry stalled — hence 6, not 5. Rig-dependent
-// (a real radio's distortion moves the OFDM waterfall), so it is the ULTRA_FAST default, not the
-// plain default. ULTRA_OFDM_FLOOR_AWGN_DB overrides. Read once.
+// (a real radio's distortion moves the OFDM waterfall): a member of ULTRA_FAST (default since
+// 2026-11-09; ULTRA_FAST=0 restores 8 dB). ULTRA_OFDM_FLOOR_AWGN_DB overrides. Read once.
 inline constexpr float kOFDMEntryFloorAwgnMeasuredDb = 6.0f;
 inline float ofdmEntryFloorAwgnDb() {
     static const float v = [] {

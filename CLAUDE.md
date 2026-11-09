@@ -90,7 +90,7 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 - Multi-Carrier DPSK + chirp sync. ARQ selective-repeat with a **timing-derived window (1–5)** via `mcDpskWindowSizeForTiming` (not fixed window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
 
 ### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)
-- OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake. Key: `decodeFixedFrame()` in frame_v2.cpp.
+- OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake; since 2026-11-09 (`ULTRA_FAST`) group starts carry NO chirp — the receiver finds each burst descriptor by frame-structure detection (chirp only at connect, the first groups and an RTO resend) — and data frames are ONE turbo codeword (`ULTRA_DATA_FEC`). Key: `decodeFixedFrame()` in frame_v2.cpp.
 
 ### Mode 3: OFDM_NARROW (narrowband chirp 1250-1750 Hz, 500 Hz BW, low SNR)
 - OFDM, FFT=2048, 21 carriers, 492 Hz BW. Same frame format as wideband (4-CW data, 1-CW control), frame + optional channel interleaving, light preamble for data. Dual-listen: idle RX listens for both wideband and narrowband chirps. ARQ selective-repeat **window=3** (ACK timeout ~14 s). ~200 bps (R1/4) to ~450 bps (R1/2) — ~5× slower than wideband but works ~7.5 dB lower SNR.
@@ -128,7 +128,7 @@ Single-seed entries are floor *locators*, not statistical floors. Higher rates
 
 **Auto rate ladder:** `src/protocol/waveform_selection.hpp::selectOFDMCodeRate()`
 is the single source of truth for code-rate selection; wideband entry floors are
-in `src/protocol/connection_policy.hpp` (AWGN 8, Good 8, Moderate 14, Poor disabled — lowered from 10/12 on 2026-07-07
+in `src/protocol/connection_policy.hpp` (AWGN 6 via `ULTRA_FAST`, 8 with `ULTRA_FAST=0`; Good 8, Moderate 14, Poor disabled — lowered from 10/12 on 2026-07-07
 measured sweeps; the old 10/12/14/18 table is obsolete).
 Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.cpp`
 — don't duplicate the threshold table elsewhere.
@@ -318,7 +318,9 @@ unvalidated on hardware" caveat.
 **Priority 2.5 (rate selection truth, 2026-11-09):** `docs/EVM_RATE_SELECTION_2026_11_08.md` — a burst frame
 decodes iff its decision-directed EVM SNR clears a per-rung threshold that is the SAME on ITU Good and Moderate
 (0.1-0.3 dB); channel-SNR thresholds differ 2-4 dB between classes. Rate logic that needs a channel class is in the
-wrong domain. GUI-gate speed stack: `ULTRA_FAST=1` (both stations) — opt-in pending a rig A/B.
+wrong domain. GUI-gate speed stack `ULTRA_FAST` is ON by default since 2026-11-09 (structure
+acquisition, measured anchors, turbo, EVM climb, 6 dB AWGN floor); `ULTRA_FAST=0` is the pre-flip
+baseline for the pending rig A/B. Same setting on both stations.
 
 **Priority 2.5 (hardware truth):** `docs/ANALOG_CHAIN_VERIFIED_2026_07_26.md` — the Pi5→IONOS→Mac
 analog chain MEASURED CLEAN (tilt 0.7 dB, SNDR 30.7 dB = 0.36 dB at dial 20, PAPR 9.7 dB normal).

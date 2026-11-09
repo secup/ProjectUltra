@@ -950,8 +950,7 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     }
 
     // ── MEASURED TOTAL-ERROR LLR NOISE (ULTRA_LLR_MEASURED_NV, default ON) ──
-    // Technique adopted from an open-source HF modem's receiver (LLR noise from
-    // the frame's own decision residual), generalized to a Gaussian scale
+    // LLR noise from the frame's own decision residual, as a Gaussian scale
     // mixture — derivation in measured_llr_noise.hpp.
     //
     // Why. Every model above sets the LLR sigma^2 from THERMAL noise (+ modelled

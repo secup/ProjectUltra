@@ -1,6 +1,7 @@
 #pragma once
 // ============================================================================
-// EFFECTIVE-SNR RATE SELECTION  (ULTRA_RATE_EVM=1, opt-in; 2026-11-08)
+// EFFECTIVE-SNR RATE SELECTION  (2026-11-08; ULTRA_RATE_EVM=climb is the default via ULTRA_FAST
+// since 2026-11-09, =1 FULL is an experiment, =0 off)
 // ============================================================================
 //
 // WHAT WAS MEASURED. Every burst data frame carries the demodulator's decision-directed,
@@ -17,8 +18,8 @@
 //
 // That is the effective-SNR link abstraction: fading, Doppler-induced estimation error and
 // implementation loss are all already inside the EVM, so what remains is the code's own
-// waterfall. It is also how the reference open-source HF modem adapts — per-frame measured
-// SNR against per-level thresholds plus an outer-loop margin, with no channel classifier.
+// waterfall: per-frame measured SNR against per-level thresholds plus an outer-loop margin
+// (standard outer-loop link adaptation), with no channel classifier.
 //
 // WHY IT REPLACES THE OUTCOME-ONLY DECISION. The latent controller sees only k-of-M per group
 // on the rung in use. A rung that always decodes saturates its likelihood, so the controller
