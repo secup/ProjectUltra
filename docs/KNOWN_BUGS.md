@@ -83,45 +83,6 @@ stage (plan Stage 3) must now be justified against THIS number, not against the 
   identical channel samples. Default `--mod` is now `qpsk` (the old `dqpsk` default silently
   measured coherent QPSK).
 
-### BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE (open, 2026-08-06) — P2, RELIABILITY AT THE FLOOR
-
-**Symptom.** The AWGN@8 MC-DPSK message row (`m7` in `tools/message_gui_matrix.sh`) fails
-about **half the time**, with a sharply BIMODAL signature — never anything in between:
-
-| outcome | elapsed | delivered |
-|---|---|---|
-| PASS | 78–79 s | 2/2, byte-exact |
-| FAIL | 347 s | 0/2 (`SR-ARQ: Frame seq=0 failed after 10 retries` → `FAIL #0`) |
-
-**Measured (2026-08-06), interleaved A/B, 4 pairs, binaries verified by embedded commit:**
-
-| arm | commit | result |
-|---|---|---|
-| OLD | `c37148e` (before that night's changes) | **2/4 PASS** |
-| NEW | `9aea693` | **2/4 PASS** |
-
-**PRE-EXISTING — not caused by the stale-SNR or provenance work.** Both arms fail at the same
-rate with the same timing signature. The A/B was run precisely because the row had passed on
-older binaries and started failing after those commits; it did not.
-
-**The interesting part.** By RUN ORDER the interleaved sequence was
-`PASS, FAIL, FAIL, PASS, PASS, FAIL, FAIL, PASS` — a period-4 alternation that ignores which
-binary is running. Every run uses `--seed 17`, so the channel realisation is IDENTICAL each
-time; the nondeterminism is therefore in timing/scheduling, not the channel. Combined with the
-bimodality (78 s or 347 s, nothing between) this points at a discrete acquisition/handshake
-outcome, and the run-order structure suggests carry-over between consecutive harness runs
-(ota_simulator socket/port state is the obvious suspect) rather than anything in the modem.
-
-**Context.** AWGN@8 is only ~3 dB above the documented MC-DPSK R1/4 in-band floor of 5 dB, and
-the matrix comments call this row "the reachability case" — some marginality is expected by
-design. A ~50% failure rate is more than marginal, but this row is the FLOOR probe, not a
-representative operating point: every other message row (AWGN@20, Good@20/15/10, Poor@20) and
-both file regressions passed byte-exact in the same matrix.
-
-**Before chasing the modem, test the harness hypothesis:** run m7 in isolation with a long
-settle between runs, and with a fresh `ota_simulator` per run, and see whether the period-4
-structure survives. If it does not, this is apparatus, not PHY.
-
 ### BUG-TURNOVER-GRANT-LOST-IN-REQUESTER-ECHO (open, 2026-08-05) — P2, LATENCY (IONOS rig)
 
 **Symptom.** The DATA-turn handover stalls for ~46 s on a healthy link. The requester
@@ -2392,6 +2353,37 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-ACK-DROPPED (FIXED 2026-11-09) — was BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE: every MC-DPSK file ACK was dropped
+
+**Symptom.** AWGN@8 file/message runs failed about half the time with a bimodal signature (PASS
+in ~80 s, or FAIL at ~347 s after `SR-ARQ: Frame seq=0 failed after 10 retries`). On 2026-08-06
+the cause was suspected to be harness carry-over between runs.
+
+**Root cause (2026-11-09).** The bimodality is the CONNECT decision: the handshake SNR reads 7.8 or
+8.0 dB around the 8 dB OFDM entry floor. At 8.0 the link takes OFDM and passes; at 7.8 it takes
+MC-DPSK, and every MC-DPSK file transfer failed. The receiver decoded every frame
+(`MC-DPSK continuous burst frame 3 decoded: OK 4/4 CW`) and requested a tone ACK, but the ACK had
+no completed-turn provenance — an MC-DPSK burst carried no physical-end marker, and MORE_FRAG means
+"the FILE continues", so the decoder learns the turn ended only ~0.9 s LATER (no continuation
+header). The frontend therefore treated it as an asynchronous ACK: `shouldDeferToneBurstAck`
+deferred it on decoder RX evidence held for `kDescriptorLostReverseTxHoldMs` (13 s), and with a
+2.5 s defer deadline that evidence is always still fresh, so every ACK was DROPPED
+(`LISTEN-BEFORE-ACK: ... ACK DROPPED (RTO covers)`, 28 per run) and the sender retried to its cap.
+BRAVO's own TX recording contained no tone ACK at all.
+
+**Fix.** The sender stamps the CRC-protected `PHYSICAL_BURST_END` marker on the last frame of every
+MC-DPSK DATA turn, singletons included (`streaming_frame_policy::shouldStampPhysicalBurstEnd`,
+`Connection::flushBurstBuffer`); the receiver reports `physical_turn_complete` for a marked frame on
+both MC-DPSK delivery paths (`hasMcDpskTurnEndMarker`, first frame and continuation) and stops
+waiting for a continuation after it. The ACK then rides the existing completed-turn path. An old
+receiver ignores the marker (same behaviour as before); an old sender sends none.
+
+**Verified** (`gui_qso_scenario.sh`, AWGN@7 → MC-DPSK DQPSK R1/4, 2 KB, seed 42, 7.3 Hz): old build
+FAIL (28 ACKs dropped, 27 retransmissions, 0 bps), fixed build PASS (0 dropped, 0 retransmissions,
+90 bps); a 21 KB run delivered 33 ACKs with 0 retransmissions. AWGN@8 seeds 42/43/44, all three negotiating MC-DPSK DQPSK R1/4: 3/3 PASS (two of them had failed on that path in the 2026-11-09 broad matrix, one under `ULTRA_FAST`); OFDM AWGN@20 unchanged at 1720 bps. Remaining: the 8 dB
+OFDM entry floor sends a 7.8 dB reading to MC-DPSK although OFDM delivers ~2300 bps there
+(`ULTRA_FAST`) — an entry-floor question, not this bug.
 
 ### BUG-GUI-DISPLAY-SLEEP-STALL (FIXED 2026-11-09) — was P1 for unattended stations
 

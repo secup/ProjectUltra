@@ -320,6 +320,17 @@ when `flushBurstBuffer` sends one — chirp acquisition. Structure acquisition n
 switch; pricing one there is a ~25 % phantom penalty that kept the controller off 16QAM R2/3.
 **Test:** GUI gate arm C (`docs/EVM_RATE_SELECTION_2026_11_08.md` §4).
 
+### INV-ACK-TURN-001: the ACK for a turn's last frame carries completed-turn provenance
+
+**Rule:** every physical DATA turn whose end the receiver must ACK carries a CRC-protected
+`PHYSICAL_BURST_END` on its last frame (multi-frame OFDM bursts; EVERY MC-DPSK turn, singletons
+included), and the receiver reports `physical_turn_complete` for it BEFORE the frame callback, so
+the ACK takes the completed-group path. An ACK without that provenance is held by listen-before-ACK
+on decoder evidence for `kDescriptorLostReverseTxHoldMs` (13 s) against a 2.5 s deadline — i.e.
+dropped — which is right only for genuinely asynchronous ACKs (timer backstops, descriptor loss).
+Never infer the end of an MC-DPSK turn from MORE_FRAG: it says the FILE continues.
+**Test:** `StreamingFramePolicy` (`test_physical_burst_end_wire_policy`); GUI gate AWGN@7 MC-DPSK.
+
 ### INV-GUI-LOOP-001: the GUI loop never waits on the display
 
 **Rule:** `ultra_gui` drains RX audio and ticks the protocol from its render loop, so nothing in

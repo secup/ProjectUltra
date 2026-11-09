@@ -186,6 +186,16 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
   group assembly (`burst_transport_rx_` collector, default `true` → `onBurstGroupReceived` →
   `processArqFrame` → `endGroupReceiveAndAck`) that **`arq_` drives**. ACK is a **tone-burst**
   (`connection.cpp` `setEmitToneBurstSackCallback` + `onToneBurstAck`). 🟢
+- **Physical-turn end marker** `Flags::PHYSICAL_BURST_END` (DATA-only reuse of the legacy URGENT
+  bit, CRC-protected): stamped by the sender on the LAST frame of a physical DATA turn —
+  multi-frame non-interleaved OFDM bursts (`encodeBurstLight` →
+  `streaming_frame_policy::shouldStampPhysicalBurstEnd`), and since 2026-11-09 EVERY MC-DPSK turn,
+  singletons included (`flushBurstBuffer` singleton path stamps a wire copy). The receiver turns it
+  into `DecodeResult::physical_turn_complete` (`hasPhysicalBurstEndMarker` OFDM,
+  `hasMcDpskTurnEndMarker` MC-DPSK), which makes `Connection::onFrameReceived` open a
+  completed-group ACK context, so the frontend's listen-before-ACK does not hold the ACK on decoder
+  evidence. Before 2026-11-09 every MC-DPSK file ACK was held for `kDescriptorLostReverseTxHoldMs`
+  (13 s) against a 2.5 s deadline and DROPPED (BUG-MCDPSK-ACK-DROPPED). 🟢
 - **REMOVED 2026-06-06 (R1b):** the separate `BurstStopAndWaitController burst_transport_` group
   controller (own seq space, group stop-and-wait, GROUP_ACK/GROUP_NACK control frames,
   `formAndSendBurstGroup`/`SR`, `startBurstFileTransfer`, `burst_transport.hpp`). `use_burst_transport_`

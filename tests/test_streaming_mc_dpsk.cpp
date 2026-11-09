@@ -1,3 +1,4 @@
+#include "gui/modem/streaming_frame_policy.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "ota_channel_core/channel.hpp"
@@ -223,9 +224,20 @@ bool runContinuousBurstLoopback() {
         return false;
     }
 
+    // The wire copy of an MC-DPSK turn marks its LAST frame PHYSICAL_BURST_END (the ACK of
+    // that frame must carry completed-turn provenance — BUG-MCDPSK-ACK-DROPPED); the ARQ's
+    // logical frames are unchanged.
+    const auto expected_wire = streaming_frame_policy::preparePhysicalBurstFrames(
+        serialized_frames, /*stamp_physical_end=*/true);
     for (size_t i = 0; i < serialized_frames.size(); ++i) {
-        if (decoded_frames[i] != serialized_frames[i]) {
+        if (decoded_frames[i] != expected_wire[i]) {
             std::cout << "FAIL: continuous burst frame " << i << " mismatch\n";
+            return false;
+        }
+        const bool marked = (decoded_frames[i][3] & v2::Flags::PHYSICAL_BURST_END) != 0;
+        if (marked != (i + 1 == serialized_frames.size())) {
+            std::cout << "FAIL: continuous burst frame " << i
+                      << (marked ? " carries" : " lacks") << " the turn-end marker\n";
             return false;
         }
     }

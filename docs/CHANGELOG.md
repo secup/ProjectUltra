@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-09 — FIX: every MC-DPSK file ACK was dropped by listen-before-ACK (BUG-MCDPSK-ACK-DROPPED)
+
+**What was broken.** MC-DPSK file transfers (the mode below the OFDM floors) could not complete:
+the receiver decoded every frame and requested its tone ACK, and the frontend dropped every one
+(`LISTEN-BEFORE-ACK: ... ACK DROPPED (RTO covers)`, 28 per run), so the sender retried each frame
+to its cap (`SR-ARQ: Frame seq=0 failed after 10 retries`). It was filed in August as
+BUG-MCDPSK-AWGN8-BIMODAL-HANDSHAKE: at AWGN@8 the handshake SNR reads 7.8 or 8.0 dB around the 8 dB
+OFDM entry floor, and only the MC-DPSK picks failed. **Mechanism:** an MC-DPSK burst carried no
+physical-end marker and MORE_FRAG only means "the file continues", so the decoder learned the turn
+had ended ~0.9 s after the last frame (no continuation header) — after that frame's ACK was already
+requested. Without completed-turn provenance the ACK is asynchronous: `shouldDeferToneBurstAck`
+defers it on decoder RX evidence held for `kDescriptorLostReverseTxHoldMs` (13 s), and its 2.5 s
+deadline always finds that evidence fresh, so it is dropped. The sender's own TX recording held no
+tone ACK at all (`measure_ack_staircase scan` + a tone-energy scan of `bravo_tx.f32`).
+
+**What changed.** Sender: `streaming_frame_policy::shouldStampPhysicalBurstEnd` marks the last
+frame of EVERY MC-DPSK DATA turn with the CRC-protected `PHYSICAL_BURST_END` (multi-frame bursts via
+`encodeBurstLight`; singletons in `Connection::flushBurstBuffer` on a private wire copy — the ARQ's
+logical frame stays byte-stable). Receiver: `hasMcDpskTurnEndMarker` sets
+`DecodeResult::physical_turn_complete` for a marked frame on both MC-DPSK delivery paths (first
+frame and continuation), and the decoder no longer waits for a continuation after it; the ACK then
+rides the existing completed-turn path. OFDM is unchanged. An old receiver ignores the marker; an
+old sender sends none (old behaviour). INV-ACK-TURN-001.
+
+**Verification.** `tools/gui_qso_scenario.sh`, AWGN@7 (→ MC-DPSK DQPSK R1/4), 2 KB, seed 42, 7.3 Hz:
+old build FAIL (28 ACKs dropped, 27 retransmissions, 0 bps) vs fixed build PASS (0 dropped, 0
+retransmissions, 90 bps). AWGN@8 seeds 42/43/44, all on MC-DPSK: 3/3 PASS (two had failed on that
+path in the broad matrix). 21 KB at AWGN@7: 33 ACKs received, 0 retransmissions (the run is simply
+long at R1/4). OFDM AWGN@20: 1720 bps, unchanged. `StreamingFramePolicy` 81/81 (MC-DPSK stamping
+and receiver rule), `StreamingMCDPSK` updated to expect the marked wire copy; full ctest 107/107.
+
 ## 2026-11-09 — FIX: `ultra_gui` froze its receiver while the display slept (BUG-GUI-DISPLAY-SLEEP-STALL)
 
 **What was broken.** The GUI drains RX audio into the modem from its render loop, and with vsync

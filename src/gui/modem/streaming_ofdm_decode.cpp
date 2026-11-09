@@ -3085,6 +3085,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         const bool physical_burst_end =
             frame_policy::hasPhysicalBurstEndMarker(
                 result.success, connected_, is_ofdm, burst_transport_rx_,
+                result.frame_data) ||
+            frame_policy::hasMcDpskTurnEndMarker(
+                result.success, connected_, mode_ == protocol::WaveformMode::MC_DPSK,
                 result.frame_data);
         if (result.success && anchored_burst_backstop_armed_ &&
             v2::isDataFrame(result.frame_type) &&
@@ -3437,13 +3440,16 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
     }
 
+    // A frame marked as its turn's last (PHYSICAL_BURST_END) has no continuation to wait
+    // for; MORE_FRAG only says the FILE continues.
     const bool can_continue_mc_dpsk =
         result.success &&
         connected_ &&
         mode_ == protocol::WaveformMode::MC_DPSK &&
         v2::isDataFrame(result.frame_type) &&
         result.frame_type != v2::FrameType::DATA_REPAIR &&
-        decodedFrameHasMoreFrag(result);
+        decodedFrameHasMoreFrag(result) &&
+        !result.physical_turn_complete;
     if (can_continue_mc_dpsk) {
         startMCDPSKBurstContinuation(next_block_pos, next_search_abs,
                                      sync_snr_, sync_cfo_);
@@ -3678,6 +3684,10 @@ void StreamingDecoder::continueMCDPSKBurst() {
     DecodeResult result = decodeMCDPSKFrame(
         mc_burst_pending_soft_bits_, code_rate_, v2::getBytesPerCodeword(code_rate_),
         mc_burst_snr_, mc_burst_cfo_);
+    // The sender marks its turn's last frame (BUG-MCDPSK-ACK-DROPPED): say so BEFORE the
+    // callback, so the ACK it triggers carries completed-turn provenance.
+    result.physical_turn_complete = frame_policy::hasMcDpskTurnEndMarker(
+        result.success, connected_, /*is_mc_dpsk=*/true, result.frame_data);
     deliverContinuationResult(result);
 
     const bool more_frag = decodedFrameHasMoreFrag(result);
@@ -3697,7 +3707,8 @@ void StreamingDecoder::continueMCDPSKBurst() {
         return;
     }
 
-    if (!more_frag || mc_burst_frames_decoded_ >= MC_DPSK_MAX_BURST_FRAMES) {
+    if (!more_frag || result.physical_turn_complete ||
+        mc_burst_frames_decoded_ >= MC_DPSK_MAX_BURST_FRAMES) {
         LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst complete: frames=%d last_cw=%d",
                   log_prefix_.c_str(), mc_burst_frames_decoded_, total_cw);
         finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);

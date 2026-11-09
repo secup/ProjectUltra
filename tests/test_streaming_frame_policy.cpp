@@ -259,9 +259,15 @@ void test_physical_burst_end_wire_policy() {
     CHECK(!shouldStampPhysicalBurstEnd(
                2, ultra::protocol::WaveformMode::OFDM_CHIRP, true, true),
           "cross-frame interleave must keep the descriptor/group callback boundary");
-    CHECK(!shouldStampPhysicalBurstEnd(
-               2, ultra::protocol::WaveformMode::MC_DPSK, true, false),
-          "MC-DPSK is outside the Phase-1 marker scope");
+    // BUG-MCDPSK-ACK-DROPPED: MC-DPSK marks EVERY physical DATA turn, singletons included.
+    // Its only other end-of-turn signal (no continuation header one codeword later) comes
+    // after the last frame's ACK was requested, which then could only be dropped.
+    CHECK(shouldStampPhysicalBurstEnd(
+              2, ultra::protocol::WaveformMode::MC_DPSK, true, false),
+          "a multi-frame MC-DPSK turn stamps its last frame");
+    CHECK(shouldStampPhysicalBurstEnd(
+              1, ultra::protocol::WaveformMode::MC_DPSK, false, false),
+          "an MC-DPSK singleton is a whole physical turn and stamps too");
 
     auto first = v2::makeFixedDataFrame(
         "ALPHA", "BRAVO", 10, ultra::Bytes{0x10}, ultra::CodeRate::R1_2, 4);
@@ -290,6 +296,17 @@ void test_physical_burst_end_wire_policy() {
     CHECK(!hasPhysicalBurstEndMarker(
                true, false, true, true, wire[1]),
           "disconnected traffic cannot authorize burst-tail reverse egress");
+    // MC-DPSK receiver: the same CRC-valid marker proves the peer's turn ended.
+    CHECK(hasMcDpskTurnEndMarker(true, true, /*is_mc_dpsk=*/true, wire[1]),
+          "a marked MC-DPSK DATA frame proves the turn is complete");
+    CHECK(!hasMcDpskTurnEndMarker(true, true, true, wire[0]),
+          "an unmarked MC-DPSK member is not a turn end");
+    CHECK(!hasMcDpskTurnEndMarker(false, true, true, wire[1]),
+          "a failed decode proves nothing");
+    CHECK(!hasMcDpskTurnEndMarker(true, true, /*is_mc_dpsk=*/false, wire[1]),
+          "the MC-DPSK rule never applies to OFDM traffic");
+    CHECK(!hasMcDpskTurnEndMarker(true, false, true, wire[1]),
+          "disconnected traffic cannot authorize reverse egress");
 
     const auto sanitized =
         preparePhysicalBurstFrames(logical, /*stamp_physical_end=*/false);

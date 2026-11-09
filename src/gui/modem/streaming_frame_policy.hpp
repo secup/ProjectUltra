@@ -267,6 +267,12 @@ inline bool shouldStampPhysicalBurstEnd(size_t frame_count,
                                         protocol::WaveformMode mode,
                                         bool supports_data_preamble,
                                         bool burst_interleave) {
+    // MC-DPSK: every physical DATA turn, singletons included. Its only other burst-end
+    // signal is the receiver failing to find a continuation header ~one codeword after the
+    // last frame, which arrives AFTER that frame's ACK was requested; without the marker
+    // the ACK was classified asynchronous, held for a whole maximum OFDM turn of decoder
+    // evidence and dropped at its 2.5 s deadline every time (BUG-MCDPSK-ACK-DROPPED).
+    if (mode == protocol::WaveformMode::MC_DPSK) return frame_count >= 1;
     return frame_count > 1 && protocol::isOFDMMode(mode) &&
            supports_data_preamble && !burst_interleave;
 }
@@ -301,6 +307,23 @@ inline bool hasPhysicalBurstEndMarker(bool decode_success,
                                       const Bytes& frame_data) {
     if (!decode_success || !connected || !is_ofdm || !burst_transport ||
         frame_data.size() < 4) {
+        return false;
+    }
+    const auto header = protocol::v2::parseHeader(frame_data);
+    return header.valid && !header.is_control &&
+           protocol::v2::isDataFrame(header.type) &&
+           header.type != protocol::v2::FrameType::DATA_REPAIR &&
+           (frame_data[3] & protocol::v2::Flags::PHYSICAL_BURST_END) != 0;
+}
+
+// MC-DPSK DATA turns carry PHYSICAL_BURST_END on their last frame (every turn, singletons
+// included — shouldStampPhysicalBurstEnd). A CRC-valid marked frame proves the peer's turn is
+// over, so its ACK is a completed-turn ACK, not an asynchronous one.
+inline bool hasMcDpskTurnEndMarker(bool decode_success,
+                                   bool connected,
+                                   bool is_mc_dpsk,
+                                   const Bytes& frame_data) {
+    if (!decode_success || !connected || !is_mc_dpsk || frame_data.size() < 4) {
         return false;
     }
     const auto header = protocol::v2::parseHeader(frame_data);

@@ -9331,6 +9331,22 @@ void Connection::flushBurstBuffer(bool retransmission_required,
         // deliberately NOT consumed here — a single-frame send carries no BURST_HEADER
         // descriptor (encodeBurstLight:476-489), so the one-shot stays armed for the
         // next descriptor-bearing (multi-frame) burst.
+        //
+        // MC-DPSK: this one frame IS the whole physical turn, so it carries the
+        // CRC-protected PHYSICAL_BURST_END marker (on a private wire copy; the ARQ's
+        // logical frame stays byte-stable) — the receiver then ACKs it as a completed
+        // turn instead of holding the ACK on decoder evidence until it is dropped
+        // (BUG-MCDPSK-ACK-DROPPED). OFDM singletons keep their full-anchor provenance.
+        if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+            if (auto frame = v2::DataFrame::deserialize(committed_frames[0]);
+                frame && v2::isDataFrame(frame->type) &&
+                frame->type != v2::FrameType::DATA_REPAIR) {
+                frame->flags = static_cast<uint8_t>(
+                    frame->flags | v2::Flags::PHYSICAL_BURST_END);
+                on_transmit_(frame->serialize());
+                return;
+            }
+        }
         on_transmit_(committed_frames[0]);
     } else if (on_transmit_burst_) {
         LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", committed_frames.size());
