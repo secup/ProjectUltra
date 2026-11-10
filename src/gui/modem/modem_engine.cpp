@@ -17,12 +17,6 @@ namespace ultra {
 namespace gui {
 
 namespace {
-Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
-    if (config.bits_per_symbol == 1) return Modulation::DBPSK;
-    if (config.bits_per_symbol == 3) return Modulation::D8PSK;
-    return Modulation::DQPSK;
-}
-
 void copySNRMetrics(LoopbackStats& stats, const DecodeResult& result) {
     stats.snr_db = result.snr_db;
     stats.snr_source = result.snr_source;
@@ -107,6 +101,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
         });
 
         if (result.success && !result.frame_data.empty()) {
+            if (decode_observer_) decode_observer_(result);
             if (deliverFrame(result)) {
                 notifyFrameParsed(result.frame_data, result.frame_type);
             }
@@ -156,6 +151,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
             }
             LOG_MODEM(INFO, "Narrowband chirp detected, switching control waveform");
         }
+        if (ping_observer_) ping_observer_(snr_db, cfo_hz);
         if (ping_received_callback_) {
             ping_received_callback_(snr_db);
         }
@@ -233,6 +229,9 @@ void ModemEngine::setConfig(const ModemConfig& config) {
     LOG_MODEM(INFO, "setConfig called: new code_rate=%d, modulation=%d",
               static_cast<int>(config.code_rate), static_cast<int>(config.modulation));
     config_ = config;
+    // A config set from outside is the wideband geometry; OFDM_NARROW keeps its preset.
+    narrow_geometry_ = false;
+    applyOfdmGeometryFor(waveform_mode_);
 
     // BUG FIX: Don't change decoder rate here - it should stay at R1_4 for disconnected mode
     // The decoder rate should only change when setConnected(true) is called

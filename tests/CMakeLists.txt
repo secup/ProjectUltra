@@ -452,6 +452,20 @@ add_executable(test_evm_rate_selector test_evm_rate_selector.cpp)
 target_link_libraries(test_evm_rate_selector PRIVATE ultra_core)
 add_test(NAME EvmRateSelector COMMAND test_evm_rate_selector)
 
+# CLI loopback (2026-11-10): `ultra ptx` -> `ultra prx` through ModemEngine for every frame type.
+if(TARGET ultra)
+    add_test(NAME CliLoopback
+             COMMAND ${CMAKE_COMMAND} -DULTRA=$<TARGET_FILE:ultra>
+                     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cli_loopback
+                     -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_loopback.cmake)
+    set_tests_properties(CliLoopback PROPERTIES LABELS "cli" TIMEOUT 600)
+endif()
+
+# Arbitrary-ratio resampler (2026-11-10): WAV input at any rate, e.g. 12 kHz KiwiSDR audio.
+add_executable(test_resampler test_resampler.cpp)
+target_link_libraries(test_resampler PRIVATE ultra_core)
+add_test(NAME Resampler COMMAND test_resampler)
+
 # Decision-directed EVM model (2026-11-10): closed forms vs the receiver's estimator.
 add_executable(test_dd_evm_model test_dd_evm_model.cpp)
 target_link_libraries(test_dd_evm_model PRIVATE ultra_core)

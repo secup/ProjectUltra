@@ -22,7 +22,8 @@ cites an archived file.
 
 - `tools/gui_qso_scenario.sh`: **faithful full-protocol + fade/throughput gate** (two real `ultra_gui -sim` stations over `ota_simulator serve`).
 - `tools/measure_ack_fer.cpp`: ACK/FER measurement over the real StreamingEncoder/Decoder.
-- `ultra ptx/prx`: raw waveform/frame diagnostics.
+- `ultra ptx/prx`: send one frame the way a session sends it / decode every frame of a recording
+  (any WAV rate), both through ModemEngine, the GUI's modem.
 
 ## Quality Workflow
 

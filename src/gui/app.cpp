@@ -582,12 +582,13 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             if (s == "r3_4") return CodeRate::R3_4;
             return CodeRate::R1_4;
         };
+        // OFDM data is coherent: QPSK, 8PSK, 16QAM, 32QAM (the old DQPSK default is not an
+        // OFDM modulation any more and fell back to QPSK inside the waveform).
         auto parseMod = [](const std::string& s) -> Modulation {
-            if (s == "dqpsk") return Modulation::DQPSK;
-            if (s == "qpsk") return Modulation::QPSK;
-            if (s == "d8psk") return Modulation::D8PSK;
-            if (s == "dbpsk") return Modulation::DBPSK;
-            return Modulation::DQPSK;
+            if (s == "8psk" || s == "qam8") return Modulation::QAM8;
+            if (s == "16qam" || s == "qam16") return Modulation::QAM16;
+            if (s == "32qam" || s == "qam32") return Modulation::QAM32;
+            return Modulation::QPSK;
         };
         if (options_.monitor_mode == "mc_dpsk") {
             modem_.setWaveformMode(protocol::WaveformMode::MC_DPSK);
@@ -598,17 +599,12 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 : protocol::WaveformMode::OFDM_CHIRP;
             const auto rate = parseRate(options_.monitor_rate);
             const auto mod = parseMod(options_.monitor_modulation);
-            modem_.setDataMode(mod, rate);
-            modem_.setWaveformMode(wf);
-            modem_.setConnected(true);  // forces decoder into connected OFDM data path
-            modem_.setHandshakeComplete(true);  // monitor mode deliberately skips CONNECT/ACK
-            // Post-handshake, OFDM data frames are fixed 4-CW. Without this the
-            // decoder treats incoming as 1-CW control frames and falsely rejects
-            // the data symbols past the first ~9 OFDM symbols as noise.
-            modem_.setFixedFrameCodewords(4);
-            appendRxLogLine("[monitor] " + options_.monitor_mode + " forced; "
-                            + options_.monitor_modulation + " "
-                            + options_.monitor_rate + "; 4-CW fixed; handshake skipped");
+            // The state a connection reaches after MODE_CHANGE to this rung, including its
+            // negotiated codeword count; `ultra prx` decodes recordings the same way.
+            modem_.joinConnectedSession(wf, mod, rate);
+            appendRxLogLine("[monitor] " + options_.monitor_mode + " forced; " +
+                            modulationToString(mod) + " " + codeRateToString(rate) +
+                            "; handshake skipped");
         }
     }
 

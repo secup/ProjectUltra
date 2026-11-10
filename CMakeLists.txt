@@ -582,7 +582,7 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
     )
-    target_link_libraries(ultra PRIVATE ultra_core ota_channel_core)
+    target_link_libraries(ultra PRIVATE ultra_core ota_channel_core ultra_tool_wav_io)
 
     # otasim_ctl - admin CLI for the OTASim server (SetChannel etc.)
     add_executable(otasim_ctl

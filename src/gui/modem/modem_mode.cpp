@@ -46,6 +46,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
               static_cast<int>(waveform_mode_), static_cast<int>(mode));
 
     waveform_mode_ = mode;
+    applyOfdmGeometryFor(mode);
 
     // Update StreamingDecoder to use the new waveform
     // When disconnected, always use MC_DPSK for PING detection (chirp-based sync)
@@ -104,6 +105,47 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                       config_.num_carriers,
                       connected_ ? "connected" : "disconnected");
             break;
+    }
+}
+
+// OFDM_NARROW is its own geometry (FFT 2048, 21 carriers, 1250-1750 Hz chirp), not a label on
+// the wideband one. Until 2026-11-10 only ultra_tnc switched to it; the GUI (and so `ultra ptx`)
+// ran OFDM_NARROW on the wideband 1024/59 geometry, which a TNC station could not decode
+// (BUG-GUI-NARROW-WIDEBAND-GEOMETRY). The data mode (modulation, rate, pilots) carries over.
+void ModemEngine::applyOfdmGeometryFor(protocol::WaveformMode mode) {
+    const bool narrow = mode == protocol::WaveformMode::OFDM_NARROW;
+    if (narrow == narrow_geometry_) return;
+    ModemConfig next;
+    if (narrow) {
+        wideband_config_ = config_;
+        next = presets::narrowbandOFDM();
+    } else {
+        next = wideband_config_;
+    }
+    next.modulation = config_.modulation;
+    next.code_rate = config_.code_rate;
+    next.use_pilots = true;
+    next.pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(next.modulation, next.code_rate);
+    config_ = next;
+    narrow_geometry_ = narrow;
+    LOG_MODEM(INFO, "[%s] OFDM geometry for %s: FFT=%d, carriers=%d, chirp %.0f-%.0f Hz",
+              log_prefix_.c_str(), protocol::waveformModeToString(mode), config_.fft_size,
+              config_.num_carriers, config_.chirp_f_start, config_.chirp_f_end);
+}
+
+void ModemEngine::joinConnectedSession(protocol::WaveformMode mode, Modulation mod,
+                                       CodeRate rate) {
+    if (mode == protocol::WaveformMode::MC_DPSK) {
+        mod = mcDpskModulationForConfig(mc_dpsk_config_);
+    }
+    // The order the connection's callbacks run in: data mode, waveform, connected, confirmed.
+    setDataMode(mod, rate);
+    setWaveformMode(mode);
+    setConnected(true);
+    setHandshakeComplete(true);
+    if (protocol::isOFDMMode(mode)) {
+        setFixedFrameCodewords(protocol::connection_policy::recommendCWCount(mod, rate, mode));
     }
 }
 

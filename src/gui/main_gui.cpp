@@ -24,6 +24,7 @@
 #include <atomic>
 #include <ultra/logging.hpp>
 #include <ultra/build_info.hpp>
+#include "sync/acquisition_mode.hpp"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -190,10 +191,10 @@ void printGuiUsage(const char* prog) {
     std::printf("  --opengl, --gl                Use OpenGL renderer\n");
     std::printf("  --no-waterfall                Disable waterfall on startup\n");
     std::printf("  --waterfall                   Enable waterfall on startup\n");
-    std::printf("  --monitor-ofdm [rate]         Monitor OFDM_CHIRP\n");
+    std::printf("  --monitor-ofdm [rate]         Monitor OFDM_CHIRP (r1_4 r1_2 r2_3 r3_4)\n");
     std::printf("  --monitor-ofdm-narrow [rate]  Monitor OFDM_NARROW\n");
     std::printf("  --monitor-mcdpsk              Monitor MC-DPSK\n");
-    std::printf("  --monitor-mod <mod>           Monitor modulation\n");
+    std::printf("  --monitor-mod <mod>           Monitor modulation (qpsk 8psk 16qam 32qam)\n");
     std::printf("  Scenario scripting (drives the real UI actions; reuse with -sim + OTASim):\n");
     std::printf("  --auto-connect <peer>         Initiate a connection once the link is up\n");
     std::printf("  --connect-delay <s>           Wait N seconds after startup before auto-connect\n");
@@ -977,6 +978,12 @@ int main(int argc, char* argv[]) {
             return failStartup("ImGui_ImplOpenGL2_Init failed");
         }
         writeStartupLog("ImGui_ImplOpenGL2_Init succeeded");
+    }
+
+    // OFDM monitor mode joins without a handshake: acquire on chirps, as `ultra prx` does
+    // (before the App builds its modem; the acquisition mode is read once).
+    if (opts.monitor_mode == "ofdm_chirp" || opts.monitor_mode == "ofdm_narrow") {
+        ultra::sync::preferChirpAcquisitionWithoutHandshake();
     }
 
     // Create application with parsed options

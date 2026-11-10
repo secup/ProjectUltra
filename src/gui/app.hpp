@@ -57,7 +57,7 @@ public:
         // - monitor_mode = "mc_dpsk": force MC-DPSK
         std::string monitor_mode;
         std::string monitor_rate = "r1_4";   // Used when monitor_mode is OFDM
-        std::string monitor_modulation = "dqpsk";
+        std::string monitor_modulation = "qpsk";  // qpsk, 8psk, 16qam, 32qam
 
         // Scenario scripting (additive test/demo automation). Drives the real
         // UI actions (connect/accept/sendFile/sendMessage) from the render loop

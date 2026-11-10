@@ -10,6 +10,77 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX(cli): `ultra ptx`/`prx` run the GUI's modem path; OFDM_NARROW geometry in ModemEngine; chirp correlation over silence; WAV resampler (BUG-CLI-PTX-PRX-BROKEN, BUG-GUI-NARROW-WIDEBAND-GEOMETRY, BUG-CHIRP-NORM-SILENCE, BUG-RESAMPLER-RATIO)
+
+**What was broken.** A user reported that `ultra ptx`/`prx` did not work. Loopback (`ptx` ->
+`prx`) showed: `prx` decoded OFDM only by default (PING, CONNECT, DISCONNECT needed `-w dpsk`),
+never decoded MC-DPSK data, hard-coded DQPSK (OFDM is coherent-only: `Unsupported modulation`),
+had no 8PSK/16QAM/32QAM, ran `-w narrow` on the wideband geometry, and fed a threaded ModemEngine
+faster than real time so its search load-shedding dropped audio; `info` was stale. `ptx` built
+DATA frames with `DataFrame::makeData` (sized from the payload) while a session sends
+`makeFixedDataFrame` at the negotiated codeword count, so its frames matched no connected
+receiver. Three faults sat in shared code:
+- **GUI OFDM_NARROW ran the wideband geometry.** Only `ultra_tnc` applied
+  `presets::narrowbandOFDM()`; the GUI (and so `ptx -w narrow`) kept FFT 1024 / 59 carriers under
+  the narrowband label, so a GUI and a TNC in a narrowband session could not decode each other.
+  The GUI's `--monitor-ofdm` defaulted to DQPSK, forced 4-codeword frames and had no 16/32QAM.
+- **Chirp correlation over near-silence.** `ChirpSync::detectChirpTemplateFFT` divided the FFT
+  correlation, whose rounding noise scales with the whole buffer, by each window's own energy from
+  a float running sum. Over the near-silent gaps of a resampled file the normalized correlation
+  reached 3477 and false chirps hid real ones (a 44.1 kHz WAV lost one frame in eight). Live
+  receive audio always carries noise far above that floor.
+- **Resampler.** It designed its 64-tap anti-alias filter for max(in, out) but ran it at in x up
+  (7 MHz for 44.1 -> 48 kHz): any WAV not at an integer ratio of 48 kHz decoded as garbage.
+
+**What changed.**
+- `ModemEngine::joinConnectedSession(mode, mod, rate)` (`modem_mode.cpp`): the calls a connection
+  makes after CONNECT_ACK and MODE_CHANGE (data mode, waveform, connected, handshake confirmed,
+  `recommendCWCount` codewords). Used by the GUI's `--monitor-ofdm`, `ptx` and `prx`.
+- `ModemEngine::applyOfdmGeometryFor` (called by `setWaveformMode` and `setConfig`): OFDM_NARROW
+  takes the narrowband preset with the current data mode; any other waveform restores the wideband
+  config. Read-only `setDecodeObserver` / `setPingObserver` taps (SNR, CFO, EVM; delivery is
+  unchanged) and `getFixedFrameCodewords()`.
+- `src/main.cpp`: `ptx` transmits from the session state (`makeFixedDataFrame` at the session's
+  codeword count for OFDM data); `-m qpsk|8psk|16qam|32qam`; `.wav` output. `prx` plays the whole
+  recording into one ModemEngine per station state (idle MC-DPSK, connected MC-DPSK, connected OFDM
+  at each of the 11 wideband rungs and narrowband QPSK R1/4 and R1/2; `-w/-m/-r` narrow the set),
+  in synchronous mode with `feedAudio` + `processRxBuffer` every 20 ms (the GUI's synchronous
+  loop), with no callsign so it hears every address (ModemEngine otherwise takes its log label as
+  the callsign and drops other stations' frames). Duplicates are merged; a PING that opens a decoded
+  OFDM frame is left out (BUG-IDLE-PING-FROM-OFDM-CHIRP). WAV input at any rate. An earlier version
+  of this fix gave `prx` its own `StreamingDecoder` setup, header discovery and a chirp splitter;
+  all of it is gone: with session-sized frames, continuous ModemEngine receivers decode every frame.
+- `sync::preferChirpAcquisitionWithoutHandshake()` (`acquisition_mode.hpp`), called by `prx` and by
+  the GUI's OFDM monitor modes: a receiver without a handshake has no session CFO, and structure
+  acquisition then throws away the CFO it measures (BUG-STRUCTURE-ACQ-DROPS-CFO, open). Measured on a
+  12 kHz WAV at 18 dB with a 7.3 Hz offset: 4/8 frames with structure acquisition, 8/8 with chirp.
+- `chirp_sync.hpp`: window energies from a double running sum, floored at 1e-6 of the buffer's
+  energy (the FFT rounding noise, ~u log2 N of the buffer, then stays under ~1e-3 of a normalized
+  correlation; only windows 60 dB under the buffer are touched).
+- `src/dsp/resampler.cpp`: windowed-sinc interpolation at the fractional input position of each
+  output (Blackman, 16 zero crossings, cutoff 0.46 x min(1, out/in) of the input rate, tabulated at
+  512 phases), `flush()` for the stream end; `wav_io` calls it. `cli_enums`: `16qam/32qam/64qam`.
+
+**Verification.**
+- New CTests: `CliLoopback` (11 cases: PING via WAV, CONNECT, DISCONNECT, MC-DPSK data, OFDM QPSK
+  R1/2 with every receiver, 8PSK R2/3, 16QAM R3/4, 32QAM R2/3, narrowband QPSK R1/4 data, narrowband
+  PING and DISCONNECT; 5 s; it fails on a wrong expectation) and
+  `Resampler` (8/12/16/44.1 -> 48 kHz error below -60 dB, 96 -> 48 kHz rejection, streaming = one
+  shot). Full ctest: 114/114 (TNCSession disabled as before), then `CliLoopback` + `Resampler`.
+- A 34 s file of 8 frames with 1 s gaps (PING, CONNECT, OFDM QPSK R1/2, 8PSK R2/3, 16QAM R3/4,
+  32QAM R2/3, MC-DPSK DATA, DISCONNECT): 8/8 from a clean 48 kHz WAV, from a 12 kHz WAV at 18 dB
+  with +7.3 Hz (KiwiSDR-like), and from a 44.1 kHz WAV (7/8 before the chirp fix). `prx` takes
+  27-31 s for it with all 14 receivers.
+- `ptx -w narrow`: 99 % of the post-chirp power in 1247-1755 Hz (was 129-2937 Hz).
+- GUI gate (one seed each, 21 KB, 7.3 Hz): AWGN 20 dB PASS 4010 bps, Good 20 dB PASS 3210 bps, both
+  files byte-exact (single-seed smoke runs, not an A/B; the wideband session path is unchanged
+  except the chirp normalization over near-silence). A forced OFDM_NARROW session failed at
+  CONNECT before any OFDM_NARROW frame was sent; released v0.6.2 fails it identically
+  (BUG-NARROW-MCDPSK-CONNECT, open), so the narrowband geometry is verified offline only
+  (`CliLoopback` `ofdm_narrow`, spectrum above).
+- `ptx -w narrow` with `ping`/`connect`/`disconnect` now sends the narrowband control waveform
+  (`setNarrowbandControl`, as the GUI does with OFDM_NARROW forced).
+
 ## 2026-11-10 — RELEASE: v0.6.2-pre-alpha
 
 Version 0.6.1 -> 0.6.2 in `CMakeLists.txt` (the binaries, the TNC `VERSION` reply and OTASim

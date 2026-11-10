@@ -187,6 +187,8 @@ LoadedWav loadWavMono48k(const std::string& path) {
         ultra::Resampler resampler(sample_rate, kWavTargetSampleRate);
         ultra::SampleSpan span(mono.data(), mono.size());
         wav.samples_48k = resampler.process(span);
+        const ultra::Samples tail = resampler.flush();
+        wav.samples_48k.insert(wav.samples_48k.end(), tail.begin(), tail.end());
     }
 
     return wav;

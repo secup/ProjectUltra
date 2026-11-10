@@ -100,9 +100,9 @@ inline std::optional<Modulation> parseModulation(const std::string& value,
     if (v == "qpsk") return Modulation::QPSK;
     if (v == "bpsk") return Modulation::BPSK;
     if (v == "8psk" || v == "qam8" || v == "8qam") return Modulation::QAM8;
-    if (v == "qam16") return Modulation::QAM16;
-    if (v == "qam32") return Modulation::QAM32;
-    if (v == "qam64") return Modulation::QAM64;
+    if (v == "qam16" || v == "16qam") return Modulation::QAM16;
+    if (v == "qam32" || v == "32qam") return Modulation::QAM32;
+    if (v == "qam64" || v == "64qam") return Modulation::QAM64;
     return std::nullopt;
 }
 

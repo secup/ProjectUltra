@@ -105,8 +105,11 @@ public:
     Resampler(uint32_t input_rate, uint32_t output_rate);
     ~Resampler();
 
-    // Resample a block
+    // Resample a block (streaming: outputs whose kernel support is complete).
     Samples process(SampleSpan in);
+
+    // End of stream: the outputs the fed input still owes (its last ~half kernel).
+    Samples flush();
 
     // Get expected output size for given input size
     size_t outputSize(size_t input_size) const;

@@ -63,6 +63,36 @@ Measurement workaround (used 2026-11-10): `ULTRA_BURST_ACQ=chirp --preroll-ms 30
 7.3 Hz); without the preroll the tool's chirp at sample 0 is not found either (best correlation
 0.09, the first-frame artifact of BUG-HARNESS-003) and the LTS fallback runs at 0 Hz.
 
+Also hits every receiver that joins without a handshake, so it has no session CFO: `ultra prx` on
+a KiwiSDR-like recording (12 kHz WAV, 18 dB, +7.3 Hz) decoded 4/8 frames with structure
+acquisition and 8/8 with chirp acquisition. Since 2026-11-10 `ultra prx` and the GUI's OFDM
+`--monitor` modes call `sync::preferChirpAcquisitionWithoutHandshake()` (chirp unless
+`ULTRA_BURST_ACQ` is set); remove that call when this bug is fixed.
+
+### BUG-NARROW-MCDPSK-CONNECT (open, 2026-11-10) — P2: a narrowband session cannot connect
+
+A GUI session forced to OFDM_NARROW (`ULTRA_FORCE_WAVEFORM=OFDM_NARROW tools/gui_qso_scenario.sh
+--channel awgn --snr-db 20 --seed 42 --cfo-hz 7.3 --file-kb 2`) gets PING/PONG through and then
+fails all 10 CONNECT attempts: the responder detects every narrowband chirp (correlation 0.99) and
+fails CW0 of the 2-codeword CONNECT each time. Released v0.6.2 (a18a6b8) fails the same way, so it
+predates the 2026-11-10 CLI work; not bisected (the 2-codeword CONNECT of 0c0c920 is one suspect).
+
+Offline repro: `ultra ptx connect -w narrow -o c.f32 && ultra prx -w mcdpsk c.f32` -> 0 frames.
+On that clean signal (no noise, 0 Hz) the narrowband MC-DPSK receiver (`mc_dpsk_presets::narrowband()`
+on both ends, via `WaveformFactory::createNarrowbandMCDPSK`) reads training SNR 40.8 dB but
+data-aided SNR 7.7 dB, its jitter tracker a 31 degree phase RMS, and its clock tracker a 6.9 Hz
+dial that is not there. The 1-codeword narrowband DISCONNECT still decodes, at a reported 10.7 dB.
+The demodulation itself is degraded; the edge-carrier trackers on the 4-carrier geometry are the
+first thing to check. While open, narrowband mode is unusable in the GUI and the TNC.
+
+### BUG-IDLE-PING-FROM-OFDM-CHIRP (open, 2026-11-10) — P3: an idle receiver reports the chirp of a short OFDM frame as a PING
+
+A PING is a bare dual chirp, and every chirp-preambled OFDM frame opens with one. An idle
+MC-DPSK receiver that hears a short OFDM frame followed by silence (a `ptx` frame, a recording)
+reports a PING at that chirp (PATH1 ratio 0.269 on a clean 16QAM frame). In a session the idle
+receiver is not listening during OFDM data, so it only shows in offline decoding; `ultra prx`
+leaves such a PING out of its report when a decoded OFDM frame starts at it.
+
 ### BUG-GATE-SCRIPT-SILENT-EXIT (open, 2026-11-10) — P3, test tooling
 
 About 1 in 70 `tools/gui_qso_scenario.sh` runs ends ~27 s in, during the connect, with nothing
@@ -2436,6 +2466,39 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-CLI-PTX-PRX-BROKEN (FIXED 2026-11-10) — `ultra ptx`/`prx` did not decode most frames
+
+**Symptom.** Reported by a user. `ptx` -> `prx` loopback: `prx` decoded OFDM only (PING, CONNECT and
+DISCONNECT needed `-w dpsk`), never decoded MC-DPSK data, hard-coded DQPSK (OFDM is coherent-only:
+`Unsupported modulation` warnings), offered no 8PSK/16QAM/32QAM, ran `-w narrow` on the wideband
+geometry, and dropped audio by feeding a threaded ModemEngine faster than real time (`LOAD-SHED`).
+**Root cause.** The CLI had its own setup of the modem instead of the states a session puts it in,
+and `ptx` built data frames with `DataFrame::makeData` (sized from the payload) where a session
+sends `makeFixedDataFrame` at the negotiated codeword count. **Fix.** Both run ModemEngine in the
+session's state (`joinConnectedSession`); `prx` runs one synchronous ModemEngine receiver per
+station state over the whole recording. CTest `CliLoopback`. CHANGELOG 2026-11-10.
+
+### BUG-GUI-NARROW-WIDEBAND-GEOMETRY (FIXED 2026-11-10) — the GUI ran OFDM_NARROW on the wideband geometry
+
+Only `ultra_tnc` switched to `presets::narrowbandOFDM()` (FFT 2048, 21 carriers, 1250-1750 Hz
+chirp) for OFDM_NARROW; the GUI (and so `ptx -w narrow`) kept the 1024/59 wideband geometry under
+the narrowband label, so a GUI and a TNC in a narrowband session could not decode each other.
+`ModemEngine::applyOfdmGeometryFor` now applies the geometry whenever the waveform changes.
+
+### BUG-CHIRP-NORM-SILENCE (FIXED 2026-11-10) — normalized chirp correlation far above 1 over near-silence
+
+`ChirpSync::detectChirpTemplateFFT` divided the FFT correlation, whose rounding noise is set by the
+whole buffer, by each window's own energy (from a float running sum). Over near-silent windows (the
+gaps of a resampled file) it reached 3477 and false chirps hid real ones: a 44.1 kHz WAV lost one
+frame in eight. Window energies now come from a double running sum floored at 1e-6 of the buffer's.
+
+### BUG-RESAMPLER-RATIO (FIXED 2026-11-10) — WAV input at 44.1 kHz was destroyed
+
+`Resampler` designed its 64-tap anti-alias filter for max(in, out) but ran it at in x up (7 MHz
+for 44.1 -> 48 kHz; 12 -> 48 kHz happened to work). Rewritten as windowed-sinc interpolation at the
+fractional input position (Blackman, 16 zero crossings, cutoff 0.46 x min(1, out/in) of the input
+rate) with `flush()`. CTest `Resampler`: error below -60 dB at 8/12/16/44.1 kHz.
 
 ### BUG-LTS-EARLY-EXIT (FIXED 2026-11-10) — high-SNR burst groups locked ~33 samples early, ~6 dB of EVM lost
 

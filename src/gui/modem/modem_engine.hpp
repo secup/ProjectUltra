@@ -33,6 +33,13 @@
 namespace ultra {
 namespace gui {
 
+// The MC-DPSK data modulation a preset carries (its bits per symbol).
+inline Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
+    if (config.bits_per_symbol == 1) return Modulation::DBPSK;
+    if (config.bits_per_symbol == 3) return Modulation::D8PSK;
+    return Modulation::DQPSK;
+}
+
 // Real modem engine using OFDM modulator/demodulator and LDPC codec
 class ModemEngine {
 public:
@@ -56,6 +63,8 @@ public:
     // ========================================================================
     void setConfig(const ModemConfig& config);
     const ModemConfig& getConfig() const { return config_; }
+    // The MC-DPSK preset with the engine's chirp settings (what its decoder listens for).
+    const MultiCarrierDPSKConfig& getMCDPSKConfig() const { return mc_dpsk_config_; }
 
     void setFilterConfig(const FilterConfig& config);
     const FilterConfig& getFilterConfig() const { return filter_config_; }
@@ -248,6 +257,13 @@ public:
 
     // Ping received callback - called when "ULTR" magic detected via DPSK
     // The measured_snr is estimated from preamble energy
+    // Read-only taps on every decoded frame (before delivery) and every PING, for tools that
+    // print the measurements (SNR, CFO, EVM). They do not change what is decoded or delivered.
+    using DecodeObserver = std::function<void(const DecodeResult&)>;
+    void setDecodeObserver(DecodeObserver observer) { decode_observer_ = std::move(observer); }
+    using PingObserver = std::function<void(float snr_db, float cfo_hz)>;
+    void setPingObserver(PingObserver observer) { ping_observer_ = std::move(observer); }
+
     using PingReceivedCallback = std::function<void(float measured_snr)>;
     void setPingReceivedCallback(PingReceivedCallback callback) { ping_received_callback_ = callback; }
 
@@ -368,6 +384,13 @@ public:
     }
 
     void setDataMode(Modulation mod, CodeRate rate);
+
+    // Join a connection already running on `mode` at (mod, rate), without a handshake: the
+    // state a station reaches after CONNECT_ACK and MODE_CHANGE, including the codeword count
+    // the connection negotiates for that rung (connection_policy::recommendCWCount). MC-DPSK
+    // data always rides the engine's MC-DPSK preset modulation. The GUI's --monitor mode and
+    // `ultra ptx`/`ultra prx` use it, so they send and decode what a connected station does.
+    void joinConnectedSession(protocol::WaveformMode mode, Modulation mod, CodeRate rate);
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 
@@ -427,6 +450,11 @@ public:
     // Force fixed-frame codeword count on encoder + decoder. Used by
     // the GUI's monitor-mode override so the decoder doesn't default
     // to 1-CW control-frame demod on incoming OFDM data frames.
+    // Codewords per fixed OFDM data frame the encoder sends (a session's negotiated count).
+    int getFixedFrameCodewords() const {
+        return streaming_encoder_ ? streaming_encoder_->getFixedFrameCodewords()
+                                  : protocol::v2::kDefaultFixedFrameCodewords;
+    }
     void setFixedFrameCodewords(int cw_count) {
         if (streaming_encoder_) streaming_encoder_->setFixedFrameCodewords(cw_count);
         if (streaming_decoder_) streaming_decoder_->setFixedFrameCodewords(cw_count);
@@ -482,6 +510,13 @@ public:
 
 private:
     ModemConfig config_;
+    // The OFDM geometry follows the waveform (applyOfdmGeometryFor): OFDM_NARROW runs the
+    // narrowband preset, every other mode the configured wideband geometry kept here.
+    ModemConfig wideband_config_;
+    bool narrow_geometry_ = false;
+    void applyOfdmGeometryFor(protocol::WaveformMode mode);
+    DecodeObserver decode_observer_;
+    PingObserver ping_observer_;
     std::string log_prefix_ = "MODEM";
     // Live local callsign for the RX address filter (deliverFrame). Empty => fall back to the
     // log_prefix_-derived label (preserves existing GUI behavior where label == callsign).

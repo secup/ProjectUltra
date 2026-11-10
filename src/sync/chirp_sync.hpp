@@ -748,12 +748,22 @@ private:
         std::vector<Complex> corr_complex(FFT_SIZE);
         fft_->inverse(product.data(), corr_complex.data());
 
-        // Compute signal energy for normalization (sliding window approximation)
-        // Pre-compute cumulative energy for O(1) per-position normalization
-        std::vector<float> cumsum_energy(fft_input_len + 1, 0.0f);
+        // Window energies for the normalization, from a running sum. In double: in float, the
+        // difference of two large partial sums cancels to rounding garbage over quiet stretches.
+        std::vector<double> cumsum_energy(fft_input_len + 1, 0.0);
         for (size_t i = 0; i < fft_input_len; i++) {
-            cumsum_energy[i + 1] = cumsum_energy[i] + samples[i] * samples[i];
+            cumsum_energy[i + 1] =
+                cumsum_energy[i] + static_cast<double>(samples[i]) * samples[i];
         }
+        // The float FFT correlation carries rounding noise of about u log2(N) sqrt(E_buf E_tmpl)
+        // at EVERY lag (u = 2^-24), however quiet the window at that lag is. Over a window far
+        // quieter than the buffer (digital silence, the near-zero gaps of a resampled file), that
+        // noise divided by the window's own tiny energy gave normalized correlations far above 1
+        // (3477 measured on a 44.1 kHz WAV) and false chirps that hid the real ones
+        // (BUG-CHIRP-NORM-SILENCE). Flooring the window energy at 1e-6 of the buffer's keeps the
+        // noise under ~1e-3 of a normalized correlation; only windows 60 dB under the buffer are
+        // affected, and float FFT correlation cannot resolve a chirp there anyway.
+        const double window_energy_floor = 1e-6 * cumsum_energy[fft_input_len];
 
         // Find peak correlation (magnitude for CFO tolerance)
         // Cross-correlation R[k] = sum_n s[n] * conj(h[n-k])
@@ -767,9 +777,11 @@ private:
             float corr_mag = std::abs(corr_complex[pos]);
 
             // Normalize by signal and template energy
-            float sig_energy = cumsum_energy[pos + chirp_len] - cumsum_energy[pos];
-            float denom = std::sqrt(sig_energy * tmpl_energy);
-            float norm_corr = (denom > 1e-10f) ? corr_mag / denom : 0.0f;
+            const double sig_energy = std::max(cumsum_energy[pos + chirp_len] - cumsum_energy[pos],
+                                               window_energy_floor);
+            const double denom = std::sqrt(sig_energy * static_cast<double>(tmpl_energy));
+            const float norm_corr =
+                (denom > 1e-10) ? static_cast<float>(corr_mag / denom) : 0.0f;
 
             if (norm_corr > best_corr) {
                 best_corr = norm_corr;

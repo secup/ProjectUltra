@@ -113,10 +113,18 @@ results by the rules above (paired, interleaved, n ≥ 8).
 # Frame / ACK error rate through the real encoder and decoder over a channel model
 ./build/measure_ack_fer --snr 20 --config data4_full --channel good --mod qpsk --rate r2_3 --seed 1 --n 200
 
-# Single-frame transmit / decode
-./build/ultra ptx "Hello" -s MYCALL -d THEIRCALL | aplay -f FLOAT_LE -r 48000
+# Single-frame transmit / decode (ModemEngine, the GUI's modem path; CTest CliLoopback)
+./build/ultra ptx "Hello" -s MYCALL -d THEIRCALL -m 16qam -r r3_4 -o hello.wav
+./build/ultra prx hello.wav            # WAV at any rate, or raw float32 48 kHz from a file/stdin
 arecord -f FLOAT_LE -r 48000 | ./build/ultra prx
 ```
+
+`ptx` sends a frame from the state a session is in (`ModemEngine::joinConnectedSession`: the
+negotiated codeword count, the narrowband geometry for `-w narrow`). `prx` plays the recording into
+one ModemEngine receiver per station state (idle and connected MC-DPSK, connected OFDM at every
+rung; `-w`, `-m`, `-r` narrow the set) and prints each frame with its SNR, CFO and EVM. It acquires
+on chirps, so burst groups a session sent without a chirp are not decoded
+(BUG-STRUCTURE-ACQ-DROPS-CFO; `ULTRA_BURST_ACQ=structure` tries them with a small dial offset).
 
 ## Manual modulation / rate selection
 

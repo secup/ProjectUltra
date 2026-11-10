@@ -216,6 +216,18 @@ where: cfo_to_samples = sample_rate / chirp_rate = 48000 / 4800 = 10 samples/Hz
 
 ---
 
+### INV-SYNC-CHIRP-002: a normalized chirp correlation never exceeds 1 (2026-11-10)
+
+**Rule:** `detectChirpTemplateFFT` normalizes by window energies from a DOUBLE running sum, floored
+at 1e-6 of the whole buffer's energy. Never normalize an FFT correlation by a window energy that can
+fall below the FFT's rounding noise.
+**Why:** the FFT correlation's rounding noise (about u log2 N of sqrt(E_buffer E_template)) sits at
+every lag, however quiet the window there. Divided by a near-zero window energy it gave 3477 and
+false chirps that hid real ones (BUG-CHIRP-NORM-SILENCE, a 44.1 kHz WAV).
+**Test:** `CliLoopback`; scan of a resampled multi-frame file (CHANGELOG 2026-11-10).
+
+---
+
 ### INV-SYNC-LTS-001: an LTS lock is the TOP of the first peak, placed by the matched filter (2026-11-10)
 
 **Rule:** `detectDataSync` may stop at the first high-confidence Schmidl-Cox peak (later identical
@@ -642,6 +654,30 @@ float snr_db = 10 * log10(signal_power / noise_power);
 **Rule:** HF channel simulation (fading, delay spread) must be applied to the ENTIRE signal including preamble, not just data.
 
 **Why:** Real HF affects everything. Testing only data portion would be unrealistic.
+
+---
+
+### INV-TEST-003: the CLI is a ModemEngine station, not a harness (2026-11-10)
+
+**Rule:** `ultra ptx`/`prx` drive `ModemEngine` only: the session state comes from
+`ModemEngine::joinConnectedSession` (as in the GUI's `--monitor-ofdm`), receive goes through
+`feedAudio` + `processRxBuffer`, and data frames are built by the connection's own builder
+(`v2::makeFixedDataFrame` at the session's codeword count). No private `StreamingDecoder` setup,
+no decoder features the GUI does not use, no file-splitting around the receivers.
+**Why:** `cli_simulator` was retired for diverging from the production modem wrapper; the old CLI
+diverged the same way and could not decode most frames (BUG-CLI-PTX-PRX-BROKEN). A frame `prx`
+decodes is a frame a GUI station in that state decodes.
+**Test:** `CliLoopback`.
+
+### INV-GEOM-NARROW-001: the OFDM geometry follows the waveform inside ModemEngine (2026-11-10)
+
+**Rule:** `ModemEngine::applyOfdmGeometryFor` (from `setWaveformMode` and `setConfig`) puts
+OFDM_NARROW on `presets::narrowbandOFDM()` (FFT 2048, 21 carriers, 1250-1750 Hz chirp) and every
+other waveform on the configured wideband geometry, keeping the data mode. Frontends do not pick
+the geometry themselves.
+**Why:** only `ultra_tnc` switched it; the GUI ran OFDM_NARROW on the wideband geometry and could
+not talk to a TNC in narrowband (BUG-GUI-NARROW-WIDEBAND-GEOMETRY).
+**Test:** `CliLoopback` (`ofdm_narrow`); `ptx -w narrow` occupies 1247-1755 Hz.
 
 ---
 

@@ -358,9 +358,9 @@ mkdir build && cd build && cmake .. && make -j4
 
 # CLI
 ./ultra ptx ping -s MYCALL | aplay -f FLOAT_LE -r 48000      # PING probe
-./ultra ptx "Hello" -s MYCALL -d THEIRCALL -o msg.f32        # send message
-./ultra prx recording.f32          # decode (OFDM)
-./ultra prx -w dpsk recording.f32  # decode (DPSK/PING)
+./ultra ptx "Hello" -s MYCALL -d THEIRCALL -m 16qam -r r3_4 -o msg.wav  # DATA as a session sends it
+./ultra prx recording.wav          # decode every frame: MC-DPSK + every OFDM rung, any WAV rate
+# ptx/prx run ModemEngine (joinConnectedSession), the GUI's modem path; CTest CliLoopback
 ```
 
 | Tool | Purpose | Example |
