@@ -10,6 +10,58 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX: asynchronous ACKs are sent once the peer stops, not dropped (INV-TONE-ACK-005)
+
+**What was broken.** An ACK without completed-turn provenance (descriptor lost, the turn's
+marked last frame lost) was deferred by listen-before-ACK while the decoder had RX evidence
+within 13 s (`kDescriptorLostReverseTxHoldMs`), and dropped at its 2.5 s deadline if the evidence
+was still that recent. The evidence was the decode that produced the ACK, so every such ACK was
+dropped; `ultra_tnc` dropped it on the spot. The sender then retried to its cap
+(BUG-ASYNC-ACK-ALWAYS-DROPPED).
+
+**What changed.**
+- `connection_policy`: `decideDeferredToneAck` (3 quiet polls send; at the deadline, declared
+  airtime or new decoder evidence drop, energy-only busy sends — F127/F129/F176 unchanged),
+  `deferredToneAckSeesNewInbound` (decode-driven ACK: only a substantive stamp newer than the
+  ACK's own decode; the backstop timer's re-confirm: the old age rule), `toneAckIsTimerReconfirm`,
+  `ackCcaDeferMs` / `deferredToneAckBudgetMs` (shared), knob `ULTRA_ASYNC_ACK_NOVELTY` (default on;
+  `0` = the old rule everywhere, TNC immediate drop).
+- Decoder: `lastAnchoredBackstopMs` — stamped right before the anchored-burst backstop requests
+  its re-confirm, so the frontend knows that ACK came from a timer.
+- GUI `App::maybeFireDeferredAck` uses the shared policy; `ultra_tnc` defers an uncertain ACK and
+  polls it from `tick()` with the same policy instead of dropping it.
+- Why the backstop keeps the age rule: the first version sent it like any async ACK, and on
+  Moderate@10 s43 it was keyed seven times onto the sender's RTO resends (the backstop fires
+  about when that resend starts, before it has produced any evidence; CCA missed it on fading):
+  112 retransmissions, FAIL. Filed as BUG-BACKSTOP-RACES-RTO.
+
+**Verification.**
+- CTest `ConnectionPolicy` 455/455 (new `test_deferred_tone_ack_policy`); full `ctest` 111/111.
+- GUI gate, interleaved pairs in one build (`ULTRA_ASYNC_ACK_NOVELTY=0` vs default), MC-DPSK
+  pinned (`ULTRA_FORCE_WAVEFORM=MC_DPSK`), Good@8, 2 KB, 7.3 Hz; frames delivered out of 42
+  before the time limit (most runs on both arms hit it at 90 bps):
+
+  | Seed | old rule | fix | deferred async ACKs |
+  |---|---|---|---|
+  | 42 | 16 | 21 | old: 2 dropped; fix: 3 sent |
+  | 43 | 27 | 27 | none |
+  | 44 | 35 | 30 | none |
+  | 45 | 42 (PASS) | 42 (PASS) | none |
+  | 46 | 18 | 33 | old: 1 dropped; fix: none |
+  | 47 | 4 | 21 | old: 5 dropped; fix: 4 sent |
+  | 48 | 36 | 36 | none |
+  | 49 | 10 | 24 | old: 3 dropped; fix: 3 sent |
+
+  Total 188 -> 234 (+24 %); paired t p ~= 0.10, sign test 4-1 (p = 0.38) — suggestive at n = 8,
+  not significant. The mechanism is unambiguous: 11/11 deferred async ACKs dropped vs 0/10.
+- Good@6 s42-47 (4 KB) and Moderate@10 s42-49 (2 KB, OFDM) ran with the first version, which
+  differs from the final rule only on backstop re-confirms (present only in Moderate@10 s43):
+  async ACKs were rare there and the other pairs equal within run-to-run spread. Moderate@10 s43
+  rerun with the final rule: PASS 190 bps, its three backstop re-confirms dropped as before (old
+  rule FAIL in that run; the trajectory is chaotic — in the earlier pair the old rule passed).
+  No regression: AWGN@20 3610, Good@20 3190 / 3210 / 3180 (s42 twice, s43), hardware dial 16
+  940 bps.
+
 ## 2026-11-10 — FIX: the burst header no longer sets OFDM's TX level (INV-FRAME-WHITEN-001)
 
 **What was broken.** On a peak-limited transmitter every burst is scaled to its loudest sample,

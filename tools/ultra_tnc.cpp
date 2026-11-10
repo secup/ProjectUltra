@@ -310,6 +310,52 @@ public:
         }
 
         bridge_.tick(elapsed_ms);
+        maybeFireDeferredAck();
+    }
+
+    // Listen-before-ACK poll for a deferred tone ACK (the GUI tick's policy). Sensors are read
+    // before taking deferred_ack_mutex_ so this thread never nests it inside a modem lock.
+    void maybeFireDeferredAck() {
+        const int64_t substantive_ms = modem_.lastRxSubstantiveMs();
+        const bool evidence_within_hold = modem_.rxSignalActive(
+            ultra::protocol::connection_policy::kDescriptorLostReverseTxHoldMs);
+        const bool air_arriving = modem_.burstAirSamplesRemaining() > 0;
+        const bool channel_busy = modem_.channelBusyForTx();
+        std::vector<float> send;
+        {
+            std::lock_guard<std::mutex> lk(deferred_ack_mutex_);
+            if (!deferred_ack_pending_) return;
+            if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
+                deferred_ack_pending_ = false;
+                deferred_ack_samples_.clear();
+                return;
+            }
+            namespace cp = ultra::protocol::connection_policy;
+            const bool new_inbound = cp::deferredToneAckSeesNewInbound(
+                deferred_ack_group_complete_, deferred_ack_timer_reconfirm_, substantive_ms,
+                deferred_ack_armed_substantive_ms_, evidence_within_hold);
+            if (channel_busy || new_inbound || air_arriving) {
+                deferred_ack_quiet_polls_ = 0;
+            } else {
+                ++deferred_ack_quiet_polls_;
+            }
+            const auto action = cp::decideDeferredToneAck(
+                air_arriving, channel_busy, new_inbound, deferred_ack_quiet_polls_,
+                std::chrono::steady_clock::now() >= deferred_ack_deadline_);
+            if (action == cp::DeferredAckAction::HOLD) return;
+            deferred_ack_pending_ = false;
+            deferred_ack_quiet_polls_ = 0;
+            if (action == cp::DeferredAckAction::DROP) {
+                deferred_ack_samples_.clear();
+                LOG_WARN("AUDIO", "Dropped deferred tone ACK: inbound signal (new decoder "
+                                  "evidence/declared airtime) through the defer window");
+                return;
+            }
+            send.swap(deferred_ack_samples_);
+            LOG_INFO("AUDIO", "Deferred tone ACK sent (%s)",
+                     channel_busy ? "deadline with energy-only busy" : "channel clear");
+        }
+        queueTx(std::move(send));
     }
 
 #ifdef ULTRA_TNC_TESTING
@@ -364,6 +410,15 @@ private:
     // previously-drained DATA frame after teardown activation.
     std::atomic<bool> disconnect_teardown_active_{false};
     std::mutex input_audio_mutex_;
+    // Deferred tone ACK (listen-before-ACK; see maybeFireDeferredAck). Leaf lock.
+    std::mutex deferred_ack_mutex_;
+    std::vector<float> deferred_ack_samples_;
+    std::chrono::steady_clock::time_point deferred_ack_deadline_{};
+    int64_t deferred_ack_armed_substantive_ms_ = 0;
+    bool deferred_ack_timer_reconfirm_ = false;  // requested by the backstop timer
+    int deferred_ack_quiet_polls_ = 0;
+    bool deferred_ack_group_complete_ = false;
+    bool deferred_ack_pending_ = false;
     bool input_enabled_ = false;
     bool output_enabled_ = false;
     bool handshake_complete_ = false;
@@ -557,26 +612,64 @@ private:
                         kDescriptorLostReverseTxHoldMs);
                 const bool channel_busy = modem_.channelBusyForTx();
                 const uint64_t air_remaining = modem_.burstAirSamplesRemaining();
-                // The headless TNC has no GUI-style deferred-ACK scheduler.  A
-                // physical group boundary is causally safe even if the energy
+                // A physical group boundary is causally safe even if the energy
                 // detector retains a stale busy reading; an asynchronous/timer
                 // ACK is safe only when *all* independent inbound sensors agree.
-                // Dropping merely delegates cumulative feedback to the sender's
-                // retry/RTO path and is preferable to blanking our own receiver.
+                // An uncertain ACK is DEFERRED to tick(), which decides with the
+                // GUI's listen-before-ACK policy (connection_policy::
+                // decideDeferredToneAck). It used to be dropped here, and since the
+                // decode that produced it always counted as recent evidence, every
+                // ACK without completed-turn provenance was dropped
+                // (BUG-ASYNC-ACK-ALWAYS-DROPPED).
                 const bool uncertain_inbound =
                     !inbound_group_complete && (recent_rx || channel_busy);
-                if (air_remaining > 0 || uncertain_inbound) {
+                if ((air_remaining > 0 || uncertain_inbound) &&
+                    !ultra::protocol::connection_policy::asyncAckNoveltyEnabled()) {
                     LOG_WARN("AUDIO",
                              "Dropped tone ACK while inbound OFDM may still be on "
                              "air (group_complete=%d recent_rx=%d cca_busy=%d "
-                             "air_samples=%llu)",
-                             inbound_group_complete ? 1 : 0,
-                             recent_rx ? 1 : 0,
+                             "air_samples=%llu; ULTRA_ASYNC_ACK_NOVELTY=0)",
+                             inbound_group_complete ? 1 : 0, recent_rx ? 1 : 0,
                              channel_busy ? 1 : 0,
                              static_cast<unsigned long long>(air_remaining));
-                    return;  // sender's retransmit/RTO path re-requests cumulative state
+                    return;
                 }
-                queueTx(modem_.transmitToneBurstAck(tba));
+                auto samples = modem_.transmitToneBurstAck(tba);
+                if (samples.empty()) return;
+                if (air_remaining > 0 || uncertain_inbound) {
+                    const uint32_t budget_ms =
+                        ultra::protocol::connection_policy::deferredToneAckBudgetMs(
+                            air_remaining);
+                    LOG_INFO("AUDIO",
+                             "Tone ACK deferred up to %u ms (group_complete=%d "
+                             "recent_rx=%d cca_busy=%d air_samples=%llu)",
+                             budget_ms, inbound_group_complete ? 1 : 0,
+                             recent_rx ? 1 : 0, channel_busy ? 1 : 0,
+                             static_cast<unsigned long long>(air_remaining));
+                    std::lock_guard<std::mutex> lk(deferred_ack_mutex_);
+                    deferred_ack_samples_ = std::move(samples);
+                    deferred_ack_deadline_ = std::chrono::steady_clock::now() +
+                                             std::chrono::milliseconds(budget_ms);
+                    deferred_ack_armed_substantive_ms_ = modem_.lastRxSubstantiveMs();
+                    deferred_ack_timer_reconfirm_ =
+                        ultra::protocol::connection_policy::toneAckIsTimerReconfirm(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count(),
+                            modem_.lastAnchoredBackstopMs());
+                    deferred_ack_group_complete_ = inbound_group_complete;
+                    deferred_ack_quiet_polls_ = 0;  // a newer ACK restarts the confirmation
+                    deferred_ack_pending_ = true;
+                    return;
+                }
+                {
+                    // A causally safe ACK supersedes an older deferred one.
+                    std::lock_guard<std::mutex> lk(deferred_ack_mutex_);
+                    deferred_ack_pending_ = false;
+                    deferred_ack_samples_.clear();
+                    deferred_ack_quiet_polls_ = 0;
+                }
+                queueTx(std::move(samples));
             });
         engine_.setArmToneBurstAckMonitorCallback([this](uint32_t window_ms) {
             modem_.rearmToneBurstAckMonitor(window_ms);

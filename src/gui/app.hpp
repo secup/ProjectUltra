@@ -347,6 +347,9 @@ private:
     bool ack_defer_pending_ = false;
     int ack_defer_quiet_ticks_ = 0;
     bool ack_defer_inbound_group_complete_ = false;
+    // lastRxSubstantiveMs() when the ACK was deferred (BUG-ASYNC-ACK-ALWAYS-DROPPED).
+    int64_t ack_defer_armed_substantive_ms_ = 0;
+    bool ack_defer_timer_reconfirm_ = false;  // requested by the backstop timer
     void maybeFireDeferredAck();
     void submitToneAckSamples(const std::vector<float>& samples);
     void setDisconnectTeardownActive(bool active);

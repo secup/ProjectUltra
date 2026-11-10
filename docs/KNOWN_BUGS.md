@@ -8,40 +8,24 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-ASYNC-ACK-ALWAYS-DROPPED (open, 2026-11-09) — P1 near the floor: an ACK without completed-turn provenance can never be sent
+### BUG-BACKSTOP-RACES-RTO (open, 2026-11-10) — P2: the backstop's re-confirm ACK fires as the sender's resend starts
 
-**Mechanism.** `App`'s listen-before-ACK defers a tone ACK whose `inbound_group_complete` is false
-when the decoder has RX evidence within `kDescriptorLostReverseTxHoldMs` (13 s), and at the defer
-deadline (`ULTRA_ACK_CCA_DEFER_MS`, 2.5 s, or the declared remaining airtime + 0.5 s) it DROPS the
-ACK if that evidence is still within the hold. The evidence is normally the frame being ACKed,
-decoded milliseconds earlier, so the hold always outlasts the deadline: every asynchronous ACK is
-dropped by construction. At high SNR almost every ACK has provenance (descriptor-proven groups,
-marked tails) and this never shows; near the floor the descriptor or the turn's last frame is lost
-more often, the ACK falls into this path, and the sender retries to its cap.
+**What.** The anchored-burst ACK backstop (`streaming_sync_acquisition.cpp`, F165) fires 14.6 s
+after an accepted anchor that framed no group and asks for a re-confirm ACK. Its comment says this
+"beats the sender RTO (~air-end + 11.4 s) by ~9 s"; the sender's RTO has since shrunk (INFLIGHT-RTO
+table, 8.0-15.6 s from the burst start), so on the GUI gate the backstop fires within about a second
+of the sender's RTO resend: Moderate@10 s43, BRAVO backstops at 48.83 / 74.46 / 99.84 s against
+ALPHA resends at 49.61 / 74.98 / ... (separate clocks, ~0.5 s apart); dial-15 hardware-TX run,
+1.2 s before ALPHA's ACK window closed. A re-confirm keyed then lands on the resend's anchor: the
+receiver blanks the chirp it needs to re-acquire, the next backstop fires, and the cycle repeats
+(the 2026-11-10 run that keyed them: seven re-confirms over seven resends, 112 retransmissions,
+FAIL). Listen-before-ACK cannot see that resend yet (no decoder evidence in its first ~1.5 s; the
+energy CCA misses it on fading), so the re-confirm keeps the old age rule (INV-TONE-ACK-005), which
+drops it — i.e. the backstop's ACK is effectively dead.
 
-**Evidence (GUI gate, 4 KB, 7.3 Hz).** `ULTRA_FAST` AWGN@5 s43 (OFDM QPSK R1/4): 13 ACKs dropped,
-0 received, 112 retransmissions, `Frame seq=0 failed after 15 retries`. Good@6 s42 (MC-DPSK,
-connect read 2.0 dB): 15 dropped, `seq=13 failed after 10 retries`. The MC-DPSK version of the
-same trap was total (BUG-MCDPSK-ACK-DROPPED, fixed by giving the tail completed-turn provenance).
-
-**Deterministic reproduction (2026-11-09, peak-limited TX model).** `tools/gui_qso_scenario.sh
---channel awgn --snr-db 15 --seed 42 --cfo-hz 7.3 --file-kb 2 --tx-model hardware` with
-`ULTRA_PAPR_SNR_CORRECTION=0` (the correction keeps this link on MC-DPSK; without it OFDM runs at
-about 4 dB): 0 bytes in 290 s. The first burst decodes 6 data slices (turbo, 1 iteration, mean
-|LLR| 1.2) but its descriptor/CRC tail is lost: `Unproven burst marker abandoned ... no group
-callback/synchronous ACK emitted`, so the decoded frames are discarded. BRAVO then sends an ACK for
-the previous group (`group_seq=63 frame_mask=0x0000`) about 16.2 s after each of ALPHA's burst
-starts; it lasts 0.85 s and ALPHA's ACK window closes at 16.98 s, so every one of the 13 ACKs ends
-after the window (`armed window EXPIRED undetected`). ALPHA's resends (full chirp) then fail to
-decode (mean |LLR| 0.1), and the cycle repeats every 17 s. Here the ACK is sent, not dropped, but it
-is late for the same reason: the turn has no provenance.
-
-**Fix direction (needs rig evidence — the listen-before-ACK guards exist because keying over an
-incoming burst was measured to cost craters: F124/F127/F129/F176).** Decide at the deadline on
-NEW decoder evidence since the deferral (the peer is still transmitting) rather than on evidence
-age; or hold until the evidence hold expires, bounded by the peer's ACK window, then send if the
-channel is quiet. Until then the `ULTRA_FAST` AWGN entry floor stays at 6 dB, not the 5 dB the
-data rung alone would allow.
+**Fix direction.** Derive the backstop deadline from the sender's RTO policy for the anchored
+group (or its minimum when the descriptor is lost) so the re-confirm can land inside the sender's
+listen window, minus the ACK airtime; or stop emitting a re-confirm that cannot arrive before it.
 
 ### BUG-HARNESS-TURBO-NO-RESULT (open, 2026-11-09) — P3, measurement tooling
 
@@ -2406,6 +2390,35 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-ASYNC-ACK-ALWAYS-DROPPED (FIXED 2026-11-10) — an ACK without completed-turn provenance could never be sent
+
+**Symptom.** Near the floor, the receiver decoded frames but the sender never heard an ACK for
+them and retried to its cap (Good@6 s42 MC-DPSK: 5 ACKs dropped, `seq=13 failed after 10
+retries`). On the GUI the ACK was deferred and then dropped; the headless TNC dropped it at once.
+
+**Root cause.** `App`'s listen-before-ACK defers a tone ACK whose `inbound_group_complete` is
+false while the decoder has RX evidence within `kDescriptorLostReverseTxHoldMs` (13 s), and drops
+it at the defer deadline (2.5 s, or the remaining declared airtime + 0.5 s) if that evidence is
+still within the hold. The evidence is the decode that produced the ACK, so the hold always
+outlasted the deadline. `ultra_tnc` dropped such an ACK immediately on the same test.
+
+**Fix.** INV-TONE-ACK-005: one shared policy (`connection_policy::decideDeferredToneAck`) for
+the GUI tick and the TNC tick (the TNC now defers instead of dropping). An ACK produced by a
+decode is held only by substantive decoder evidence NEWER than that decode (the peer still on
+the air). The anchored-burst backstop's re-confirm keeps the age rule, because it fires about
+when the sender's RTO resend begins (BUG-BACKSTOP-RACES-RTO); the first version of this fix
+treated it like the rest and keyed it over the resend's anchor (Moderate@10 s43: seven times,
+112 retransmissions, FAIL). `ULTRA_ASYNC_ACK_NOVELTY=0` restores the old rule.
+
+**Verification.** CTest `ConnectionPolicy` 455/455 (`test_deferred_tone_ack_policy`). GUI gate,
+interleaved pairs in one build (`ULTRA_ASYNC_ACK_NOVELTY=0` vs default): MC-DPSK pinned
+(`ULTRA_FORCE_WAVEFORM=MC_DPSK`), Good@8, 2 KB, seeds 42-49 — the old rule dropped 11/11 deferred
+async ACKs, the fix 0/10; frames delivered before the time limit 188 -> 234 (+24 %), and in the
+four pairs where async ACKs occurred 48 -> 99 (s42 16 -> 21, s46 18 -> 33, s47 4 -> 21,
+s49 10 -> 24); the other four 140 -> 135 (no async ACKs; run-to-run spread). Paired t p ~= 0.10,
+sign test 4-1 (p = 0.38): suggestive at n = 8, not significant. No regression: AWGN@20 3610,
+Good@20 3190 / 3210 / 3180, hardware dial 16 940-960 bps.
 
 ### BUG-BURST-OPENING-SETS-PEAK (FIXED 2026-11-10) — the burst header set every OFDM burst's level
 

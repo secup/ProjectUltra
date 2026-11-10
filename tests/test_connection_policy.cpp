@@ -1552,10 +1552,57 @@ void test_tone_ack_defer_uses_independent_rx_evidence() {
           "CCA opt-out should disable energy-only deferral");
     CHECK(shouldDeferToneBurstAck(false, true, 0, true, false),
           "CCA opt-out must not disable the decoder-evidence safety gate");
-    CHECK(deferredToneAckRxHoldMs(false) == kDescriptorLostReverseTxHoldMs,
-          "a pending asynchronous ACK must retain the full descriptor-loss guard");
-    CHECK(deferredToneAckRxHoldMs(true) == 0,
-          "a physically-complete group ACK must not inherit its own fresh RX stamp");
+}
+
+// BUG-ASYNC-ACK-ALWAYS-DROPPED: a pending ACK is held by decoder evidence NEWER than the decode
+// that produced it, never by that decode itself (its age outlasted every deadline).
+void test_deferred_tone_ack_policy() {
+    using A = DeferredAckAction;
+    // Evidence novelty for a decode-driven ACK.
+    CHECK(!deferredToneAckSeesNewInbound(false, false, 1000, 1000, true),
+          "the ACK's own decode is not evidence that the peer is still transmitting");
+    CHECK(deferredToneAckSeesNewInbound(false, false, 1500, 1000, true),
+          "a substantive stamp after the deferral means the peer is still on the air");
+    CHECK(!deferredToneAckSeesNewInbound(true, false, 1500, 1000, true) &&
+              !deferredToneAckSeesNewInbound(true, true, 1500, 1000, true),
+          "a physically-complete group ACK ignores decoder evidence");
+    // The backstop TIMER's re-confirm keeps the age rule (BUG-BACKSTOP-RACES-RTO).
+    CHECK(deferredToneAckSeesNewInbound(false, true, 1000, 1000, true),
+          "a timer re-confirm is held by any evidence within the descriptor-loss hold");
+    CHECK(!deferredToneAckSeesNewInbound(false, true, 1000, 1000, false),
+          "a timer re-confirm with no evidence for the whole hold is free to send");
+    CHECK(toneAckIsTimerReconfirm(10000, 10000) && toneAckIsTimerReconfirm(10200, 10000) &&
+              !toneAckIsTimerReconfirm(10000 + kBackstopAckProvenanceMs + 1, 10000) &&
+              !toneAckIsTimerReconfirm(9000, 10000),
+          "only an ACK emitted right after the backstop stamp is the timer's");
+    // Quiet confirmation.
+    CHECK(decideDeferredToneAck(false, false, false, 1, false) == A::HOLD &&
+              decideDeferredToneAck(false, false, false, 2, false) == A::HOLD,
+          "fewer than three consecutive quiet polls hold (F127: fade nulls)");
+    CHECK(decideDeferredToneAck(false, false, false, kDeferredAckQuietPolls, false) == A::SEND,
+          "three quiet polls send, well before the deadline");
+    // Inside the window, any sensor holds.
+    CHECK(decideDeferredToneAck(true, false, false, 0, false) == A::HOLD &&
+              decideDeferredToneAck(false, true, false, 0, false) == A::HOLD &&
+              decideDeferredToneAck(false, false, true, 0, false) == A::HOLD,
+          "declared airtime, CCA busy or new decoder evidence hold the ACK");
+    // At the deadline.
+    CHECK(decideDeferredToneAck(false, false, true, 0, true) == A::DROP,
+          "new decoder evidence at the deadline drops (F127: the peer is transmitting)");
+    CHECK(decideDeferredToneAck(true, false, false, 0, true) == A::DROP,
+          "declared airtime at the deadline drops (F176)");
+    CHECK(decideDeferredToneAck(false, true, false, 0, true) == A::SEND,
+          "energy-only busy at the deadline sends (F129: mislearned CCA floor)");
+    // The bug, end to end: an async ACK deferred right after its decode, then a quiet channel.
+    const bool stale_only =
+        deferredToneAckSeesNewInbound(false, false, /*last*/ 5000, /*armed*/ 5000, true);
+    CHECK(decideDeferredToneAck(false, false, stale_only, kDeferredAckQuietPolls, false) == A::SEND,
+          "an async ACK on a quiet channel is sent, not dropped (BUG-ASYNC-ACK-ALWAYS-DROPPED)");
+    // Budget: 2.5 s default, or the remaining declared airtime + 0.5 s, capped at 12 s.
+    CHECK(deferredToneAckBudgetMs(0) == ackCcaDeferMs() &&
+              deferredToneAckBudgetMs(48ull * 4000) == 4500 &&
+              deferredToneAckBudgetMs(48ull * 60000) == 12000,
+          "defer budget covers the declared airtime, bounded at 12 s");
 }
 
 void test_silent_ack_repeat_is_explicit_opt_in() {
@@ -1684,6 +1731,7 @@ int main() {
     test_inflight_ack_timeout_scales_with_frames();
     test_silent_ack_repeat_broad_signal_hold_is_waveform_independent();
     test_tone_ack_defer_uses_independent_rx_evidence();
+    test_deferred_tone_ack_policy();
     test_silent_ack_repeat_is_explicit_opt_in();
     test_anchored_backstop_payload_evidence_forbids_fake_crater();
     test_scripted_disconnect_quit_requires_protocol_completion();

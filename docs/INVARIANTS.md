@@ -290,6 +290,23 @@ only the global maximum, and a payload containing the Costas sequence (~10 % of 
 loses its ACK whenever the alias outscores the preamble (BUG-TONE-ACK-CLEAN-MISS).
 **Test:** `ToneBurstAckRoundTrip` (`costas_alias_in_payload_does_not_hide_the_preamble`).
 
+### INV-TONE-ACK-005: a deferred ACK is held only by evidence newer than its own decode
+
+**Rule:** a tone ACK that cannot be keyed at once (energy CCA busy, declared airtime still ahead,
+or no completed-turn provenance with recent decoder evidence) is decided on every GUI and headless
+TNC tick by `connection_policy::decideDeferredToneAck`: three consecutive quiet polls send; at the
+deadline (2.5 s, or the remaining declared airtime + 0.5 s) declared airtime or NEW decoder evidence
+drops it and energy-only busy sends it (F127, F129, F176). For an ACK produced by a decode, new
+decoder evidence is a substantive stamp (accepted sync, consumed descriptor, decoded codewords)
+newer than the one present when the ACK was deferred (`deferredToneAckSeesNewInbound`) — never the
+age of any evidence: the decode that produced the ACK is itself evidence, so an age window held
+every such ACK through its deadline (BUG-ASYNC-ACK-ALWAYS-DROPPED). Never count the broad stamp;
+noise false-lock attempts set it (F147). The anchored-burst backstop's re-confirm (recognized by
+the decoder's backstop stamp, `toneAckIsTimerReconfirm`) keeps the age rule: it fires about when
+the sender's RTO resend starts, before that resend has produced any evidence
+(BUG-BACKSTOP-RACES-RTO). `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
+TNC's immediate drop). **Test:** `ConnectionPolicy` (`test_deferred_tone_ack_policy`).
+
 ---
 
 ## Rate Selection Invariants (2026-11-09)
@@ -325,9 +342,9 @@ switch; pricing one there is a ~25 % phantom penalty that kept the controller of
 **Rule:** every physical DATA turn whose end the receiver must ACK carries a CRC-protected
 `PHYSICAL_BURST_END` on its last frame (multi-frame OFDM bursts; EVERY MC-DPSK turn, singletons
 included), and the receiver reports `physical_turn_complete` for it BEFORE the frame callback, so
-the ACK takes the completed-group path. An ACK without that provenance is held by listen-before-ACK
-on decoder evidence for `kDescriptorLostReverseTxHoldMs` (13 s) against a 2.5 s deadline — i.e.
-dropped — which is right only for genuinely asynchronous ACKs (timer backstops, descriptor loss).
+the ACK takes the completed-group path. An ACK without that provenance goes through
+listen-before-ACK's evidence-novelty rule (INV-TONE-ACK-005), which is right only for genuinely
+asynchronous ACKs (timer backstops, descriptor loss): it waits out a peer that is still on the air.
 Never infer the end of an MC-DPSK turn from MORE_FRAG: it says the FILE continues.
 **Test:** `StreamingFramePolicy` (`test_physical_burst_end_wire_policy`); GUI gate AWGN@7 MC-DPSK.
 

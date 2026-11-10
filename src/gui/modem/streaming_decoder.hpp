@@ -621,6 +621,16 @@ public:
     // "inbound transmission in progress" with nothing on the air. The broad
     // stamp stays for listen-before-ACK, where conservative deferral is right.
     int64_t lastRxSubstantiveMs() const { return last_rx_substantive_ms_.load(); }
+    // Steady-clock ms when the anchored-burst backstop last fired. Its re-confirm ACK is
+    // emitted synchronously from that callback, so a tone ACK produced within
+    // kBackstopAckProvenanceMs of this stamp is timer-driven (INV-TONE-ACK-005).
+    int64_t lastAnchoredBackstopMs() const { return last_anchored_backstop_ms_.load(); }
+    void stampAnchoredBackstop() const {
+        last_anchored_backstop_ms_.store(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+    }
     bool hasLastPhysicalSnr() const { return last_physical_snr_valid_.load(); }
     float lastPhysicalSnrDb() const { return last_physical_snr_db_.load(); }
     // Handoff §5: distribution over the recent physical readings.
@@ -1278,6 +1288,7 @@ private:
     // rxSignalActiveWithin(~1600ms) — one frame interval plus slack.
     mutable std::atomic<int64_t> last_rx_signal_ms_{-1000000};
     mutable std::atomic<int64_t> last_rx_substantive_ms_{-1000000};  // F147
+    mutable std::atomic<int64_t> last_anchored_backstop_ms_{-1000000};
     // F147: the current lock came from the connected full-anchor search the
     // receiver ARMED (a sender resend was expected). The pre-LDPC false-lock
     // LLR gate must hold this lock instead of bouncing to re-search: rejecting

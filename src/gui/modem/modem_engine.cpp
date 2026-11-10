@@ -1155,6 +1155,10 @@ int64_t ModemEngine::lastRxSubstantiveMs() const {
     return streaming_decoder_ ? streaming_decoder_->lastRxSubstantiveMs() : -1000000;
 }
 
+int64_t ModemEngine::lastAnchoredBackstopMs() const {
+    return streaming_decoder_ ? streaming_decoder_->lastAnchoredBackstopMs() : -1000000;
+}
+
 float ModemEngine::getDopplerCoherenceDopplerHz() const {
     return streaming_decoder_ ? streaming_decoder_->getLastMeasuredDopplerHz() : 0.0f;
 }

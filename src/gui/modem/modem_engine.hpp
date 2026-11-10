@@ -147,6 +147,7 @@ public:
     bool rxSignalActive(int64_t within_ms = 1600) const;
     int64_t lastRxSignalMs() const;
     int64_t lastRxSubstantiveMs() const;  // F147: accepted-decode evidence only
+    int64_t lastAnchoredBackstopMs() const;  // INV-TONE-ACK-005 provenance
     // Two-SNR model: last PHYSICAL in-band channel SNR (power ratio vs the
     // burst-time noise ref) measured at the connect sequence. BETA — see
     // BUG-PHYSICAL-SNR-RIG-REF. Valid=false until first data-bearing frame.

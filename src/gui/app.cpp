@@ -771,13 +771,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                 // deadline, decoder/geometry evidence drops the stale ACK while
                 // energy-only busy sends (the adaptive CCA floor can false-alarm).
                 // ULTRA_ACK_CCA_DEFER_MS=0 opts out (old immediate-key behavior).
-                static const uint32_t kAckCcaDeferMs = [] {
-                    if (const char* e = std::getenv("ULTRA_ACK_CCA_DEFER_MS")) {
-                        const long v = std::atol(e);
-                        if (v >= 0 && v <= 10000) return static_cast<uint32_t>(v);
-                    }
-                    return 2500u;  // default ON
-                }();
+                const uint32_t kAckCcaDeferMs = protocol::connection_policy::ackCcaDeferMs();
                 // F176 GEOMETRIC ACK GATE: the decoder publishes the declared
                 // air-end of the group being received (descriptor geometry, on
                 // the sample clock). Never key an ack before the burst we are
@@ -803,8 +797,8 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                         inbound_group_complete)) {
                     const uint32_t air_rem_ms =
                         static_cast<uint32_t>(air_rem / 48);  // 48 kHz
-                    const uint32_t defer_ms = std::min<uint32_t>(
-                        12000, std::max(kAckCcaDeferMs, air_rem_ms + 500));
+                    const uint32_t defer_ms =
+                        protocol::connection_policy::deferredToneAckBudgetMs(air_rem);
                     LOG_MODEM(INFO,
                               "ToneBurstAck: deferring up to %u ms (%s%s%u ms of "
                               "burst still arriving)",
@@ -825,6 +819,21 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
                     // whose later frame generated it.
                     ack_defer_quiet_ticks_ = 0;
                     ack_defer_inbound_group_complete_ = inbound_group_complete;
+                    // The decode that produced this ACK: only substantive evidence
+                    // NEWER than it says the peer is still transmitting — unless the
+                    // ACK is the backstop TIMER's re-confirm, which keeps the age rule
+                    // (INV-TONE-ACK-005, BUG-BACKSTOP-RACES-RTO).
+                    ack_defer_armed_substantive_ms_ = modem_.lastRxSubstantiveMs();
+                    {
+                        const int64_t now_ms =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+                        ack_defer_timer_reconfirm_ =
+                            !protocol::connection_policy::asyncAckNoveltyEnabled() ||
+                            protocol::connection_policy::toneAckIsTimerReconfirm(
+                                now_ms, modem_.lastAnchoredBackstopMs());
+                    }
                     ack_defer_pending_ = true;
                 } else {
                     // A newer, causally-safe group-boundary ACK supersedes any
@@ -3120,8 +3129,9 @@ void App::submitToneAckSamples(const std::vector<float>& samples) {
 // LISTEN-BEFORE-ACK tick poll (F124): a deferred ACK sends after confirmed quiet.
 // At the deadline, energy-only busy is allowed through (protecting against a
 // mislearned CCA floor), but decoder/geometry evidence drops the stale ACK rather
-// than violating half duplex.  Descriptor-loss asynchronous ACKs retain a full
-// maximum-burst guard; physically-complete group ACKs bypass that RX stamp.
+// than violating half duplex.  An asynchronous ACK (no completed-turn provenance)
+// counts only decoder evidence newer than its own decode; physically-complete
+// group ACKs ignore decoder evidence altogether.
 void App::maybeFireDeferredAck() {
     if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
         clearPendingAckAudioForTeardown();
@@ -3139,49 +3149,47 @@ void App::maybeFireDeferredAck() {
             ack_defer_inbound_group_complete_ = false;
             return;
         }
-        const int64_t rx_hold_ms =
-            protocol::connection_policy::deferredToneAckRxHoldMs(
-                ack_defer_inbound_group_complete_);
-        const bool rx_evidence =
-            rx_hold_ms > 0 && modem_.rxSignalActive(rx_hold_ms);
+        // Shared listen-before-ACK decision (connection_policy::decideDeferredToneAck):
+        // quiet on every sensor for 3 consecutive ticks sends (F127: one quiet sample
+        // races a fade null); at the deadline, decoder/geometry evidence DROPS (F127:
+        // 'send regardless' keyed over the sender's resend and blanked the frames that
+        // would have ended the exchange — WE DO NOT TRANSMIT WHILE SIGNAL IS ARRIVING),
+        // energy-only busy SENDS (F129: a mislearned CCA floor reading ambient noise;
+        // dropping cost two full RTO cycles). Decoder evidence means substantive
+        // evidence NEWER than the decode that produced this ACK
+        // (BUG-ASYNC-ACK-ALWAYS-DROPPED: the age of ANY evidence held every async ACK
+        // through its deadline).
+        const bool new_inbound =
+            protocol::connection_policy::deferredToneAckSeesNewInbound(
+                ack_defer_inbound_group_complete_, ack_defer_timer_reconfirm_,
+                modem_.lastRxSubstantiveMs(), ack_defer_armed_substantive_ms_,
+                modem_.rxSignalActive(
+                    protocol::connection_policy::kDescriptorLostReverseTxHoldMs));
         const bool air_arriving = modem_.burstAirSamplesRemaining() > 0;  // F176
-        if (modem_.channelBusyForTx() || rx_evidence || air_arriving) {
+        const bool channel_busy = modem_.channelBusyForTx();
+        if (channel_busy || new_inbound || air_arriving) {
             ack_defer_quiet_ticks_ = 0;
-            // DEADLINE = DROP, never key over (F127, waterfall-proven: the 2.5 s
-            // deadline is shorter than an 8-10 s burst, so 'send regardless' keyed
-            // our tones over the sender's RESEND — blanking the very frames that
-            // would have ended the exchange, manufacturing craters at 24 dB). If
-            // the channel stayed busy the whole window, the sender has moved on
-            // and is transmitting; this ACK is stale. Dropping is plain ack loss
-            // — the RTO/dup-ack machinery covers it. Half-duplex rule, absolute:
-            // WE DO NOT TRANSMIT WHILE SIGNAL IS ARRIVING.
-            if (std::chrono::steady_clock::now() >= ack_defer_deadline_) {
-                // F129: DROP only on DECODER evidence of a real inbound signal.
-                // Energy-only "busy" with no sync/frame evidence is the broken
-                // adaptive threshold reading ambient noise (both F129 drops:
-                // sender verifiably silent, floor had latched below the noise
-                // floor) — SEND in that case; dropping cost two full RTO cycles
-                // (~19 s each).
-                ack_defer_pending_ = false;
-                ack_defer_inbound_group_complete_ = false;
-                if (rx_evidence || air_arriving) {
-                    ack_defer_samples_.clear();
-                    guiLog("LISTEN-BEFORE-ACK: inbound signal (decoder evidence/"
-                           "declared airtime) through the defer window — ACK "
-                           "DROPPED (RTO covers)");
-                } else {
-                    deadline_send.swap(ack_defer_samples_);  // sent after unlock
-                }
-            }
-            goto after_lock;
+        } else {
+            ++ack_defer_quiet_ticks_;
         }
-        // QUIET CONFIRMATION (F127): one quiet sample races fade nulls inside an
-        // incoming burst — require 3 consecutive quiet ticks (~50-100 ms) before
-        // keying, mirroring the repeat path's continuous-quiet doctrine.
-        if (++ack_defer_quiet_ticks_ < 3) return;
+        const auto action = protocol::connection_policy::decideDeferredToneAck(
+            air_arriving, channel_busy, new_inbound, ack_defer_quiet_ticks_,
+            std::chrono::steady_clock::now() >= ack_defer_deadline_);
+        if (action == protocol::connection_policy::DeferredAckAction::HOLD) return;
         ack_defer_pending_ = false;
         ack_defer_quiet_ticks_ = 0;
         ack_defer_inbound_group_complete_ = false;
+        if (action == protocol::connection_policy::DeferredAckAction::DROP) {
+            ack_defer_samples_.clear();
+            guiLog("LISTEN-BEFORE-ACK: inbound signal (new decoder evidence/"
+                   "declared airtime) through the defer window — ACK "
+                   "DROPPED (RTO covers)");
+            return;
+        }
+        if (channel_busy) {
+            deadline_send.swap(ack_defer_samples_);  // sent after unlock
+            goto after_lock;
+        }
         copy.swap(ack_defer_samples_);
     }
     guiLog("LISTEN-BEFORE-ACK: channel clear (confirmed) — sending deferred ACK");

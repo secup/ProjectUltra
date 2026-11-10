@@ -500,12 +500,84 @@ inline bool shouldDeferToneBurstAck(bool cca_enabled,
            (!inbound_group_complete && recent_decoder_rx_evidence);
 }
 
-// RX-evidence hold used while a primary ACK is pending on the GUI tick.  It is
-// derived solely from physical-egress provenance, never from whether evidence
-// happened to be present when the ACK was first deferred: a descriptor-loss
-// sync/decode stamp may arrive later in the same inbound burst.
-inline constexpr int64_t deferredToneAckRxHoldMs(bool inbound_group_complete) {
-    return inbound_group_complete ? 0 : kDescriptorLostReverseTxHoldMs;
+// LISTEN-BEFORE-ACK for a pending (deferred) tone ACK — shared by the GUI tick and the headless
+// TNC tick. The independent inbound sensors at each poll:
+//   air_arriving  the declared air-end of the group being received is still ahead (F176);
+//   channel_busy  the energy CCA (fade- and floor-fragile, F129);
+//   new_inbound   for an ACK produced by a DECODE: SUBSTANTIVE decoder evidence (accepted sync,
+//                 consumed descriptor, decoded codewords — never a noise false-lock attempt,
+//                 F147) NEWER than the decode that produced it. For an ACK requested by a TIMER
+//                 (the anchored-burst backstop's re-confirm): any decoder evidence within
+//                 kDescriptorLostReverseTxHoldMs, as before. An ACK whose turn the decoder
+//                 declared complete is causally safe and ignores both.
+// Quiet on every sensor for kDeferredAckQuietPolls consecutive polls sends (F127: one quiet sample
+// races a fade null). At the deadline, decoder or geometry evidence drops the ACK: the peer is on
+// the air, keying would blank our own receiver and the peer could not hear us (F127); energy-only
+// busy sends, as a mislearned CCA floor reads ambient noise as a signal (F129).
+//
+// BUG-ASYNC-ACK-ALWAYS-DROPPED (fixed 2026-11-10): the decoder test used to be the AGE of the
+// latest evidence of any kind (kDescriptorLostReverseTxHoldMs, 13 s). The decode that produced the
+// ACK is itself such evidence, so the test held through every deadline (2.5 s, or the remaining
+// declared airtime + 0.5 s) and dropped every ACK without completed-turn provenance — on the
+// headless TNC, at once. Only evidence that the peer transmitted AFTER that decode says it is
+// still on the air; a later stamp from the same inbound burst is exactly that.
+// The timer re-confirm keeps the age rule: the backstop fires about when the sender's own RTO
+// resend begins (BUG-BACKSTOP-RACES-RTO), before that resend has produced any evidence, so a
+// re-confirm keyed on a quiet-looking channel lands on the resend's anchor (GUI gate, Moderate@10
+// s43: seven re-confirms keyed over seven resends, 112 retransmissions, FAIL).
+enum class DeferredAckAction : uint8_t { HOLD, SEND, DROP };
+// ULTRA_ASYNC_ACK_NOVELTY (default on; "0" treats every asynchronous ACK like the timer
+// re-confirm — the pre-fix age-based hold — and restores the headless TNC's immediate drop;
+// A/B and rollback).
+inline bool asyncAckNoveltyEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_ASYNC_ACK_NOVELTY");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return on;
+}
+inline constexpr int kDeferredAckQuietPolls = 3;
+// A tone ACK produced within this long of the decoder's backstop stamp came from that timer
+// (the re-confirm is emitted synchronously inside the backstop callback).
+inline constexpr int64_t kBackstopAckProvenanceMs = 250;
+inline constexpr bool toneAckIsTimerReconfirm(int64_t now_ms, int64_t last_backstop_ms) {
+    return now_ms >= last_backstop_ms && now_ms - last_backstop_ms <= kBackstopAckProvenanceMs;
+}
+inline constexpr bool deferredToneAckSeesNewInbound(bool inbound_group_complete,
+                                                    bool timer_reconfirm,
+                                                    int64_t last_substantive_ms,
+                                                    int64_t armed_substantive_ms,
+                                                    bool any_evidence_within_hold) {
+    if (inbound_group_complete) return false;
+    if (timer_reconfirm) return any_evidence_within_hold;
+    return last_substantive_ms > armed_substantive_ms;
+}
+// quiet_polls counts consecutive polls with every sensor quiet, including this one.
+inline constexpr DeferredAckAction decideDeferredToneAck(bool air_arriving, bool channel_busy,
+                                                         bool new_inbound, int quiet_polls,
+                                                         bool deadline_passed) {
+    if (air_arriving || channel_busy || new_inbound) {
+        if (!deadline_passed) return DeferredAckAction::HOLD;
+        return (air_arriving || new_inbound) ? DeferredAckAction::DROP : DeferredAckAction::SEND;
+    }
+    return quiet_polls >= kDeferredAckQuietPolls ? DeferredAckAction::SEND
+                                                 : DeferredAckAction::HOLD;
+}
+// Listen-before-ACK defer budget: ULTRA_ACK_CCA_DEFER_MS (default 2500; 0 = key at once, the
+// pre-F124 behaviour), extended to cover the remaining declared airtime + 0.5 s, capped at 12 s.
+inline uint32_t ackCcaDeferMs() {
+    static const uint32_t v = [] {
+        if (const char* e = std::getenv("ULTRA_ACK_CCA_DEFER_MS")) {
+            const long ms = std::atol(e);
+            if (ms >= 0 && ms <= 10000) return static_cast<uint32_t>(ms);
+        }
+        return 2500u;
+    }();
+    return v;
+}
+inline uint32_t deferredToneAckBudgetMs(uint64_t burst_air_samples_remaining) {
+    const uint32_t air_rem_ms = static_cast<uint32_t>(burst_air_samples_remaining / 48);  // 48 kHz
+    return std::min<uint32_t>(12000, std::max(ackCcaDeferMs(), air_rem_ms + 500));
 }
 inline constexpr uint32_t kWideOFDMAckTimeoutFloorMs = 8000;
 

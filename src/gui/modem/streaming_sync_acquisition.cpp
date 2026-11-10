@@ -456,6 +456,9 @@ void StreamingDecoder::searchForSync() {
                       "group within the window — requesting re-confirm ack "
                       "(payload_seen=%d)",
                       log_prefix_.c_str(), payload_seen ? 1 : 0);
+            // Provenance for the frontend's listen-before-ACK: the ACK this callback
+            // produces was requested by a TIMER, not by a decode (INV-TONE-ACK-005).
+            stampAnchoredBackstop();
             if (anchored_burst_no_group_callback_) {
                 anchored_burst_no_group_callback_(payload_seen);
             }
