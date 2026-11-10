@@ -17,6 +17,8 @@
 #include "ultra/ofdm.hpp"
 #include "sync/chirp_sync.hpp"
 #include <memory>
+#include <utility>
+#include <vector>
 
 namespace ultra {
 
@@ -202,6 +204,8 @@ private:
     std::unique_ptr<sync::ChirpSync> short_anchor_chirp_sync_;  // short dual chirp (warm descriptor)
     HilbertTransform data_sync_hilbert_{65};
     std::vector<Complex> data_sync_analytic_scratch_;
+    // detectDataSync: (offset, matched-filter score) of every coarse point of one scan.
+    std::vector<std::pair<int, float>> data_sync_coarse_mf_scratch_;
     // Preamble-less structure acquisition (ULTRA_BURST_ACQ=structure): see
     // detectFrameStructure() in the .cpp for the statistic and its noise law.
     std::unique_ptr<FFT> structure_fft_;

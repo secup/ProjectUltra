@@ -276,6 +276,76 @@ bool test_ofdm_chirp_data_preamble_awgn_warm_sync() {
     return true;
 }
 
+// BUG-LTS-EARLY-EXIT (2026-11-10): inside a burst the LTS pair follows the previous frame's
+// data, and the two-symbol Schmidl-Cox peak is flat-topped: at 20-30 dB it sits around 0.95 from
+// tens of samples before the frame start to tens after, so the first point clearing the 0.95
+// first-peak level can land on either side of the start. The detector must report the start.
+// The old early exit locked 16QAM groups ~33 samples early on the GUI gate (EVM 18.4 -> 12.5 dB
+// at AWGN 20); the first fix searched the matched filter only AFTER that crossing and, when the
+// crossing came late, locked the second LTS symbol one symbol late (matched filter side peak).
+// Below the first-peak level (12-15 dB) the old rule's maximum of the flat top is a noise draw
+// too (GUI gate: a first group locked -38 samples). Every coarse-grid phase (lead mod 8), for the
+// wideband geometry and the narrowband one (FFT 2048, 21 carriers: a ~6x wider matched filter).
+bool checkDataSyncTiming(const ModemConfig& cfg, Modulation mod, CodeRate rate, int tolerance,
+                         const std::string& label) {
+    int worst = 0;
+    std::string worst_case;
+    for (float snr : {12.0f, 15.0f, 20.0f, 25.0f, 30.0f}) {
+        OFDMChirpWaveform tx(cfg);
+        tx.configure(mod, rate);
+        tx.setTxFrequencyOffset(7.3f);
+        Samples audio;
+        for (int i = 0; i < 4; ++i) append(audio, tx.modulate(makeEncodedCodeword()));
+        const int true_start = static_cast<int>(audio.size());
+        append(audio, tx.generateDataPreamble());
+        append(audio, tx.modulate(makeEncodedCodeword()));
+        appendTailMargin(audio, tx.getSamplesPerSymbol());
+        addAwgn(audio, snr, 0x20261110u + static_cast<uint32_t>(snr));
+
+        for (int lead = 960; lead < 968; ++lead) {  // the warm window opens expected - 960
+            OFDMChirpWaveform rx(cfg);
+            rx.configure(mod, rate);
+            SyncResult sync;
+            const int window_start = true_start - lead;
+            CHECK(rx.detectDataSync(SampleSpan(audio.data() + window_start,
+                                               audio.size() - static_cast<size_t>(window_start)),
+                                    sync, 7.3f, 0.30f),
+                  label + " timing: LTS after data should sync (" + std::to_string(snr) +
+                      " dB, lead " + std::to_string(lead) + ")");
+            const int err = window_start + sync.start_sample - true_start;
+            if (std::abs(err) > std::abs(worst)) {
+                worst = err;
+                worst_case = std::to_string(static_cast<int>(snr)) + " dB, lead " +
+                             std::to_string(lead);
+            }
+        }
+    }
+    CHECK(std::abs(worst) <= tolerance,
+          label + " timing: start must be the LTS peak (worst error " + std::to_string(worst) +
+              " samples at " + worst_case + ")");
+    return true;
+}
+
+bool test_ofdm_chirp_data_preamble_timing_high_snr() {
+    ModemConfig wide;
+    wide.sample_rate = 48000;
+    wide.fft_size = 1024;
+    wide.num_carriers = 59;
+    wide.cp_mode = CyclicPrefixMode::MEDIUM;
+    wide.modulation = Modulation::QAM16;
+    wide.code_rate = CodeRate::R2_3;
+    wide.use_pilots = true;
+    wide.pilot_spacing = 8;
+    const bool wide_ok = checkDataSyncTiming(wide, Modulation::QAM16, CodeRate::R2_3, 2,
+                                             "OFDM-CHIRP wideband");
+    ModemConfig narrow = presets::narrowbandOFDM();
+    narrow.modulation = Modulation::QPSK;
+    narrow.code_rate = CodeRate::R1_2;
+    const bool narrow_ok = checkDataSyncTiming(narrow, Modulation::QPSK, CodeRate::R1_2, 4,
+                                               "OFDM-CHIRP narrowband");
+    return wide_ok && narrow_ok;
+}
+
 bool test_ofdm_chirp_data_preamble_noise_false_sync_rate() {
     ModemConfig cfg;
     cfg.sample_rate = 48000;
@@ -340,6 +410,7 @@ int main() {
     test_ofdm_chirp_keeps_strongest_anchor_when_its_training_is_readable();
     test_ofdm_chirp_data_preamble_loopback();
     test_ofdm_chirp_data_preamble_awgn_warm_sync();
+    test_ofdm_chirp_data_preamble_timing_high_snr();
     test_ofdm_chirp_data_preamble_noise_false_sync_rate();
 
     if (tests_failed != 0) {

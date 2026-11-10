@@ -216,6 +216,20 @@ where: cfo_to_samples = sample_rate / chirp_rate = 48000 / 4800 = 10 samples/Hz
 
 ---
 
+### INV-SYNC-LTS-001: an LTS lock is the TOP of the first peak, placed by the matched filter (2026-11-10)
+
+**Rule:** `detectDataSync` may stop at the first high-confidence Schmidl-Cox peak (later identical
+data symbols make false peaks), but it reports that peak's location, not its confidence crossing
+and not the maximum of its flat top: when the matched filter against the known LTS clearly sees
+the peak, the lock is the matched filter's maximum over the WHOLE peak region (one symbol either
+side of the crossing; searching one side only finds its side peak at the second LTS symbol, one
+symbol late). Never report a threshold crossing as a timing.
+**Why:** two identical LTS symbols give a Schmidl-Cox peak about one symbol wide whose top is
+flat; at high SNR it crosses 0.95 tens of samples before the start. Every member of a burst is
+sliced at stride from this lock (INV-SCO-001), so the error hit whole groups: ~33 samples early,
+~6 dB of EVM (BUG-LTS-EARLY-EXIT).
+**Test:** `WaveformLoopback` (`test_ofdm_chirp_data_preamble_timing_high_snr`).
+
 ## Structure Acquisition Invariants (`ULTRA_BURST_ACQ=structure`, 2026-11-08)
 
 ### INV-SYNC-STRUCT-001: Structure detection is for GROUP STARTS only

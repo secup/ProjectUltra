@@ -1220,29 +1220,88 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     int search_end = std::min(static_cast<int>(signal_start) + actual_search_window,
                               static_cast<int>(samples.size()) - symbol_samples * 2);
 
+    // DETECTION: the FIRST high-confidence peak wins. The LTS (two identical training symbols)
+    // is the first pair of identical symbols in the frame, and later identical data symbols can
+    // make false peaks further on. Two identical symbols make the Schmidl-Cox metric a peak
+    // about one symbol wide around the frame start with a FLAT top (WaveformLoopback reads
+    // ~0.95-0.96 from tens of samples before the start to tens after), so the first point that
+    // clears 0.95 can fall on either side of the start. The scan used to stop there and report
+    // it: whole burst groups were locked ~33 samples early (every member is sliced at stride
+    // from this lock) and lost ~6 dB of EVM (BUG-LTS-EARLY-EXIT). It now scans one more symbol
+    // past that crossing, so the peak is wholly inside [crossing - symbol, crossing + symbol].
+    //
+    // TIMING inside that peak comes from the matched filter against the known LTS: sharp
+    // (main lobe ~ fs / occupied bandwidth ~ 17 samples) and maximal at the start. Payload
+    // projects onto it at ~0.05; its only other structure is a side peak of ~0.5-0.6 one symbol
+    // either side, where one LTS symbol still matches half the template. Its maximum over the
+    // whole peak region is therefore the start, and must be taken over the region on BOTH sides
+    // of the crossing: searching only after it locked the side peak, one symbol late, whenever
+    // the crossing came after the start. When it clearly sees the LTS (kMatchedTimingFloor, ten
+    // times the payload projection) it places the lock. The same holds for a detection that
+    // never reaches the first-peak level (12-15 dB): the flat top's maximum is a noise draw
+    // there too (WaveformLoopback: 51 samples off at 12 dB; GUI gate: a first group -38), so
+    // the region is then centred on that maximum.
+    constexpr float kFirstPeakConfidence = 0.95f;
+    constexpr float kMatchedTimingFloor = 0.5f;
+    int first_peak_end = search_end;
+    int first_peak_crossing = -1;
+    auto& coarse_mf = data_sync_coarse_mf_scratch_;  // (offset, matched score) per coarse point
+    coarse_mf.clear();
     for (int offset = static_cast<int>(signal_start);
-         offset < search_end; offset += 8) {  // Step by 8 for speed
-
+         offset < search_end && (first_peak_crossing < 0 || offset <= first_peak_end);
+         offset += 8) {  // Step by 8 for speed
         const DataSyncCandidate candidate = evaluate_offset(offset);
         if (candidate.combined_corr > best_corr) {
             adopt_candidate(offset, candidate);
         }
-
-        // Early exit on first high-confidence peak. The LTS (two identical training
-        // symbols) is always the FIRST pair of identical symbols in the frame. With
-        // 1-CW LDPC zero-padding, data symbols can also be identical (all-zero bits →
-        // 0° DQPSK phase change), creating false peaks later in the search window.
-        // By stopping at the first peak above 0.95, we always lock onto the real LTS.
-        if (candidate.combined_corr > 0.95f) {
-            break;
+        coarse_mf.emplace_back(offset, candidate.matched_corr);
+        if (first_peak_crossing < 0 && candidate.combined_corr > kFirstPeakConfidence) {
+            first_peak_crossing = offset;
+            first_peak_end = std::min(search_end, offset + symbol_samples);
+        }
+    }
+    // The detected peak's region: one symbol either side of the first-peak crossing, or of the
+    // best detection when no point reached the first-peak level.
+    const bool detected_peak = first_peak_crossing >= 0 || best_corr > threshold;
+    const int peak_anchor = first_peak_crossing >= 0 ? first_peak_crossing : best_offset;
+    float peak_mf = 0.0f;
+    int peak_mf_offset = -1;
+    if (detected_peak && matched_filter_ready) {
+        for (const auto& [offset, mf] : coarse_mf) {
+            if (offset < peak_anchor - symbol_samples || offset > peak_anchor + symbol_samples) {
+                continue;
+            }
+            if (mf > peak_mf) {
+                peak_mf = mf;
+                peak_mf_offset = offset;
+            }
         }
     }
 
-    // Fine refinement: 1-sample steps around coarse peak.
-    // The 8-sample coarse search can be up to 4 samples off-peak.
-    // For QPSK, even 4-sample offset causes ~40° phase error at edge carriers.
-    // Cost: 9 evaluations × symbol_samples MACs — negligible.
-    if (best_corr > threshold) {
+    if (detected_peak && matched_filter_ready && peak_mf >= kMatchedTimingFloor) {
+        // Fine timing on the matched filter: 1-sample steps around its coarse maximum.
+        int timing = peak_mf_offset;
+        DataSyncCandidate at_timing = evaluate_offset(peak_mf_offset);
+        const int refine_start = std::max(static_cast<int>(signal_start), peak_mf_offset - 4);
+        const int refine_end = std::min(search_end, peak_mf_offset + 5);  // exclusive
+        for (int offset = refine_start; offset < refine_end; ++offset) {
+            if (offset == peak_mf_offset) continue;
+            const DataSyncCandidate candidate = evaluate_offset(offset);
+            if (candidate.matched_corr > at_timing.matched_corr) {
+                at_timing = candidate;
+                timing = offset;
+            }
+        }
+        // Only the timing moves: the reported correlation stays the detection's own best, so
+        // every acceptance decision downstream sees what it saw before.
+        const float detection_corr = best_corr;
+        adopt_candidate(timing, at_timing);
+        best_corr = std::max(best_corr, detection_corr);
+    } else if (best_corr > threshold) {
+        // Fine refinement: 1-sample steps around coarse peak.
+        // The 8-sample coarse search can be up to 4 samples off-peak.
+        // For QPSK, even 4-sample offset causes ~40° phase error at edge carriers.
+        // Cost: 9 evaluations × symbol_samples MACs — negligible.
         int refine_start = std::max(static_cast<int>(signal_start), best_offset - 4);
         int refine_end = std::min(search_end, best_offset + 5);  // exclusive
 

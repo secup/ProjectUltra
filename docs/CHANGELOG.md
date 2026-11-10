@@ -10,6 +10,50 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX(sync): an LTS lock is the top of the peak, not where it crosses 0.95 (INV-SYNC-LTS-001)
+
+**What was broken.** BUG-LTS-EARLY-EXIT: on the GUI gate a third of high-SNR burst groups had every
+data frame sliced ~33 samples early, and those frames read 6-8 dB less EVM (AWGN 20: 18.4 -> 12.5 dB).
+`OFDMChirpWaveform::detectDataSync`, which places a group's first data member (the others follow at
+stride, INV-SCO-001), stopped its coarse scan at the first offset above 0.95. Two identical LTS
+symbols give a Schmidl-Cox peak about one symbol wide with a flat top, so at high SNR it clears
+0.95 tens of samples before the start (`sc=0.95 mf=0.07` on a bad lock, `sc=0.93 mf=0.95` on a good
+one). 16QAM R2/3 mostly survived the loss; a 16QAM R3/4 group did not (2/8), and the rate
+controller then stayed low for the rest of the transfer.
+
+**What changed.** The scan continues one symbol past the first high-confidence crossing; for any
+detected peak, the matched filter against the known LTS places the lock: its maximum over the peak
+region (one symbol either side of the crossing, or of the best detection when nothing crossed),
+refined in 1-sample steps, when it clearly sees the LTS (>= 0.5; payload projects at ~0.05). The
+reported correlation stays the detection's own, so every acceptance decision is unchanged. Two
+intermediate versions were measured and rejected: the plain maximum of the flat top (a noise draw:
+51 samples off at 12 dB) and a matched-filter search after the crossing only, which locked the
+filter's side peak at the second LTS symbol, one symbol late, and lost whole groups (AWGN 20 dB
+4250 -> 2940 bps).
+
+**Verification.** `WaveformLoopback` `test_ofdm_chirp_data_preamble_timing_high_snr`: LTS after
+data, 7.3 Hz, all eight coarse-grid phases at 12/15/20/25/30 dB, wideband within 2 samples and
+narrowband (FFT 2048, 21 carriers) within 4 (old detector -37, the rejected version +1120). Full
+`ctest`. GUI gate, interleaved builds, 5 seeds, 7.3 Hz offset (21 KB at AWGN 15, Good 20,
+Moderate 20; 50 KB otherwise), goodput in bps:
+
+| Scenario | Before | After | Change | Paired t p | Sign |
+|---|---:|---:|---:|---:|---|
+| AWGN 15 dB | 3598 | 3606 | 0 % | 0.10 | 3-0 |
+| AWGN 20 dB | 4254 | 4258 | 0 % | 0.18 | 2-0 |
+| AWGN 25 dB | 4262 | 4262 | 0 % | 1.00 | 1-1 |
+| ITU Good 20 dB | 2658 | 3012 | +13 % | 0.14 | 3-1 |
+| ITU Good 25 dB | 3650 | 4030 | +10 % | 0.02 | 5-0 |
+| ITU Good 30 dB | 3770 | 4162 | +10 % | 0.04 | 4-0 |
+| ITU Moderate 20 dB | 2230 | 2472 | +11 % | 0.30 | 4-1 |
+
+All transfers CRC-clean; one Good 30 pair is missing (the gate script exited during connect,
+BUG-GATE-SCRIPT-SILENT-EXIT).
+
+Also filed while measuring (open): BUG-STRUCTURE-ACQ-DROPS-CFO — the structure-acquisition
+detector measures a burst's residual CFO but hands the decoder the tracked value, so with an empty
+or >5 Hz-wrong tracker every frame fails (`measure_ack_fer --cfo-hz` with the default stack).
+
 ## 2026-11-10 — FIX(cfo): a burst that proves nothing restores the handshake CFO, not 0 Hz (INV-CFO-006)
 
 **What was broken.** BUG-CFO-REVOKE-TO-ZERO: when the first OFDM burst of a session could not be

@@ -40,6 +40,39 @@ drops it — i.e. the backstop's ACK is effectively dead.
 group (or its minimum when the descriptor is lost) so the re-confirm can land inside the sender's
 listen window, minus the ACK airtime; or stop emitting a re-confirm that cannot arrive before it.
 
+### BUG-STRUCTURE-ACQ-DROPS-CFO (open, 2026-11-10) — P2: structure acquisition measures the residual CFO and throws it away
+
+`OFDMChirpWaveform::detectFrameStructure` (the `ULTRA_BURST_ACQ=structure` group-start detector,
+on by default through `ULTRA_FAST`) computes the LTS1 -> LTS2 residual CFO of the burst it finds,
+logs it (`STRUCTURE sync at ... resid_cfo=+7.39 Hz (known 0.0)`) and hands the decoder the tracked
+value (`last_cfo_ = known_cfo_hz`). Downstream the LTS stage may correct an uncertified prior only
+within the 5 Hz dual-chirp phantom bound (`LTS residual CFO 7.47 Hz NOT applied (beyond phantom
+bound)`), so a burst acquired with a tracked CFO more than ~5 Hz off is demodulated off-frequency
+and every frame fails, although the detector measured the right offset (chi 88, rho 0.96).
+
+Exposure: a live session seeds the tracker with the handshake's dual-chirp CFO and keeps it
+certified, so it is right at almost every group start. It bites whenever the tracker is empty or
+wrong at a group start: `measure_ack_fer --cfo-hz` with the default stack (every frame, cold
+decoder: 0/10 at 25 dB AWGN with a 7.3 Hz offset), and in a session any path that resets the
+tracker without a session reference. The detector's estimate is the burst's own measurement
+(unambiguous to +-20.8 Hz, one LTS symbol), so it should act as the Stage-1 CFO producer when the
+tracker is not established (as the chirp does under INV-CFO-005) instead of being dropped. The
+phantom bound exists for dual-chirp priors and does not describe this one.
+
+Measurement workaround (used 2026-11-10): `ULTRA_BURST_ACQ=chirp --preroll-ms 300` (8/8 at 25 dB,
+7.3 Hz); without the preroll the tool's chirp at sample 0 is not found either (best correlation
+0.09, the first-frame artifact of BUG-HARNESS-003) and the LTS fallback runs at 0 Hz.
+
+### BUG-GATE-SCRIPT-SILENT-EXIT (open, 2026-11-10) — P3, test tooling
+
+About 1 in 70 `tools/gui_qso_scenario.sh` runs ends ~27 s in, during the connect, with nothing
+but `CAFFEINATE_PID=...` in its output and `summary.env`, and both stations shut down cleanly
+(`RX decode loop exiting`). The script runs under `set -euo pipefail` with `trap cleanup EXIT`, so
+a check command that returns non-zero in the polling loop ends the run silently and the trap stops
+the stations; no modem failure is involved. Seen 2026-11-10 in three builds alike (batch runs of
+~210). A/B tables count only pairs where both runs completed. Fix: find the failing command (run
+with `bash -x`) and guard it, so every exit writes RESULT and REASON.
+
 ### BUG-HARNESS-TURBO-NO-RESULT (open, 2026-11-09) — P3, measurement tooling
 
 `tools/measure_ack_fer` (classic single-frame path) emits no `DecodeResult` for a turbo data
@@ -2403,6 +2436,39 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-LTS-EARLY-EXIT (FIXED 2026-11-10) — high-SNR burst groups locked ~33 samples early, ~6 dB of EVM lost
+
+**Symptom.** On the GUI gate at AWGN 15-25 dB (7.3 Hz offset) about a third of burst groups had
+every data frame sliced 28-35 samples early (`LTS phase slope ~11.7 deg/carrier (timing offset
+~-33 samples)`), and those frames read 6-8 dB less EVM than correctly timed ones (AWGN 20: 18.4 ->
+12.5 dB; AWGN 25: 21.4 -> 13.3). 16QAM R2/3 mostly survived it (7/8); 16QAM R3/4 and 32QAM groups
+cratered (2/8) and the rate controller then stepped down for the rest of the transfer.
+
+**Root cause.** `OFDMChirpWaveform::detectDataSync` (the warm narrow search that places the first
+data member of a group; members after it are sliced at stride, INV-SCO-001) stopped its coarse
+scan at the first offset whose correlation exceeded 0.95. Two identical LTS symbols make the
+Schmidl-Cox metric a peak about one symbol wide, and at high SNR it clears 0.95 tens of samples
+before the frame start; the +-4 sample refinement could not walk back. The log line of a bad lock
+shows it: `Data sync detected ... corr=0.95 (sc=0.95 mf=0.07)` (the matched filter is far from
+its peak); a good lock reads `sc=0.93 mf=0.95`. Locating the maximum instead is not enough either:
+the Schmidl-Cox top is flat (0.96 from the start to 35 samples late at 30 dB), so its maximum is
+decided by noise.
+
+**Fix.** The scan continues one symbol past the first high-confidence crossing, and for any
+detected peak the matched filter against the known LTS places the lock: its maximum over the
+peak region (one symbol either side of the crossing, or of the best detection when nothing
+crossed), then 1-sample steps, when it clearly sees the LTS (>= 0.5; payload projects at ~0.05).
+The reported correlation stays the detection's own, so acceptance decisions are unchanged. Two
+intermediate versions failed in ways worth keeping: (1) the plain maximum of the Schmidl-Cox top
+is a noise draw (it is flat: 0.96 at the start and 35 samples late; 51 samples off at 12 dB); (2)
+searching the matched filter only AFTER the crossing locked its side peak at the second LTS
+symbol, one symbol late (`sc=0.22 mf=0.59`), whenever the crossing came after the start; on the
+GUI gate whole groups were then lost (AWGN 20 dB 4250 -> 2940 bps).
+
+**Verification.** `WaveformLoopback` `test_ofdm_chirp_data_preamble_timing_high_snr` (LTS after
+data, 7.3 Hz, all eight coarse-grid phases at 12/15/20/25/30 dB): the old detector -37 samples,
+version (2) +1120, the fix within 2 samples everywhere. GUI gate A/B: CHANGELOG 2026-11-10.
 
 ### BUG-CFO-REVOKE-TO-ZERO (FIXED 2026-11-10) — one unproven burst at session start left the CFO at 0 Hz and the link dead
 
