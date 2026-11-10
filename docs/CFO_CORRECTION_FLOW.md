@@ -369,6 +369,9 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 5. **Drift limiting threshold: 1 Hz** — Reject chirp CFO measurements that differ by >1 Hz from cached value when connected. Real oscillator drift is slow.
 6. **Re-process training after CFO correction** — If LTS residual correction changes `freq_offset_hz`, the training symbols must be re-processed to get a clean channel estimate.
 7. **Pilot-CFO feedback is OFDM-only** — Do not apply OFDM pilot-based CFO updates to MC-DPSK frames.
+8. **A revoke without a certificate restores the handshake CFO, not 0 Hz** (INV-CFO-006) — the
+   LTS can only correct an uncertified prior within the 5 Hz phantom bound, so a 0 Hz default on a
+   7 Hz link is unrecoverable until a chirp re-anchors.
 
 ---
 
@@ -378,6 +381,7 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 |---------|-------|-----|
 | One station 100%, other all failures | Fading distorted chirp → wrong CFO on one direction | LTS residual correction + feedback loop |
 | Progressive phase drift in constellation | Wrong CFO not corrected between frames | CFO feedback loop |
+| After one unproven burst (descriptor lost) every frame decodes as noise, data syncs log `using CFO=0.0 Hz`, LTS logs `residual ... NOT applied (beyond phantom bound)` | The tracked CFO was revoked to the 0 Hz default (BUG-CFO-REVOKE-TO-ZERO) | Session reference (INV-CFO-006) |
 | First frame fails, rest OK | LTS residual not estimated | Check threshold (0.3 Hz) |
 | All frames fail equally | Systematic CFO error > 5 Hz | Check chirp detection, increase LTS correction range |
 | CW[1]/CW[3] fail more than CW[0]/CW[2] | LLR imbalance in DQPSK demapper | Check `soft_demap.hpp` bit0 vs bit1 scaling |

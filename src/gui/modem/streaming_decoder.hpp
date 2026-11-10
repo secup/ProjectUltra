@@ -550,7 +550,12 @@ public:
     float getLastCFO() const { return cfo_tracker_.tracked(); }
 
     // Set known CFO (for testing or when CFO is known from other source)
-    void setKnownCFO(float cfo_hz) { cfo_tracker_.store(cfo_hz); }
+    // The handshake's measured CFO: tracked value AND the session reference a burst that
+    // proves nothing falls back to (BUG-CFO-REVOKE-TO-ZERO).
+    void setKnownCFO(float cfo_hz) {
+        cfo_tracker_.store(cfo_hz);
+        cfo_tracker_.setSessionReference(cfo_hz);
+    }
 
     // Outcome-side CFO contract probe: a CRC/LDPC-valid connected control-first
     // OFDM frame must restore this certificate after a 0/N group revoked it.

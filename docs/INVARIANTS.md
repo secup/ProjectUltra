@@ -97,6 +97,20 @@ unestablished tracker accepts the chirp; the first OFDM frame's LTS stage correc
 into a 7.3 Hz error on 27/48 Good@20 frames — and looked correct for months because the simulator's
 truth was 0 Hz. Never judge "established" from |CFO| > ε either (a true 0 Hz is established too).
 
+### INV-CFO-006: A burst that proves nothing falls back to the session's measurement, never to 0 Hz (2026-11-10)
+
+**Rule:** when the burst outcome revokes the tracked CFO and no delivered group has certified a
+value yet, `CFOTracker` restores the SESSION REFERENCE — the handshake's dual-chirp CFO, set by
+`StreamingDecoder::setKnownCFO` at connect — established but uncertified (cold, so the LTS still
+corrects it within the phantom bound). Only a tracker with no session reference falls to the
+0 Hz default. A certificate always takes precedence; `reset()` clears both.
+**Why:** the old revoke-to-0 Hz turned the first unproven burst of a session (descriptor lost at
+low SNR) into a permanent 7.3 Hz error: the LTS residual (7.29 Hz, chi 36) is rejected beyond
+the 5 Hz phantom bound, every later frame demodulated as noise (|LLR| ~0.1) and the link never
+recovered (BUG-CFO-REVOKE-TO-ZERO). **Test:** `StreamingSignalPolicy`
+(`test_burst_outcome_cfo_reconciliation`: all three revoke paths, certificate precedence,
+reset, non-finite reference).
+
 ### INV-CHIRP-003: A chirp search must start kappa x CFO_max before the expected chirp
 
 **Rule:** a connected chirp search window may begin `SyncController::kChirpCfoPeakLeadSamples`

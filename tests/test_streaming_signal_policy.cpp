@@ -356,6 +356,45 @@ void test_burst_outcome_cfo_reconciliation() {
     CHECK_CLOSE(no_snapshot_abort.tracked(), 0.0f, 0.0001f,
                 "uncertain burst without proof should clear the cold-clamp reference");
 
+    // BUG-CFO-REVOKE-TO-ZERO: with no certificate yet, every revoke path falls back to the
+    // session's handshake measurement (setSessionReference), uncertified and cold — never to
+    // the 0 Hz default that left a 7.3 Hz link permanently outside the LTS correction bound.
+    for (int path = 0; path < 3; ++path) {
+        CFOTracker session;
+        session.store(7.40f);
+        session.setSessionReference(7.40f);
+        session.store(11.9f);  // a pilot walk that must not survive
+        const Action a = path == 0 ? session.reconcileUncertainBurstEnd()
+                       : path == 1 ? session.applyBurstDecodeOutcome(0, 8)
+                                   : session.applyBurstDecodeOutcome(1, 2);
+        CHECK(a == Action::RESTORED_SESSION_REFERENCE,
+              "no certificate: revoke restores the session reference");
+        CHECK_CLOSE(session.tracked(), 7.40f, 0.0001f,
+                    "the handshake CFO, not 0 Hz and not the pilot walk");
+        CHECK(session.established() && !session.pilotSeeded(),
+              "restored reference is information (established) but not warm proof");
+    }
+    {
+        CFOTracker certified_wins;
+        certified_wins.setSessionReference(7.40f);
+        certified_wins.store(7.10f);
+        certified_wins.applyBurstDecodeOutcome(8, 8);  // certifies 7.10
+        certified_wins.store(3.0f);
+        CHECK(certified_wins.reconcileUncertainBurstEnd() == Action::ROLLED_BACK_WARM,
+              "a delivered-group certificate takes precedence over the session reference");
+        CHECK_CLOSE(certified_wins.tracked(), 7.10f, 0.0001f, "certified value restored");
+        certified_wins.reset();
+        certified_wins.store(5.0f);
+        CHECK(certified_wins.reconcileUncertainBurstEnd() == Action::REVOKED,
+              "reset clears the session reference with the certificate");
+        CHECK_CLOSE(certified_wins.tracked(), 0.0f, 0.0001f, "no reference left: 0 Hz default");
+        CFOTracker nan_ref;
+        nan_ref.setSessionReference(std::numeric_limits<float>::quiet_NaN());
+        nan_ref.store(2.0f);
+        CHECK(nan_ref.reconcileUncertainBurstEnd() == Action::REVOKED,
+              "a non-finite reference is ignored");
+    }
+
     // A historical snapshot may still be useful numerically after 0/N revoked
     // warm trust, but restoring it must not silently re-certify it.
     CFOTracker historical;

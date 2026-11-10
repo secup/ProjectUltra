@@ -2404,6 +2404,32 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-CFO-REVOKE-TO-ZERO (FIXED 2026-11-10) — one unproven burst at session start left the CFO at 0 Hz and the link dead
+
+**Symptom.** On marginal links (GUI gate Good@6, the 2026-11-09 hardware-TX dial-15 stall) the
+first OFDM burst lost its descriptor, its decoded frames were discarded ("Unproven burst marker
+abandoned"), and after that nothing ever decoded again: every resend demodulated as noise (mean
+|LLR| 0.1), the anchored-burst backstop fired every ~17-25 s, 88 retransmissions, 0 bytes.
+
+**Root cause.** The abandoned burst reconciles the CFO tracker (`reconcileUncertainBurstEnd`;
+the 0/N and partial outcomes behave the same). With no certified snapshot — none exists until a
+group is delivered — it stored the 0 Hz default: "Uncertain burst CFO reconcile:
+action=revoke-no-certificate tracked 7.40 -> 0.00 Hz". From then on data syncs ran at 0 Hz on a
+7.3 Hz link; the LTS measured the error (`residual CFO 7.29 Hz`, chi 36.3) but may correct an
+uncertified prior only within the 5 Hz dual-chirp phantom bound, so it was rejected; the chirp
+re-anchor did not land, and the receiver stayed 7.3 Hz off.
+
+**Fix.** INV-CFO-006: the tracker keeps the handshake's dual-chirp CFO as the session reference
+(`setSessionReference`, from `StreamingDecoder::setKnownCFO` at connect). Every revoke path with
+no certificate restores it — established, uncertified, cold — and logs
+`action=restore-session-reference`; the 0 Hz default remains only when no reference exists.
+
+**Verification.** `StreamingSignalPolicy` (new cases); full `ctest`. GUI gate, Good@6 2 KB,
+seeds 42-49, interleaved builds: the one pair whose first descriptor was lost (s43) went from
+`revoke-no-certificate`, 0 frames, FAIL to `restore-session-reference`, 14/14 frames, PASS
+510 bps; the other seven pairs unchanged within run-to-run spread; AWGN@20 3610, Good@20 3210,
+Moderate@10 910 unchanged.
+
 ### BUG-ASYNC-ACK-ALWAYS-DROPPED (FIXED 2026-11-10) — an ACK without completed-turn provenance could never be sent
 
 **Symptom.** Near the floor, the receiver decoded frames but the sender never heard an ACK for

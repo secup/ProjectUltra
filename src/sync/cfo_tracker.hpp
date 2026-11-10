@@ -35,6 +35,7 @@ public:
         REVOKED,
         ROLLED_BACK_WARM,
         ROLLED_BACK_COLD,
+        RESTORED_SESSION_REFERENCE,  // no certificate yet: back to the handshake measurement
     };
 
     // The current tracked CFO (Hz). Read on acquisition (as the known CFO) and before each demod.
@@ -116,10 +117,9 @@ public:
                 return BurstOutcomeAction::CERTIFIED;
             }
             const bool restored = rollbackToCertifiedLocked();
-            if (!restored) { cfo_.store(0.0f); established_.store(false); }
             pilot_seeded_.store(false);
-            return restored ? BurstOutcomeAction::ROLLED_BACK_COLD
-                            : BurstOutcomeAction::REVOKED;
+            if (restored) return BurstOutcomeAction::ROLLED_BACK_COLD;
+            return revokeToSessionReferenceLocked();
         }
         if (valid && logical_ok > 0) {
             const bool was_warm = pilot_seeded_.load();
@@ -127,19 +127,16 @@ public:
                 return was_warm ? BurstOutcomeAction::ROLLED_BACK_WARM
                                 : BurstOutcomeAction::ROLLED_BACK_COLD;
             }
-            cfo_.store(0.0f);
-            established_.store(false);
             pilot_seeded_.store(false);
-            return BurstOutcomeAction::REVOKED;
+            return revokeToSessionReferenceLocked();
         }
         // A proven 0/N outcome, or malformed counts, cannot leave the mutable
         // pilot walk as the connected-cold drift reference: the cold chirp clamp
         // would otherwise compare against (and potentially retain) the poison.
         const bool restored = rollbackToCertifiedLocked();
-        if (!restored) { cfo_.store(0.0f); established_.store(false); }
         pilot_seeded_.store(false);
-        return restored ? BurstOutcomeAction::ROLLED_BACK_COLD
-                        : BurstOutcomeAction::REVOKED;
+        if (restored) return BurstOutcomeAction::ROLLED_BACK_COLD;
+        return revokeToSessionReferenceLocked();
     }
 
     // No authoritative LDPC outcome exists (unproven geometry, hard process
@@ -152,13 +149,31 @@ public:
             return was_warm ? BurstOutcomeAction::ROLLED_BACK_WARM
                             : BurstOutcomeAction::ROLLED_BACK_COLD;
         }
-        // There is no trustworthy numeric reference. Leaving a mutable pilot
-        // walk here would let connected-cold chirp sanity compare against it and
-        // clamp a valid re-acquisition back to the same unproven value.
+        // No certificate. Never keep the mutable pilot walk (connected-cold chirp
+        // sanity would compare against it and clamp a valid re-acquisition back to
+        // the same unproven value); fall back to the session's handshake measurement,
+        // or to the uninformative 0 Hz default only when there is none.
+        pilot_seeded_.store(false);
+        if (restoreSessionReferenceLocked()) {
+            return BurstOutcomeAction::RESTORED_SESSION_REFERENCE;
+        }
         cfo_.store(0.0f);
         established_.store(false);
-        pilot_seeded_.store(false);
         return BurstOutcomeAction::REVOKED;
+    }
+
+    // The session's reference measurement: the dual-chirp CFO of the handshake frames
+    // (StreamingDecoder::setKnownCFO at connect, after LDPC-verified CONNECT/CONNECT_ACK).
+    // It is not a certificate — the LTS residual still corrects it like any uncertified
+    // prior — but it IS information, so a burst that proves nothing falls back to it, never
+    // to a 0 Hz default (BUG-CFO-REVOKE-TO-ZERO: the first OFDM burst of a session lost its
+    // descriptor, the revoke turned the handshake's 7.4 Hz into 0 Hz, the LTS correction is
+    // bounded at the 5 Hz chirp-phantom bound, and no later frame decoded). Cleared by reset().
+    void setSessionReference(float cfo_hz) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!std::isfinite(cfo_hz)) return;
+        session_reference_cfo_.store(cfo_hz);
+        has_session_reference_.store(true);
     }
 
     // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
@@ -191,6 +206,8 @@ public:
         pilot_seeded_.store(false);
         has_certified_.store(false);
         certified_cfo_.store(0.0f);
+        has_session_reference_.store(false);
+        session_reference_cfo_.store(0.0f);
     }
 
 private:
@@ -204,6 +221,22 @@ private:
         has_certified_.store(true);
         pilot_seeded_.store(true);
         return true;
+    }
+
+    bool restoreSessionReferenceLocked() {
+        if (!has_session_reference_.load()) return false;
+        cfo_.store(session_reference_cfo_.load());
+        established_.store(true);
+        return true;
+    }
+    // No certificate: the session reference if there is one, else the 0 Hz default.
+    BurstOutcomeAction revokeToSessionReferenceLocked() {
+        if (restoreSessionReferenceLocked()) {
+            return BurstOutcomeAction::RESTORED_SESSION_REFERENCE;
+        }
+        cfo_.store(0.0f);
+        established_.store(false);
+        return BurstOutcomeAction::REVOKED;
     }
 
     bool rollbackToCertifiedLocked() {
@@ -229,6 +262,8 @@ private:
     std::atomic<bool> established_{false};
     std::atomic<float> certified_cfo_{0.0f};  // last DELIVERED-group CFO (cheap re-anchor)
     std::atomic<bool> has_certified_{false};
+    std::atomic<float> session_reference_cfo_{0.0f};  // handshake dual-chirp CFO
+    std::atomic<bool> has_session_reference_{false};
 };
 
 }  // namespace sync

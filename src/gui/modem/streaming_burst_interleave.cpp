@@ -49,6 +49,7 @@ const char* burstCFOActionName(sync::CFOTracker::BurstOutcomeAction action) {
         case Action::REVOKED: return "revoke-no-certificate";
         case Action::ROLLED_BACK_WARM: return "rollback-certified-warm";
         case Action::ROLLED_BACK_COLD: return "rollback-certified-cold";
+        case Action::RESTORED_SESSION_REFERENCE: return "restore-session-reference";
     }
     return "unknown";
 }

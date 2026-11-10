@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX(cfo): a burst that proves nothing restores the handshake CFO, not 0 Hz (INV-CFO-006)
+
+**What was broken.** BUG-CFO-REVOKE-TO-ZERO: when the first OFDM burst of a session could not be
+proven (descriptor lost on a marginal link), `CFOTracker` revoked the tracked CFO to the 0 Hz
+default because no delivered group had certified a value yet. The handshake had measured 7.4 Hz
+on two LDPC-verified frames; the LTS saw the 7.29 Hz error but may correct an uncertified prior
+only within the 5 Hz phantom bound, so every later frame decoded as noise and the link died
+(Good@6 runs: 88 retransmissions, 0 bytes; the 2026-11-09 dial-15 stall has the same signature).
+
+**What changed.** `CFOTracker::setSessionReference` (set with the handshake CFO by
+`StreamingDecoder::setKnownCFO` at connect, cleared by `reset`); `reconcileUncertainBurstEnd` and
+both no-certificate paths of `applyBurstDecodeOutcome` restore it (established, uncertified) and
+report `RESTORED_SESSION_REFERENCE` ("restore-session-reference"); the 0 Hz default only when
+there is no reference. Certificates still take precedence.
+
+**Verification.** `StreamingSignalPolicy` (all three revoke paths, certificate precedence, reset,
+non-finite reference); full `ctest`. GUI gate, Good@6 2 KB, seeds 42-49, interleaved builds:
+
+| Seed | without | with |
+|---|---|---|
+| 43 (first descriptor lost) | FAIL, 0/14 frames, `revoke-no-certificate` | PASS 510 bps, 14/14, `restore-session-reference` |
+| 44, 45 | PASS 270, 510 | PASS 270, 510 |
+| 47, 48, 49 | PASS 450, 270, 420 | PASS 500, 260, 360 |
+| 42, 46 | FAIL (MC-DPSK, time limit, 26 / 30 frames) | FAIL (same, 26 / 30 frames) |
+
+AWGN@20 21 KB 3610, Good@20 21 KB 3210, Moderate@10 910: unchanged.
+
 ## 2026-11-10 — PERF(handshake): 2-codeword connect frames and an early PING verdict, 24.0 → 13.7 s (INV-HANDSHAKE-001/002)
 
 **What was slow.** "Connecting" to "Connected" took 24.0 s on every GUI-gate run (89 runs,

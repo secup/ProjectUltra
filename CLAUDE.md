@@ -68,6 +68,9 @@ results; see docs/CHANGELOG.md):
   (|r| > t₍ₙ₋₁₎(3σ)·σ_r, `src/ofdm/lts_cfo_update.hpp`); a CERTIFIED prior is never corrected.
   Never gate it on |CFO| magnitude or channel flatness (the 2026-11-08 BUG-LTS-CFO-SEED-GATE)
 - After demodulation, corrected CFO propagates back to cached `last_cfo_`
+- A burst that proves nothing never resets the CFO to 0 Hz: without a certificate the tracker
+  restores the handshake's dual-chirp CFO (session reference, INV-CFO-006). 0 Hz on a 7 Hz link is
+  beyond the LTS correction's 5 Hz phantom bound and killed the link (BUG-CFO-REVOKE-TO-ZERO)
 - NEVER remove the feedback in `ofdm_chirp_waveform.cpp:process()` or `streaming_decoder.cpp` — without it, wrong chirp CFO re-injects every frame → progressive phase drift → CW failures
 - Soundcard clock drift: burst members are sliced at stride + the session drift model (`sync/sco_tracker.hpp`, INV-SCO-001); NEVER re-slice a member from its own LTS timing estimate (§14.25: lost ~50 % of bursts on fading)
 
