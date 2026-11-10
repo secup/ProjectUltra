@@ -10,6 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — RELEASE: v0.6.1-pre-alpha
+
+Version 0.6.0 -> 0.6.1 in `CMakeLists.txt` (the binaries, the TNC `VERSION` reply and OTASim
+report it). **Not compatible over the air with 0.6.0:** OFDM control frames are whitened
+(INV-FRAME-WHITEN-001) and a 0.6.0 receiver cannot read them (a 0.6.1 receiver still reads
+0.6.0's), so both stations must upgrade. Contents since v0.6.0 (3 commits): a real station's TX
+levels and ALC/PA in OTASim and the PAPR-corrected connect pick (3eef623); the burst header no
+longer sets OFDM's TX level, +2.0-2.9 dB on a peak-limited transmitter (d8c56c1); asynchronous
+tone ACKs sent instead of always dropped, GUI and TNC (ed16731). README: latest release, the
+real-station level result, roadmap. Not yet measured on hardware.
+
 ## 2026-11-10 — FIX: asynchronous ACKs are sent once the peer stops, not dropped (INV-TONE-ACK-005)
 
 **What was broken.** An ACK without completed-turn provenance (descriptor lost, the turn's

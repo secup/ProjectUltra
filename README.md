@@ -17,7 +17,7 @@ view.
 > versions, so both stations must run the same build. Performance is measured on software and
 > hardware HF channel simulators; it is not yet characterized over the air at scale.
 
-*Updated 2026-11-09. Latest release: [`v0.6.0-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.0-pre-alpha).*
+*Updated 2026-11-10. Latest release: [`v0.6.1-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.1-pre-alpha).*
 
 ---
 
@@ -59,14 +59,18 @@ radios), full protocol in real time. 21 KB file, mean of 5 seeds:
 | ITU Moderate (0.5 Hz / 1 ms) | — | 1.7 kbps | 2.1 kbps | 2.5 kbps |
 
 A 50 KB file on ITU Good at 20 dB averages 3.3 kbps (2.9–3.8 across seeds). On AWGN at 6–7 dB
-the link runs OFDM at 1.0–1.2 kbps.
+the link runs OFDM at 1.0–1.2 kbps. Measured on v0.6.0; v0.6.1 leaves these figures unchanged.
+
+With a real station's transmit levels (every burst scaled to the same peak power, as a real
+transmitter does), v0.6.1 sends OFDM data about 2.4 dB louder than v0.6.0 at the same peak. On
+AWGN in the simulator, the link now runs OFDM at 770–970 bps from 15 dB on the simulator's scale.
 
 ### Previous release, hardware channel simulator
 
 `v0.5.2.1-pre-alpha` between a Raspberry Pi 5 and a Mac through a hardware HF channel simulator,
 real soundcards and real half-duplex turnaround (August 2026). 50 KB on ITU Good at 20 dB:
 16 of 16 transfers byte-exact, mean 1.98 kbps with the rung held at 8PSK R2/3, 1.50–2.32 kbps
-under automatic rate control. v0.6.0 has not yet been measured on hardware.
+under automatic rate control. v0.6.0 and v0.6.1 have not yet been measured on hardware.
 
 Fading channels vary a lot from run to run: identical builds on the same path have differed by
 0.7 kbps. Compare distributions, not best runs. No claim is made about performance relative to
@@ -221,7 +225,7 @@ before transmitting, use the minimum power needed, and be ready to move.
 
 ## Roadmap
 
-- Validate v0.6.0 on the hardware channel simulator (both stations on the same build).
+- Validate v0.6.1 on the hardware channel simulator (both stations on the same build).
 - Shorten connection setup (about 30 s today).
 - Leaner frame headers, which matter most at the lowest rung.
 - Broader two-way over-the-air testing, especially at low SNR.
