@@ -10,6 +10,16 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — RELEASE: v0.6.2-pre-alpha
+
+Version 0.6.1 -> 0.6.2 in `CMakeLists.txt` (the binaries, the TNC `VERSION` reply and OTASim
+report it). **Not compatible over the air with 0.6.1:** the CONNECT frame is now 35 bytes in 2
+codewords (INV-HANDSHAKE-001), so both stations must upgrade. Contents since v0.6.1 (4 commits):
+connection setup 24.0 -> 13.7 s (0c0c920); a burst that proves nothing restores the handshake CFO
+instead of 0 Hz (df9763e); LTS locks at the top of the peak, fading +10..+13 % (0e4c1ac); 16QAM
+R3/4 and 32QAM R2/3 rungs with constellation-aware EVM thresholds, AWGN +8..+19 % (9c54784).
+README: latest release, v0.6.2 results, rung table. Not yet measured on hardware.
+
 ## 2026-11-10 — FEAT(rate): 16QAM R3/4 and 32QAM R2/3 rungs, EVM thresholds carried between constellations (INV-RATE-EVM-003, INV-RATE-RUNG-001)
 
 **What was missing.** The top auto rung was 16QAM R2/3 (2.67 bits per carrier). 16QAM R3/4 was a

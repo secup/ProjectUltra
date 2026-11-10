@@ -17,7 +17,7 @@ view.
 > versions, so both stations must run the same build. Performance is measured on software and
 > hardware HF channel simulators; it is not yet characterized over the air at scale.
 
-*Updated 2026-11-10. Latest release: [`v0.6.1-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.1-pre-alpha).*
+*Updated 2026-11-10. Latest release: [`v0.6.2-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.2-pre-alpha).*
 
 ---
 
@@ -45,14 +45,15 @@ view.
 ## Performance
 
 All figures are goodput: file bytes delivered and CRC-verified per second of transfer, with
-retransmissions and turnarounds included. Connection setup (about 14 s on `main`, 24 s in v0.6.1) is
+retransmissions and turnarounds included. Connection setup (about 14 s since v0.6.2, 24 s before) is
 not included.
 
-### `main` (after v0.6.1), software channel simulator
+### v0.6.2, software channel simulator
 
-Two changes since v0.6.1: burst groups are no longer received with a timing error that cost
-some of them 6 dB, and two faster rungs, 16QAM R3/4 and 32QAM R2/3, are in use on strong channels.
-Same simulator and offset as below, mean of 5 seeds, v0.6.1-era `main` against current `main`:
+Two changes in v0.6.2 move the data rate: burst groups are no longer received with a timing
+error that cost some of them 6 dB, and two faster rungs, 16QAM R3/4 and 32QAM R2/3, are in use on
+strong channels. Same simulator and offset as below, mean of 5 seeds, before and after those two
+changes:
 
 | Channel | 15 dB | 20 dB | 25 dB | 30 dB |
 |---|---:|---:|---:|---:|
@@ -86,7 +87,7 @@ AWGN in the simulator, the link now runs OFDM at 770–970 bps from 15 dB on the
 `v0.5.2.1-pre-alpha` between a Raspberry Pi 5 and a Mac through a hardware HF channel simulator,
 real soundcards and real half-duplex turnaround (August 2026). 50 KB on ITU Good at 20 dB:
 16 of 16 transfers byte-exact, mean 1.98 kbps with the rung held at 8PSK R2/3, 1.50–2.32 kbps
-under automatic rate control. v0.6.0 and v0.6.1 have not yet been measured on hardware.
+under automatic rate control. v0.6.0 to v0.6.2 have not yet been measured on hardware.
 
 Fading channels vary a lot from run to run: identical builds on the same path have differed by
 0.7 kbps. Compare distributions, not best runs. No claim is made about performance relative to
@@ -104,8 +105,8 @@ other HF data modems; that needs paired on-air testing.
 | QPSK R3/4 | 51 | 3188 bps | enabled |
 | 8PSK R2/3 | 51 | 4250 bps | enabled |
 | 16QAM R2/3 | 51 | 5667 bps | enabled (strong channels) |
-| 16QAM R3/4 | 51 | 6375 bps | enabled on `main` (strong channels) |
-| 32QAM R2/3 | 51 | 7083 bps | enabled on `main` (strong channels) |
+| 16QAM R3/4 | 51 | 6375 bps | enabled since v0.6.2 (strong channels) |
+| 32QAM R2/3 | 51 | 7083 bps | enabled since v0.6.2 (strong channels) |
 | 8PSK R3/4, 16QAM R1/2 | 51 | 4250–4781 bps | disabled |
 
 8PSK R3/4 now decodes on fading, but 16QAM R2/3 delivers more at every SNR measured.
@@ -245,8 +246,8 @@ before transmitting, use the minimum power needed, and be ready to move.
 
 ## Roadmap
 
-- Validate v0.6.1 on the hardware channel simulator (both stations on the same build).
-- Shorten connection setup further (about 14 s on `main`; the CONNECT/CONNECT_ACK exchange is
+- Validate v0.6.2 on the hardware channel simulator (both stations on the same build).
+- Shorten connection setup further (about 14 s in v0.6.2; the CONNECT/CONNECT_ACK exchange is
   most of it).
 - Leaner frame headers, which matter most at the lowest rung.
 - Broader two-way over-the-air testing, especially at low SNR.
