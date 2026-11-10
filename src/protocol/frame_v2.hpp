@@ -6,6 +6,7 @@
 #include <optional>
 #include <cstdint>
 #include <vector>
+#include <array>
 #include <algorithm>
 #include <cctype>
 
@@ -1067,6 +1068,62 @@ inline bool isDataCodeword(const Bytes& data) {
 // Get index from data codeword (assumes isDataCodeword returned true)
 inline uint8_t getDataCodewordIndex(const Bytes& data) {
     return data.size() >= 2 ? data[1] : 0;
+}
+
+// ============================================================================
+// OFDM control-frame whitening (INV-FRAME-WHITEN-001, 2026-11-10)
+// ============================================================================
+//
+// An OFDM control frame (BURST_HEADER descriptor, ACK, GROUP_ACK, MODE_CHANGE, ...) is the 20-byte
+// ControlFrame LDPC-encoded at R1/4 in ONE codeword with no interleaving, so its first OFDM symbols
+// carry the frame's systematic bits. Unscrambled, the fixed header bytes put the same QPSK point on
+// most carriers of a symbol (measured: 34 of 59 in the BURST_HEADER's first symbol); those carriers
+// add in phase and the symbol peaks 15.3 dB over the burst RMS, above anything in the data that
+// follows (12.3-13.3 dB over a 5-6 s burst). A peak-limited transmitter scales the whole burst to
+// that one peak, so the descriptor alone held every OFDM data burst 2.0-2.9 dB down.
+//
+// The sender XORs the 20 frame bytes with this fixed sequence before LDPC encoding. LDPC decoding
+// does not depend on the whitening, so the receiver decodes as before and recognizes a whitened
+// frame by its whitened magic (unwhitenControlCodeword); a raw-magic codeword (MC-DPSK control
+// frames, data-frame CW0, a sender with ULTRA_CONTROL_WHITEN=0) is left untouched. The sequence is
+// SplitMix64 from a fixed seed (integer-only, identical on every platform).
+inline constexpr std::array<uint8_t, 20> kControlFrameWhitening = {
+    0x6D, 0x1C, 0x6C, 0x15, 0x56, 0x31, 0x80, 0x77, 0x84, 0xFA,
+    0x83, 0xF6, 0x90, 0x9B, 0x85, 0xEC, 0xE6, 0x1F, 0xCF, 0x65};
+inline constexpr uint8_t kWhitenedMagic0 =
+    static_cast<uint8_t>(((MAGIC_V2 >> 8) & 0xFF) ^ kControlFrameWhitening[0]);
+inline constexpr uint8_t kWhitenedMagic1 =
+    static_cast<uint8_t>((MAGIC_V2 & 0xFF) ^ kControlFrameWhitening[1]);
+// A whitened frame must never read as a raw header, a data codeword or a PHY mask header.
+static_assert(kControlFrameWhitening[0] != 0 || kControlFrameWhitening[1] != 0,
+              "whitened magic must differ from the raw magic");
+static_assert(kWhitenedMagic0 != DATA_CW_MARKER,
+              "whitened magic must not look like a data codeword");
+static_assert(!(kWhitenedMagic0 == 0x50 && kWhitenedMagic1 == 0x4D),
+              "whitened magic must not look like a PHY mask header");
+
+// Sender switch (ULTRA_CONTROL_WHITEN, default on; "0" sends the legacy unscrambled frames).
+// Receivers accept both forms, so the two stations need not agree.
+bool controlFrameWhiteningEnabled();
+
+// The 20 frame bytes XORed with the sequence (bytes beyond 20 are left as they are).
+inline Bytes whitenControlFrame(Bytes frame) {
+    const size_t n = std::min(frame.size(), kControlFrameWhitening.size());
+    for (size_t i = 0; i < n; ++i) frame[i] ^= kControlFrameWhitening[i];
+    return frame;
+}
+
+// After a successful LDPC decode: restores a whitened control frame in place and returns true;
+// returns false (bytes untouched) for anything that does not start with the whitened magic.
+inline bool unwhitenControlCodeword(Bytes& info_bytes) {
+    if (info_bytes.size() < kControlFrameWhitening.size() ||
+        info_bytes[0] != kWhitenedMagic0 || info_bytes[1] != kWhitenedMagic1) {
+        return false;
+    }
+    for (size_t i = 0; i < kControlFrameWhitening.size(); ++i) {
+        info_bytes[i] ^= kControlFrameWhitening[i];
+    }
+    return true;
 }
 
 // ============================================================================

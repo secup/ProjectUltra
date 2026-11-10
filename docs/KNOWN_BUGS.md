@@ -2407,6 +2407,36 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-BURST-OPENING-SETS-PEAK (FIXED 2026-11-10) — the burst header set every OFDM burst's level
+
+**Symptom.** On a peak-limited transmitter (the hardware TX path; any real PA) OFDM data went out
+3.2 dB below the MC-DPSK CONNECT the connect SNR is measured on, so the PAPR correction (INV-SNR-
+PAPR-001) had to keep a real station on MC-DPSK up to dial 17 (90 bps). A TX recording
+(`gui_qso_scenario.sh --tx-model hardware --record`) showed that most of the gap was not OFDM's
+nature: in every OFDM burst the loudest sample was in the first symbol of the BURST_HEADER
+descriptor, 15.3 dB over the burst RMS, while the 5-6 s of data that followed peaked at
+12.3-13.3 dB. The burst is scaled to that one sample, which cost 2.0-2.9 dB of average power.
+
+**Root cause.** A control frame is one R1/4 LDPC codeword with no interleaving, so its first
+symbols carry the 20 header bytes as systematic bits. The fixed fields put the same QPSK point on
+34 of the 59 carriers and they added in phase. (Data frames were already whitened: turbo whitens
+its whole info block, LDPC data frames their padding.) A second, smaller outlier: one fixed symbol
+of the chirp-less burst's settling fill peaked at 13.1 dB.
+
+**Fix.** INV-FRAME-WHITEN-001: the 20 bytes of a one-codeword OFDM control frame are XORed with
+`v2::kControlFrameWhitening` before LDPC encoding and restored by the receiver after decoding (by
+the whitened magic; raw frames are still accepted). The settling fill redraws any symbol peaking
+above a typical data symbol (10 dB over RMS). The PAPR correction's prior drops 3.4 -> 1.0 dB.
+`ULTRA_CONTROL_WHITEN=0` sends the old frames. Over-the-air: a receiver older than this cannot
+decode whitened control frames — upgrade both stations.
+
+**Verification.** OFDM bursts at the hardware peak target, in-band level vs the reference:
+-10.6 / -10.5 / -11.6 dB -> -8.2 / -8.3 / -8.6 dB; every burst's peak is now its own data's;
+CONNECT-vs-data body gap 3.2 / 3.2 / 2.7 -> 0.8 / 1.1 / 0.2 dB. GUI gate, AWGN s42, 2 KB,
+`--tx-model hardware`, correction on: dial 15/16/17 MC-DPSK 90 bps -> OFDM 770/970/960 bps, dial
+18 810 -> 950, dial 14 unchanged (MC-DPSK). Default simulator unchanged (AWGN@20 3590/3600,
+Good@20 3190/3210 and 3180/3180). CTest `ControlFrameWhitening`.
+
 ### BUG-SCO-NOT-TRACKED-IN-BURST (FIXED 2026-11-09) — soundcard clock drift walked in-burst frames late
 
 **Symptom** (found by the OTASim clock offset, `gui_qso_scenario.sh --clock-ppm`). A burst group

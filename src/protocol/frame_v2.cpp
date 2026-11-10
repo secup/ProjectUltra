@@ -1924,7 +1924,16 @@ std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits,
 
     // Return exactly bytes_per_cw bytes (the info portion)
     Bytes result(decoded.begin(), decoded.begin() + bytes_per_cw);
+    unwhitenControlCodeword(result);  // INV-FRAME-WHITEN-001: no-op unless whitened
     return {true, result};
+}
+
+bool controlFrameWhiteningEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_CONTROL_WHITEN");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return on;
 }
 
 CodewordStatus decodeCodewordsWithLDPC(const std::vector<std::vector<float>>& soft_bits) {

@@ -1301,7 +1301,13 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
         // Control frames = 1 CW
         // Control frames always use R1/4: exact fit (20 bytes = 162 info bits / 8)
         // and maximum LDPC redundancy for fading resilience
-        auto cws = v2::encodeFrameWithLDPC(tx_data, CodeRate::R1_4);
+        // INV-FRAME-WHITEN-001: a one-codeword control frame is whitened before LDPC encoding so
+        // its systematic header bits cannot line its symbols' carriers up into a peak that sets
+        // the whole burst's level on a peak-limited transmitter (frame_v2.hpp).
+        const bool whiten_control = tx_data.size() == v2::ControlFrame::SIZE &&
+                                    v2::controlFrameWhiteningEnabled();
+        auto cws = v2::encodeFrameWithLDPC(
+            whiten_control ? v2::whitenControlFrame(tx_data) : tx_data, CodeRate::R1_4);
         uint8_t actual_cw = static_cast<uint8_t>(cws.size());
 
         // Patch total_cw for ConnectFrames (CONNECT, DISCONNECT, etc.)

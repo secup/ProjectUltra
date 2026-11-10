@@ -10,6 +10,58 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX: the burst header no longer sets OFDM's TX level (INV-FRAME-WHITEN-001)
+
+**What was broken.** On a peak-limited transmitter every burst is scaled to its loudest sample,
+and in every OFDM burst that sample was in the BURST_HEADER descriptor, not the data. A control
+frame is one R1/4 LDPC codeword without interleaving, so its first symbols carry the 20 header
+bytes as systematic bits; the fixed fields put one QPSK point on 34 of the 59 carriers, which add
+in phase: 15.3 dB over the burst RMS, against 12.3-13.3 dB for the data that follows. That one
+symbol held OFDM data 2.0-2.9 dB down, most of the 3.2 dB gap to the MC-DPSK CONNECT that made
+the PAPR correction keep real stations on MC-DPSK up to dial 17. Found with a TX recording
+(`gui_qso_scenario.sh --tx-model hardware --record`). Also: one fixed settling-fill symbol of
+the chirp-less burst peaked at 13.1 dB. (BUG-BURST-OPENING-SETS-PEAK.)
+
+**What changed.**
+- `frame_v2.hpp/.cpp`: `kControlFrameWhitening` (20 SplitMix64 bytes; static checks that the
+  whitened magic `38 50` reads as neither a raw header, a data codeword nor a PHY mask header),
+  `whitenControlFrame`, `unwhitenControlCodeword` (restores a decoded codeword that starts with
+  the whitened magic, leaves anything else alone), `controlFrameWhiteningEnabled`
+  (`ULTRA_CONTROL_WHITEN`, default on, sender only); `decodeSingleCodeword` unwhitens.
+- TX: `StreamingEncoder::encodeFrameBytes` whitens a 20-byte OFDM control frame before LDPC.
+- RX: the decoder's LDPC codec is wrapped in `ControlUnwhiteningCodec` (`frame_decoder.hpp`;
+  all nine `codec_->decode` sites), and `robustDecodeSingleCW` unwhitens: the LDPC decode does
+  not depend on the whitening, so no decode site changes and no header peek sees a whitened frame.
+  Raw frames (MC-DPSK control frames, `ULTRA_CONTROL_WHITEN=0` senders) still decode.
+- `OFDMChirpWaveform::generateSettlingSymbols`: one symbol per draw, redrawn while its sample
+  peak exceeds 10 dB over its RMS (the median single-symbol peak of random 59-carrier OFDM).
+- `connection_policy::peakNormalizedOfdmBelowMcDpskPriorDb`: the PAPR correction's prior is 1.0 dB
+  (measured: 0.79-1.23 dB on the 5-6 s entry bursts), 3.4 dB with `ULTRA_CONTROL_WHITEN=0`.
+  `App::txPaprPriorDb` and `ultra_tnc` use it.
+- **Over the air:** a receiver older than this cannot read whitened control frames. Upgrade both.
+
+**Verification.**
+- CTest `ControlFrameWhitening` (new): 23 control frames round-trip byte-exact whitened and
+  legacy; raw headers and data codewords untouched; the codec wrapper; descriptor envelope peak
+  13.1 -> 10.3 dB over its RMS; settling fill bounded at 10 dB and within 0.2 dB of the data level.
+- TX recordings, AWGN@20, `--tx-model hardware`: OFDM burst levels -10.6 / -10.5 / -11.6 ->
+  -8.2 / -8.3 / -8.6 dB vs the reference (CONNECT -7.7 unchanged); each burst's peak is now its
+  own data's; CONNECT-vs-data body gap 3.2 / 3.2 / 2.7 -> 0.8 / 1.1 / 0.2 dB.
+- GUI gate, same jobs on both builds (AWGN s42 7.3 Hz 2 KB `--tx-model hardware`, correction on;
+  single runs):
+
+  | Dial | before | after |
+  |---|---|---|
+  | 14 | MC-DPSK 90 bps | MC-DPSK 90 bps |
+  | 15 | MC-DPSK 90 bps | OFDM QPSK R2/3 770 bps |
+  | 16 | MC-DPSK 90 bps | OFDM QPSK R3/4 970 bps |
+  | 17 | MC-DPSK 90 bps | OFDM QPSK R3/4 960 bps |
+  | 18 | OFDM 810 bps | OFDM 950 bps |
+
+  Default simulator unchanged: AWGN@20 21 KB 3590 -> 3600, Good@20 s42 3190 -> 3210, s43
+  3180 -> 3180. Good@20 `--tx-model hardware --tx-pa drive_db=3`: 2090 -> 2220 (one fading run,
+  not evidence).
+
 ## 2026-11-09 — FEAT(sim) + FIX: a real station's TX levels in OTASim; PAPR-corrected connect pick (INV-SNR-PAPR-001)
 
 **What was missing / broken.**

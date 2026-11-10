@@ -3917,7 +3917,7 @@ float App::txPaprPriorDb() const {
     // peak normalization (the hardware path, or the sim with ULTRA_SIM_PAPR_PENALTY=1) does.
     return (simulation_enabled_ && !simPaprPenaltyEnabled())
                ? 0.0f
-               : protocol::connection_policy::kPeakNormalizedOfdmBelowMcDpskDb;
+               : protocol::connection_policy::peakNormalizedOfdmBelowMcDpskPriorDb();
 }
 
 void App::noteTxBurstLevelForPapr(const std::vector<float>& normalized, const char* context) {

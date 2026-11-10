@@ -426,24 +426,51 @@ Samples OFDMChirpWaveform::generateSettlingSymbols(size_t count) {
     if (!modulator_ || count == 0) {
         return Samples();
     }
-    // Enough bits for `count` symbols at any profile (all carriers x 4 bits), fixed
-    // SplitMix64 content: deterministic on every platform. The modulator resets its pilot
-    // pattern per call, so this cannot shift the pattern phase of the frame that follows.
+    // Fixed SplitMix64 content, one symbol per draw (enough bits for any profile: all carriers x
+    // 4 bits): deterministic on every platform. The modulator resets its pilot pattern per call,
+    // so this cannot shift the pattern phase of the frame that follows.
+    //
+    // NO OUTLIER PEAKS (INV-FRAME-WHITEN-001, 2026-11-10). A peak-normalized transmitter scales
+    // the whole burst to its loudest sample, and the fill leads every chirp-less burst: one fixed
+    // fill symbol peaking 13.1 dB over the RMS (the data's own maximum over a 5-6 s burst is
+    // 12.3-13.3 dB) held such bursts up to 0.7 dB down. The fill carries no information, so a
+    // symbol whose sample peak exceeds a typical data symbol's is simply redrawn; the bound is the
+    // median single-symbol peak of random 59-carrier OFDM (~10 dB over RMS), so about half the
+    // draws pass and the expected cost is two modulations per fill symbol.
+    constexpr double kSettlingSymbolPeakOverRmsDb = 10.0;
+    constexpr int kMaxDrawsPerSymbol = 32;
     const size_t symbol_samples = static_cast<size_t>(getSamplesPerSymbol());
-    Bytes bytes((count * config_.num_carriers * 4 + 7) / 8);
+    const size_t bytes_per_draw = (static_cast<size_t>(config_.num_carriers) * 4 + 7) / 8;
     uint64_t x = 0x5E771E5EEDC0FFEEULL;
-    for (auto& b : bytes) {
+    auto next_byte = [&x]() {
         x += 0x9E3779B97F4A7C15ULL;
         uint64_t z = x;
         z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
         z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-        b = static_cast<uint8_t>((z ^ (z >> 31)) & 0xFFu);
+        return static_cast<uint8_t>((z ^ (z >> 31)) & 0xFFu);
+    };
+    const double max_peak_over_rms = std::pow(10.0, kSettlingSymbolPeakOverRmsDb / 20.0);
+    Samples out;
+    out.reserve(count * symbol_samples);
+    Bytes bytes(bytes_per_draw);
+    for (size_t s = 0; s < count; ++s) {
+        Samples sym;
+        for (int draw = 0; draw < kMaxDrawsPerSymbol; ++draw) {
+            for (auto& b : bytes) b = next_byte();
+            sym = modulator_->modulate(ByteSpan(bytes.data(), bytes.size()), config_.modulation);
+            if (sym.size() < symbol_samples) return Samples();
+            sym.resize(symbol_samples);
+            double ss = 0.0, pk = 0.0;
+            for (float v : sym) {
+                ss += static_cast<double>(v) * v;
+                pk = std::max(pk, std::abs(static_cast<double>(v)));
+            }
+            const double rms = std::sqrt(ss / static_cast<double>(symbol_samples));
+            if (rms > 0.0 && pk <= max_peak_over_rms * rms) break;
+        }
+        out.insert(out.end(), sym.begin(), sym.end());
     }
-    Samples s = modulator_->modulate(ByteSpan(bytes.data(), bytes.size()), config_.modulation);
-    if (s.size() > count * symbol_samples) {
-        s.resize(count * symbol_samples);
-    }
-    return s;
+    return out;
 }
 
 Samples OFDMChirpWaveform::generateDataPreamble() {

@@ -468,6 +468,10 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   no auto rung reaches them. Confirm no forced-mod test path first.
 - **R6. `carrier_ldpc_interleaver`** — default-off diversity layer, auto-on only on masked
   carriers; likely removable. Confirm the masked-carrier path is truly unused first.
+- **R20. `OFDMDemodulator::Impl::huntForCodeword`** (`ofdm_sync.cpp`, declared in
+  `demodulator_impl.hpp`) — no callers (2026-11-10). It recognizes a frame only by the RAW magic
+  `55 4C`, so it would also miss whitened OFDM control frames (INV-FRAME-WHITEN-001) if revived.
+  **KEEP** the LDPC hunt's sibling `robustDecodeSingleCW` (`streaming_ofdm_decode.cpp`, live).
 - **R9. `src/gui/adaptive_mode.cpp` legacy SNR-threshold controller** — the old
   `>48 dB → QAM64 R5/6` ladder (`:28-40`). NOT the production auto path (`recommendDataMode` /
   `selectCoherentOFDM` is), and it is the last live picker of `CodeRate::R5_6` after R5/6 was

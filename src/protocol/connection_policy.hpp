@@ -1290,8 +1290,10 @@ inline LadderRung selectLadderRung(float snr_db, float fading_index) {
 // that scales every burst to the same PEAK (the hardware TX path, normalizeTxBurstForHardware; a
 // real PA is peak-limited too) sends OFDM data ofdm_offset_db weaker in average in-band power,
 // because OFDM's peak-to-average ratio is higher (2026-11-09, production encoder at the hardware
-// peak target: MC-DPSK CONNECT -7.7 dB, OFDM data bursts -10.5..-11.6 dB vs the sim reference).
-// The OFDM floors and anchors are in OFDM's own SNR, so OFDM candidacy and its entry rate are
+// peak target: MC-DPSK CONNECT -7.7 dB, OFDM data bursts -10.5..-11.6 dB vs the sim reference;
+// 2026-11-10, once the burst opening no longer sets the burst's peak (INV-FRAME-WHITEN-001):
+// OFDM data -8.2..-8.6 dB). The OFDM floors and anchors are in OFDM's own SNR, so OFDM candidacy
+// and its entry rate are
 // judged at snr_db - ofdm_offset_db; the MC-DPSK rungs keep the measured SNR, which was measured
 // on MC-DPSK. ofdm_offset_db is 0 when the transmitter normalizes average power (the default
 // simulator), so the pick is unchanged there.
@@ -1303,9 +1305,19 @@ inline bool paprSnrCorrectionEnabled() {
     return on;
 }
 
-// Prior for a peak-normalized transmitter before this station has measured its own bursts:
-// midpoint of the chirp-anchored (2.9 dB) and chirp-less (3.9 dB) OFDM bursts above.
-inline constexpr float kPeakNormalizedOfdmBelowMcDpskDb = 3.4f;
+// Prior for a peak-normalized transmitter before this station has measured its own bursts: the
+// in-band level gap between the MC-DPSK CONNECT body and the OFDM data body of the 5-6 s entry
+// bursts, from GUI-gate TX recordings (`--tx-model hardware --record`). 1.0 dB since the control
+// frames are whitened and the settling fill has no outlier symbol (2026-11-10: 0.79-1.23 dB, the
+// data's own peak statistics). 3.4 dB was the gap while the unscrambled BURST_HEADER symbol set
+// every OFDM burst's peak (2.7-3.2 dB on the bodies); it still applies to a sender running
+// ULTRA_CONTROL_WHITEN=0.
+inline constexpr float kPeakNormalizedOfdmBelowMcDpskDb = 1.0f;
+inline constexpr float kPeakNormalizedOfdmBelowMcDpskUnwhitenedDb = 3.4f;
+inline float peakNormalizedOfdmBelowMcDpskPriorDb() {
+    return v2::controlFrameWhiteningEnabled() ? kPeakNormalizedOfdmBelowMcDpskDb
+                                              : kPeakNormalizedOfdmBelowMcDpskUnwhitenedDb;
+}
 
 inline LadderRung selectLadderRungPaprCorrected(float snr_db, float fading_index,
                                                 float ofdm_offset_db) {

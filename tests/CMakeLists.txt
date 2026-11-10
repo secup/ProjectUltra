@@ -96,6 +96,13 @@ target_link_libraries(test_frame_structure_detector PRIVATE ultra_core)
 target_include_directories(test_frame_structure_detector PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME FrameStructureDetector COMMAND test_frame_structure_detector)
 
+# OFDM control-frame whitening (INV-FRAME-WHITEN-001): round trip of both forms, the receiver codec
+# wrapper, and the descriptor's PAPR outlier removed.
+add_executable(test_control_frame_whitening test_control_frame_whitening.cpp)
+target_link_libraries(test_control_frame_whitening PRIVATE ultra_core)
+target_include_directories(test_control_frame_whitening PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME ControlFrameWhitening COMMAND test_control_frame_whitening)
+
 # LTS-pair frame CFO update (src/ofdm/lts_cfo_update.hpp): derived laws vs Monte Carlo.
 add_executable(test_lts_cfo_update test_lts_cfo_update.cpp)
 target_include_directories(test_lts_cfo_update PRIVATE ${CMAKE_SOURCE_DIR}/src)

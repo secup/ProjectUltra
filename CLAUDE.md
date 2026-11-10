@@ -155,9 +155,12 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
   windowed-sinc time scaling, chunk-invariant). Until 2026-11-09 both simulated stations shared
   one sample clock.
   Real-station TX levels: `--tx-model hardware` (every burst at the same PEAK like the hardware
-  path, so OFDM data rides ~3-4 dB below the MC-DPSK CONNECT) and the radio's ALC/PA `--tx-pa SPEC`
-  (`TxPaAlcChannelModel`). The connect-time pick corrects for that gap on a peak-limited TX
-  (INV-SNR-PAPR-001, `ULTRA_PAPR_SNR_CORRECTION`; set it to 0 on a bench whose noise tracks the signal).
+  path, so OFDM data rides ~1 dB below the MC-DPSK CONNECT — 3-4 dB until 2026-11-10, when the
+  unscrambled BURST_HEADER symbol set every burst's peak, INV-FRAME-WHITEN-001) and the radio's
+  ALC/PA `--tx-pa SPEC` (`TxPaAlcChannelModel`). The connect-time pick corrects for that gap on a
+  peak-limited TX (INV-SNR-PAPR-001, `ULTRA_PAPR_SNR_CORRECTION`; set it to 0 on a bench whose noise
+  tracks the signal). Before blaming a waveform's PAPR, record the TX (`--record`) and find which
+  symbol sets the burst's peak.
 - Per-symbol pilot tracking is active in `channel_equalizer.cpp` (LS pilot H update,
   alpha-smoothed, residual CFO + timing recovery; pilots ~every 10 carriers).
 - **Recommendation:** OFDM_CHIRP with DQPSK; rate auto via `selectOFDMCodeRate()`.

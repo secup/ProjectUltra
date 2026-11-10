@@ -163,7 +163,8 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
     waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
     frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
         mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
-    frame_decoder_.codec_ = fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4);
+    frame_decoder_.codec_ = withControlUnwhitening(
+        fec::CodecFactory::create(fec::CodecType::LDPC, CodeRate::R1_4));
 
     LOG_MODEM(INFO, "StreamingDecoder: Initialized (buffer=%zu samples)", sync_controller_.ring_.buffer_capacity_samples_);
 
@@ -1660,7 +1661,7 @@ void StreamingDecoder::setCodecType(fec::CodecType type) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (codec_type_ == type) return;
     codec_type_ = type;
-    frame_decoder_.codec_ = fec::CodecFactory::create(type, code_rate_);
+    frame_decoder_.codec_ = withControlUnwhitening(fec::CodecFactory::create(type, code_rate_));
 }
 
 // ============================================================================

@@ -397,7 +397,7 @@ private:
         // the same average level (no gap). The measured prior; the GUI refines it live.
         engine_.setTxPaprOffsetDb(cfg_.sim_audio
                                       ? 0.0f
-                                      : ultra::protocol::connection_policy::kPeakNormalizedOfdmBelowMcDpskDb);
+                                      : ultra::protocol::connection_policy::peakNormalizedOfdmBelowMcDpskPriorDb());
         engine_.setMeasuredSNR(cfg_.snr_db, ultra::SNRSource::NONE);
         // Inbound bulk transfers (the peer's accumulated data-port stream, shipped as a
         // modem file transfer) reconstruct here; TNCBridge::onFileReceived reads the wire

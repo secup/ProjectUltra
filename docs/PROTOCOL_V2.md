@@ -225,6 +225,12 @@ Two distinct paths are used.
 1. Control frames (`isControlFrame == true`)
 - Encoded as 1-CW control at hardened profile: `DQPSK + R1/4`
 - Receiver first tries OFDM control-profile decode before data-profile decode
+- Whitened (2026-11-10, INV-FRAME-WHITEN-001): the sender XORs the 20 frame bytes with the fixed
+  sequence `v2::kControlFrameWhitening` before LDPC encoding, so the header cannot line the
+  symbol's carriers up into a peak. A whitened frame decodes to the whitened magic `38 50`; the
+  receiver XORs it back (`v2::unwhitenControlCodeword`, in its LDPC codec wrapper). Raw-magic frames
+  (`55 4C`: MC-DPSK control frames, a sender with `ULTRA_CONTROL_WHITEN=0`) are accepted unchanged,
+  so the two stations need not agree; a pre-2026-11-10 receiver cannot read whitened frames.
 
 2. Non-control frames (data/connect)
 - Encoded through fixed 4-CW frame path with frame-level interleaving

@@ -320,7 +320,10 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
     }
 
     Bytes data;
-    if (ok) data.assign(decoded.begin(), decoded.end());
+    if (ok) {
+        data.assign(decoded.begin(), decoded.end());
+        v2::unwhitenControlCodeword(data);  // INV-FRAME-WHITEN-001: no-op unless whitened
+    }
     return {ok, data};
 }
 

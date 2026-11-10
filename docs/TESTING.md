@@ -57,7 +57,8 @@ tools/gui_qso_scenario.sh --channel awgn --snr-db 20 --cfo-hz 7.3 --clock-ppm 50
 
 # A real station's TX levels: every burst at the same PEAK (high-PAPR OFDM rides below MC-DPSK),
 # plus the radio's ALC/PA driven 3 dB hot. The dial stays referenced to the simulator's reference
-# level, so the CONNECT arrives ~7.7 dB and OFDM data ~10.5-11.6 dB below the dial.
+# level, so the CONNECT arrives ~7.7 dB and OFDM data ~8.2-8.6 dB below the dial. Add --record to
+# capture each station's TX audio (OUT/{alpha,bravo}_tx.f32) and see which symbol sets a burst's peak.
 tools/gui_qso_scenario.sh --channel good --snr-db 20 --tx-model hardware --tx-pa drive_db=3 --out /tmp/X
 
 # Force a specific PHY rung (measurement only — bypasses rate control)

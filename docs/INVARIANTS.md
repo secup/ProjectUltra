@@ -372,6 +372,24 @@ average power, by the station's measured TX PAPR offset. Judge OFDM candidacy an
 measured on MC-DPSK. The offset comes from the station's own normalized bursts (0 when the TX
 normalizes average power, as the default simulator does), is handed to `Connection` lock-free, and
 is disabled with `ULTRA_PAPR_SNR_CORRECTION=0` on a bench whose noise tracks the signal level.
+The prior used before the station has measured its own bursts is 1.0 dB with whitened control
+frames (`peakNormalizedOfdmBelowMcDpskPriorDb`; 3.4 dB with `ULTRA_CONTROL_WHITEN=0`); re-measure
+it from a `--tx-model hardware --record` TX recording whenever a burst's opening content changes.
+
+### INV-FRAME-WHITEN-001: nothing but the data sets an OFDM burst's peak
+
+**Rule:** every burst is scaled to its loudest sample on a peak-limited transmitter, so no
+deterministic content in a burst may peak above the data that follows. One-codeword OFDM control
+frames (the BURST_HEADER descriptor leads every burst) are XORed with `v2::kControlFrameWhitening`
+before LDPC encoding; the receiver restores them after decoding by their whitened magic (the LDPC
+decode does not depend on the whitening), in `ControlUnwhiteningCodec` / `robustDecodeSingleCW` /
+`decodeSingleCodeword`, before any header peek. The chirp-less burst's settling fill redraws any
+symbol whose sample peak exceeds a typical data symbol's (10 dB over RMS). **Why:** unscrambled,
+the descriptor's systematic header bits put one QPSK point on 34 of 59 carriers and its symbol
+peaked 15.3 dB over the burst RMS against the data's own 12.3-13.3 dB, holding every OFDM burst
+2.0-2.9 dB down; a fixed fill symbol at 13.1 dB cost chirp-less bursts up to 0.7 dB more.
+**Test:** `ControlFrameWhitening` (both forms round-trip byte-exact, raw headers and data
+codewords untouched, the codec wrapper, descriptor envelope peak 13.1 -> 10.3 dB, fill bound).
 ---
 
 ## Sample Position Invariants
