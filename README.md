@@ -45,7 +45,8 @@ view.
 ## Performance
 
 All figures are goodput: file bytes delivered and CRC-verified per second of transfer, with
-retransmissions and turnarounds included. Connection setup (about 30 s) is not included.
+retransmissions and turnarounds included. Connection setup (about 14 s on `main`, 24 s in v0.6.1) is
+not included.
 
 ### v0.6.0, software channel simulator
 
@@ -226,7 +227,8 @@ before transmitting, use the minimum power needed, and be ready to move.
 ## Roadmap
 
 - Validate v0.6.1 on the hardware channel simulator (both stations on the same build).
-- Shorten connection setup (about 30 s today).
+- Shorten connection setup further (about 14 s on `main`; the CONNECT/CONNECT_ACK exchange is
+  most of it).
 - Leaner frame headers, which matter most at the lowest rung.
 - Broader two-way over-the-air testing, especially at low SNR.
 

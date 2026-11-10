@@ -8,6 +8,19 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-CONNECT-PICK-LOW-SNR-FADING (open, 2026-11-10) — P2: OFDM picked at Good@4-6 from a "selection SNR" 6-9 dB above the measured CONNECT
+
+**What.** On the GUI gate at ITU Good 4-6 dB the responder's entry pick selected OFDM QPSK
+R1/4-R1/2 while the CONNECT's own data-aided SNR read 0.1-3.6 dB: `Adaptive ladder selected
+OFDM_CHIRP (SNR=2.0 sel=8.1 (mcdpsk_in_band), ...)`, `SNR=0.1 sel=9.9`, `SNR=-0.9 sel=8.1`
+(old and new builds alike). OFDM then runs at an effective SNR near or below its floor and the
+transfer is a coin flip: passes at 150-640 bps, or stalls (BUG-CFO-REVOKE-TO-ZERO when the first
+descriptor is lost). `sel` is `connectSelectionSnrDb` (connection_policy.hpp, fade basis and
+physical-SNR terms); which term lifts it this far is not yet analysed.
+
+**Next.** Log the terms of `connectSelectionSnrDb` at the pick and compare with the OFDM SNR the
+data then actually sees, across Good 4-10 dB seeds.
+
 ### BUG-BACKSTOP-RACES-RTO (open, 2026-11-10) — P2: the backstop's re-confirm ACK fires as the sender's resend starts
 
 **What.** The anchored-burst ACK backstop (`streaming_sync_acquisition.cpp`, F165) fires 14.6 s

@@ -538,13 +538,17 @@ void test_connect_frame_roundtrip_and_crc() {
 
         auto serialized = connect.serialize();
         assert(serialized.size() == DataFrame::HEADER_SIZE + ConnectFrame::PAYLOAD_SIZE + DataFrame::CRC_SIZE);
-        assert(serialized[12] == FIXED_FRAME_CODEWORDS);
+        // 35 bytes in a fixed 2-codeword R1/4 frame (2026-11-10: the destination callsign is
+        // dst_hash only; 45 bytes in 4 codewords before).
+        assert(serialized.size() == 35);
+        assert(serialized[12] == kConnectFrameCodewords);
 
         auto parsed = ConnectFrame::deserialize(serialized);
         assert(parsed.has_value());
         assert(parsed->type == FrameType::CONNECT);
         assert(parsed->getSrcCallsign() == "VA2MVR/P");
-        assert(parsed->getDstCallsign() == "W1AW");
+        assert(parsed->dst_hash == hashCallsign("W1AW"));
+        assert(parsed->src_hash == hashCallsign("VA2MVR/P"));
         assert(parsed->mode_capabilities == ModeCapabilities::ALL);
         assert(parsed->negotiated_mode == static_cast<uint8_t>(WaveformMode::OFDM_CHIRP));
         assert(parsed->initial_modulation == static_cast<uint8_t>(Modulation::DQPSK));

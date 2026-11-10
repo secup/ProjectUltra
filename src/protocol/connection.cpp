@@ -7082,7 +7082,7 @@ uint32_t Connection::connectControlFrameAirtimeMs() const {
         control_mod = config_.forced_modulation;
     }
 
-    const int connect_cw_count = v2::kDefaultFixedFrameCodewords;
+    const int connect_cw_count = v2::kConnectFrameCodewords;
     const auto timing = connection_policy::mcDpskFrameTiming(
         control_mod,
         config_.mc_dpsk_num_carriers,

@@ -141,7 +141,7 @@ inline PingFrameDecision evaluatePingFrame(
     // point an absolute data_rms floor is acceptable as a last-resort tie-break
     // for a low-level noisy ping whose 4-CW decode produced nothing. The
     // *pre*-decode WAIT decision must NOT use this absolute floor (it would skip
-    // the 4-CW CONNECT decode for a low-level-but-real CONNECT) — it gates on
+    // the fixed CONNECT decode for a low-level-but-real CONNECT) — it gates on
     // ping_by_silence (ratiometric) only. See streaming_ofdm_decode.cpp ~1290.
     // Payload absence, most-principled test first: (a) ratiometric silence,
     // (b) noise-relative — the gap reads as the receiver's own idle noise

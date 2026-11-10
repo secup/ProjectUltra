@@ -20,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cassert>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -233,6 +234,12 @@ static bool hasInvalidOFDMTraining(IWaveform* waveform, bool is_ofdm, bool conne
     lts_channel_mag = waveform->getLastLTSChannelMagnitude();
     return signal_policy::invalidOFDMLTSTraining(
         is_ofdm, connected, lts_signal_power, lts_channel_mag);
+}
+
+size_t StreamingDecoder::pingWindowSamples() const {
+    const size_t sps = waveform_ ? static_cast<size_t>(std::max(1, waveform_->getSamplesPerSymbol()))
+                                 : 512;
+    return 9 * sps + std::max(frame_policy::kPingRMSCheckSamples, 3 * sps);
 }
 
 // Robust single-CW LDPC decode with Phase 0 decoder diversity (up to 4 retries)
@@ -1117,6 +1124,8 @@ void StreamingDecoder::decodeCurrentFrame() {
     const size_t ping_training_skip = 9 * mc_dpsk_symbol_samples;
     const size_t ping_check_samples = std::max(
         frame_policy::kPingRMSCheckSamples, 3 * mc_dpsk_symbol_samples);
+    // pingWindowSamples() must equal this span (the readiness gate releases the frame there).
+    assert(!allow_ping_detection || ping_training_skip + ping_check_samples == pingWindowSamples());
     auto evaluatePingDecision = [&](bool ldpc_attempted,
                                     bool ldpc_decode_succeeded,
                                     bool ldpc_magic_valid) {
@@ -1311,6 +1320,18 @@ void StreamingDecoder::decodeCurrentFrame() {
             emitPingFrame(ping_decision, false);
             return;
         }
+        // EARLY PING VERDICT: this slice is only the PING window. Not a silent PING, so hold
+        // the frame (sync_position_ untouched) for the full control requirement; the CW0 /
+        // fixed-CONNECT decode and PATH2 then run exactly as before on the full slice.
+        if (frame_truncated && pending_total_cw_ == 0 &&
+            ping_window_checked_sync_pos_ != sync_position_ + 1) {
+            ping_window_checked_sync_pos_ = sync_position_ + 1;
+            state_ = DecoderState::SYNC_FOUND;
+            return;
+        }
+        // Full slice: the episode is over. Clear the ring-position key so a later sync at the
+        // same ring index (after a wrap) gets its own early check.
+        if (!frame_truncated) ping_window_checked_sync_pos_ = 0;
     }
 
     // Connected OFDM control-first hypothesis:
@@ -2531,7 +2552,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                     return true;
                 }
                 const auto ping_decision = evaluatePingDecision(true, false, false);
-                // Gate the 4-CW CONNECT decode on the RATIOMETRIC silence test
+                // Gate the fixed CONNECT decode on the RATIOMETRIC silence test
                 // only — NOT the full is_ping (which also fires on an absolute
                 // data_rms<=0.16 floor via ping_by_chirp_lock). A real CONNECT on
                 // a quieter analog chain (real soundcards/IONOS deliver ~half the
@@ -2560,7 +2581,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                          ping_decision.gap_is_noise);
             }();
             if (wait_for_fixed_connect) {
-                pending_total_cw_ = v2::kDefaultFixedFrameCodewords;
+                pending_total_cw_ = v2::kConnectFrameCodewords;
                 state_ = DecoderState::SYNC_FOUND;
                 LOG_MODEM(INFO,
                           "[%s] MC-DPSK CW0 failed with data energy; waiting for %d-CW fixed CONNECT frame (%d samples)",
@@ -3755,7 +3776,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
         fixed.sync_quality_db = snr;
         fixed.cfo_hz = cfo;
 
-        const int cw_count = v2::kDefaultFixedFrameCodewords;
+        const int cw_count = v2::kConnectFrameCodewords;
         const size_t frame_bits =
             static_cast<size_t>(fec::FrameInterleaver::totalFrameBits(cw_count));
         if (soft_bits.size() < frame_bits) {

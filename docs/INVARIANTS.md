@@ -309,6 +309,34 @@ TNC's immediate drop). **Test:** `ConnectionPolicy` (`test_deferred_tone_ack_pol
 
 ---
 
+## Handshake Invariants (2026-11-10)
+
+### INV-HANDSHAKE-001: a connect frame carries its sender's callsign and fits the smallest frame
+
+**Rule:** CONNECT / CONNECT_ACK / CONNECT_NAK carry the SENDER's full callsign (station
+identification) and address the peer by `dst_hash` only; nothing that is display-only goes on
+air. The MC-DPSK fixed frame is `v2::kConnectFrameCodewords`, the smallest R1/4 codeword count
+that holds the frame (two static_asserts pin it), and every connect-specific site — the encoder's
+fixed CONNECT, the receiver's fixed-CONNECT wait and decode, the half-open fallback span, the
+connect airtime and retry interval — uses that constant, never `kDefaultFixedFrameCodewords`
+(the data-frame default). **Why:** each handshake codeword costs 81 DBPSK symbols (1.73 s); the
+destination callsign and a padding codeword made the two connect frames 16.6 s of a 24 s
+handshake. **Test:** `FrameV2` (35-byte roundtrip, `TOTAL_CW` = 2), `StreamingMCDPSK` (CONNECT
+loopback, half-open fallback), `UltraTncSimAudio` (two TNCs connect end to end).
+
+### INV-HANDSHAKE-002: only a silent PING is decided early
+
+**Rule:** a disconnected MC-DPSK frame is first released at `pingWindowSamples()` — exactly the
+span PATH1's silence test reads (training skip + check window; `decodeCurrentFrame` asserts the
+two agree). PATH1 may emit a PING there; any other outcome holds the frame, with
+`sync_position_` untouched, until the full control requirement has arrived, so the CW0 /
+fixed-CONNECT decode, the pre-LDPC guards and PATH2 never see a shorter slice than before.
+**Why:** the verdict used to wait for a whole one-codeword slot (1.92 s) it never reads; PING and
+PONG each cost 1.6 s more than their content. **Test:** `PingDetector`, `StreamingMCDPSK`,
+`UltraTncSimAudio`; GUI gate PONG at 3.5 s instead of 6.7 s.
+
+---
+
 ## Rate Selection Invariants (2026-11-09)
 
 ### INV-RATE-EVM-001: EVM decode thresholds belong to ONE PHY configuration

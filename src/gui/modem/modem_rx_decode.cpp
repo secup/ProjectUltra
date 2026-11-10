@@ -85,7 +85,7 @@ void ModemEngine::notifyFrameParsed(const Bytes& frame_data, protocol::v2::Frame
     auto connect = v2::ConnectFrame::deserialize(frame_data);
     if (connect) {
         std::string src = connect->getSrcCallsign();
-        std::string dst = connect->getDstCallsign();
+        std::string dst;  // the frame names only its sender; the receiver is us
 
         if (src.empty()) {
             src = "UNKNOWN";

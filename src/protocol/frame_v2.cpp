@@ -1130,8 +1130,6 @@ ConnectFrame ConnectFrame::makeConnect(const std::string& src, const std::string
     // Copy callsigns (null-terminated, max 9 chars)
     std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
-    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
     f.mode_capabilities = mode_caps;
     f.negotiated_mode = forced_waveform;        // 0xFF = AUTO, else forced
@@ -1158,8 +1156,6 @@ ConnectFrame ConnectFrame::makeConnectAck(const std::string& src, const std::str
 
     std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
-    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
     // CONNECT_ACK reuses this byte to carry responder fading index.
     f.mode_capabilities = encodeFadingIndex(fading_index);
@@ -1185,8 +1181,6 @@ ConnectFrame ConnectFrame::makeConnectNak(const std::string& src, const std::str
 
     std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
-    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
@@ -1205,8 +1199,6 @@ ConnectFrame ConnectFrame::makeDisconnect(const std::string& src, const std::str
 
     std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-    std::strncpy(f.dst_callsign, dst.c_str(), MAX_CALLSIGN_LEN - 1);
-    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
@@ -1228,8 +1220,6 @@ ConnectFrame ConnectFrame::makeConnectAckByHash(const std::string& src, uint32_t
 
     std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-    // dst_callsign unknown - leave empty (will be filled from received CONNECT)
-    f.dst_callsign[0] = '\0';
 
     f.mode_capabilities = encodeFadingIndex(fading_index);
     f.negotiated_mode = neg_mode;
@@ -1254,7 +1244,6 @@ ConnectFrame ConnectFrame::makeConnectNakByHash(const std::string& src, uint32_t
 
     std::strncpy(f.src_callsign, src.c_str(), MAX_CALLSIGN_LEN - 1);
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-    f.dst_callsign[0] = '\0';
 
     f.mode_capabilities = 0;
     f.negotiated_mode = 0;
@@ -1263,8 +1252,8 @@ ConnectFrame ConnectFrame::makeConnectNakByHash(const std::string& src, uint32_t
 }
 
 Bytes ConnectFrame::serialize() const {
-    // Use DATA frame format: header (17B) + payload (25B) + CRC (2B) = 44 bytes
-    // Always uses 4 codewords with frame-level interleaving for fading resistance
+    // DATA frame format: header (17B) + payload (16B) + CRC (2B) = 35 bytes, sent as a fixed
+    // kConnectFrameCodewords R1/4 frame with frame-level interleaving.
     Bytes out;
     out.reserve(DataFrame::HEADER_SIZE + PAYLOAD_SIZE + DataFrame::CRC_SIZE);
 
@@ -1286,8 +1275,8 @@ Bytes ConnectFrame::serialize() const {
     out.push_back((dst_hash >> 8) & 0xFF);
     out.push_back(dst_hash & 0xFF);
 
-    // Total codewords (1 byte) - default fixed-frame count for compatibility
-    out.push_back(kDefaultFixedFrameCodewords);
+    // Total codewords (1 byte): the fixed handshake frame's codeword count
+    out.push_back(static_cast<uint8_t>(kConnectFrameCodewords));
 
     // Payload length (2 bytes)
     out.push_back((PAYLOAD_SIZE >> 8) & 0xFF);
@@ -1298,13 +1287,10 @@ Bytes ConnectFrame::serialize() const {
     out.push_back((hcrc >> 8) & 0xFF);
     out.push_back(hcrc & 0xFF);
 
-    // Payload: src_callsign (10B) + dst_callsign (10B) + caps (1B) + wfmode (1B)
-    //          + mod (1B) + rate (1B) + snr (1B) + cw_count (1B) = 26B
+    // Payload: src_callsign (10B) + caps (1B) + wfmode (1B) + mod (1B) + rate (1B)
+    //          + snr (1B) + cw_count (1B) = 16B. The destination is dst_hash only.
     for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
         out.push_back(static_cast<uint8_t>(src_callsign[i]));
-    }
-    for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
-        out.push_back(static_cast<uint8_t>(dst_callsign[i]));
     }
     out.push_back(mode_capabilities);
     out.push_back(negotiated_mode);
@@ -1376,12 +1362,7 @@ std::optional<ConnectFrame> ConnectFrame::deserialize(ByteSpan data) {
     }
     f.src_callsign[MAX_CALLSIGN_LEN - 1] = '\0';  // Ensure null-terminated
 
-    for (int i = 0; i < MAX_CALLSIGN_LEN; i++) {
-        f.dst_callsign[i] = static_cast<char>(data[payload_offset + MAX_CALLSIGN_LEN + i]);
-    }
-    f.dst_callsign[MAX_CALLSIGN_LEN - 1] = '\0';
-
-    size_t field_offset = payload_offset + 2 * MAX_CALLSIGN_LEN;
+    size_t field_offset = payload_offset + MAX_CALLSIGN_LEN;
     f.mode_capabilities = data[field_offset];
     f.negotiated_mode = data[field_offset + 1];
     f.initial_modulation = data[field_offset + 2];
@@ -1405,9 +1386,6 @@ std::string ConnectFrame::getSrcCallsign() const {
     return std::string(src_callsign);
 }
 
-std::string ConnectFrame::getDstCallsign() const {
-    return std::string(dst_callsign);
-}
 
 bool hasPhyMaskV1Capability(const ConnectFrame& frame) {
     if (frame.type == FrameType::CONNECT_ACK) {

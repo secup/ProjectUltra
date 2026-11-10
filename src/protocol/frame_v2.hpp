@@ -714,14 +714,16 @@ struct DataFrame {
 // ============================================================================
 // Connect Frame (for ham-compliant callsign identification)
 // ============================================================================
-// Uses DATA frame structure for variable length, carrying full callsigns.
-// This ensures proper callsign identification per ham radio regulations.
+// Uses DATA frame structure, carrying the SENDER's full callsign: each station identifies
+// itself in its own handshake frame (CONNECT: the initiator, CONNECT_ACK: the responder). The
+// destination is addressed by dst_hash only — the receiver knows its own callsign — so the
+// frame does not repeat it (removed 2026-11-10; it was display-only and cost a whole codeword).
 //
 // Payload format:
-// ┌────────────┬────────────┬──────┬──────┬─────┬──────┬─────┐
-// │ SRC_CALL   │ DST_CALL   │ CAPS │ WFMOD│ MOD │ RATE │ SNR │
-// │ 10B (null) │ 10B (null) │  1B  │  1B  │ 1B  │  1B  │ 1B  │  = 25 bytes payload
-// └────────────┴────────────┴──────┴──────┴─────┴──────┴─────┘
+// ┌────────────┬──────┬──────┬─────┬──────┬─────┬────────┐
+// │ SRC_CALL   │ CAPS │ WFMOD│ MOD │ RATE │ SNR │ CW/RUNG│
+// │ 10B (null) │  1B  │  1B  │ 1B  │  1B  │ 1B  │   1B   │  = 16 bytes payload
+// └────────────┴──────┴──────┴─────┴──────┴─────┴────────┘
 //
 // CONNECT frame fields (dual meaning based on frame type):
 //   - mode_capabilities: CONNECT = our supported waveform modes (bitmap)
@@ -738,11 +740,12 @@ struct DataFrame {
 // When forced values are set (not 0xFF), responder MUST use them.
 // When AUTO (0xFF), responder chooses based on measured SNR.
 //
-// Total frame: 17B header + 25B payload + 2B CRC = 44 bytes
-// Always uses 4 codewords with frame-level interleaving for fading resistance.
+// Total frame: 17B header + 16B payload + 2B CRC = 35 bytes, sent as a fixed
+// kConnectFrameCodewords (2) R1/4 frame with frame-level interleaving (was 45 bytes in a padded
+// 4-codeword frame: 8.3 s of DBPSK airtime per handshake frame instead of 4.8 s).
 struct ConnectFrame {
     static constexpr size_t MAX_CALLSIGN_LEN = 10;  // 9 chars + null terminator
-    static constexpr size_t PAYLOAD_SIZE = 26;       // 10 + 10 + 1 + 1 + 1 + 1 + 1 + 1 (cw_count)
+    static constexpr size_t PAYLOAD_SIZE = 16;       // 10 + 1 + 1 + 1 + 1 + 1 + 1 (cw_count)
 
     FrameType type = FrameType::CONNECT;
     uint8_t flags = Flags::VERSION_V2;
@@ -750,8 +753,7 @@ struct ConnectFrame {
     uint32_t src_hash = 0;  // For routing (24-bit)
     uint32_t dst_hash = 0;  // For routing (24-bit)
 
-    char src_callsign[MAX_CALLSIGN_LEN] = {0};  // Full source callsign
-    char dst_callsign[MAX_CALLSIGN_LEN] = {0};  // Full destination callsign
+    char src_callsign[MAX_CALLSIGN_LEN] = {0};  // Full source callsign (the sender's ID)
     uint8_t mode_capabilities = 0;               // Supported waveform modes (CONNECT)
     uint8_t negotiated_mode = 0;                 // Forced/negotiated waveform (0xFF=AUTO)
 
@@ -796,9 +798,8 @@ struct ConnectFrame {
     // Deserialize from bytes
     static std::optional<ConnectFrame> deserialize(ByteSpan data);
 
-    // Get callsigns as strings
+    // Get the sender's callsign as a string
     std::string getSrcCallsign() const;
-    std::string getDstCallsign() const;
 };
 
 bool hasPhyMaskV1Capability(const ConnectFrame& frame);
@@ -1166,6 +1167,14 @@ inline constexpr int kMinFixedFrameCodewords = 1;
 // the collapse was the tone-lock + anchor-wait-disarm bugs, not PAPR.
 inline constexpr int kMaxFixedFrameCodewords = 16;
 inline constexpr int kDefaultFixedFrameCodewords = 4;
+// The MC-DPSK CONNECT / CONNECT_ACK / CONNECT_NAK fixed frame: the smallest R1/4 codeword count
+// that holds a ConnectFrame (2 x 20 bytes >= 35). Every handshake codeword costs 81 DBPSK symbols
+// (1.73 s on the robust 8-carrier profile), so this count IS the handshake airtime.
+inline constexpr int kConnectFrameCodewords = 2;
+static_assert(17 + ConnectFrame::PAYLOAD_SIZE + 2 <= static_cast<size_t>(kConnectFrameCodewords) * 20,
+              "a ConnectFrame must fit its fixed R1/4 frame");
+static_assert(17 + ConnectFrame::PAYLOAD_SIZE + 2 > static_cast<size_t>(kConnectFrameCodewords - 1) * 20,
+              "kConnectFrameCodewords is the smallest frame that holds a ConnectFrame");
 inline constexpr int FIXED_FRAME_CODEWORDS = kDefaultFixedFrameCodewords;  // source compatibility
 constexpr uint16_t DISCONNECT_SEQ = 0xFFFF;  // Unique seq for DISCONNECT (won't collide with ARQ 0-based seqs)
 constexpr int FIXED_FRAME_OVERHEAD = DataFrame::HEADER_SIZE + DataFrame::CRC_SIZE;  // 17 + 2 = 19 bytes

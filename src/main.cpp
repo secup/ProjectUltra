@@ -265,8 +265,11 @@ int runProtocolRx(const char* input_file, WaveformType waveform, CodeRate rate) 
         // Try parsing as ConnectFrame (CONNECT, DISCONNECT, etc.)
         auto connect = v2::ConnectFrame::deserialize(data);
         if (connect) {
+            char dst_hex[16];
+            std::snprintf(dst_hex, sizeof(dst_hex), "0x%06X",
+                          static_cast<unsigned>(connect->dst_hash & 0xFFFFFFu));
             std::cerr << "    " << connect->getSrcCallsign()
-                      << " -> " << connect->getDstCallsign() << "\n";
+                      << " -> (hash " << dst_hex << ")\n";
             return;
         }
 

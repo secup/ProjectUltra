@@ -59,14 +59,20 @@ There are 4 practical families on air.
 
 1. Raw Ping/Pong (no LDPC frame container)
 2. ControlFrame (20 bytes)
-3. ConnectFrame (serialized as Data-style frame, 44 bytes)
+3. ConnectFrame (serialized as Data-style frame, 35 bytes)
 4. DataFrame (variable serialized size)
 
 ### Raw Ping/Pong
 
-- Bytes: `55 4C 54 52` (`ULTR`)
-- Used for quick presence probe before full CONNECT
-- Not wrapped in v2 frame format
+- On air: the MC-DPSK dual chirp + 8 training symbols + 1 reference symbol (`encodePing` =
+  `generatePreamble`), no data, no LDPC, no addressing (66 816 samples, 1.39 s). A PONG is the
+  same waveform. The `PingFrame` "ULTR" struct is not sent; it survives only in tools and tests.
+- Meaning comes from local state: a bare chirp received while DISCONNECTED is a PING (answer
+  with a PONG); while PROBING it is the PONG (send the CONNECT).
+- The receiver classifies it by the silence after the training symbols (PATH1, data/training RMS
+  over the next 5 000 samples) and, at low SNR, by a solid chirp lock with no decodable payload
+  (PATH2). Since 2026-11-10 PATH1 is judged as soon as those 14 216 samples have arrived, not
+  after a whole one-codeword slot (INV-HANDSHAKE-002).
 
 ### ControlFrame (20 bytes)
 
@@ -81,25 +87,28 @@ Used by frame types where `v2::isControlFrame(type)` is true:
 Layout:
 - `MAGIC(2) TYPE(1) FLAGS(1) SEQ(2) SRC_HASH(3) DST_HASH(3) TOTAL_CW(1) LEN(2) HCRC(2) PAYLOAD(LEN) FCRC(2)`
 
-### ConnectFrame (44 bytes serialized)
+### ConnectFrame (35 bytes serialized)
 
-ConnectFrame uses DataFrame-style header + fixed payload:
-- Header: 17 bytes
-- Payload: 25 bytes
+ConnectFrame uses DataFrame-style header + fixed payload (INV-HANDSHAKE-001):
+- Header: 17 bytes (`TOTAL_CW` = `kConnectFrameCodewords` = 2, `LEN` = 16)
+- Payload: 16 bytes
 - Frame CRC: 2 bytes
-- Total serialized bytes: 44
+- Total serialized bytes: 35, sent over MC-DPSK as a fixed 2-codeword R1/4 frame with
+  frame-level interleaving (4.8 s of DBPSK airtime; 45 bytes in 4 codewords, 8.3 s, before
+  2026-11-10)
 
 Payload fields:
-- `SRC_CALL[10]`
-- `DST_CALL[10]`
-- `mode_capabilities[1]`
+- `SRC_CALL[10]` — the SENDER's callsign (station identification: CONNECT carries the
+  initiator's, CONNECT_ACK the responder's). The destination is `DST_HASH` only.
+- `mode_capabilities[1]` (CONNECT_ACK: the responder's fading index)
 - `negotiated_mode[1]`
 - `initial_modulation[1]`
 - `initial_code_rate[1]`
-- `measured_snr[1]`
+- `measured_snr[1]` (CONNECT_ACK)
+- `cw_count[1]` (bits 0-3 CW count, 4-6 ladder rung on CONNECT_ACK, 7 PHY_MASK_V1 on CONNECT_ACK)
 
 Used for:
-- `CONNECT`, `CONNECT_ACK`, `CONNECT_NAK`, `DISCONNECT`
+- `CONNECT`, `CONNECT_ACK`, `CONNECT_NAK` (DISCONNECT is a ControlFrame)
 
 Special value:
 - `DISCONNECT_SEQ = 0xFFFF`
@@ -216,7 +225,8 @@ Current data modulation policy:
 - For non-20-byte frames, encoder patches `TOTAL_CW` + CRCs to match actual encoded CW count before TX
 
 Typical handshake observation:
-- 44-byte ConnectFrame over MC-DPSK R1/4 encodes to 3 CWs on air
+- The 35-byte ConnectFrame goes out as a fixed 2-codeword interleaved R1/4 frame (the
+  receiver waits for `kConnectFrameCodewords` when CW0 alone does not decode)
 
 ### OFDM path
 

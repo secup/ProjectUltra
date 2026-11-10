@@ -875,7 +875,7 @@ bool StreamingDecoder::tryDecodePendingHandshakeMCDPSKConnect() {
         }
 
         // The detector can lock as soon as training begins.  Do not consume the
-        // candidate until all four fixed CONNECT codewords are physically in the
+        // candidate until every fixed CONNECT codeword (kConnectFrameCodewords) is in the
         // ring; processBuffer remains non-blocking while those samples arrive.
         if (total_fed < candidate.training_abs ||
             total_fed - candidate.training_abs < candidate.required_samples) {

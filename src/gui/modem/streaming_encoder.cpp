@@ -1196,8 +1196,8 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
 
         if (is_connect_frame) {
             if (tx_data.size() >= v2::DataFrame::HEADER_SIZE &&
-                tx_data[12] != v2::kDefaultFixedFrameCodewords) {
-                tx_data[12] = v2::kDefaultFixedFrameCodewords;
+                tx_data[12] != v2::kConnectFrameCodewords) {
+                tx_data[12] = v2::kConnectFrameCodewords;
                 uint16_t hcrc = v2::ControlFrame::calculateCRC(tx_data.data(), 15);
                 tx_data[15] = (hcrc >> 8) & 0xFF;
                 tx_data[16] = hcrc & 0xFF;
@@ -1208,10 +1208,10 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
             }
 
             Bytes encoded = v2::encodeFixedFrame(
-                tx_data, CodeRate::R1_4, v2::kDefaultFixedFrameCodewords);
+                tx_data, CodeRate::R1_4, v2::kConnectFrameCodewords);
             LOG_MODEM(INFO, "[%s] MC-DPSK fixed CONNECT: %zu bytes -> %d CWs (%zu coded, frame_interleave=yes)",
                       log_prefix_.c_str(), tx_data.size(),
-                      v2::kDefaultFixedFrameCodewords, encoded.size());
+                      v2::kConnectFrameCodewords, encoded.size());
             return encoded;
         }
 

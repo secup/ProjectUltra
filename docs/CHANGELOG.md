@@ -10,6 +10,63 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — PERF(handshake): 2-codeword connect frames and an early PING verdict, 24.0 → 13.7 s (INV-HANDSHAKE-001/002)
+
+**What was slow.** "Connecting" to "Connected" took 24.0 s on every GUI-gate run (89 runs,
+23.9-24.1 s); the first data burst followed at 26.1 s. Two thirds of it was the two connect
+frames: a 45-byte ConnectFrame padded to a fixed 4-codeword R1/4 frame on the robust 8-carrier
+DBPSK profile, 8.3 s of airtime each (frame bytes 40-44 sat in CW2 and CW3 was pure padding).
+10 of the 45 bytes were the destination callsign, which no receiver uses (address filtering is
+`dst_hash`; the hash-addressed ACK variants already sent it empty).
+
+**What changed.**
+- `ConnectFrame`: the destination callsign is no longer on air (field and `getDstCallsign`
+  removed): 17 + 16 + 2 = 35 bytes. Each station still sends its own callsign in its own frame
+  (station identification).
+- `v2::kConnectFrameCodewords` = 2, pinned by two static_asserts as the smallest R1/4 frame that
+  holds a ConnectFrame. Used by every connect-specific site: the encoder's fixed CONNECT, the
+  receiver's fixed-CONNECT wait (`pending_total_cw_`) and decode (`tryFixedConnectFrame`), the
+  half-open CONNECT fallback span, `Connection::connectControlFrameAirtimeMs` (8504 → 5048 ms,
+  so the CONNECT retry interval drops from 34.0 s to 20.2 s and the responder fail-safe with it).
+- Displays: the GUI shows the local callsign as the destination (existing fallback); the CLI
+  prints the destination hash.
+- **Over the air:** not compatible with v0.6.1 (a 45-byte CONNECT is not understood).
+
+**Verification.**
+- `FrameV2` (35-byte roundtrip, `TOTAL_CW` = 2, hashes), full `ctest` 111/111; `StreamingMCDPSK`
+  CONNECT loopback and half-open fallback, `UltraTncSimAudio` (two TNCs connect end to end).
+- GUI gate, interleaved old/new builds, 11 scenarios (AWGN 20 and 3, Good 20 / 6 / 4, Moderate 10,
+  hardware-TX dial 15): "Connected" at 24.0 → 17.0-17.1 s in every one, every connect on its
+  first CONNECT in both arms, including AWGN@3 and Good@4. First data 26.0 → 19.1 s.
+- Not a handshake effect but seen in the same batch: three low-SNR fading transfers failed on
+  the new build. Two were BUG-CFO-REVOKE-TO-ZERO (the first burst lost its descriptor and the
+  receiver's CFO was revoked to 0 Hz — the whole timeline is 7 s earlier, so a different burst
+  met the fade); one connected into MC-DPSK and hit the 1 KB time limit. The connect picks of
+  those pairs were identical OFDM picks at a "selection SNR" of 8-10 dB while the CONNECT itself
+  measured 0-3.6 dB (pre-existing; see KNOWN_BUGS).
+- Entry measurement: the data-aided connect SNR now averages a 3.5 s frame instead of 6.9 s, so
+  the fading entry pick is noisier; the entry calibration was measured on 4-CW CONNECTs.
+
+**Second part: the PING/PONG verdict.** A disconnected MC-DPSK receiver classified a bare chirp
+only once a whole one-codeword control slot had arrived (92 160 samples, 1.92 s after the training
+symbols), although PATH1's silence test reads only the training span plus a 5 000-sample window
+(14 216 samples). Now `checkIfReadyToDecode` first releases such a frame at `pingWindowSamples()`
+(the same span `decodeCurrentFrame` evaluates, asserted equal); a silent PING is emitted at once,
+anything else is held (`ping_window_checked_sync_pos_`, sync_position_ untouched) for the full
+requirement, where the CW0 / fixed-CONNECT decode and PATH2 run on the full slice exactly as
+before. No wire change. GUI gate, interleaved builds (both with the 2-codeword frame):
+
+| Scenario | PONG heard | Connected (before → after) |
+|---|---|---|
+| AWGN@20 | 6.7 → 3.5 s | 17.0 → 13.7 s |
+| Good@20 | 6.8 → 3.5 s | 17.1 → 13.8 s |
+| Moderate@10 | 6.8 → 3.5 s | 17.1 → 13.8 s |
+| Good@6 | 6.8 → 5.1 s | 17.1 → 15.4 s (one of the two verdicts needed PATH2) |
+| AWGN@3 | 6.7 → 6.7 s | 17.0 → 17.0 s (noise fills the window: PATH2, as before) |
+
+All connects on the first CONNECT. Together: "Connecting" to "Connected" 24.0 → 13.7 s and the
+first data burst 26.1 → 15.8 s on clean and Moderate channels.
+
 ## 2026-11-10 — RELEASE: v0.6.1-pre-alpha
 
 Version 0.6.0 -> 0.6.1 in `CMakeLists.txt` (the binaries, the TNC `VERSION` reply and OTASim

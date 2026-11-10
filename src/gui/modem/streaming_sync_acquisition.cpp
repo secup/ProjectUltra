@@ -1002,13 +1002,13 @@ void StreamingDecoder::searchForSync() {
         // PHYs intentionally share the dual chirps and therefore the exact
         // training origin.  Retain only a REAL expected dual-chirp lock (never a
         // weak LTS/data fallback); processBuffer will make one bounded raw-ring
-        // MC decode after all four fixed codewords have arrived.
+        // MC decode after every fixed CONNECT codeword has arrived.
         if (last_sync_expected_full_anchor_ && !used_structure_anchor &&
             handshake_confirmation_pending_.load(std::memory_order_acquire)) {
             MultiCarrierDPSKConfig fallback_config = mc_dpsk_config_;
             fallback_config.bits_per_symbol = 1;  // fixed handshake profile = DBPSK
             const size_t coded_bits =
-                static_cast<size_t>(v2::kDefaultFixedFrameCodewords) *
+                static_cast<size_t>(v2::kConnectFrameCodewords) *
                 v2::LDPC_CODEWORD_BITS;
             const size_t bits_per_symbol = static_cast<size_t>(
                 std::max(1, fallback_config.num_carriers));
@@ -1250,6 +1250,15 @@ void StreamingDecoder::checkIfReadyToDecode() {
     if (sync_from_structure_anchor_ && !burst_latched &&
         sync_controller_.have_burst_descriptor_ && full_frame_samples > requirement.samples) {
         requirement.samples = full_frame_samples;
+    }
+    // EARLY PING VERDICT: a disconnected MC-DPSK frame is first released once its PING window
+    // has arrived (PATH1's silence test reads nothing else), so a bare chirp is answered ~1.6 s
+    // sooner. decodeCurrentFrame holds anything that is not a silent PING for the full
+    // requirement (ping_window_checked_sync_pos_), so no other decision sees fewer samples.
+    if (!connected_ && mode_ == protocol::WaveformMode::MC_DPSK && pending_total_cw_ == 0 &&
+        requirement.mode == decode_policy::DecodeSampleMode::ControlPeek &&
+        ping_window_checked_sync_pos_ != sync_position_ + 1) {
+        requirement.samples = std::min(requirement.samples, pingWindowSamples());
     }
 
     static constexpr int kAudioSampleRateHz = 48000;

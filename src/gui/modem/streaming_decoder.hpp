@@ -1509,6 +1509,14 @@ private:
     // ARQ RTO, which is the regression BUG-ANCHOR-WAIT-NO-ACK-STALL was fixed to
     // prevent.
     size_t truncation_hold_frame_len_ = 0;
+    // EARLY PING VERDICT (2026-11-10): sync_position_ + 1 of the disconnected MC-DPSK frame whose
+    // PING window was already judged "not a silent PING" (0 = none). Until then such a frame is
+    // released at pingWindowSamples(), the only samples PATH1's silence test reads, instead of
+    // after the full one-codeword control slot (1.6 s later at 1024 samples/symbol).
+    size_t ping_window_checked_sync_pos_ = 0;
+    // Training skip + check window of the PATH1 silence test (decodeCurrentFrame's
+    // ping_training_skip + ping_check_samples): the readiness gate and the decode must agree.
+    size_t pingWindowSamples() const;
     std::vector<std::vector<float>> burst_soft_buffer_;  // collected soft bits per frame
     std::vector<DecodeResult> burst_metric_templates_;   // per-physical-frame LTS metrics
     // EARLY-FRAME-DECODE (2026-07-05, turnaround lever): for NON-interleaved groups
