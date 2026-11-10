@@ -710,9 +710,11 @@ static bool test_crater_grading_is_default_on() {
         TA::verdictGraded(c, false, 0.0f, false, 0.875f);
         return TA::rxCmd(c);
     };
-    if (run(nullptr) != cur)
-        FAIL("DEFAULT (knob unset): two 7/8 groups must HOLD idx " + std::to_string(cur) +
-             ", got " + std::to_string(run(nullptr)));
+    // Not lower: since 2026-11-10 16QAM R2/3 is no longer the ladder top (16QAM R3/4 and 32QAM
+    // R2/3 sit above it with turbo data frames), so the same evidence may also climb.
+    if (run(nullptr) < cur)
+        FAIL("DEFAULT (knob unset): two 7/8 groups must NOT demote from idx " +
+             std::to_string(cur) + ", got " + std::to_string(run(nullptr)));
     if (run("0") >= cur)
         FAIL("knob=0 must restore the legacy binary demote (got idx " +
              std::to_string(run("0")) + ", want < " + std::to_string(cur) + ")");

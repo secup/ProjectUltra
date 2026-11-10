@@ -1987,6 +1987,14 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
         psk8LadderEnabled()) {
         return 12;
     }
+    // 32QAM (2026-11-10): the same frame-duration rule (4 x bits per symbol: QPSK 8, 8PSK 12,
+    // 16QAM 16) asks 20 for 5 bits; the fixed frame holds at most kMaxFixedFrameCodewords (16).
+    // Measured (turbo, measure_ack_fer): 16 codewords decode ~0.7 dB lower than 8 on AWGN (one
+    // longer turbo codeword) and the same on ITU Good. The coherence walk in
+    // recommendCWCountForFading still shortens it past the measured Tc.
+    if (waveform == WaveformMode::OFDM_CHIRP && mod == Modulation::QAM32) {
+        return v2::kMaxFixedFrameCodewords;
+    }
     return recommendCWCount(rate, waveform);
 }
 

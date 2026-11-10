@@ -105,7 +105,7 @@ usage() {
 modulation_bits() {
   awk -v mod="$1" '
     BEGIN {
-      table = "16QAM 4\nQAM16 4\n8PSK 3\nQAM8 3\nQPSK 2\nDQPSK 2\nD8PSK 3\nDBPSK 1\nBPSK 1\nany 2\ncoherent 2"
+      table = "32QAM 5\nQAM32 5\n16QAM 4\nQAM16 4\n8PSK 3\nQAM8 3\nQPSK 2\nDQPSK 2\nD8PSK 3\nDBPSK 1\nBPSK 1\nany 2\ncoherent 2"
       n = split(table, rows, "\n")
       for (i = 1; i <= n; ++i) {
         split(rows[i], f, " ")
@@ -444,6 +444,9 @@ unexpected_data_mode_pattern() {
       ;;
     QPSK)
       printf '%s\n' 'Adaptive downgrade queued: .* -> (8PSK|QAM8|QAM16|16QAM)|MODE_CHANGE: OFDM (8PSK|QAM8|QAM16|16QAM) |Data mode set to: (8PSK|QAM8|QAM16|16QAM)|TX: Using (8PSK|QAM8|QAM16|16QAM)'
+      ;;
+    32QAM|QAM32)
+      printf '%s\n' 'Adaptive downgrade queued: .* -> (D8PSK|DQPSK|QPSK|8PSK|QAM8|QAM16|16QAM)|MODE_CHANGE: OFDM (D8PSK|DQPSK|QPSK|8PSK|QAM8|QAM16|16QAM) |Data mode set to: (D8PSK|DQPSK|QPSK|8PSK|QAM8|QAM16|16QAM)|TX: Using (D8PSK|DQPSK|QPSK|8PSK|QAM8|QAM16|16QAM)'
       ;;
     8PSK|QAM8)
       printf '%s\n' 'Adaptive downgrade queued: .* -> (D8PSK|DQPSK|QPSK|QAM16|16QAM)|MODE_CHANGE: OFDM (D8PSK|DQPSK|QPSK|QAM16|16QAM) |Data mode set to: (D8PSK|DQPSK|QPSK|QAM16|16QAM)|TX: Using (D8PSK|DQPSK|QPSK|QAM16|16QAM)'

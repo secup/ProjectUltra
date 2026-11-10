@@ -386,6 +386,29 @@ it unchanged; making it react to raw losses (as an SNR-driven outer loop must) w
 selector chase fades.
 **Test:** `EvmRateSelector` (`test_margin_moves_on_calibration_error_only`).
 
+### INV-RATE-EVM-003: compare a threshold with frames of another constellation only through the EVM model (2026-11-10)
+
+**Rule:** a rung's EVM decode threshold is measured on that rung's own frames. When the selector
+judges it from frames of a different constellation it uses `evmThresholdOnFramesDb(rung,
+frame_mod)`, which carries the threshold through `ofdm/dd_evm_model.hpp` (the reading the frames'
+constellation gives at the same true SNR). Never compare raw EVMs across constellations, and
+keep the model's geometry equal to the transmitter's (CTest `DdEvmModel` checks it against a
+brute-force run of the receiver's estimator).
+**Why:** the decision-directed EVM reads high by a constellation-dependent amount near each
+constellation's operating point: at a true 12 dB, QPSK reads 12.3, 16QAM 13.0, 32QAM 15.2. Raw
+comparison left 32QAM R2/3 unreachable from 16QAM frames on channels where it loses no frame.
+**Test:** `EvmRateSelector` (`test_thresholds_carried_between_constellations`), `DdEvmModel`.
+
+### INV-RATE-RUNG-001: a ladder rung exists only on the PHY it was measured on (2026-11-10)
+
+**Rule:** `CoherentRung::turbo_only` rows (16QAM R3/4, 32QAM R2/3) are holes unless OFDM data
+frames are turbo (`ofdmDataFrameFec()`); every consumer of the ladder (connect pick, locally
+enabled, calibration and class anchors) goes through `coherentRungUsableWithDataFec`. Canonical
+rung indices stay below `kRungAuthorityStartupProbeFlag` (the tone-ACK command carries 4 bits).
+**Why:** with LDPC data frames 16QAM R3/4 has a 20 % error floor on ITU Good and 32QAM was never
+measured; `ULTRA_FAST=0` must stay the untouched baseline of the pending rig A/B.
+**Test:** `WaveformPolicy` and `WaveformPolicyLdpc` (the same checks with `ULTRA_DATA_FEC=ldpc`).
+
 ### INV-RATE-PRICE-001: price only the anchors the sender will actually emit
 
 **Rule:** the latent selector's candidate geometry charges the descriptor-switch full anchor only

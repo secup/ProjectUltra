@@ -10,6 +10,72 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FEAT(rate): 16QAM R3/4 and 32QAM R2/3 rungs, EVM thresholds carried between constellations (INV-RATE-EVM-003, INV-RATE-RUNG-001)
+
+**What was missing.** The top auto rung was 16QAM R2/3 (2.67 bits per carrier). 16QAM R3/4 was a
+ladder hole (20 % error floor on Good with LDPC data frames) and 32QAM had no rung. Re-measured on
+the turbo PHY (`measure_ack_fer`, production geometry, `--cfo-hz 0`, 3 seeds x 40 frames; FER %):
+
+| Rung | AWGN 50 % point | Good 20 / 22 / 24 / 26 / 28 dB | Moderate 24 / 28 / 32 dB |
+|---|---:|---|---|
+| 16QAM R2/3 | 11.7 dB | 8 / 2 / 0 / 0 / 0 | 14 / 6 / 2 |
+| 16QAM R3/4 | 13.0 dB | 22 / 12 / 5 / 2 / 1 | 27 / 15 / 6 |
+| 32QAM R2/3 (cw16) | 15.6 dB | 36 / 20 / 12 / 2 / 0 | 38 / 22 / 15 |
+
+8PSK R3/4 now decodes on fading but 16QAM R2/3 delivers more at every SNR (stays disabled);
+32QAM R1/2 is dominated by 16QAM R2/3; 32QAM R3/4 (denser pilots, a grid change) is within 4 %
+of 32QAM R2/3 and was left out.
+
+A second problem blocked 32QAM: the selector judges every rung from the EVM of frames sent on the
+current rung, and the decision-directed EVM reads high by a constellation-dependent amount near
+each constellation's operating point (true 12 dB: QPSK 12.3, 16QAM 13.0, 32QAM 15.2 dB). 16QAM
+frames on a channel where 32QAM R2/3 loses no frame (AWGN 18 dB) read 15.2 dB, under 32QAM's own
+threshold.
+
+**What changed.**
+- `src/ofdm/dd_evm_model.hpp` (new): the receiver estimator's expected reading at a true SNR, in
+  closed form per constellation (PAM per axis for QPSK/16QAM/32QAM/64QAM/BPSK, a 1-D integral for
+  8PSK), with its inverse. `evmThresholdOnFramesDb` carries a rung's threshold to the frames'
+  constellation; the selector stores each frame's modulation. Identity on a rung's own frames.
+- `waveform_selection.hpp`: rung index 10 = 32QAM R2/3 (fits the 4-bit authority field);
+  `CoherentRung::turbo_only`, checked by every ladder consumer (`coherentRungUsableWithDataFec`);
+  16QAM R3/4 and 32QAM R2/3 rows in the default ladder (connect-time Good anchors 27 / 28 dB, above
+  16QAM R2/3's 26, so the connect pick below 27 dB is unchanged); 32QAM EVM demote floor 20.5.
+- `connection_policy.hpp`: 32QAM frames carry 16 codewords (the 4 x bits-per-symbol rule, capped).
+- `evm_rate_selector.hpp`: turbo thresholds 16QAM R3/4 13.4 -> 12.3 (measured), 32QAM R2/3 15.5.
+- `latent_rate_controller.hpp`: measured thetas 16QAM R3/4 22.0 -> 19.5, 32QAM R2/3 22.3 (16QAM
+  R2/3 plus the measured turbo spacing on Good, +1.7 / +4.5 dB); July set 22.0 / 24.8 (derived).
+- Tools: `measure_ack_fer --mod qam32`; `gui_qso_scenario.sh --expect-mod 32QAM`.
+
+**Verification.** New CTests `DdEvmModel` (closed forms vs a brute-force run of the receiver's
+estimator, 6 constellations x 7 SNRs within 0.06 dB) and `WaveformPolicyLdpc` (the new rungs vanish
+with LDPC data frames); `EvmRateSelector`, `WaveformPolicy`, `RxAuthority` updated (tests that
+compared raw EVMs across constellations, and one that assumed 16QAM R2/3 was the ladder top). Full
+`ctest` 113/113. Model check against measured frames: on AWGN the true SNR inferred from 16QAM
+frames predicts 8PSK and 32QAM frames' EVM within 0.3 dB up to 16 dB EVM. GUI gate, forced rung,
+AWGN 25 dB, 21 KB: 16QAM R2/3 3600, 16QAM R3/4 4270, 32QAM R2/3 4390 bps (cw8). Adaptive A/B on
+top of the LTS timing fix, interleaved, 5 seeds, 7.3 Hz offset, bps:
+
+| Scenario | Timing fix only | + new rungs | Change | Paired t p | Sign |
+|---|---:|---:|---:|---:|---|
+| AWGN 15 dB (21 KB) | 3606 | 3900 | +8 % | <0.001 | 5-0 |
+| AWGN 20 dB (50 KB) | 4258 | 5060 | +19 % | <0.001 | 4-0 |
+| AWGN 25 dB (50 KB) | 4262 | 5060 | +19 % | <0.001 | 5-0 |
+| ITU Good 20 dB (21 KB) | 3012 | 3200 | +6 % | 0.19 | 4-0 |
+| ITU Good 25 dB (50 KB) | 4030 | 4318 | +7 % | 0.14 | 3-2 |
+| ITU Good 30 dB (50 KB) | 4162 | 4115 | -1 % | 0.61 | 2-2 |
+| ITU Moderate 20 dB (21 KB) | 2472 | 2398 | -3 % | 0.56 | 2-3 |
+
+Both changes against v0.6.1-era `main` (df9763e): AWGN 15/20/25 +8 / +19 / +19 %, Good 20/25/30
++20 / +18 / +13 % (p 0.02 / 0.01 / 0.06, 5-0 each), Moderate 20 +8 % (n.s.). On Moderate 20 the new
+rungs were never used (the -3 % is run-to-run spread); on Good 30 32QAM loses 10-15 % of frames on
+the GUI path and roughly ties 16QAM R3/4.
+
+**Open.** 32QAM gets no decision-directed channel tracking (`use_coherent_dd` covers 8PSK and
+16QAM through per-modulation gates; generalize them from the constellation geometry); a cross-shaped
+32QAM would need ~1.1 dB less than the rectangular one; on the GUI gate frames read ~1.8 dB less
+EVM than in `measure_ack_fer` at the same nominal SNR.
+
 ## 2026-11-10 — FIX(sync): an LTS lock is the top of the peak, not where it crosses 0.95 (INV-SYNC-LTS-001)
 
 **What was broken.** BUG-LTS-EARLY-EXIT: on the GUI gate a third of high-SNR burst groups had every

@@ -7,6 +7,9 @@
 //   3. The outer-loop margin moves on calibration error only: a loss the frames' own EVMs
 //      predicted leaves it unchanged; a loss they did not predict raises it.
 //   4. Window and readiness: unmeasured frames are skipped, the window holds kWindowFrames.
+//   5. Thresholds are carried between constellations (ofdm/dd_evm_model.hpp): a rung's own
+//      threshold applies to its own constellation's frames, and frames of another
+//      constellation are compared with the reading THEY give at the same true SNR.
 
 #include "protocol/connection_policy.hpp"
 #include "protocol/evm_rate_selector.hpp"
@@ -57,21 +60,28 @@ void test_margin_is_visible_from_any_rung() {
     EvmRateSelector sel;
     sel.observeGroup(kRungIdxQpskR12, frames(20.0f, 5), 5, 5);
     CHECK(sel.ready(), "one five-frame group is enough to decide");
-    CHECK(sel.successProb(kRungIdxQam16R23) > 0.99f,
-          "20 dB EVM frames predict 16QAM R2/3 decodes them");
+    CHECK(sel.successProb(kRungIdxQam16R23) > 0.99f &&
+              sel.successProb(kRungIdxQam32R23) > 0.99f,
+          "20 dB EVM frames predict 16QAM R2/3 and 32QAM R2/3 decode them");
     const auto pick = sel.best(productionGeometry());
-    CHECK(pick.rung == kRungIdxQam16R23,
-          "AWGN-like 20 dB frames select 16QAM R2/3 directly from R1/2 (got "
+    CHECK(pick.rung == kRungIdxQam32R23,
+          "AWGN-like 20 dB frames select the densest rung, 32QAM R2/3, directly from R1/2 (got "
               << static_cast<int>(pick.rung) << ")");
 
-    // Frames at 8 dB: QPSK decodes them, 8PSK R2/3 (eta 9.5) does not.
+    // QPSK frames midway between QPSK R2/3's threshold and 8PSK R2/3's threshold as QPSK
+    // frames read it: the first decodes them, the second does not.
+    const float t_qpsk = evmThresholdOnFramesDb(kRungIdxQpskR23, Modulation::QPSK);
+    const float t_8psk = evmThresholdOnFramesDb(kRungIdxQam8R23, Modulation::QPSK);
+    CHECK(t_8psk - t_qpsk > 1.5f,
+          "8PSK R2/3 sits >1.5 dB above QPSK R2/3 on QPSK frames (" << t_qpsk << ", " << t_8psk
+                                                                     << ")");
     EvmRateSelector mid;
-    mid.observeGroup(kRungIdxQpskR23, frames(8.0f, 5), 5, 5);
-    CHECK(mid.successProb(kRungIdxQpskR23) > 0.95f, "8 dB frames decode on QPSK R2/3");
-    CHECK(mid.successProb(kRungIdxQam8R23) < 0.05f, "8 dB frames fail on 8PSK R2/3");
+    mid.observeGroup(kRungIdxQpskR23, frames(0.5f * (t_qpsk + t_8psk), 5), 5, 5);
+    CHECK(mid.successProb(kRungIdxQpskR23) > 0.9f, "the midway frames decode on QPSK R2/3");
+    CHECK(mid.successProb(kRungIdxQam8R23) < 0.1f, "and fail on 8PSK R2/3");
     const auto p8 = mid.best(productionGeometry());
     CHECK(p8.rung >= kRungIdxQpskR23 && p8.rung <= kRungIdxQpskR34,
-          "8 dB frames select a QPSK R2/3-R3/4 rung (got " << static_cast<int>(p8.rung) << ")");
+          "midway frames select a QPSK R2/3-R3/4 rung (got " << static_cast<int>(p8.rung) << ")");
 }
 
 void test_fade_is_rung_independent() {
@@ -85,8 +95,8 @@ void test_fade_is_rung_independent() {
     CHECK(std::fabs(p23 - 0.75f) < 0.02f && std::fabs(p8 - 0.75f) < 0.03f,
           "a deep fade costs QPSK R2/3 and 8PSK R2/3 the same fraction (" << p23 << ", " << p8
                                                                          << ")");
-    CHECK(sel.best(productionGeometry()).rung == kRungIdxQam8R23,
-          "so the selector keeps the denser rung through it");
+    CHECK(sel.best(productionGeometry()).rung >= kRungIdxQam8R23,
+          "so the selector does not escape to a lower rung through it");
 }
 
 void test_margin_moves_on_calibration_error_only() {
@@ -151,9 +161,14 @@ void test_time_to_finish_objective() {
     for (auto& g : geometry) {
         if (g.valid()) g.frame_airtime_s = 1.2f;
     }
+    // On 8PSK frames: four well above 16QAM R2/3's threshold as 8PSK frames read it, one 1 dB
+    // above 8PSK R2/3's own (1 in 5 below 16QAM's cliff).
+    const float t16 = evmThresholdOnFramesDb(kRungIdxQam16R23, Modulation::QAM8);
+    const float t8 = evmDecodeThresholdDb(kRungIdxQam8R23);
     EvmRateSelector sel;
     for (int g = 0; g < 4; ++g) {
-        std::vector<float> e = {13.5f, 13.5f, 13.5f, 13.5f, 11.0f};   // 1 in 5 below 16QAM's cliff
+        const float hi = t16 + 1.5f, lo = t8 + 1.0f;
+        std::vector<float> e = {hi, hi, hi, hi, lo};
         sel.observeGroup(kRungIdxQam8R23, e, 5, 5);
     }
     CHECK(sel.successProb(kRungIdxQam16R23) > 0.7f && sel.successProb(kRungIdxQam16R23) < 0.85f &&
@@ -175,11 +190,17 @@ void test_climb_mode_only_takes_reliable_rungs() {
     EvmRateSelector awgn;
     awgn.observeGroup(kRungIdxQpskR12, frames(18.0f, 5), 5, 5);
     CHECK(awgn.bestReliable(geometry, kRungIdxNone, LatentRateController::kCapProb) ==
-              kRungIdxQam16R23,
-          "AWGN-like frames: 16QAM R2/3 is reliable, so a climb may go straight to it");
+              kRungIdxQam32R23,
+          "AWGN-like frames: 32QAM R2/3 is reliable, so a climb may go straight to it");
+    // 8PSK frames: four well above 16QAM R2/3's threshold as 8PSK frames read it, one between
+    // 8PSK R2/3's own threshold and that: 16QAM R2/3 decodes ~80 %, 8PSK R2/3 all but certainly.
+    const float t16 = evmThresholdOnFramesDb(kRungIdxQam16R23, Modulation::QAM8);
+    const float t8 = evmDecodeThresholdDb(kRungIdxQam8R23);
+    CHECK(t16 - t8 > 1.2f, "16QAM R2/3 sits above 8PSK R2/3 on 8PSK frames");
     EvmRateSelector fading;
     for (int g = 0; g < 4; ++g) {
-        fading.observeGroup(kRungIdxQam8R23, {13.5f, 13.5f, 13.5f, 13.5f, 11.0f}, 5, 5);
+        const float hi = t16 + 1.5f, lo = t8 + 0.7f;
+        fading.observeGroup(kRungIdxQam8R23, {hi, hi, hi, hi, lo}, 5, 5);
     }
     CHECK(fading.bestReliable(geometry, kRungIdxNone, LatentRateController::kCapProb) ==
               kRungIdxQam8R23,
@@ -206,6 +227,43 @@ void test_thresholds_are_ordered() {
     CHECK(evmDecodeThresholdDb(kRungIdxQpskR34) < evmDecodeThresholdDb(kRungIdxQam8R23) &&
               evmDecodeThresholdDb(kRungIdxQam8R23) < evmDecodeThresholdDb(kRungIdxQam16R23),
           "denser modulation at the same rate needs more EVM");
+    CHECK(evmDecodeThresholdDb(kRungIdxQam16R34) < evmDecodeThresholdDb(kRungIdxQam32R23),
+          "32QAM R2/3 needs more than 16QAM R3/4");
+}
+
+void test_thresholds_carried_between_constellations() {
+    // Own constellation: identity, for every rung.
+    for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
+        const auto pick = coherentRungFromIndex(r);
+        CHECK(evmThresholdOnFramesDb(r, pick.mod) == evmDecodeThresholdDb(r),
+              "rung " << static_cast<int>(r) << " keeps its own threshold on its own frames");
+    }
+    // 32QAM frames read high near 32QAM's threshold, so on 16QAM frames the same channel reads
+    // lower: the threshold a 16QAM link must clear to climb is below 32QAM's own.
+    const float own32 = evmDecodeThresholdDb(kRungIdxQam32R23);
+    const float on16 = evmThresholdOnFramesDb(kRungIdxQam32R23, Modulation::QAM16);
+    CHECK(on16 < own32 - 1.0f && on16 > own32 - 3.0f,
+          "32QAM R2/3 on 16QAM frames: " << on16 << " vs own " << own32);
+    // Measured (measure_ack_fer AWGN, 2026-11-10): 16QAM frames read 15.2 dB at 18 dB, where
+    // 32QAM R2/3 loses no frame, and 13.0 dB at 15 dB, where it loses every frame.
+    EvmRateSelector at18;
+    at18.observeGroup(kRungIdxQam16R23, frames(15.2f, 5), 5, 5);
+    CHECK(at18.successProb(kRungIdxQam32R23) > LatentRateController::kCapProb,
+          "16QAM frames at 18 dB AWGN predict 32QAM R2/3 reliably ("
+              << at18.successProb(kRungIdxQam32R23) << ")");
+    EvmRateSelector at15;
+    at15.observeGroup(kRungIdxQam16R23, frames(13.0f, 5), 5, 5);
+    CHECK(at15.successProb(kRungIdxQam32R23) < 0.5f,
+          "16QAM frames at 15 dB AWGN do not (" << at15.successProb(kRungIdxQam32R23) << ")");
+    CHECK(at15.bestReliable(productionGeometry(), kRungIdxNone,
+                            LatentRateController::kCapProb) != kRungIdxQam32R23,
+          "so no climb to 32QAM there");
+    // A mixed window: each frame against its own constellation's reading.
+    EvmRateSelector mixed;
+    mixed.observeGroup(kRungIdxQam16R23, frames(15.2f, 5), 5, 5);
+    mixed.observeGroup(kRungIdxQam32R23, frames(own32 + 2.0f, 5), 5, 5);
+    CHECK(mixed.successProb(kRungIdxQam32R23) > 0.95f,
+          "16QAM and 32QAM frames on one good channel agree");
 }
 
 }  // namespace
@@ -219,6 +277,7 @@ int main() {
     test_time_to_finish_objective();
     test_climb_mode_only_takes_reliable_rungs();
     test_thresholds_are_ordered();
+    test_thresholds_carried_between_constellations();
     std::cout << (tests_failed == 0 ? "PASS" : "FAIL") << ": "
               << (tests_run - tests_failed) << "/" << tests_run << " checks\n";
     return tests_failed == 0 ? 0 : 1;

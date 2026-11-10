@@ -147,7 +147,7 @@ void usage(const char* argv0) {
         << " --snr <db> --config <ack_light|data4_light|data4_full|ack_full|warm_sync_light|burst_chunk>"
         << " --seed <u64> --n <frames|chunks>"
         << " [--channel awgn|good|moderate|poor]"
-        << " [--mod dqpsk|qpsk|d8psk|qam8|qam16]"
+        << " [--mod dqpsk|qpsk|d8psk|qam8|qam16|qam32]"
         << " [--rate r1_4|r1_2|r2_3|r3_4]"
         << " [--carrier-interleave 0|1]"
         << " [--group <2..8>] [--burst-interleave 0|1]\n"
@@ -184,6 +184,7 @@ ultra::Modulation parseMod(const std::string& s) {
     if (s == "d8psk") return ultra::Modulation::D8PSK;
     if (s == "qam8") return ultra::Modulation::QAM8;
     if (s == "qam16") return ultra::Modulation::QAM16;
+    if (s == "qam32") return ultra::Modulation::QAM32;
     throw std::runtime_error("unknown --mod: " + s);
 }
 

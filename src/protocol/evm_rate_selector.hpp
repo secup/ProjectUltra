@@ -57,6 +57,7 @@
 #include <vector>
 
 #include "frame_v2.hpp"
+#include "ofdm/dd_evm_model.hpp"
 #include "ultra/fast_profile.hpp"
 #include "latent_rate_controller.hpp"
 #include "waveform_selection.hpp"
@@ -116,6 +117,11 @@ inline void setEvmRateSelectionForTesting(bool on) {
 //     16QAM R2/3    12.55          12.1 (10-12 dB: 5 %, 12-14 dB: 96 %)
 //     16QAM R3/4    13.9            -
 //
+// 16QAM R3/4 and 32QAM R2/3 (turbo, 2026-11-10): measure_ack_fer AWGN, production geometry
+// (both cw16), 3 seeds x 40 frames per dB; a failed turbo frame reports no EVM, so eta is the
+// decoded frames' EVM interpolated at the 50 %-FER SNR, taken RELATIVE to 16QAM R2/3 measured the
+// same way (11.38 there): 16QAM R3/4 +0.55 dB, 32QAM R2/3 +3.76 dB.
+//
 // CROSS-RUNG USE. The EVM a frame reads also depends on the rung it was sent on: each rung's
 // pilot/codeword geometry sets its own channel-estimation ceiling (AWGN fits: QPSK ~21.7 dB,
 // 16QAM ~24.7 dB, QPSK R1/4 ~17.7 dB), so on a strong channel 16QAM frames read up to ~1.3 dB
@@ -151,13 +157,34 @@ inline float evmDecodeThresholdTurboDb(uint8_t rung) {
         case kRungIdxQam8R34: return 10.0f;
         case kRungIdxQam16R12: return 10.85f;
         case kRungIdxQam16R23: return 11.75f;
-        case kRungIdxQam16R34: return 13.4f;
+        case kRungIdxQam16R34: return 12.3f;   // 16QAM R2/3 + 0.55, measured (was 13.4 derived)
+        case kRungIdxQam32R23: return 15.5f;   // 16QAM R2/3 + 3.76, measured
         default: return 99.0f;
     }
 }
 inline float evmDecodeThresholdDb(uint8_t rung) {
     return v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO ? evmDecodeThresholdTurboDb(rung)
                                                              : evmDecodeThresholdLdpcDb(rung);
+}
+
+// CROSS-CONSTELLATION THRESHOLDS (2026-11-10). Each eta_r above is measured on rung r's OWN frames,
+// but the selector reads the window's frames, sent on whatever rung the link was on. The
+// decision-directed EVM reads high by an amount that depends on the constellation
+// (ofdm/dd_evm_model.hpp): on one channel at a true 12 dB, QPSK frames read 12.3 dB, 16QAM 13.0 and
+// 32QAM 15.2. So eta is carried to the frames' constellation at the same true SNR:
+//     eta_r(on frames of m) = reading_m(true SNR at which rung r's own frames read eta_r).
+// Identity for frames of the rung's own constellation, i.e. every same-modulation decision is
+// unchanged. Without it, 16QAM frames on a channel where 32QAM R2/3 loses no frame (AWGN 18 dB:
+// 16QAM frames read ~15.2, 32QAM frames ~16.3) never clear 32QAM's own 15.5 by the climb margin.
+// Measured check: on AWGN the model predicts 8PSK and 32QAM frames' EVM from 16QAM frames' within
+// 0.3 dB wherever a threshold can sit (EVM <= 16 dB).
+inline float evmThresholdOnFramesDb(uint8_t rung, Modulation frame_mod) {
+    const float own = evmDecodeThresholdDb(rung);
+    if (rung < kRungIdxQpskR14 || rung >= kRungIdxCount) return own;
+    const Modulation rung_mod = coherentRungFromIndex(rung).mod;
+    if (frame_mod == rung_mod) return own;
+    const double carried = dd_evm::translateReadingDb(rung_mod, own, frame_mod);
+    return std::isfinite(carried) ? static_cast<float>(carried) : own;
 }
 // Logistic slope around eta: the measured 10-90 % widths are 1-1.5 dB (fits 3-4 /dB); 3 /dB
 // keeps a little width for the estimator's own per-frame noise.
@@ -178,6 +205,7 @@ public:
 
     void reset() {
         ring_.fill(0.0f);
+        ring_mod_.fill(Modulation::AUTO);
         next_ = 0;
         count_ = 0;
         margin_db_ = 0.0f;
@@ -185,7 +213,10 @@ public:
     }
 
     static float frameSuccess(float evm_db, uint8_t rung, float margin_db) {
-        const float z = kEvmDecodeSlopePerDb * (evm_db - evmDecodeThresholdDb(rung) - margin_db);
+        return successAt(evm_db, evmDecodeThresholdDb(rung), margin_db);
+    }
+    static float successAt(float evm_db, float eta_db, float margin_db) {
+        const float z = kEvmDecodeSlopePerDb * (evm_db - eta_db - margin_db);
         return 1.0f / (1.0f + std::exp(-std::clamp(z, -40.0f, 40.0f)));
     }
 
@@ -194,11 +225,15 @@ public:
     void observeGroup(uint8_t rung, const std::vector<float>& evm_db, int delivered, int frames) {
         int measured = 0;
         float predicted = 0.0f;
+        const bool coherent_rung = rung >= kRungIdxQpskR14 && rung < kRungIdxCount;
+        const Modulation frame_mod =
+            coherent_rung ? coherentRungFromIndex(rung).mod : Modulation::AUTO;
         for (float e : evm_db) {
             if (!std::isfinite(e)) continue;
             ++measured;
             if (rung < kRungIdxCount) predicted += frameSuccess(e, rung, margin_db_);
             ring_[next_] = e;
+            ring_mod_[next_] = frame_mod;
             next_ = (next_ + 1) % kWindowFrames;
             if (count_ < kWindowFrames) ++count_;
         }
@@ -222,7 +257,9 @@ public:
     float successProb(uint8_t rung) const {
         if (count_ == 0) return 0.0f;
         float s = 0.0f;
-        for (size_t i = 0; i < count_; ++i) s += frameSuccess(ring_[i], rung, margin_db_);
+        for (size_t i = 0; i < count_; ++i) {
+            s += successAt(ring_[i], thresholdOnFrames(rung, ring_mod_[i]), margin_db_);
+        }
         return s / static_cast<float>(count_);
     }
 
@@ -338,7 +375,37 @@ public:
     }
 
 private:
+    // evmThresholdOnFramesDb, cached per (rung, frame constellation): the PSK model integrates
+    // numerically, and successProb runs for every rung at every decision. Keyed on the own
+    // threshold too, so a FEC switch (tests) recomputes.
+    float thresholdOnFrames(uint8_t rung, Modulation frame_mod) const {
+        const int slot = frameModSlot(frame_mod);
+        if (slot < 0 || rung >= kRungIdxCount) return evmDecodeThresholdDb(rung);
+        const float own = evmDecodeThresholdDb(rung);
+        CrossThreshold& c = cross_[rung][static_cast<size_t>(slot)];
+        if (!c.valid || c.own_db != own) {
+            c = {true, own, evmThresholdOnFramesDb(rung, frame_mod)};
+        }
+        return c.eta_db;
+    }
+    static int frameModSlot(Modulation m) {
+        switch (m) {
+            case Modulation::QPSK: return 0;
+            case Modulation::QAM8: return 1;
+            case Modulation::QAM16: return 2;
+            case Modulation::QAM32: return 3;
+            default: return -1;  // not a coherent data rung: its frames keep the own threshold
+        }
+    }
+    struct CrossThreshold {
+        bool valid = false;
+        float own_db = 0.0f;
+        float eta_db = 0.0f;
+    };
+    mutable std::array<std::array<CrossThreshold, 4>, kRungIdxCount> cross_{};
+
     std::array<float, kWindowFrames> ring_{};
+    std::array<Modulation, kWindowFrames> ring_mod_{};
     size_t next_ = 0;
     size_t count_ = 0;
     float margin_db_ = 0.0f;

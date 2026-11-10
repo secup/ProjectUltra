@@ -170,7 +170,15 @@ struct CoherentRung {
     Modulation mod;
     CodeRate rate;
     float min_snr_db[3];  // indexed by FadingClass: [AWGN, GOOD, MODERATE]
+    // Usable only with the one-codeword turbo data frame (ULTRA_DATA_FEC=turbo, the ULTRA_FAST
+    // default), the PHY on which the rung was measured; with LDPC data frames it is a hole.
+    bool turbo_only = false;
 };
+
+// A ladder row exists for the active data-frame FEC (see CoherentRung::turbo_only).
+inline bool coherentRungUsableWithDataFec(const CoherentRung& row) {
+    return !row.turbo_only || v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
+}
 
 inline constexpr CoherentRung kCoherentLadder[] = {
     // mod              rate            AWGN             GOOD             MODERATE
@@ -255,9 +263,25 @@ inline bool psk8LadderEnabled() {
 
 inline constexpr CoherentRung kCoherentLadderPsk8Exp[] = {
     // mod              rate            AWGN             GOOD             MODERATE
-    {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
+    // 32QAM R2/3 and 16QAM R3/4 (2026-11-10, TURBO ONLY). Re-measured on the turbo PHY
+    // (measure_ack_fer, production geometry, 3 seeds x 40 frames; FER %):
+    //                 AWGN 50 % point    ITU Good  20 / 22 / 24 / 26 / 28    Moderate 24 / 28 / 32
+    //   16QAM R2/3        11.7 dB                   8 /  2 /  0 /  0 /  0          14 /  6 /  2
+    //   16QAM R3/4        13.0                     22 / 12 /  5 /  2 /  1          27 / 15 /  6
+    //   32QAM R2/3        15.6 (cw16)              36 / 20 / 12 /  2 /  0          38 / 22 / 15
+    // Delivered bits per carrier, bits x (1 - FER), on Good: 32QAM R2/3 ties 16QAM R2/3 at 22 dB
+    // and leads by 15 % at 24, 21 % at 26, 25 % from 28; 16QAM R3/4 never beats both neighbours
+    // there, but is the AWGN rung between ~14 and ~17 dB. On Moderate both lose to 16QAM R2/3
+    // below ~28 dB (5-10 % error floors). GUI gate, forced, AWGN 25 dB, 21 KB: 16QAM R2/3 3600,
+    // 16QAM R3/4 4270, 32QAM R2/3 (cw8) 4390 bps. The rate controllers (RX authority: start at
+    // QPSK R1/2, climb on measured frames) use these rows only to know the rungs exist. The Good
+    // anchors matter only for a CONNECT-time pick without RX authority, and sit above 16QAM
+    // R2/3's 26.0 so that pick is unchanged below 27 dB: each rung loses <= 2 % of Good frames
+    // there. AWGN and Moderate stay disabled for the classifier hazard documented below.
+    {Modulation::QAM32, CodeRate::R2_3, {kRungDisabledDb, 28.0f,           kRungDisabledDb}, true},
+    {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, 27.0f,           kRungDisabledDb}, true},
     {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, 26.0f,           kRungDisabledDb}},  // AWGN COLUMN — MEASURED 2026-07-28 AND DELIBERATELY LEFT DISABLED. Forced 16QAM R2/3 on OTASim AWGN passes at EVERY swept dial with ZERO craters: dial 20 -> 3250 bps (26/26 frames OK), 16 -> 3240, 14 -> 3110, 12 -> 3270 (27/28 frames). vs 8PSK R2/3 auto at AWGN@20 = 2430, i.e. +33.7% measured against +33.5% predicted from 2.67/2.00 bits-per-carrier. In-band reads dial-0.2 there, so the lowest working point is snr_avg ~20.5 and the AWGN floor is BELOW the swept range. THE RUNG WORKS. It stays disabled because the HAZARD IS THE CLASSIFIER, NOT THE RUNG: 8PSK R3/4 was auto-disabled 2026-07-06 for exactly this shape — "the A18 anchor was validated on TRUE AWGN only; on the Watterson bench a 60-90 s calm stretch legitimately classifies AWGN, unlocks this rung, and it craters when fading returns (F141/F143: 3 runs poisoned)". 16QAM R2/3 measures 51.4% FER on Good, and the Good/AWGN discriminator is a known-open bug (BUG-FADING-INDEX-BLIND; the coherence discriminator). A calm stretch misclassified as AWGN would unlock a rung that fails half its frames — the identical failure with a worse rung. UNLOCK CONDITION: a trustworthy sustained-AWGN classification (or the effective-SINR/PER selector, which makes the column moot because it predicts PER from the measured per-carrier grid instead of a channel-class label). Reproduce: ULTRA_FORCE_DATA_MOD=QAM16 ULTRA_FORCE_DATA_RATE=R2_3 ULTRA_LOCK_RATE=1 ULTRA_RX_RATE_AUTHORITY=0 tools/gui_qso_scenario.sh --channel awgn --snr-db 12 --expect-mod 16QAM --expect-rate R2/3. GOOD 20.0 -> 26.0 (2026-07-26, MEASURED, LIVE LADDER): at 20.0 this rung measures **51.4% FER** on ITU Good and NEVER overtakes 8PSK R2/3 anywhere in 16-24 dB (delivered @20 1890 vs 2450; @24 2700 vs 2754). The ladder was confidently selecting a rung that fails HALF its frames, cratering, demoting and reaching again -- the dominant source of rate churn. 26.0 is EXTRAPOLATED, not measured: 16QAM R2/3 is still behind at the top swept point (24 dB) and the curves converge, so it should overtake around 25-26. Set above the highest measured point where 8PSK still wins, preserving the rung for a genuinely better channel rather than deleting it. Re-measure above 24 dB before trusting 26.
-    {Modulation::QAM8,  CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},  // KEEP DISABLED — the demanded FADING validation WAS RUN 2026-07-26 and FAILED: on ITU Good (= MPG) this rung measures 76.4/60.4/50.7/42.4/38.9% FER at 16/18/20/22/24 dB, i.e. it NEVER approaches the 10% floor in the swept range (tools/sweep_fading_anchors.sh; docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md). Attractive on paper (constant envelope, immune to the cheap-card compression that craters 16QAM above drive ~0.70, lower nominal requirement than 16QAM R2/3) but it does not survive fading. Original note — AUTO-DISABLED 2026-07-06: the A18 anchor was validated on TRUE AWGN only; on the Watterson bench a 60-90 s calm stretch legitimately classifies AWGN, unlocks this rung, and it craters when fading returns (F141/F143/F143-probe: 3 runs poisoned). Re-enable only after a FADING validation. Forceable for measurement.
+    {Modulation::QAM8,  CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},  // KEEP DISABLED — RE-MEASURED 2026-11-10 ON THE TURBO PHY: it now decodes on fading (ITU Good 24/13/7/2 % FER at 16/18/20/22 dB, Moderate 25 % at 20) but 16QAM R2/3 delivers more at every swept SNR on both (Good 20 dB: 2.45 vs 2.09 bits per carrier), so it is dominated, not broken. Earlier note — the demanded FADING validation WAS RUN 2026-07-26 and FAILED: on ITU Good (= MPG) this rung measures 76.4/60.4/50.7/42.4/38.9% FER at 16/18/20/22/24 dB, i.e. it NEVER approaches the 10% floor in the swept range (tools/sweep_fading_anchors.sh; docs/FADING_ANCHOR_MEASUREMENT_2026_07_26.md). Attractive on paper (constant envelope, immune to the cheap-card compression that craters 16QAM above drive ~0.70, lower nominal requirement than 16QAM R2/3) but it does not survive fading. Original note — AUTO-DISABLED 2026-07-06: the A18 anchor was validated on TRUE AWGN only; on the Watterson bench a 60-90 s calm stretch legitimately classifies AWGN, unlocks this rung, and it craters when fading returns (F141/F143/F143-probe: 3 runs poisoned). Re-enable only after a FADING validation. Forceable for measurement.
     {Modulation::QAM8,  CodeRate::R2_3, {16.0f,           17.0f,           kRungDisabledDb}},  // GOOD 19.0 -> 17.0 (2026-07-26, MEASURED): the anchor belongs at the THROUGHPUT CROSSOVER, not the FER<=10% floor -- a denser rung carrying more retx still wins while rate x (1-FER) is higher. Swept on ITU Good (= MPG), delivered bps: @16 QPSK R3/4 1686 vs 8PSK R2/3 1499; @18 1914 vs 2106; @20 2066 vs 2450; @22 2096 vs 2673; @24 2111 vs 2754. Interpolated crossover 17.0 dB, and 8PSK R2/3 then wins at EVERY higher swept point. The old 19.0 was derived as "QPSK R2/3 anchor +3.6 (constellation)" -- a geometry estimate, never a fading measurement. Lowering it also makes QAM16 R1/2 (identical eta = 2.0, but denser constellation AND non-constant envelope) unreachable, which is correct: at equal spectral efficiency prefer the lower-order modulation. NOTE: only the GOOD column is measured; AWGN 16.0 and MODERATE are untouched. Original note — 2026-07-05 probe: good@20 s42 PASS 2040, 0 craters (forced). QPSK R2/3 anchor +3.6 -> A16/G19
     {Modulation::QAM16, CodeRate::R1_2, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},  // GOOD 18.0 -> DISABLED (2026-07-26): ⚠️ THE "STRICTLY DOMINATED" CLAIM BELOW IS MEASURABLY FALSE (2026-07-29). Full-family sweep, ITU Good @20, frame path, 4 seeds x n=100 (n=400/cell, sigma ~2 pts): 16QAM R1/2 passes **87.2%** vs 8PSK R2/3 **82.2%** — the 16QAM rung is ~5 points BETTER at identical eta=2.0, not dominated. The "prefer the lower order at equal eta" argument is a CONSTELLATION-GEOMETRY estimate that ignores the code rate: R1/2 buys more FEC margin than the denser constellation costs. Same class of error as the old 8PSK Good 19.0 anchor (derived as "QPSK R2/3 +3.6 constellation", never measured). **The rung nevertheless STAYS DISABLED**, because the SECOND reason in the note below is untouched and still real: the predictive climb jumped idx 3 -> 7 purely because 7 > 5 and parked the link there. Re-enabling requires fixing the climb, not just correcting this claim. Original note follows — STRICTLY DOMINATED by 8PSK R2/3 — identical eta (2.0) but denser constellation AND non-constant envelope, while 8PSK R2/3 now sits at Good 17. Leaving it enabled let the PREDICTIVE CLIMB jump idx 3 -> 7 (measured) purely because 7 > 5, parking the link on the worse of two equal-rate rungs; that run did not finish inside 420 s. At equal spectral efficiency, prefer the lower order.
     {Modulation::QPSK,  CodeRate::R3_4, {15.0f,           20.0f,           kRungDisabledDb}},
@@ -295,6 +319,7 @@ inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
         n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
     }
     for (size_t i = 0; i < n; ++i) {
+        if (!coherentRungUsableWithDataFec(rungs[i])) continue;
         if (snr_db >= rungs[i].min_snr_db[cls]) {
             return {rungs[i].mod, rungs[i].rate};
         }
@@ -322,7 +347,8 @@ enum : uint8_t {
     kRungIdxQam16R12 = 7,
     kRungIdxQam16R23 = 8,
     kRungIdxQam16R34 = 9,
-    kRungIdxCount = 10,  // first unassigned
+    kRungIdxQam32R23 = 10,  // 2026-11-10 (turbo only); rectangular 4 x 8 32QAM, cw16
+    kRungIdxCount = 11,  // first unassigned
 };
 
 // The authority field is five bits wide while canonical rung indices occupy only the
@@ -356,6 +382,7 @@ inline uint8_t coherentRungIndexFor(Modulation mod, CodeRate rate) {
         if (rate == CodeRate::R3_4) return kRungIdxQam16R34;
         return kRungIdxNone;
     }
+    if (mod == Modulation::QAM32 && rate == CodeRate::R2_3) return kRungIdxQam32R23;
     return kRungIdxNone;
 }
 
@@ -371,6 +398,7 @@ inline CoherentPick coherentRungFromIndex(uint8_t idx) {
         case kRungIdxQam16R12: return {Modulation::QAM16, CodeRate::R1_2};
         case kRungIdxQam16R23: return {Modulation::QAM16, CodeRate::R2_3};
         case kRungIdxQam16R34: return {Modulation::QAM16, CodeRate::R3_4};
+        case kRungIdxQam32R23: return {Modulation::QAM32, CodeRate::R2_3};
         default: return {Modulation::QPSK, CodeRate::R1_4};
     }
 }
@@ -469,6 +497,7 @@ inline bool coherentRungLocallyEnabled(Modulation mod, CodeRate rate) {
     }
     for (size_t i = 0; i < n; ++i) {
         if (rungs[i].mod == mod && rungs[i].rate == rate) {
+            if (!coherentRungUsableWithDataFec(rungs[i])) return false;
             for (int c = 0; c < 3; ++c) {
                 if (rungs[i].min_snr_db[c] < kRungDisabledDb) return true;
             }
@@ -497,6 +526,7 @@ inline float calibrationAnchorDbFor(Modulation mod, CodeRate rate) {
     }
     for (size_t i = 0; i < n; ++i) {
         if (rungs[i].mod == mod && rungs[i].rate == rate) {
+            if (!coherentRungUsableWithDataFec(rungs[i])) return kRungDisabledDb;
             float best = kRungDisabledDb;
             for (int c = 0; c < 3; ++c) {
                 if (rungs[i].min_snr_db[c] < best) best = rungs[i].min_snr_db[c];
@@ -539,6 +569,7 @@ inline float evmUsableFloorDbForRung(uint8_t rung_idx) {
         case kRungIdxQam16R12: return 14.9f;  // measured (13.3 partial)
         case kRungIdxQam16R23: return 16.7f;  // measured
         case kRungIdxQam16R34: return 19.5f;  // extrap above 16QAM R2/3
+        case kRungIdxQam32R23: return 20.5f;  // 16QAM R2/3 + 3.8 (the measured EVM-threshold spacing)
         default: return kRungDisabledDb;
     }
 }
@@ -592,6 +623,7 @@ inline float rungClassAnchorDb(Modulation mod, CodeRate rate, float fading_index
     }
     for (size_t i = 0; i < n; ++i) {
         if (rungs[i].mod == mod && rungs[i].rate == rate) {
+            if (!coherentRungUsableWithDataFec(rungs[i])) return kRungDisabledDb;
             if (rungs[i].min_snr_db[cls] < kRungDisabledDb) return rungs[i].min_snr_db[cls];
             float best = kRungDisabledDb;  // class column disabled → rung's physics floor
             for (int c = 0; c < 3; ++c) {

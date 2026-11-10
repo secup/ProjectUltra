@@ -48,6 +48,21 @@ All figures are goodput: file bytes delivered and CRC-verified per second of tra
 retransmissions and turnarounds included. Connection setup (about 14 s on `main`, 24 s in v0.6.1) is
 not included.
 
+### `main` (after v0.6.1), software channel simulator
+
+Two changes since v0.6.1: burst groups are no longer received with a timing error that cost
+some of them 6 dB, and two faster rungs, 16QAM R3/4 and 32QAM R2/3, are in use on strong channels.
+Same simulator and offset as below, mean of 5 seeds, v0.6.1-era `main` against current `main`:
+
+| Channel | 15 dB | 20 dB | 25 dB | 30 dB |
+|---|---:|---:|---:|---:|
+| AWGN | 3.6 → 3.9 kbps | 4.3 → 5.1 kbps | 4.3 → 5.1 kbps | — |
+| ITU Good | — | 2.7 → 3.2 kbps | 3.7 → 4.3 kbps | 3.8 → 4.3 kbps |
+| ITU Moderate | — | 2.2 → 2.4 kbps | — | — |
+
+21 KB files at 15 dB and at 20 dB on the fading channels, 50 KB otherwise. Moderate is within
+run-to-run spread.
+
 ### v0.6.0, software channel simulator
 
 Two complete stations over OTASim (ITU-R F.1487 Watterson fading, 7.3 Hz dial offset between the
@@ -89,7 +104,11 @@ other HF data modems; that needs paired on-air testing.
 | QPSK R3/4 | 51 | 3188 bps | enabled |
 | 8PSK R2/3 | 51 | 4250 bps | enabled |
 | 16QAM R2/3 | 51 | 5667 bps | enabled (strong channels) |
-| 8PSK R3/4, 16QAM R1/2, R3/4 | 51 | 4250–6375 bps | disabled: did not hold on fading |
+| 16QAM R3/4 | 51 | 6375 bps | enabled on `main` (strong channels) |
+| 32QAM R2/3 | 51 | 7083 bps | enabled on `main` (strong channels) |
+| 8PSK R3/4, 16QAM R1/2 | 51 | 4250–4781 bps | disabled |
+
+8PSK R3/4 now decodes on fading, but 16QAM R2/3 delivers more at every SNR measured.
 
 MC-DPSK runs 47–375 bps; narrowband OFDM 193–386 bps.
 

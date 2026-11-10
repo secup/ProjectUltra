@@ -440,17 +440,34 @@ void test_data_mode_policy() {
     CHECK(mod == Modulation::QAM8, "high-SNR AWGN selects QAM8 (top enabled AWGN rung)");
     CHECK(rate == CodeRate::R2_3, "high-SNR AWGN -> QAM8 R2/3 (R3/4 auto-disabled 2026-07-06)");
 
-    recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::QAM16, "good-fading in-band SNR32 selects 16QAM");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR32 -> 16QAM R2/3 (G20 anchor)");
-
-    recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::QAM16, "good-fading in-band SNR30 selects 16QAM");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR30 -> 16QAM R2/3 (G20 anchor)");
-
-    recommendDataMode(28.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
-    CHECK(mod == Modulation::QAM16, "good-fading in-band SNR28 selects 16QAM (default ladder)");
-    CHECK(rate == CodeRate::R2_3, "good-fading in-band SNR28 -> 16QAM R2/3 (G20 anchor)");
+    // Turbo-only rungs (2026-11-10): 32QAM R2/3 from Good 28, 16QAM R3/4 from 27. With LDPC
+    // data frames (ULTRA_DATA_FEC=ldpc, CTest WaveformPolicyLdpc) they are holes and 16QAM R2/3
+    // stays the top Good pick.
+    const bool turbo = v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
+    for (float snr : {32.0f, 30.0f, 28.0f}) {
+        recommendDataMode(snr, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+        if (turbo) {
+            CHECK(mod == Modulation::QAM32 && rate == CodeRate::R2_3,
+                  "good-fading in-band SNR" << snr << " selects 32QAM R2/3 (turbo, G28 anchor)");
+        } else {
+            CHECK(mod == Modulation::QAM16 && rate == CodeRate::R2_3,
+                  "good-fading in-band SNR" << snr << " selects 16QAM R2/3 (LDPC: no 32QAM)");
+        }
+    }
+    recommendDataMode(27.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::QAM16 && rate == (turbo ? CodeRate::R3_4 : CodeRate::R2_3),
+          "good-fading in-band SNR27 selects 16QAM R3/4 with turbo, R2/3 with LDPC");
+    recommendDataMode(26.5f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(mod == Modulation::QAM16 && rate == CodeRate::R2_3,
+          "good-fading in-band SNR26.5 still selects 16QAM R2/3 (G26 anchor, unchanged)");
+    CHECK(coherentRungLocallyEnabled(Modulation::QAM32, CodeRate::R2_3) == turbo &&
+              coherentRungLocallyEnabled(Modulation::QAM16, CodeRate::R3_4) == turbo,
+          "32QAM R2/3 and 16QAM R3/4 exist exactly when data frames are turbo");
+    CHECK(coherentRungIndexFor(Modulation::QAM32, CodeRate::R2_3) == kRungIdxQam32R23 &&
+              coherentRungFromIndex(kRungIdxQam32R23).mod == Modulation::QAM32 &&
+              coherentRungFromIndex(kRungIdxQam32R23).rate == CodeRate::R2_3 &&
+              kRungIdxCount <= kRungAuthorityStartupProbeFlag,
+          "32QAM R2/3 round-trips through its rung index, which fits the authority field");
 
     // AWGN in-band SNR=21.7 -> QAM8 R3/4 (A18 top AWGN rung; default ladder psk8-exp).
     recommendDataMode(21.7f, WaveformMode::OFDM_CHIRP, mod, rate, 0.04f);

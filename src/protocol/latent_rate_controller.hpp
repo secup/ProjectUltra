@@ -176,6 +176,15 @@ inline bool latentStartupProbeAllowedByOperator() {
 //     16QAM R2/3    17.8   0.40    20.3
 //     16QAM R3/4    22.0   0.13    26.0 derived   (20 % error floor: never usable on Good)
 //
+// TURBO RUNGS (2026-11-10). With the one-codeword turbo data frame (the ULTRA_FAST default) the
+// 16QAM R3/4 floor is gone and 32QAM R2/3 decodes on Good. Their thetas are the 16QAM R2/3 theta
+// plus the spacing measured on the turbo PHY in one sweep (measure_ack_fer, production geometry,
+// ITU Good, 3 seeds x 40 frames x 2 dB; 50 %-FER points 16QAM R2/3 14.3, 16QAM R3/4 16.0,
+// 32QAM R2/3 18.8 dB): +1.7 and +4.5 dB. The spacing, not the absolute point: this table's
+// rungs were fitted on LDPC frames, and the latent x absorbs a common offset, not a spacing.
+//     16QAM R3/4    19.5   (17.8 + 1.7)
+//     32QAM R2/3    22.3   (17.8 + 4.5)
+//
 // The derived QPSK spacing (5 dB per code rate) was the large error: on fading the waterfall is
 // shaped by fades as much as by coding, so adjacent code rates sit 2-3 dB apart. That error is
 // also why the controller stalled on QPSK R2/3 at Good@20: R2/3 successes saturate the
@@ -229,7 +238,8 @@ inline float latentThetaForRung(uint8_t idx) {
             case kRungIdxQam8R34: return 17.1f;
             case kRungIdxQam16R12: return 13.7f;
             case kRungIdxQam16R23: return 17.8f;
-            case kRungIdxQam16R34: return 22.0f;
+            case kRungIdxQam16R34: return 19.5f;  // turbo: 16QAM R2/3 + 1.7 (was 22.0, LDPC floor)
+            case kRungIdxQam32R23: return 22.3f;  // turbo: 16QAM R2/3 + 4.5
             default: return 99.0f;
         }
     }
@@ -242,7 +252,8 @@ inline float latentThetaForRung(uint8_t idx) {
         case kRungIdxQam8R34: return 20.5f;   // measured
         case kRungIdxQam16R12: return 17.0f;  // derived: between 8PSK R2/3 and 8PSK R3/4
         case kRungIdxQam16R23: return 20.3f;  // measured
-        case kRungIdxQam16R34: return 26.0f;  // derived: unmeasured, deliberately pessimistic
+        case kRungIdxQam16R34: return 22.0f;  // derived: 16QAM R2/3 + the turbo spacing 1.7
+        case kRungIdxQam32R23: return 24.8f;  // derived: 16QAM R2/3 + the turbo spacing 4.5
         default: return 99.0f;
     }
 }

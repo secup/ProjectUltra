@@ -436,6 +436,9 @@ add_test(NAME IterativeChestRemod COMMAND test_iterative_chest_remod)
 add_executable(test_waveform_policy test_waveform_policy.cpp)
 target_link_libraries(test_waveform_policy PRIVATE ultra_core)
 add_test(NAME WaveformPolicy COMMAND test_waveform_policy)
+# Same checks with LDPC data frames: the turbo-only rungs (32QAM R2/3, 16QAM R3/4) must vanish.
+add_test(NAME WaveformPolicyLdpc COMMAND test_waveform_policy)
+set_tests_properties(WaveformPolicyLdpc PROPERTIES ENVIRONMENT "ULTRA_DATA_FEC=ldpc")
 
 add_executable(test_goodput_rate_controller test_goodput_rate_controller.cpp)
 target_link_libraries(test_goodput_rate_controller PRIVATE ultra_core)
@@ -448,6 +451,11 @@ add_test(NAME LatentRateController COMMAND test_latent_rate_controller)
 add_executable(test_evm_rate_selector test_evm_rate_selector.cpp)
 target_link_libraries(test_evm_rate_selector PRIVATE ultra_core)
 add_test(NAME EvmRateSelector COMMAND test_evm_rate_selector)
+
+# Decision-directed EVM model (2026-11-10): closed forms vs the receiver's estimator.
+add_executable(test_dd_evm_model test_dd_evm_model.cpp)
+target_link_libraries(test_dd_evm_model PRIVATE ultra_core)
+add_test(NAME DdEvmModel COMMAND test_dd_evm_model)
 
 # Pins CP geometry so prose cannot drift from the arithmetic (2026-07-28: three comments
 # claimed MEDIUM@1024 = "256 samples / 5.3ms"; actual is 96 / 2.00 ms).

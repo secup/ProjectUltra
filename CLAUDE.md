@@ -405,7 +405,7 @@ no live caller found. Pinned by CTest `OFDMCarrierOrdering`.
 | Carrier spacing | 46.875 Hz | 23.4375 Hz |
 | Occupied band | 140.625 – 2906.25 Hz | 1265.625 – 1757.8125 Hz |
 | Occupied FFT bins | 1–30, 995–1023 | 1–11, 2038–2047 |
-| Max throughput | 3.4 kbps | ~450 bps |
+| Max throughput | ~5.1 kbps GUI gate (32QAM R2/3, AWGN 20-25 dB, 2026-11-10; raw 7.1 kbps) | ~450 bps |
 
 **Carrier ordering contract** (`src/ofdm/pilot_pattern.hpp`, CTest `OFDMCarrierOrdering`):
 carriers run `k = -floor(Nc/2) … +ceil(Nc/2)` **skipping k = 0** (DC is never occupied);
@@ -420,7 +420,7 @@ count means one more carrier above DC than below (29/30), so the band is **not**
 |------|------|---------------|---------|-----|--------|
 | MC-DPSK | dual chirp | 5 dB AWGN | 938 | ±50 Hz | Good |
 | OFDM_NARROW | NB chirp + LTS | ~17 dB AWGN | ~450 (R1/2, w=3) | ±50 Hz | Good (R1/4) |
-| OFDM_CHIRP R1/4 | dual chirp + LTS anchor, warm LTS data | 10 dB AWGN / 15 dB Good | 3.4 k | ±50 Hz | Good (R1/4) |
+| OFDM_CHIRP R1/4 | dual chirp + LTS anchor, warm LTS data | 10 dB AWGN / 15 dB Good | 5.1 k (32QAM R2/3) | ±50 Hz | Good (R1/4) |
 | SC-DPSK | Barker-13 | -8 to -3 dB | 125 | N/A | Good |
 
 (OFDM_COX removed — enum `0x00` reserved; was Schmidl-Cox, never auto-selected. Only the S-C sync primitive remains.)
