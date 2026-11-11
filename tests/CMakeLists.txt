@@ -85,6 +85,11 @@ target_link_libraries(test_turbo_codec PRIVATE ultra_core)
 target_include_directories(test_turbo_codec PRIVATE ${CMAKE_SOURCE_DIR}/src)
 add_test(NAME TurboCodec COMMAND test_turbo_codec)
 
+add_executable(test_mcdpsk_frame test_mcdpsk_frame.cpp)
+target_link_libraries(test_mcdpsk_frame PRIVATE ultra_core)
+target_include_directories(test_mcdpsk_frame PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME MCDPSKFrame COMMAND test_mcdpsk_frame)
+
 add_executable(test_turbo_data_frame test_turbo_data_frame.cpp)
 target_link_libraries(test_turbo_data_frame PRIVATE ultra_core)
 target_include_directories(test_turbo_data_frame PRIVATE ${CMAKE_SOURCE_DIR}/src)

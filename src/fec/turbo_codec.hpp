@@ -65,8 +65,10 @@ inline int infoBitsForBytes(size_t info_bytes) {
 }
 
 // Encode `info_bytes` (whitened and CRC-32C protected internally) into `air_bits`
-// coded bits, packed MSB-first (air_bits / 8 bytes, air order).
-Bytes encode(const Bytes& info_bytes, int air_bits);
+// coded bits, packed MSB-first (air_bits / 8 bytes, air order). `crc_seed` is XORed into
+// the CRC: a receiver decoding with another seed fails the check (2^-32 false accept), which
+// addresses a frame to a session without spending a byte. 0 = the plain CRC (OFDM frames).
+Bytes encode(const Bytes& info_bytes, int air_bits, uint32_t crc_seed = 0);
 
 enum class Stop : uint8_t { Crc, MaxIterations, Stuck, NoEnergy };
 
@@ -83,6 +85,7 @@ struct DecodeOptions {
     // LDPC normalized min-sum factor 0.75.
     float extrinsic_scale = 0.75f;
     bool early_fail = true;        // stop after 2 iterations with no decision flips
+    uint32_t crc_seed = 0;         // must match the encoder's (see encode)
 };
 
 struct DecodeResult {
@@ -105,7 +108,7 @@ DecodeResult decode(std::span<const float> air_llrs, size_t info_bytes,
 uint64_t splitmix64Next(uint64_t& state);
 std::vector<uint8_t> whitening(size_t nbytes);
 // Encoder-only helper: the K info bits (after whitening + CRC) for a payload.
-std::vector<uint8_t> infoBits(const Bytes& info_bytes);
+std::vector<uint8_t> infoBits(const Bytes& info_bytes, uint32_t crc_seed = 0);
 
 }  // namespace turbo
 }  // namespace fec

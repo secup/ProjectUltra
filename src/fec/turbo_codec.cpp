@@ -335,11 +335,11 @@ const Tables& tables(int K, int N) {
     return ref;
 }
 
-std::vector<uint8_t> infoBits(const Bytes& info_bytes) {
+std::vector<uint8_t> infoBits(const Bytes& info_bytes, uint32_t crc_seed) {
     const auto w = whitening(info_bytes.size());
     Bytes s(info_bytes.size());
     for (size_t i = 0; i < s.size(); ++i) s[i] = static_cast<uint8_t>(info_bytes[i] ^ w[i]);
-    const uint32_t crc = crc32c(s.data(), s.size());
+    const uint32_t crc = crc32c(s.data(), s.size()) ^ crc_seed;
     s.push_back(static_cast<uint8_t>(crc >> 24));
     s.push_back(static_cast<uint8_t>(crc >> 16));
     s.push_back(static_cast<uint8_t>(crc >> 8));
@@ -351,10 +351,10 @@ std::vector<uint8_t> infoBits(const Bytes& info_bytes) {
     return bits;
 }
 
-Bytes encode(const Bytes& info_bytes, int air_bits) {
+Bytes encode(const Bytes& info_bytes, int air_bits, uint32_t crc_seed) {
     const int K = infoBitsForBytes(info_bytes.size());
     const Tables& tb = tables(K, air_bits);
-    const std::vector<uint8_t> b = infoBits(info_bytes);
+    const std::vector<uint8_t> b = infoBits(info_bytes, crc_seed);
     std::vector<uint8_t> p1, p2;
     uint8_t x1[3], z1[3], x2[3], z2[3];
     rscEncode(b, nullptr, p1, x1, z1);
@@ -466,7 +466,7 @@ DecodeResult decode(std::span<const float> air_llrs, size_t info_bytes,
         const size_t nb = bytes.size() - kCrcBytes;
         const uint32_t got = (static_cast<uint32_t>(bytes[nb]) << 24) | (static_cast<uint32_t>(bytes[nb + 1]) << 16) |
                              (static_cast<uint32_t>(bytes[nb + 2]) << 8) | static_cast<uint32_t>(bytes[nb + 3]);
-        if (crc32c(bytes.data(), nb) == got) {
+        if ((crc32c(bytes.data(), nb) ^ opts.crc_seed) == got) {
             res.crc_ok = true;
             res.stop = Stop::Crc;
             break;
