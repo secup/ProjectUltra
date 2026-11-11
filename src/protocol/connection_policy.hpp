@@ -837,8 +837,10 @@ public:
     int command() const { return command_; }
     int probeAfterCleanBursts() const { return probe_after_; }
 
-    // Returns true when the command changed.
-    bool observe(int rung, bool clean) {
+    // Returns true when the command changed. upper_margin: this burst's evidence that the next rung
+    // would decode (the receiver's 4x-noise re-decode of its first frame); a clean burst without it
+    // does not count toward a probe. Callers with no such test pass true.
+    bool observe(int rung, bool clean, bool upper_margin = true) {
         const int before = command_;
         const int at = (rung >= 0) ? rung : command_;
         if (!clean) {
@@ -855,6 +857,10 @@ public:
         if (at == probe_target_) {
             probe_target_ = -1;
             probe_after_ = first_probe_after_;
+        }
+        if (!upper_margin) {
+            clean_streak_ = 0;  // clean, but the next rung would not decode here
+            return command_ != before;
         }
         if (++clean_streak_ >= probe_after_ && command_ + 1 < kMcDpskRungCount) {
             command_ += 1;
@@ -2489,6 +2495,18 @@ inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
     return std::clamp(timeout_ms,
                       std::max<uint32_t>(18000u, physical_rtt_ms),
                       std::max<uint32_t>(72000u, physical_rtt_ms));
+}
+
+// ULTRA_MCDPSK_COMPACT_FRAME (default ON; "0" keeps the v2 LDPC codeword chain; same setting on both
+// stations): connected MC-DPSK DATA frames are one turbo codeword with a 4-byte header
+// (protocol/mcdpsk_frame.hpp) — 52 payload bytes in 3 codewords instead of 37, and a fixed frame
+// length, so a receiver keeps decoding a burst past a failed frame.
+inline bool mcDpskCompactFrameEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_MCDPSK_COMPACT_FRAME");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return on;
 }
 
 // ULTRA_MCDPSK_INFLIGHT_RTO (default ON; "0" restores the full-window scalar): MC-DPSK sizes each

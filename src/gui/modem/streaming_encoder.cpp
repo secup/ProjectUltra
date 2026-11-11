@@ -12,6 +12,7 @@
 #include "fec/frame_interleaver.hpp"
 #include "fec/burst_interleaver.hpp"
 #include "protocol/connection_policy.hpp"
+#include "protocol/mcdpsk_frame.hpp"
 #include "ofdm/genie_tx_capture.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -1237,6 +1238,24 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
                       log_prefix_.c_str(), repair->target_seq, repair->repair_bitmap,
                       repair->repair_count, encoded.size());
             return encoded;
+        }
+
+        // Compact MC-DPSK DATA frame (ULTRA_MCDPSK_COMPACT_FRAME): one turbo codeword with a 4-byte
+        // header, the session's fixed frame size. The protocol cuts chunks to its capacity; a frame
+        // that does not fit (cut before the session's geometry was known) keeps the v2 chain.
+        if (mc_dpsk_compact_frames_.load(std::memory_order_relaxed) &&
+            protocol::connection_policy::mcDpskCompactFrameEnabled() &&
+            tx_data.size() >= 3 &&
+            tx_data[2] == static_cast<uint8_t>(v2::FrameType::DATA)) {
+            if (auto air = protocol::mcdpsk_frame::encode(tx_data, fixed_frame_codewords_,
+                                                          code_rate_)) {
+                LOG_MODEM(DEBUG, "[%s] MC-DPSK compact DATA: %zu bytes -> %d codewords",
+                          log_prefix_.c_str(), tx_data.size(), fixed_frame_codewords_);
+                return *air;
+            }
+            LOG_MODEM(WARN, "[%s] MC-DPSK compact DATA: %zu bytes do not fit %d codewords, "
+                      "sending the v2 codeword chain", log_prefix_.c_str(), tx_data.size(),
+                      fixed_frame_codewords_);
         }
 
         // Check if this is a control frame (20 bytes, type 0x10-0x21 or 0x40)

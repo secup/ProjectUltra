@@ -1239,8 +1239,7 @@ void StreamingDecoder::checkIfReadyToDecode() {
                ? static_cast<size_t>(
                      waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
                : 0);
-    const size_t control_frame_samples =
-        static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+    const size_t control_frame_samples = mcDpskControlPeekSamples();
     auto requirement = decode_policy::selectDecodeSampleRequirement(
         pending_total_cw_,
         is_ofdm_here,

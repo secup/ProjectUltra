@@ -289,6 +289,136 @@ bool runLostFrameReport() {
     return true;
 }
 
+// Compact MC-DPSK DATA frames (protocol/mcdpsk_frame.hpp): a 3-frame burst of single-codeword
+// frames; optionally the middle frame replaced by noise (frames 1 and 3 must still decode: the
+// frame length is fixed, so a failure no longer ends the burst); optionally sent at DQPSK to a
+// receiver configured for DBPSK.
+bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
+    const uint32_t alpha = v2::hashCallsign("ALPHA");
+    const uint32_t bravo = v2::hashCallsign("BRAVO");
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(tx_mod, CodeRate::R1_4);
+    encoder.setFixedFrameCodewords(3);
+    encoder.setMcDpskCompactFrames(true);
+    std::vector<Bytes> serialized_frames;
+    for (uint16_t i = 0; i < 3; ++i) {
+        Bytes payload(52);
+        for (size_t j = 0; j < payload.size(); ++j) payload[j] = static_cast<uint8_t>(0x11 * (i + 1) + j);
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(300 + i),
+                                             payload, CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(v2::Flags::VERSION_V2 | v2::Flags::MORE_FRAG);
+        serialized_frames.push_back(frame.serialize());
+    }
+    auto samples = encoder.encodeBurstLight(serialized_frames);
+    // DBPSK and DQPSK frames: 3 x 648 air bits on 8 carriers.
+    const size_t frame_samples = static_cast<size_t>(
+        ((3 * 648 + 8 * (tx_mod == Modulation::DBPSK ? 1 : 2) - 1) /
+         (8 * (tx_mod == Modulation::DBPSK ? 1 : 2))) * 1024);
+    if (samples.size() <= 3 * frame_samples) {
+        std::cout << "FAIL: " << name << ": burst shorter than three frames\n";
+        return false;
+    }
+    if (corrupt_middle) {
+        const size_t start = samples.size() - 2 * frame_samples;
+        double power = 0.0;
+        for (size_t i = start; i < start + frame_samples; ++i) power += samples[i] * samples[i];
+        const float rms = static_cast<float>(std::sqrt(power / static_cast<double>(frame_samples)));
+        uint32_t lcg = 777u;
+        for (size_t i = start; i < start + frame_samples; ++i) {
+            lcg = lcg * 1664525u + 1013904223u;
+            samples[i] = (static_cast<float>((lcg >> 8) & 0xFFFF) / 65535.0f - 0.5f) * rms * 3.46f;
+        }
+    }
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    decoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    decoder.setFixedFrameCodewords(3);
+    decoder.setMcDpskSessionAddresses(bravo, alpha);
+    int lost = 0;
+    decoder.setMcDpskFrameLostCallback([&](int) { ++lost; });
+    feedInChunks(decoder, withSilence(samples));
+    std::vector<uint16_t> seqs;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (!result.success || !v2::isDataFrame(result.frame_type)) continue;
+        auto frame = v2::DataFrame::deserialize(result.frame_data);
+        if (!frame) continue;
+        const auto expect = v2::DataFrame::deserialize(serialized_frames[frame->seq - 300]);
+        if (frame->seq < 300 || frame->seq > 302 || !expect || frame->payload != expect->payload ||
+            frame->src_hash != alpha || frame->dst_hash != bravo) {
+            std::cout << "FAIL: " << name << ": frame " << frame->seq << " does not match\n";
+            return false;
+        }
+        seqs.push_back(frame->seq);
+    }
+    const std::vector<uint16_t> want = corrupt_middle ? std::vector<uint16_t>{300, 302}
+                                                      : std::vector<uint16_t>{300, 301, 302};
+    if (seqs != want || (corrupt_middle && lost != 1) || (!corrupt_middle && lost != 0)) {
+        std::cout << "FAIL: " << name << ": decoded " << seqs.size() << " frame(s), " << lost
+                  << " loss report(s)\n";
+        return false;
+    }
+    std::cout << name << ": " << seqs.size() << " frames decoded, " << lost << " loss\n";
+    return true;
+}
+
+// MC-DPSK rate change: the up-step's evidence. A compact DBPSK burst through AWGN; the receiver
+// re-decodes the first frame with 4x the in-band noise. At 20 dB that still decodes (DQPSK would);
+// at -4 dB DBPSK decodes but the 4x-noise copy does not (DQPSK would not).
+bool runMarginTest(float snr_db, bool expect_margin) {
+    const uint32_t alpha = v2::hashCallsign("ALPHA");
+    const uint32_t bravo = v2::hashCallsign("BRAVO");
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    encoder.setFixedFrameCodewords(3);
+    encoder.setMcDpskCompactFrames(true);
+    std::vector<Bytes> frames;
+    for (uint16_t i = 0; i < 2; ++i) {
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(500 + i),
+                                             Bytes(40, static_cast<uint8_t>(0x5A + i)), CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(v2::Flags::VERSION_V2 | v2::Flags::MORE_FRAG);
+        frames.push_back(frame.serialize());
+    }
+    auto audio = withSilence(encoder.encodeBurstLight(frames));
+    ultra::ota_channel_core::SimulatedChannel channel;
+    channel.setSeed(0x3141u);
+    channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
+    channel.transmitFromA(audio);
+    audio = channel.receiveForB(audio.size());
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    decoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    decoder.setFixedFrameCodewords(3);
+    decoder.setMcDpskSessionAddresses(bravo, alpha);
+    std::vector<int> margins;
+    decoder.setMcDpskMarginCallback([&](bool m) { margins.push_back(m ? 1 : 0); });
+    feedInChunks(decoder, audio);
+    size_t decoded = 0;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && v2::isDataFrame(result.frame_type)) ++decoded;
+    }
+    if (decoded == 0 || margins.size() != 1 || (margins[0] == 1) != expect_margin) {
+        std::cout << "FAIL: margin test at " << snr_db << " dB: " << decoded << " decoded, "
+                  << margins.size() << " margin report(s), first="
+                  << (margins.empty() ? -1 : margins[0]) << "\n";
+        return false;
+    }
+    std::cout << "margin test at " << snr_db << " dB: " << decoded << " decoded, margin "
+              << (margins[0] ? "yes" : "no") << "\n";
+    return true;
+}
+
 bool runContinuousBurstLoopback() {
     StreamingEncoder encoder;
     encoder.setMode(protocol::WaveformMode::MC_DPSK);
@@ -527,6 +657,11 @@ int main() {
     if (!runConstellationChangeBurst(Modulation::DQPSK, Modulation::DBPSK)) return 1;
     if (!runConstellationChangeBurst(Modulation::DBPSK, Modulation::DQPSK)) return 1;
     if (!runLostFrameReport()) return 1;
+    if (!runCompactBurst("compact burst", Modulation::DBPSK, false)) return 1;
+    if (!runCompactBurst("compact burst, middle frame lost", Modulation::DBPSK, true)) return 1;
+    if (!runCompactBurst("compact DQPSK burst at a DBPSK receiver", Modulation::DQPSK, false)) return 1;
+    if (!runMarginTest(20.0f, true)) return 1;
+    if (!runMarginTest(-4.0f, false)) return 1;
     if (!runConnectedOFDMHalfOpenConnectFallback()) return 1;
     if (!runLowAmplitudePing("robust low-amplitude ping", mc_dpsk_presets::robust(),
                              0.030f)) return 1;

@@ -772,6 +772,20 @@ preamble), and changing the codeword count aborts in-flight frames (`setFixedFra
 **Test:** `StreamingMCDPSK` (`DQPSK burst at a DBPSK receiver` and the reverse; disabling the retry
 fails it), `ConnectionPolicy` `test_mcdpsk_rate_controller`.
 
+### INV-MCDPSK-FRAME-001: a compact MC-DPSK DATA frame's length is fixed for the session
+**Rule:** in a connected MC-DPSK session every DATA frame is ONE turbo codeword of exactly the
+session's codewords x 648 air bits (`protocol/mcdpsk_frame`), at any constellation; its CRC-32C is
+seeded from the direction's callsign hashes (the sender takes them from the v2 frame, the receiver
+from `setMcDpskSessionAddresses`), and the receiver rebuilds the v2 DATA frame for the protocol.
+Control frames keep the v2 codeword chain. The receiver decodes a burst at fixed frame positions past
+a failure, at most the sender's window (`mcDpskWindowSizeForTiming`), and hands the chirp search back
+the first position of any trailing failures.
+**Why:** a frame whose length lives in its own first codeword makes one failure lose the rest of the
+burst; a fixed length lets the end-of-turn frame still arrive, so the sender gets a SACK with the hole
+instead of waiting out its timeout. The window cap and the search hand-back keep the decoder from
+eating the next burst, which the sender queues back to back.
+**Test:** `StreamingMCDPSK` (`compact burst, middle frame lost`), `MCDPSKFrame`.
+
 ---
 
 ## Modulation Invariants

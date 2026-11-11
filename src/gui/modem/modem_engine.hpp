@@ -234,6 +234,20 @@ public:
             streaming_decoder_->setAnchoredBurstNoGroupCallback(std::move(callback));
         }
     }
+    // Compact MC-DPSK DATA frames (protocol/mcdpsk_frame.hpp) need the session's addresses: the
+    // decoder seeds the CRC with them and rebuilds the v2 frame; the encoder uses compact frames
+    // only inside a session.
+    void setMcDpskSessionAddresses(uint32_t local_hash, uint32_t peer_hash) {
+        if (streaming_decoder_) streaming_decoder_->setMcDpskSessionAddresses(local_hash, peer_hash);
+        if (streaming_encoder_) {
+            streaming_encoder_->setMcDpskCompactFrames(local_hash != 0 && peer_hash != 0);
+        }
+    }
+    void setMcDpskMarginCallback(std::function<void(bool upper_rung_margin)> callback) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setMcDpskMarginCallback(std::move(callback));
+        }
+    }
     void setMcDpskFrameLostCallback(std::function<void(int modulation)> callback) {
         if (streaming_decoder_) {
             streaming_decoder_->setMcDpskFrameLostCallback(std::move(callback));

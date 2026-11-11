@@ -10,6 +10,59 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FEAT(mcdpsk): compact single-codeword DATA frames in sessions; up-steps need margin
+
+**What was slow.** An MC-DPSK DATA frame was a chain of 648-bit LDPC codewords with a 17-byte
+header in the first, a 2-byte marker on each other and a 2-byte CRC: a 3-codeword DBPSK frame
+carried 37 bytes of file data out of 61. Its length was known only from its first codeword, so one
+failed frame also lost every frame after it in the burst, and with no frame left to end the turn the
+sender waited out its timeout. And the receiver's up-step probed DQPSK blindly: on weak channels
+(AWGN -6 dB, ITU Good 0 dB) every probe failed and cost a burst plus a timeout.
+
+**What changed.**
+- Compact frames (`ULTRA_MCDPSK_COMPACT_FRAME`, default ON, both stations): in a connected MC-DPSK
+  session every DATA frame is one turbo codeword of the session's codewords x 648 air bits
+  (`protocol/mcdpsk_frame`, committed earlier), 52 payload bytes in 3 codewords. The protocol cuts
+  chunks to that capacity (`currentDataPayloadCapacity`); the connection hands the modem the session's
+  addresses on CONNECTED (`setSessionAddressesCallback` -> `ModemEngine::setMcDpskSessionAddresses`),
+  which seed the frame CRC and let the receiver rebuild the v2 frame.
+- Receiver: the first-frame look-ahead covers one whole frame at DBPSK
+  (`MCDPSKWaveform::getSamplesForCWCountAtSlowest`); the first frame is decoded as a compact frame at
+  the configured constellation, then the other one (`decodeMcDpskCompactFirstFrame`), else the v2
+  path takes it (control frames). The burst continues frame by frame at fixed positions
+  (`continueMCDPSKCompactBurst`) PAST a failed frame, up to the sender's window, and stops at an
+  end-of-turn frame or a window that reads as the burst's own noise; after trailing failures the chirp
+  search resumes at the first failed position (bursts are queued back to back). A decoded MC-DPSK
+  frame now advances by its own span, not the look-ahead's.
+- Up-step evidence: for each burst whose first frame decoded at DBPSK the receiver re-decodes that
+  frame with three times the measured in-band noise added (`mcDpskUpperRungMarginTest`: DQPSK halves
+  the phase decision distance, so it sees what DBPSK sees at a quarter of the SNR, 6.02 dB; the noise
+  rides the real faded signal). The controller counts a clean burst toward a probe only with that
+  margin (`McDpskRateController::observe(rung, clean, upper_margin)`); with v2 frames no test runs and
+  the clean run alone decides, as before.
+- Docs: INV-MCDPSK-FRAME-001, map rows, CLAUDE.md Mode 1.
+
+**Tests.** ctest 116/116. `StreamingMCDPSK`: a compact 3-frame burst; the same with the middle frame
+replaced by noise (frames 1 and 3 decode, one loss reported); a compact DQPSK burst at a DBPSK
+receiver; the margin test through AWGN (20 dB: margin yes; -4 dB: DBPSK decodes, margin no).
+`ConnectionPolicy` 517/517 (a clean burst without margin resets the run). GUI gate A/B, every new
+MC-DPSK feature off (`ULTRA_MCDPSK_RATE_ADAPT=0 ULTRA_MCDPSK_INFLIGHT_RTO=0
+ULTRA_MCDPSK_COMPACT_FRAME=0`) vs all on, 1 KB, CFO 7.3 Hz:
+
+| Cell (1 KB, one seed) | All off | All on |
+|---|---|---|
+| AWGN 0 dB, seed 42 | PASS 237 s, 40 bps (DBPSK, 0 retx) | PASS 131 s, 80 bps (DQPSK after one step up, 0 retx) |
+| ITU Good 0 dB, seed 43 | PASS 490 s, 20 bps (18 timeouts) | PASS 231 s, 40 bps (6 timeouts; 2 steps up, 2 down; 3 frames lost) |
+| AWGN -6 dB, seed 42 | FAIL at 600 s (22 timeouts) | PASS 451 s, 20 bps (21 timeouts; no step up, 12 bursts without margin) |
+| ITU Good -3 dB, seed 42 | FAIL at 600 s (24 timeouts) | PASS 387 s, 20 bps (13 timeouts; 2 up, 2 down; 7 bursts without margin) |
+
+With the rate change and in-flight timeouts but v2 frames (the combined A/B promised in the
+`ULTRA_MCDPSK_RATE_ADAPT` entry below, same seeds) AWGN -6 and Good -3 still failed at 600 s; the
+compact frames and the margin test pass them. OFDM is untouched: AWGN 20 dB, 4 KB,
+all on: PASS 1230 bps at QPSK R1/2, as before. No `ultra_gui` crash in the 18 processes.
+
+---
+
 ## 2026-11-11 — FIX(rx): MC-DPSK waveform swap freed under the chirp search (BUG-MCDPSK-CONFIG-SWAP-SIGSEGV)
 
 **What was broken.** Two `ultra_gui` crashes on the GUI gate (08:49 and 10:57), both SIGSEGV in

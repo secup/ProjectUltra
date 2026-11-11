@@ -182,6 +182,15 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // loss evidence (-1 = the burst's first frame failed at every constellation).
     modem.setMcDpskFrameLostCallback(
         [&protocol](int modulation) { protocol.noteRxMcDpskFrameLost(modulation); });
+    // MC-DPSK rate change: the up-step's evidence (a burst's first frame still decodes with 4x
+    // the noise).
+    modem.setMcDpskMarginCallback(
+        [&protocol](bool upper_rung_margin) { protocol.noteRxMcDpskMargin(upper_rung_margin); });
+    // Compact MC-DPSK DATA frames: the session's addresses, set on every CONNECTED entry.
+    protocol.setSessionAddressesCallback(
+        [&modem](uint32_t local_hash, uint32_t remote_hash) {
+            modem.setMcDpskSessionAddresses(local_hash, remote_hash);
+        });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);

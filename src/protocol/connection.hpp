@@ -517,6 +517,11 @@ public:
     // MC-DPSK rate change (receiver side): a frame the modem could not decode, with its burst's
     // constellation (static_cast<int>(Modulation), -1 = unknown). Loss evidence, applied at once.
     void noteRxMcDpskFrameLost(int modulation);
+    // MC-DPSK rate change (receiver side): this burst's first frame still decoded with 4x the
+    // noise (the next rung's handicap). Without a test (v2 frames) the up-step stays evidence-free.
+    void noteRxMcDpskMargin(bool upper_rung_margin) {
+        rx_mcdpsk_margin_ = upper_rung_margin ? 1 : 0;
+    }
 
     // Set measured SNR from modem layer (call this when decoding frames).
     // data_aided: snr_db is the MC-DPSK data-aided (fade-averaged) estimate — the
@@ -698,6 +703,10 @@ public:
     // this station's OWN local reading (responder connect-time pick, sender-side
     // MODE_CHANGE commit) — the GUI must label the source accordingly (the responder
     // connect line used to mislabel a LOCAL reading as "(wire_peer)").
+    // The session's addresses (24-bit callsign hashes), fired on entering CONNECTED.
+    using SessionAddressesCallback = std::function<void(uint32_t local_hash, uint32_t remote_hash)>;
+    void setSessionAddressesCallback(SessionAddressesCallback cb) { on_session_addresses_ = std::move(cb); }
+
     using DataModeChangedCallback = std::function<void(Modulation mod, CodeRate rate,
                                                         int cw_count,
                                                         float snr_db, float peer_fading_index,
@@ -1358,6 +1367,7 @@ private:
     Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
     uint32_t rx_mcdpsk_frames_since_command_ = 0;
     int mcdpsk_last_command_group_seq_ = -1;
+    int rx_mcdpsk_margin_ = -1;  // -1 no test this burst, 0 failed, 1 passed
     // RECEIVER: fade-averaging ring for the verdict SNR. The per-frame broadband
     // EMA is a fade SNAPSHOT (measured ±5 dB swing on a dial-20 Good channel) —
     // rate anchors are calibrated on dial-equivalent SNR, so the verdict input is
@@ -1780,6 +1790,7 @@ private:
     FileSentCallback on_file_sent_;
     ModeNegotiatedCallback on_mode_negotiated_;
     DataModeChangedCallback on_data_mode_changed_;
+    SessionAddressesCallback on_session_addresses_;
     ConnectWaveformChangedCallback on_connect_waveform_changed_;
     PhyMaskV1NegotiatedCallback on_phy_mask_v1_negotiated_;
     HandshakeConfirmedCallback on_handshake_confirmed_;

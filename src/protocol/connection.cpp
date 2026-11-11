@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include "connection.hpp"
+#include "mcdpsk_frame.hpp"
 #include "connection_policy.hpp"
 #include "sync/acquisition_mode.hpp"
 #include "waveform_selection.hpp"
@@ -8286,6 +8287,9 @@ size_t Connection::currentDataPayloadCapacity() const {
         return v2::getFixedFramePayloadCapacity(data_code_rate_, physical_cw);
     }
     if (usesBoundedVariableMCDPSKFrames()) {
+        if (connection_policy::mcDpskCompactFrameEnabled()) {
+            return mcdpsk_frame::payloadCapacity(data_frame_cw_count_, data_code_rate_);
+        }
         return v2::getVariableFramePayloadCapacity(data_code_rate_, data_frame_cw_count_);
     }
     return SIZE_MAX;
@@ -8736,12 +8740,16 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
         const int rung = connection_policy::mcDpskRungIndexFor(rx_mcdpsk_last_modulation_);
         // Clean: the synchronous end-of-turn ACK (the burst's last frame decoded) with no hole.
         const bool clean = tone_ack_group_complete_context_ && sack_bitmap == 0;
-        const bool changed = mcdpsk_rate_ctl_.observe(rung, clean);
+        // -1: no margin test ran (v2 frames): the up-step falls back to the clean run alone.
+        const bool upper_margin = rx_mcdpsk_margin_ != 0;
+        const bool changed = mcdpsk_rate_ctl_.observe(rung, clean, upper_margin);
         rx_mcdpsk_frames_since_command_ = 0;
+        rx_mcdpsk_margin_ = -1;
         LOG_MODEM(INFO,
-                  "Connection: MC-DPSK RATE rx: burst at %s %s -> command %s%s "
+                  "Connection: MC-DPSK RATE rx: burst at %s %s%s -> command %s%s "
                   "(probe after %d clean bursts)",
                   modulationToString(rx_mcdpsk_last_modulation_), clean ? "clean" : "loss",
+                  upper_margin ? "" : " (no margin for the next rung)",
                   modulationToString(
                       connection_policy::kMcDpskRungModulations[mcdpsk_rate_ctl_.command()]),
                   changed ? " (changed)" : "", mcdpsk_rate_ctl_.probeAfterCleanBursts());
@@ -9037,6 +9045,11 @@ void Connection::resetAdaptiveDecisionState() {
 void Connection::enterConnected(bool automatic_rate_allowed) {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    // The modem needs the session's two addresses to decode compact MC-DPSK DATA frames (their
+    // CRC is seeded from them, mcdpsk_frame.hpp) and to rebuild the v2 frame it hands back.
+    if (on_session_addresses_) {
+        on_session_addresses_(v2::hashCallsign(local_call_), v2::hashCallsign(remote_call_));
+    }
     resetAdaptiveDecisionState();
     // Message-object identity is scoped to ONE session, and the two ends do not
     // necessarily observe a teardown together — a peer that missed the DISCONNECT

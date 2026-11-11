@@ -869,9 +869,19 @@ void ProtocolEngine::setMeasuredSNR(float snr_db, SNRSource source, bool data_ai
     connection_.setMeasuredSNR(snr_db, source, data_aided);
 }
 
+void ProtocolEngine::setSessionAddressesCallback(Connection::SessionAddressesCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setSessionAddressesCallback(std::move(cb));
+}
+
 void ProtocolEngine::noteRxMcDpskModulation(Modulation mod) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.noteRxMcDpskModulation(mod);
+}
+
+void ProtocolEngine::noteRxMcDpskMargin(bool upper_rung_margin) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteRxMcDpskMargin(upper_rung_margin);
 }
 
 void ProtocolEngine::noteRxMcDpskFrameLost(int modulation) {

@@ -345,6 +345,14 @@ int MCDPSKWaveform::getMinSamplesForFrame() const {
     return training_samples + ref_samples + getDataOnlySamplesForCWCount(1);
 }
 
+int MCDPSKWaveform::getSamplesForCWCountAtSlowest(int num_cw) const {
+    constexpr int LDPC_BLOCK_SIZE = 648;
+    const int carriers = std::max(1, config_.num_carriers);
+    const int data_symbols = (std::max(1, num_cw) * LDPC_BLOCK_SIZE + carriers - 1) / carriers;
+    return config_.training_symbols * config_.samples_per_symbol + config_.samples_per_symbol +
+           data_symbols * config_.samples_per_symbol;
+}
+
 int MCDPSKWaveform::getMinSamplesForCWCount(int num_cw) const {
     // Training + reference + exactly the packed data symbols for num_cw LDPC CWs.
     // The modulator packs the whole frame bitstream before rounding to a symbol

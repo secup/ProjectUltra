@@ -3,6 +3,7 @@
 #include "ofdm/genie_tx_capture.hpp"
 #include "streaming_decoder.hpp"
 #include "protocol/connection_policy.hpp"  // MC-DPSK data constellations
+#include "protocol/mcdpsk_frame.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_control_profile.hpp"
 #include "streaming_decode_policy.hpp"
@@ -906,8 +907,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                ? static_cast<size_t>(
                      waveform_->getMinSamplesForCWCount(fixed_frame_codewords_))
                : 0);
-    const size_t control_frame_samples =
-        static_cast<size_t>(waveform_->getMinSamplesForControlFrame());
+    const size_t control_frame_samples = mcDpskControlPeekSamples();
     auto requirement = decode_policy::selectDecodeSampleRequirement(
         pending_total_cw_,
         is_ofdm,
@@ -2138,6 +2138,22 @@ void StreamingDecoder::decodeCurrentFrame() {
     // bits and would be thrown away as a false lock.
     if (!is_ofdm && connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
         !soft_bits.empty()) {
+        // Compact DATA frame first (one turbo codeword, fixed length); anything else — a control
+        // frame, a PING, a lost frame — goes on to the v2 path with the constellation retry.
+        if (mcDpskCompactActive()) {
+            if (auto compact = decodeMcDpskCompactFirstFrame(frame_buffer, decode_cfo, soft_bits)) {
+                // Evidence for the receiver's up-step, before the frame (and the burst's ACK) is
+                // delivered: only at a rung with one above it.
+                const int rung = protocol::connection_policy::mcDpskRungIndexFor(
+                    waveform_->getModulation());
+                if (mc_dpsk_margin_callback_ && rung >= 0 &&
+                    rung + 1 < protocol::connection_policy::kMcDpskRungCount) {
+                    mc_dpsk_margin_callback_(mcDpskUpperRungMarginTest(frame_buffer, decode_cfo));
+                }
+                deliverMcDpskCompactFirstFrame(std::move(*compact), frame_sync_abs, gen_at_start);
+                return;
+            }
+        }
         retryMcDpskFirstFrameConstellation(frame_buffer, decode_cfo, soft_bits);
     }
     if (soft_bits.empty()) {
@@ -3224,6 +3240,15 @@ void StreamingDecoder::decodeCurrentFrame() {
             }
         }
     }
+    if (result.success && !is_ofdm && waveform_) {
+        // The look-ahead can be longer than the frame (it covers a DBPSK codeword, or a whole
+        // compact frame): a decoded MC-DPSK frame advances by its own span.
+        const int actual_cw = result.codewords_ok + result.codewords_failed;
+        if (actual_cw > 0) {
+            consumed = std::min(consumed,
+                                static_cast<size_t>(waveform_->getMinSamplesForCWCount(actual_cw)));
+        }
+    }
     size_t next_block_pos = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + consumed);
     size_t next_search_abs = frame_sync_abs + consumed;
 
@@ -3532,6 +3557,7 @@ void StreamingDecoder::startMCDPSKBurstContinuation(size_t next_pos, size_t next
     mc_burst_frames_decoded_ = 1;
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
+    mc_burst_compact_ = false;
     mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
     state_ = DecoderState::MCDPSK_BURST_CONTINUING;
 
@@ -3543,6 +3569,8 @@ void StreamingDecoder::finishMCDPSKBurstContinuation(size_t search_pos, size_t s
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
     mc_burst_frames_decoded_ = 0;
+    mc_burst_compact_ = false;
+    mc_burst_compact_fail_pos_ = SIZE_MAX;
 
     {
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
@@ -3554,6 +3582,10 @@ void StreamingDecoder::finishMCDPSKBurstContinuation(size_t search_pos, size_t s
 }
 
 void StreamingDecoder::continueMCDPSKBurst() {
+    if (mc_burst_compact_) {
+        continueMCDPSKCompactBurst();
+        return;
+    }
     auto* mc_waveform = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
     if (!mc_waveform) {
         finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
@@ -3890,6 +3922,327 @@ void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<floa
                                                    sync_noise_ref_samples_, 2900.0, 48000.0)) {
             noteMcDpskFrameLost(-1);
         }
+    }
+}
+
+// ─────────────── Compact MC-DPSK DATA frames (protocol/mcdpsk_frame.hpp) ───────────────
+
+bool StreamingDecoder::mcDpskCompactActive() const {
+    return connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
+           protocol::connection_policy::mcDpskCompactFrameEnabled() &&
+           mc_compact_local_hash_.load() != 0 && mc_compact_peer_hash_.load() != 0;
+}
+
+int StreamingDecoder::mcDpskCompactCodewords() const {
+    return v2::sanitizeFixedFrameCodewords(fixed_frame_codewords_);
+}
+
+size_t StreamingDecoder::mcDpskControlPeekSamples() const {
+    if (mcDpskCompactActive()) {
+        if (const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get())) {
+            return static_cast<size_t>(mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
+        }
+    }
+    return waveform_ ? static_cast<size_t>(waveform_->getMinSamplesForControlFrame()) : 0;
+}
+
+DecodeResult StreamingDecoder::makeMcDpskCompactResult(Bytes v2_frame, float snr_db,
+                                                       float cfo_hz) {
+    DecodeResult result;
+    result.success = true;
+    result.frame_data = std::move(v2_frame);
+    result.frame_type = v2::FrameType::DATA;
+    result.codewords_ok = mcDpskCompactCodewords();
+    result.codewords_failed = 0;
+    result.snr_db = snr_db;
+    result.snr_source = SNRSource::SYNC_QUALITY;
+    result.sync_quality_db = snr_db;
+    result.cfo_hz = cfo_hz;
+    if (waveform_) {
+        last_mc_dpsk_rx_modulation_.store(static_cast<int>(waveform_->getModulation()),
+                                          std::memory_order_relaxed);
+    }
+    return result;
+}
+
+std::optional<DecodeResult> StreamingDecoder::decodeMcDpskCompactFirstFrame(
+    const std::vector<float>& frame_buffer, float decode_cfo, std::vector<float>& soft_bits) {
+    auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+    if (!mc || frame_buffer.empty()) {
+        return std::nullopt;
+    }
+    const int codewords = mcDpskCompactCodewords();
+    const uint32_t peer = mc_compact_peer_hash_.load();
+    const uint32_t local = mc_compact_local_hash_.load();
+    auto attempt = [&](const std::vector<float>& bits) {
+        return protocol::mcdpsk_frame::decode(bits, codewords, code_rate_, peer, local);
+    };
+    auto decoded = attempt(soft_bits);
+    if (decoded.ok) {
+        return makeMcDpskCompactResult(std::move(decoded.v2_frame), sync_snr_, sync_cfo_);
+    }
+    const Modulation configured = mc->getModulation();
+    const SampleSpan frame(frame_buffer.data(), frame_buffer.size());
+    for (const Modulation alt : protocol::connection_policy::kMcDpskRungModulations) {
+        if (alt == configured) {
+            continue;
+        }
+        mc->configure(alt, code_rate_);
+        mc->setFrequencyOffset(decode_cfo);
+        if (!processWaveformForCodewords(frame, 1)) {
+            continue;
+        }
+        std::vector<float> alt_bits = mc->getSoftBits();
+        decoded = attempt(alt_bits);
+        if (decoded.ok) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK compact first frame decodes at %s (configured %s): "
+                      "the sender changed constellation",
+                      log_prefix_.c_str(), modulationToString(alt), modulationToString(configured));
+            soft_bits = std::move(alt_bits);
+            return makeMcDpskCompactResult(std::move(decoded.v2_frame), sync_snr_, sync_cfo_);
+        }
+    }
+    mc->configure(configured, code_rate_);
+    mc->setFrequencyOffset(decode_cfo);
+    processWaveformForCodewords(frame, 1);
+    soft_bits = mc->getSoftBits();
+    return std::nullopt;
+}
+
+bool StreamingDecoder::mcDpskUpperRungMarginTest(const std::vector<float>& frame_buffer,
+                                                  float decode_cfo) {
+    // The frame that just decoded, with three times the measured in-band noise added (4x in all):
+    // the next rung up halves the phase decision distance, so at this channel it sees what this
+    // rung would see at a quarter of the SNR (20 log10 2 = 6.02 dB). The noise rides the real,
+    // faded signal, so the test needs no channel model.
+    auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+    if (!mc || sync_noise_ref_rms_ <= 0.0f || frame_buffer.empty()) {
+        return false;
+    }
+    // In-band noise power P over 2900 Hz is a one-sided PSD of P/2900; white noise of variance v
+    // at 48 kHz has PSD v/24000. Adding 3x the PSD: v = 3 P 24000/2900.
+    const double inband_power =
+        static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
+    const double sigma = std::sqrt(3.0 * inband_power * 24000.0 / 2900.0);
+    std::vector<float> noisy(frame_buffer);
+    for (size_t i = 0; i + 1 < noisy.size(); i += 2) {
+        // Box-Muller from SplitMix64 (deterministic, platform-independent).
+        auto next_unit = [&]() {
+            uint64_t z = (mc_margin_rng_state_ += 0x9E3779B97F4A7C15ull);
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+            z ^= z >> 31;
+            return (static_cast<double>(z >> 11) + 0.5) / 9007199254740992.0;
+        };
+        const double u1 = next_unit();
+        const double u2 = next_unit();
+        const double r = std::sqrt(-2.0 * std::log(u1));
+        noisy[i] += static_cast<float>(sigma * r * std::cos(2.0 * M_PI * u2));
+        noisy[i + 1] += static_cast<float>(sigma * r * std::sin(2.0 * M_PI * u2));
+    }
+    MCDPSKWaveform scratch(mc_dpsk_config_);
+    scratch.configure(mc->getModulation(), code_rate_);
+    scratch.setFrequencyOffset(decode_cfo);
+    scratch.setNoiseReferenceRMS(static_cast<float>(std::sqrt(4.0 * inband_power)));
+    if (!scratch.process(SampleSpan(noisy.data(), noisy.size()))) {
+        return false;
+    }
+    const auto bits = scratch.getSoftBits();
+    return protocol::mcdpsk_frame::decode(bits, mcDpskCompactCodewords(), code_rate_,
+                                          mc_compact_peer_hash_.load(),
+                                          mc_compact_local_hash_.load()).ok;
+}
+
+void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_t frame_sync_abs,
+                                                      uint32_t gen_at_start) {
+    auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+    populateDecodeMetrics(result, false, sync_cfo_);
+    {
+        std::lock_guard<std::mutex> slock(stats_mutex_);
+        stats_.frames_decoded++;
+    }
+    stampRxSubstantive();
+    result.physical_turn_complete = frame_policy::hasMcDpskTurnEndMarker(
+        true, connected_, /*is_mc_dpsk=*/true, result.frame_data);
+    if (result.physical_turn_complete) {
+        clearProvisionalBurstAirGate();
+    }
+    {
+        std::lock_guard<std::mutex> qlock(queue_mutex_);
+        frame_queue_.push(result);
+    }
+    if (frame_callback_) {
+        frame_callback_(result);
+    }
+    if (reset_generation_.load(std::memory_order_acquire) != gen_at_start || !mc) {
+        return;
+    }
+    const int codewords = mcDpskCompactCodewords();
+    const size_t consumed = static_cast<size_t>(mc->getMinSamplesForCWCount(codewords));
+    size_t next_pos = 0;
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        next_pos = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + consumed);
+    }
+    const size_t next_abs = frame_sync_abs + consumed;
+    pending_total_cw_ = 0;
+    LOG_MODEM(INFO, "[%s] MC-DPSK compact frame 1 decoded at %s (%d codewords)%s",
+              log_prefix_.c_str(), modulationToString(mc->getModulation()), codewords,
+              result.physical_turn_complete ? ", end of turn" : "");
+    if (!result.physical_turn_complete && decodedFrameHasMoreFrag(result)) {
+        startMCDPSKBurstContinuation(next_pos, next_abs, sync_snr_, sync_cfo_);
+        mc_burst_compact_ = true;
+        mc_burst_compact_fail_pos_ = SIZE_MAX;
+        mc_burst_compact_window_ = static_cast<int>(
+            protocol::connection_policy::mcDpskWindowSizeForTiming(
+                protocol::connection_policy::mcDpskFrameTiming(
+                    mc->getModulation(), mc_dpsk_config_.num_carriers,
+                    mc_dpsk_config_.samples_per_symbol, codewords)));
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        sync_controller_.ring_.correlation_pos_ = next_pos;
+        sync_controller_.ring_.setSearchFloorLocked(next_abs);
+        last_decoded_sync_pos_ = sync_position_;
+    }
+    state_ = DecoderState::SEARCHING;
+}
+
+void StreamingDecoder::finishMCDPSKCompactBurst() {
+    if (mc_burst_compact_fail_pos_ != SIZE_MAX) {
+        // Trailing frames failed: hand the search back their first position, where the next
+        // burst's chirp may already sit (bursts are queued back to back).
+        finishMCDPSKBurstContinuation(mc_burst_compact_fail_pos_, mc_burst_compact_fail_abs_);
+    } else {
+        finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+    }
+}
+
+void StreamingDecoder::continueMCDPSKCompactBurst() {
+    auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+    if (!mc) {
+        finishMCDPSKCompactBurst();
+        return;
+    }
+    constexpr int kSampleRateHz = 48000;
+    const int codewords = mcDpskCompactCodewords();
+    const size_t frame_samples = static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords));
+
+    size_t available = 0;
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        available = (sync_controller_.ring_.write_pos_ >= mc_burst_next_pos_)
+            ? sync_controller_.ring_.write_pos_ - mc_burst_next_pos_
+            : sync_controller_.ring_.buffer_capacity_samples_ - mc_burst_next_pos_ +
+                  sync_controller_.ring_.write_pos_;
+    }
+    if (available < frame_samples) {
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - mc_burst_wait_start_time_).count();
+        const long long needed_ms =
+            static_cast<long long>((frame_samples * 1000 + kSampleRateHz - 1) / kSampleRateHz);
+        if (elapsed_ms > needed_ms + 1000) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK compact burst ended after %d frame(s) (no more audio)",
+                      log_prefix_.c_str(), mc_burst_frames_decoded_);
+            finishMCDPSKCompactBurst();
+        }
+        return;
+    }
+    std::vector<float> window(frame_samples);
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        for (size_t i = 0; i < frame_samples; ++i) {
+            window[i] = sync_controller_.ring_.buffer_[
+                sync_controller_.ring_.wrapRingIndexLocked(mc_burst_next_pos_ + i)];
+        }
+    }
+
+    // The burst is over when the next frame's window reads as this burst's own noise (the same
+    // in-band test as the v2 continuation, BUG-RX-ABSOLUTE-LEVEL).
+    if (sync_noise_ref_rms_ > 0.0f && sync_noise_ref_samples_ > 0 && window.size() > 200) {
+        FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+        for (size_t i = 0; i < 100; ++i) band.process(window[i]);
+        double sum_sq = 0.0;
+        for (size_t i = 100; i < window.size(); ++i) {
+            const float y = band.process(window[i]);
+            sum_sq += static_cast<double>(y) * static_cast<double>(y);
+        }
+        const size_t measured = window.size() - 100;
+        const double noise_power =
+            static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
+        if (frame_policy::inBandPowerReadsAsNoise(sum_sq / static_cast<double>(measured), measured,
+                                                  noise_power, sync_noise_ref_samples_, 2900.0,
+                                                  static_cast<double>(kSampleRateHz))) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK compact burst tail after %d frame(s)",
+                      log_prefix_.c_str(), mc_burst_frames_decoded_);
+            finishMCDPSKCompactBurst();
+            return;
+        }
+    }
+
+    if (!mc->processDataOnly(SampleSpan(window.data(), window.size()))) {
+        finishMCDPSKCompactBurst();
+        return;
+    }
+    const auto soft = mc->getSoftBits();
+    auto decoded = protocol::mcdpsk_frame::decode(soft, codewords, code_rate_,
+                                                  mc_compact_peer_hash_.load(),
+                                                  mc_compact_local_hash_.load());
+    const size_t frame_pos = mc_burst_next_pos_;
+    const size_t frame_abs = mc_burst_next_abs_;
+    {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        mc_burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(mc_burst_next_pos_ + frame_samples);
+    }
+    mc_burst_next_abs_ += frame_samples;
+    mc_burst_frames_decoded_++;
+    mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+
+    if (decoded.ok) {
+        DecodeResult result = makeMcDpskCompactResult(std::move(decoded.v2_frame), mc_burst_snr_,
+                                                      mc_burst_cfo_);
+        result.physical_turn_complete = frame_policy::hasMcDpskTurnEndMarker(
+            true, connected_, /*is_mc_dpsk=*/true, result.frame_data);
+        populateDecodeMetrics(result, false, mc_burst_cfo_);
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.frames_decoded++;
+        }
+        stampRxSubstantive();
+        {
+            std::lock_guard<std::mutex> qlock(queue_mutex_);
+            frame_queue_.push(result);
+        }
+        if (frame_callback_) {
+            frame_callback_(result);
+        }
+        mc_burst_compact_fail_pos_ = SIZE_MAX;
+        LOG_MODEM(INFO, "[%s] MC-DPSK compact burst frame %d decoded%s",
+                  log_prefix_.c_str(), mc_burst_frames_decoded_,
+                  result.physical_turn_complete ? ", end of turn" : "");
+        if (result.physical_turn_complete || !decodedFrameHasMoreFrag(result)) {
+            finishMCDPSKCompactBurst();
+            return;
+        }
+    } else {
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            stats_.frames_failed++;
+        }
+        noteMcDpskFrameLost(static_cast<int>(mc->getModulation()));
+        if (mc_burst_compact_fail_pos_ == SIZE_MAX) {
+            mc_burst_compact_fail_pos_ = frame_pos;
+            mc_burst_compact_fail_abs_ = frame_abs;
+        }
+        LOG_MODEM(INFO, "[%s] MC-DPSK compact burst frame %d lost (agreement %.2f), continuing",
+                  log_prefix_.c_str(), mc_burst_frames_decoded_, decoded.extrinsic_agreement);
+    }
+    if (mc_burst_frames_decoded_ >= std::max(1, mc_burst_compact_window_) ||
+        mc_burst_frames_decoded_ >= MC_DPSK_MAX_BURST_FRAMES) {
+        LOG_MODEM(INFO, "[%s] MC-DPSK compact burst complete: %d frame(s), window %d",
+                  log_prefix_.c_str(), mc_burst_frames_decoded_, mc_burst_compact_window_);
+        finishMCDPSKCompactBurst();
     }
 }
 

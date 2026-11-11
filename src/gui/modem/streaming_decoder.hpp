@@ -692,11 +692,23 @@ public:
     void setAnchoredBurstNoGroupCallback(std::function<void(bool payload_seen)> cb) {
         anchored_burst_no_group_callback_ = std::move(cb);
     }
+    // Compact MC-DPSK DATA frames (protocol/mcdpsk_frame.hpp): the session's addresses (24-bit
+    // callsign hashes; the frame CRC is seeded from them). Any thread.
+    void setMcDpskSessionAddresses(uint32_t local_hash, uint32_t peer_hash) {
+        mc_compact_local_hash_.store(local_hash);
+        mc_compact_peer_hash_.store(peer_hash);
+    }
     // MC-DPSK rate change: a connected MC-DPSK data frame this decoder could not decode, with the
     // constellation its burst was at (static_cast<int>(Modulation)), or -1 when the burst's first
     // frame failed at every constellation. Decode thread; same class as the frame callback.
     void setMcDpskFrameLostCallback(std::function<void(int modulation)> cb) {
         mc_dpsk_frame_lost_callback_ = std::move(cb);
+    }
+    // MC-DPSK rate change: for each burst whose first compact frame decoded at a rung with a rung
+    // above it, whether that frame still decodes with 4x the in-band noise (the upper rung halves
+    // the phase decision distance: 6.02 dB). The receiver probes up only on this evidence.
+    void setMcDpskMarginCallback(std::function<void(bool upper_rung_margin)> cb) {
+        mc_dpsk_margin_callback_ = std::move(cb);
     }
     // A marker-armed candidate was abandoned without trustworthy group geometry.
     // This is state-only provenance: consumers may cancel a pending experiment,
@@ -984,6 +996,23 @@ private:
     // waveform stays there (the rest of the burst shares it) and soft_bits are replaced.
     void retryMcDpskFirstFrameConstellation(const std::vector<float>& frame_buffer,
                                             float decode_cfo, std::vector<float>& soft_bits);
+    // Compact MC-DPSK DATA frames: active in a connected MC-DPSK session with both addresses set.
+    bool mcDpskCompactActive() const;
+    int mcDpskCompactCodewords() const;
+    // The connected MC-DPSK first-frame look-ahead: one whole compact frame at the slowest
+    // constellation when compact frames are active, else the waveform's control-frame span.
+    size_t mcDpskControlPeekSamples() const;
+    // A burst's first frame as a compact DATA frame, at the configured constellation then the
+    // others; on success the waveform stays at the one that decoded. nullopt: not a compact frame
+    // (the configured demodulation is restored for the v2 path).
+    std::optional<DecodeResult> decodeMcDpskCompactFirstFrame(const std::vector<float>& frame_buffer,
+                                                              float decode_cfo,
+                                                              std::vector<float>& soft_bits);
+    DecodeResult makeMcDpskCompactResult(Bytes v2_frame, float snr_db, float cfo_hz);
+    void deliverMcDpskCompactFirstFrame(DecodeResult result, size_t frame_sync_abs,
+                                        uint32_t gen_at_start);
+    void continueMCDPSKCompactBurst();
+    void finishMCDPSKCompactBurst();
 
     // CFO pre-correction: remove CFO from real passband samples before demodulation.
     // Uses Hilbert transform → analytic signal → complex rotation → real part.
@@ -1337,6 +1366,18 @@ private:
     bool anchored_burst_payload_seen_ = false;
     std::function<void(bool payload_seen)> anchored_burst_no_group_callback_;
     std::function<void(int modulation)> mc_dpsk_frame_lost_callback_;
+    std::function<void(bool upper_rung_margin)> mc_dpsk_margin_callback_;
+    uint64_t mc_margin_rng_state_ = 0x6D617267696E5F31ull;
+    bool mcDpskUpperRungMarginTest(const std::vector<float>& frame_buffer, float decode_cfo);
+    std::atomic<uint32_t> mc_compact_local_hash_{0};
+    std::atomic<uint32_t> mc_compact_peer_hash_{0};
+    // Compact burst continuation: fixed-length frames, decoded past a failure up to the sender's
+    // window; trailing failures hand the search back their first position (the next burst's
+    // chirp may sit there).
+    bool mc_burst_compact_ = false;
+    int mc_burst_compact_window_ = 0;
+    size_t mc_burst_compact_fail_pos_ = SIZE_MAX;
+    size_t mc_burst_compact_fail_abs_ = 0;
     void noteMcDpskFrameLost(int modulation) {
         if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK && mc_dpsk_frame_lost_callback_) {
             mc_dpsk_frame_lost_callback_(modulation);

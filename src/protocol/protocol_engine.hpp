@@ -236,6 +236,7 @@ public:
     // frame the modem could not decode (modulation as int, -1 when unknown).
     void noteRxMcDpskModulation(Modulation mod);
     void noteRxMcDpskFrameLost(int modulation);
+    void noteRxMcDpskMargin(bool upper_rung_margin);
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;
 
@@ -277,6 +278,7 @@ public:
     // Set callback for data mode changes
     using DataModeChangedCallback = Connection::DataModeChangedCallback;
     void setDataModeChangedCallback(DataModeChangedCallback cb);
+    void setSessionAddressesCallback(Connection::SessionAddressesCallback cb);
 
     // --- Ping/Pong (fast presence check) ---
 

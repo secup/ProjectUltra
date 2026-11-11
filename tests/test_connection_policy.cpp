@@ -1141,6 +1141,14 @@ void test_mcdpsk_rate_controller() {
     // Unknown rung: the evidence is taken at the commanded rung.
     c.reset(1, k0);
     CHECK(c.observe(-1, false) && c.command() == 0, "a loss at an unknown rung counts at the command");
+    // A clean burst without the next rung's margin does not count toward a probe, and resets the run.
+    c.reset(0, k0);
+    for (int i = 0; i < k0 - 1; ++i) c.observe(0, true, true);
+    CHECK(!c.observe(0, true, false) && c.command() == 0, "a clean burst without margin resets the run");
+    for (int i = 0; i < k0 - 1; ++i) {
+        CHECK(!c.observe(0, true, true) && c.command() == 0, "the run restarts after a no-margin burst");
+    }
+    CHECK(c.observe(0, true, true) && c.command() == 1, "k0 clean bursts with margin probe");
     // The backoff is capped.
     c.reset(0, k0);
     for (int round = 0; round < 10; ++round) {

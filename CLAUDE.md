@@ -94,6 +94,10 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 - Constellation changes during the session (2026-11-11, `ULTRA_MCDPSK_RATE_ADAPT`, INV-MCDPSK-RATE-001):
   the receiver commands DBPSK/DQPSK in each tone ACK, the sender switches between bursts (and drops a
   rung on a retransmission timeout), the receiver re-demodulates a failed first frame at the other one.
+  Up-steps need margin: the receiver re-decodes a DBPSK first frame with 4x the noise (6.02 dB).
+- DATA frames in a session are compact (2026-11-11, `ULTRA_MCDPSK_COMPACT_FRAME`, INV-MCDPSK-FRAME-001):
+  one turbo codeword of the session's codewords x 648 bits, 4-byte header, CRC seeded from the two
+  callsign hashes; fixed length, so a failed frame no longer ends the burst. Control frames stay v2.
 - Multi-Carrier DPSK + chirp sync. ARQ selective-repeat with a **timing-derived window (1–5)** via `mcDpskWindowSizeForTiming` (not fixed window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
 
 ### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)
@@ -140,7 +144,7 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 
 | Mode | Channel | In-band floor | Notes |
 |------|---------|---------------|-------|
-| MC-DPSK R1/4 | AWGN | **-6 dB** | GUI gate 2026-11-11, 1 seed (13 retx); -9 fails at the CONNECT frame. ITU Good: 0 dB passes, -3 connects but crawls (RTO waits). Was "5 dB" |
+| MC-DPSK R1/4 | AWGN | **-6 dB** | GUI gate 2026-11-11, 1 seed: 451 s for 1 KB with compact frames (v2 frames: FAIL at 600 s); -9 fails at the CONNECT frame. ITU Good: -3 dB passes (387 s, 1 seed). Was "5 dB" |
 | OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER 4.875% @10, 0% @14-20 |
 | OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that tool + CTest are now RETIRED (2026-05-30); the floor is UNBACKED, re-establish on `gui_qso_scenario.sh` (the trusted floor gate) during the ladder rework. |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
@@ -456,7 +460,7 @@ Selection: Poor HF (2 ms delay) → MC-DPSK; low SNR 5-10 dB AWGN → MC-DPSK (t
 ## Known Limitations
 1. OFDM_COX removed from the protocol enum (0x00 reserved); only the Schmidl-Cox sync primitive remains. Poor HF needs MC-DPSK (see #2).
 2. Poor HF (2 ms delay): OFDM fails — use MC-DPSK.
-3. MC-DPSK floor in-band -6 dB AWGN, 0 dB ITU Good (GUI gate, 2026-11-11, 1 seed); below that the CONNECT frame (AWGN -9) and 43.6 s retransmission waits (Good -3) are the limits.
+3. MC-DPSK floor in-band -6 dB AWGN, -3 dB ITU Good (GUI gate, 2026-11-11, 1 seed each, compact frames); on AWGN the CONNECT frame fails at -9; ITU Good below -3 is not measured yet.
 4. File transfer: DATA_START/DATA_END not fully implemented.
 
 ## Protocol v2 Flow
