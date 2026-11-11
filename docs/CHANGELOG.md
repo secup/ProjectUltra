@@ -10,6 +10,34 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FEAT(sim): a channel whose SNR changes during the session (`--snr-profile`)
+
+**What was missing.** The OTASim SNR was fixed for a whole run (`SetChannel` rebuilds the channel and
+resets its fading state), so no test could show what a session does when the channel comes up or goes
+down under it, the everyday case on HF (QSB, a band opening or closing).
+
+**What changed.** `SnrProfileChannelModel` (`ota_channel_core/models`) scales the signal each receiver
+hears by 10^((profile(t) - snr_db)/20) after the sender's PA and before fading and noise: the noise
+floor stays put and the signal rises and falls, in both directions. The profile is piecewise linear in
+dB between `T:DB` points and holds its end values; t is the channel sample index since the session's
+first transmitted sample, so any chunking gives the same output. `ota_simulator serve
+--lobby-snr-profile` and `gui_qso_scenario.sh --snr-profile` (which sets `--snr-db` to the profile's
+maximum, so the scale never exceeds 1; `SNR_PROFILE` in summary.env). No profile = no wrapper
+(byte-identical).
+
+**Tests.** `ChannelCoreModels` `checkSnrProfile`: parser (rejects decreasing times, out-of-range dB,
+malformed items), interpolation, the exact scale at five instants, identical output processed whole or
+in 1000-sample chunks, and over AWGN the same noise with and without the profile. Baselines on the GUI
+gate (AWGN, seed 42, CFO 7.3 Hz) for the waveform-follow work:
+
+| Profile | File | Result |
+|---|---|---|
+| `0:-3,60:-3,70:20` (up) | 4 KB | PASS 364 s, stays MC-DPSK DQPSK (~100 bps) with 20 dB available |
+| `0:20,30:20,32:0,150:0,152:20` (2 min out) | 30 KB | PASS 217 s: OFDM moves nothing for the 2 minutes (16 timeouts), then resumes |
+| `0:20,40:20,45:0` (down) | 6 KB | PASS 45 s: OFDM climbed to 32QAM R2/3 and finished before the drop |
+
+---
+
 ## 2026-11-11 — FEAT(mcdpsk): compact single-codeword DATA frames in sessions; up-steps need margin
 
 **What was slow.** An MC-DPSK DATA frame was a chain of 648-bit LDPC codewords with a 17-byte

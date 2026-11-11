@@ -1173,6 +1173,74 @@ std::optional<TxPaConfig> parseTxPaSpec(std::string_view spec) {
     return c;
 }
 
+std::optional<std::vector<SnrProfilePoint>> parseSnrProfileSpec(std::string_view spec) {
+    std::vector<SnrProfilePoint> profile;
+    size_t pos = 0;
+    while (pos < spec.size()) {
+        const size_t comma = spec.find(',', pos);
+        const std::string_view item =
+            spec.substr(pos, comma == std::string_view::npos ? std::string_view::npos : comma - pos);
+        const size_t colon = item.find(':');
+        if (colon == std::string_view::npos || colon == 0) return std::nullopt;
+        const std::string t_text(item.substr(0, colon));
+        const std::string db_text(item.substr(colon + 1));
+        char* end = nullptr;
+        const double t = std::strtod(t_text.c_str(), &end);
+        if (end == t_text.c_str() || *end != '\0' || !std::isfinite(t) || t < 0.0) {
+            return std::nullopt;
+        }
+        end = nullptr;
+        const float db = std::strtof(db_text.c_str(), &end);
+        if (end == db_text.c_str() || *end != '\0' || !std::isfinite(db) || db < -60.0f ||
+            db > 80.0f) {
+            return std::nullopt;
+        }
+        if (!profile.empty() && t <= profile.back().t_s) return std::nullopt;
+        profile.push_back({t, db});
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+    if (profile.empty()) return std::nullopt;
+    return profile;
+}
+
+float snrProfileDbAt(const std::vector<SnrProfilePoint>& profile, double t_s) {
+    if (t_s <= profile.front().t_s) return profile.front().snr_db;
+    if (t_s >= profile.back().t_s) return profile.back().snr_db;
+    const auto next = std::upper_bound(
+        profile.begin(), profile.end(), t_s,
+        [](double t, const SnrProfilePoint& p) { return t < p.t_s; });
+    const auto& b = *next;
+    const auto& a = *(next - 1);
+    const double f = (t_s - a.t_s) / (b.t_s - a.t_s);
+    return static_cast<float>(static_cast<double>(a.snr_db) +
+                              f * static_cast<double>(b.snr_db - a.snr_db));
+}
+
+SnrProfileChannelModel::SnrProfileChannelModel(std::unique_ptr<IChannelModel> inner,
+                                               std::vector<SnrProfilePoint> profile,
+                                               float noise_snr_db, uint32_t sample_rate)
+    : inner_(std::move(inner)),
+      profile_(std::move(profile)),
+      noise_snr_db_(noise_snr_db),
+      sample_rate_(static_cast<double>(sample_rate)) {
+    if (profile_.empty()) {
+        throw std::invalid_argument("SnrProfileChannelModel needs a profile");
+    }
+}
+
+void SnrProfileChannelModel::process(std::span<const float> input, uint64_t start_sample,
+                                     std::vector<float>& output) {
+    scaled_.resize(input.size());
+    for (size_t s = 0; s < input.size(); ++s) {
+        const double t = static_cast<double>(start_sample + s) / sample_rate_;
+        const double rel_db =
+            static_cast<double>(snrProfileDbAt(profile_, t)) - static_cast<double>(noise_snr_db_);
+        scaled_[s] = static_cast<float>(static_cast<double>(input[s]) * std::pow(10.0, rel_db / 20.0));
+    }
+    inner_->process(std::span<const float>(scaled_.data(), scaled_.size()), start_sample, output);
+}
+
 TxPaAlcChannelModel::TxPaAlcChannelModel(std::unique_ptr<IChannelModel> inner,
                                          const TxPaConfig& config, uint32_t sample_rate)
     : inner_(std::move(inner)), config_(config) {
@@ -1300,6 +1368,11 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
                                                   const RngRoot& rng_root,
                                                   std::string_view stream_name) {
     auto model = createChannelModelUnshifted(config, rng_root, stream_name);
+    if (!config.snr_profile.empty()) {
+        // Path loss over time: after the sender's PA (wrapped next), before fading and noise.
+        model = std::make_unique<SnrProfileChannelModel>(std::move(model), config.snr_profile,
+                                                         config.snr_db, config.sample_rate);
+    }
     if (config.tx_pa.enabled) {
         // The sender's ALC/PA acts on its audio BEFORE fading and noise.
         model = std::make_unique<TxPaAlcChannelModel>(std::move(model), config.tx_pa,

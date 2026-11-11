@@ -505,10 +505,80 @@ void checkRxGain() {
     std::cout << "rx_gain -20 dB x0.1, +12 dB clips at 1.0, 0 dB no wrapper\n";
 }
 
+// The path's SNR over time: the spec parser, the piecewise-linear profile, and the stage that scales
+// the SIGNAL before fading and noise (the noise floor stays at snr_db); no stage without a profile.
+void checkSnrProfile() {
+    using ultra::ota_channel_core::SnrProfileChannelModel;
+    using ultra::ota_channel_core::parseSnrProfileSpec;
+    using ultra::ota_channel_core::snrProfileDbAt;
+
+    const auto profile = parseSnrProfileSpec("0:20,1:0,2.5:10");
+    assert(profile && profile->size() == 3);
+    assert(!parseSnrProfileSpec(""));
+    assert(!parseSnrProfileSpec("5:0,5:3"));  // times must increase
+    assert(!parseSnrProfileSpec("-1:0"));
+    assert(!parseSnrProfileSpec("0:abc"));
+    assert(!parseSnrProfileSpec("0:90"));
+    assert(!parseSnrProfileSpec("0"));
+    assertNear(snrProfileDbAt(*profile, -1.0), 20.0f, 1e-6f);
+    assertNear(snrProfileDbAt(*profile, 0.5), 10.0f, 1e-6f);
+    assertNear(snrProfileDbAt(*profile, 1.75), 5.0f, 1e-6f);
+    assertNear(snrProfileDbAt(*profile, 9.0), 10.0f, 1e-6f);
+
+    RngRoot root(0x5A7u);
+    ChannelConfig cfg;
+    cfg.type = ChannelType::PASSTHROUGH;
+    cfg.snr_db = 20.0f;  // the noise floor's level = the profile's maximum
+    cfg.snr_profile = *profile;
+    auto model = createChannelModel(cfg, root, "profile");
+    assert(dynamic_cast<SnrProfileChannelModel*>(model.get()) != nullptr);
+
+    const std::vector<float> level(3 * kSampleRate, 0.5f);
+    std::vector<float> whole;
+    model->process(level, 0, whole);
+    assert(whole.size() == level.size());
+    for (const double t : {0.0, 0.5, 1.0, 1.75, 2.9}) {
+        const size_t i = static_cast<size_t>(t * kSampleRate);
+        const double rel_db = static_cast<double>(snrProfileDbAt(*profile, t)) - 20.0;
+        assertNear(whole[i], static_cast<float>(0.5 * std::pow(10.0, rel_db / 20.0)), 1e-6f);
+    }
+
+    // The channel sample index is the clock: any chunking gives the same output.
+    auto chunk_model = createChannelModel(cfg, root, "profile");
+    std::vector<float> chunked, part;
+    for (size_t off = 0; off < level.size(); off += 1000) {
+        const size_t n = std::min<size_t>(1000, level.size() - off);
+        chunk_model->process(std::span<const float>(level.data() + off, n), off, part);
+        chunked.insert(chunked.end(), part.begin(), part.end());
+    }
+    assert(chunked == whole);
+
+    // Over AWGN the noise is the same with and without the profile: only the signal moves.
+    ChannelConfig awgn = cfg;
+    awgn.type = ChannelType::AWGN;
+    awgn.snr_profile.clear();
+    auto plain = createChannelModel(awgn, root, "noise");
+    awgn.snr_profile = *profile;
+    auto profiled = createChannelModel(awgn, root, "noise");
+    const std::vector<float> silence(kSampleRate / 10, 0.0f);
+    std::vector<float> noise_plain, noise_profiled;
+    plain->process(silence, 0, noise_plain);
+    profiled->process(silence, 0, noise_profiled);
+    assert(noise_plain == noise_profiled);
+    assert(varianceOf(noise_plain, meanOf(noise_plain)) > 0.0);
+
+    cfg.snr_profile.clear();
+    auto none = createChannelModel(cfg, root, "profile");
+    assert(dynamic_cast<SnrProfileChannelModel*>(none.get()) == nullptr);
+    std::cout << "snr_profile: parse, interpolation, signal-only scale, chunk-invariant, "
+                 "no stage when empty\n";
+}
+
 int main() {
     checkStreamingCfoAcrossChunks();
     checkRxBandpassFilter();
     checkRxGain();
+    checkSnrProfile();
     {
         PassthroughChannelModel model;
         const std::vector<float> input{0.0f, 1.0f, -0.5f, 0.25f};

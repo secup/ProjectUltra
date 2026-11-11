@@ -51,6 +51,18 @@ struct TxPaConfig {
 // "pep=0.5,drive_db=3,p=2,sat_db=3,attack_ms=2,release_ms=300" (any subset; "on" = defaults).
 std::optional<TxPaConfig> parseTxPaSpec(std::string_view spec);
 
+// A path whose SNR changes over time (QSB, a band opening or closing): the in-band SNR at a time
+// after the channel's first transmitted sample. The profile is piecewise linear in dB between
+// points and holds its first/last value outside them.
+struct SnrProfilePoint {
+    double t_s = 0.0;
+    float snr_db = 0.0f;
+};
+// "T:DB,T:DB,..." with T (seconds) strictly increasing from >= 0 and -60 <= DB <= 80.
+std::optional<std::vector<SnrProfilePoint>> parseSnrProfileSpec(std::string_view spec);
+// The profile's SNR (dB) at t_s; the profile must not be empty.
+float snrProfileDbAt(const std::vector<SnrProfilePoint>& profile, double t_s);
+
 struct ChannelConfig {
     ChannelType type = ChannelType::PASSTHROUGH;
     float snr_db = 20.0f;
@@ -77,6 +89,11 @@ struct ChannelConfig {
     // unchanged) and clips at the sound card's full scale (+/-1.0). 0 = none (byte-identical
     // models). Applied after the IF filter (RxGainChannelModel).
     float rx_gain_db = 0.0f;
+    // The path's SNR over time; empty = snr_db for good (byte-identical models). The noise stays
+    // at snr_db's level and the SIGNAL is scaled by 10^((profile(t) - snr_db)/20) after the
+    // sender's PA and before fading and noise (SnrProfileChannelModel): path loss changes, the
+    // receiver's noise floor does not. Use snr_db >= the profile's maximum, so the scale is <= 1.
+    std::vector<SnrProfilePoint> snr_profile;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
@@ -273,6 +290,32 @@ private:
     std::vector<float> taps_;
     std::vector<float> history_;  // last kTaps - 1 inner output samples
     std::vector<float> scratch_;
+};
+
+// The path's SNR over time (ChannelConfig::snr_profile): scales the signal entering `inner` (the
+// fading + noise model sized for `noise_snr_db`) by 10^((profile(t) - noise_snr_db)/20), t from
+// the channel sample index, so the noise floor stays put while the signal rises and falls.
+class SnrProfileChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+
+    SnrProfileChannelModel(std::unique_ptr<IChannelModel> inner,
+                           std::vector<SnrProfilePoint> profile, float noise_snr_db,
+                           uint32_t sample_rate);
+
+    void reset() override { inner_->reset(); }
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
+
+    const std::vector<SnrProfilePoint>& profile() const { return profile_; }
+
+private:
+    std::unique_ptr<IChannelModel> inner_;
+    std::vector<SnrProfilePoint> profile_;
+    float noise_snr_db_ = 0.0f;
+    double sample_rate_ = kDefaultSampleRate;
+    std::vector<float> scaled_;
 };
 
 class TxPaAlcChannelModel final : public IChannelModel {

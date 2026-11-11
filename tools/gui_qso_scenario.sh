@@ -40,6 +40,7 @@ CLOCK_PPM="0"
 TX_PA=""
 RX_FILTER=""
 RX_GAIN_DB=""
+SNR_PROFILE=""
 TX_MODEL="sim"
 RECORD=0
 SEED="42"
@@ -84,6 +85,10 @@ usage() {
   printf '  --rx-gain-db G                 Both receivers'"'"' audio level in dB (AF / line-out / sound-card\n'
   printf '                                 gain): -30 = a quiet input, +6 = a hot one that clips at full\n'
   printf '                                 scale; SNR unchanged (default: 0 = the sender'"'"'s TX level)\n'
+  printf '  --snr-profile T:DB,...         The path'"'"'s SNR over time (seconds since the first transmitted\n'
+  printf '                                 sample, piecewise linear, both directions), e.g. 0:-3,120:-3,150:20.\n'
+  printf '                                 The noise floor stays put and the signal rises and falls; sets\n'
+  printf '                                 --snr-db to the profile'"'"'s maximum (default: none = fixed SNR)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
@@ -202,6 +207,7 @@ while [[ $# -gt 0 ]]; do
     --tx-pa) TX_PA="${2:?}"; shift 2 ;;
     --rx-filter) RX_FILTER="${2:?}"; shift 2 ;;
     --rx-gain-db) RX_GAIN_DB="${2:?}"; shift 2 ;;
+    --snr-profile) SNR_PROFILE="${2:?}"; shift 2 ;;
     --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
@@ -254,6 +260,11 @@ if [[ "$MESSAGE_TEXT" == *$'\n'* || "$MESSAGE_TEXT" == *$'\r'* ||
 fi
 if [[ "$SCENARIO_KIND" == "message" && "$DISCONNECT_AFTER_SET" -eq 0 ]]; then
   DISCONNECT_AFTER=2
+fi
+if [[ -n "$SNR_PROFILE" ]]; then
+  # The noise floor sits at the profile's maximum SNR; the simulator scales the signal down from
+  # there (it validates the spec itself).
+  SNR_DB="$(printf '%s\n' "$SNR_PROFILE" | tr ',' '\n' | awk -F: 'NF == 2 && ($2 + 0 > m || NR == 1) { m = $2 + 0 } END { printf "%g", m }')"
 fi
 if [[ "$SCENARIO_KIND" == "message" ]] &&
    [[ ! "$DISCONNECT_AFTER" =~ ^[1-9][0-9]*$ ]]; then
@@ -715,6 +726,7 @@ write_summary() {
     echo "TX_PA=$TX_PA"
     echo "RX_FILTER=$RX_FILTER"
     echo "RX_GAIN_DB=$RX_GAIN_DB"
+    echo "SNR_PROFILE=$SNR_PROFILE"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -869,6 +881,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   ${TX_PA:+--lobby-tx-pa "$TX_PA"} \
   ${RX_FILTER:+--lobby-rx-filter "$RX_FILTER"} \
   ${RX_GAIN_DB:+--lobby-rx-gain-db "$RX_GAIN_DB"} \
+  ${SNR_PROFILE:+--lobby-snr-profile "$SNR_PROFILE"} \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

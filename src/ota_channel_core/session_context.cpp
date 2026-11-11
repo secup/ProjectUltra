@@ -137,6 +137,7 @@ void SessionContext::setChannel(ChannelConfig config) {
     config_.seed = config.seed;
     config_.sample_rate = config.sample_rate;
     config_.real_hf_loop_noise = std::move(config.real_hf_loop_noise);
+    config_.snr_profile = std::move(config.snr_profile);  // a new channel replaces the profile too
     tick_samples_ = samplesForMs(config_.sample_rate, kSessionTickIntervalMs);
     max_tx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxTxQueuedAudioMs);
     max_rx_queue_samples_ = samplesForMs(config_.sample_rate, kMaxRxQueuedAudioMs);

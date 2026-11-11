@@ -36,6 +36,9 @@ struct SessionConfig {
     float rx_filter_high_hz = 0.0f;
     // Every receiving station's audio level (dB, 0 = the sender's transmit level).
     float rx_gain_db = 0.0f;
+    // The path's SNR over time, both directions (empty = default_snr_db for good). The noise
+    // floor stays at default_snr_db's level; set default_snr_db to the profile's maximum.
+    std::vector<SnrProfilePoint> snr_profile;
 
     ChannelConfig channelConfig() const {
         return {.type = default_channel_model,
@@ -55,6 +58,7 @@ struct SessionConfig {
         c.rx_filter_low_hz = rx_filter_low_hz;
         c.rx_filter_high_hz = rx_filter_high_hz;
         c.rx_gain_db = rx_gain_db;
+        c.snr_profile = snr_profile;
         return c;
     }
 };
