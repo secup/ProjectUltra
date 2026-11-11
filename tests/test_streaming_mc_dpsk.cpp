@@ -348,6 +348,12 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
         if (!result.success || !v2::isDataFrame(result.frame_type)) continue;
         auto frame = v2::DataFrame::deserialize(result.frame_data);
         if (!frame) continue;
+        // Each frame reports the SNR the session's rate decisions use (as a v2 frame does).
+        if (result.snr_source != SNRSource::MCDPSK_IN_BAND || !std::isfinite(result.snr_db)) {
+            std::cout << "FAIL: " << name << ": frame " << frame->seq << " reports SNR source "
+                      << snrSourceToString(result.snr_source) << "\n";
+            return false;
+        }
         const auto expect = v2::DataFrame::deserialize(serialized_frames[frame->seq - 300]);
         if (frame->seq < 300 || frame->seq > 302 || !expect || frame->payload != expect->payload ||
             frame->src_hash != alpha || frame->dst_hash != bravo) {

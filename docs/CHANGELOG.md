@@ -10,6 +10,22 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(mcdpsk): compact frames report the session's SNR again
+
+**What was broken.** `StreamingDecoder::makeMcDpskCompactResult` (the compact-frame change, earlier
+today) stamped every compact MC-DPSK frame's SNR as `SYNC_QUALITY`. Rate selection rejects that
+source (`acceptsRateSelectionSNR`), so from the first compact frame on the receiving station's
+measured SNR, its connect-SNR pool and the GUI readout stopped updating: the session kept its
+handshake reading.
+
+**Fix.** The compact result is routed through `populateDecodeMetrics` like a v2 MC-DPSK frame: the
+waveform's training and data-aided estimates, `MCDPSK_IN_BAND`, physical-SNR ring sample, SNR-SANITY.
+
+**Tests.** `StreamingMCDPSK` compact bursts now require every decoded frame to report
+`MCDPSK_IN_BAND` with a finite SNR (both burst cases pass); `ConnectionPolicy` unchanged.
+
+---
+
 ## 2026-11-11 — FEAT(sim): a channel whose SNR changes during the session (`--snr-profile`)
 
 **What was missing.** The OTASim SNR was fixed for a whole run (`SetChannel` rebuilds the channel and
