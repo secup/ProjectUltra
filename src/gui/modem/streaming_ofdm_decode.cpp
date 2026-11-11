@@ -3958,11 +3958,8 @@ DecodeResult StreamingDecoder::makeMcDpskCompactResult(Bytes v2_frame, float snr
     result.snr_source = SNRSource::SYNC_QUALITY;
     result.sync_quality_db = snr_db;
     result.cfo_hz = cfo_hz;
-    // The frame's measured SNR, routed exactly like a v2 MC-DPSK frame's (the waveform just
-    // demodulated it: training and data-aided estimates, MCDPSK_IN_BAND). Without this every
-    // compact frame reported SYNC_QUALITY, which rate selection rejects, so the session's SNR
-    // stopped updating after the handshake.
-    populateDecodeMetrics(result, /*is_ofdm=*/false, 0.0f);
+    // The callers route the frame's measured SNR (populateDecodeMetrics, MCDPSK_IN_BAND) before
+    // delivering it.
     if (waveform_) {
         last_mc_dpsk_rx_modulation_.store(static_cast<int>(waveform_->getModulation()),
                                           std::memory_order_relaxed);

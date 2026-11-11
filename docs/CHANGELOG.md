@@ -10,19 +10,15 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
-## 2026-11-11 — FIX(mcdpsk): compact frames report the session's SNR again
+## 2026-11-11 — RETRACTED: "compact frames report the session's SNR again" (a5f7bee)
 
-**What was broken.** `StreamingDecoder::makeMcDpskCompactResult` (the compact-frame change, earlier
-today) stamped every compact MC-DPSK frame's SNR as `SYNC_QUALITY`. Rate selection rejects that
-source (`acceptsRateSelectionSNR`), so from the first compact frame on the receiving station's
-measured SNR, its connect-SNR pool and the GUI readout stopped updating: the session kept its
-handshake reading.
-
-**Fix.** The compact result is routed through `populateDecodeMetrics` like a v2 MC-DPSK frame: the
-waveform's training and data-aided estimates, `MCDPSK_IN_BAND`, physical-SNR ring sample, SNR-SANITY.
-
-**Tests.** `StreamingMCDPSK` compact bursts now require every decoded frame to report
-`MCDPSK_IN_BAND` with a finite SNR (both burst cases pass); `ConnectionPolicy` unchanged.
+That entry claimed compact MC-DPSK frames reported `SYNC_QUALITY` and froze the session's SNR. They
+did not: both compact delivery paths (`deliverMcDpskCompactFirstFrame`, `continueMCDPSKCompactBurst`)
+already called `populateDecodeMetrics` before delivering, so every frame reported `MCDPSK_IN_BAND`.
+The claim came from reading `makeMcDpskCompactResult` alone. The added call made each frame's
+metrics run twice (its physical-SNR sample entered the ring twice) and is removed again. The test
+check that came with it stays: `StreamingMCDPSK` compact bursts require every decoded frame to
+report `MCDPSK_IN_BAND` with a finite SNR - true before and after.
 
 ---
 
