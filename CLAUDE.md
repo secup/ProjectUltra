@@ -126,11 +126,12 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 1. Connection starts in MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp).
 2. Dual-listen detects chirp type → sets BandwidthMode (WIDE/NARROW).
 3. After CONNECT_ACK, SNR measured, mode negotiated: wideband SNR<10 stay MC-DPSK; ≥10 → OFDM_CHIRP R1/4 (Good/Moderate/Poor entry floors 12/14/18); narrowband → OFDM_NARROW.
-4. With `ULTRA_WAVEFORM_FOLLOW=1` (default OFF, 2026-11-11, INV-FOLLOW-001) a connected wideband session
+4. Waveform follow (2026-11-11, INV-FOLLOW-001, default ON as dual-listen; `ULTRA_WAVEFORM_FOLLOW=0` off, `=1` agreement A/B): a connected wideband session
    then crosses between MC-DPSK and OFDM_CHIRP as the channel moves: the receiver commands the crossing in
    its tone ACK (session rung word 1..10 OFDM, 11/12 MC-DPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
-   `ULTRA_WAVEFORM_FOLLOW=2` (dual-listen, INV-DUAL-LISTEN-001): the receiver runs a second decoder on the
-   other waveform and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md).
+   Dual-listen (the default, INV-DUAL-LISTEN-001): the receiver runs a second decoder on the other waveform
+   and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md). Open:
+   BUG-FOLLOW-DIP-COST (a two-minute dip ~9 % slower than follow off).
 5. `enterConnected()` → `configureArqForCurrentDataMode()` sets ARQ window per mode: MC-DPSK timing-derived 1–5, OFDM_NARROW 3, wideband OFDM 8 default / up to 16. (Only `BurstStopAndWaitController` on the burst-transport path is true window=1.)
 6. StreamingEncoder/Decoder check `mode_`; `isOFDMMode()` unifies the OFDM family.
 

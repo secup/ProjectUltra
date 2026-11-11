@@ -556,6 +556,24 @@ guards; `ingestDataAidedGrid`; `rereferenceCarriedHistoryPhase`;
   eligibility, pilot rotation) — valuable regardless of whether the estimator lever ships.
   Only the last two knob-specific cases would go.
 
+## Conditional removal — waveform follow by agreement, `ULTRA_WAVEFORM_FOLLOW=1` (added 2026-11-11)
+
+Superseded by dual-listen (`=2`, the default since 2026-11-11): the receiver hears both waveforms and
+follows what arrives, so the receiver-side crossing by agreement is only an A/B arm. Remove it once a
+rig A/B confirms dual-listen.
+
+**Scope:** the receiver applying its own crossing on the tick after its command
+(`tickWaveformFollow`'s `rx_crossing_apply_pending_` apply), the receiver's probation and revert
+window (`crossing_probe_rx_side_`, `crossing_probe_revert_ms_`, `upCrossingRevertMs`,
+`noteRxOfdmBurstAfterCrossing`), the receiver silence crossing (`followReceiverSilenceMs`, the silence
+branch of `tickWaveformFollow`), and the `waveformFollowSetting() == 1` value.
+
+**KEEP (anti-footgun):** the session rung word and `applyWaveformCrossing` (both modes use them);
+the receiver's commands (`upCrossingWordForAck`, the empty-groups command); the sender's obedience,
+silence rule, patience and probation (`maybeObeyCrossingCommand`, `maybeCrossDownOnCollapse`,
+`maybeAbandonCrossingOnTimeout`); the stale-evidence reset, the one-burst gate, the MODE_CHANGE
+supersede; `RxDecoderPair` and everything in modem_dual_listen.cpp.
+
 ## Deprecate (divergent, not yet removed)
 
 _(none currently — R7 done, see Completed removals)_

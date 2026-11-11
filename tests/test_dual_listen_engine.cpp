@@ -72,7 +72,7 @@ std::string payloadText(const Bytes& frame) {
 // processRxBuffer 20 ms at a time (the GUI's synchronous receive loop).
 std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
                            std::vector<WaveformMode>& reports) {
-    if (dual_listen) setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    setenv("ULTRA_WAVEFORM_FOLLOW", dual_listen ? "2" : "0", 1);
     ModemEngine rx;  // no callsign, no label: it hears every station (the CLI's prx does the same)
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
     rx.setSynchronousMode(true);

@@ -812,16 +812,19 @@ inline uint8_t decodeOfdmRungCommand(uint8_t word) {
 // wideband OFDM as the channel changes (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md). "1": crossing by
 // agreement (the receiver commands and switches, probation checks the sender followed). "2": the
 // same with dual-listen receivers (docs/DUAL_LISTEN_DESIGN_2026_11_11.md): the receiver decodes
-// either waveform at any time and follows what arrives; only the sender switches. Default off until
-// the GUI gate proves it. Read once per Connection / ModemEngine, at construction.
-inline bool waveformFollowEnabled() {
+// either waveform at any time and follows what arrives; only the sender switches. Read once per
+// Connection / ModemEngine, at construction.
+// Default (unset): "2", dual-listen follow (2026-11-11, after the GUI matrix); "0" turns follow off,
+// "1" keeps crossing by agreement for A/B. Any other value reads as the default.
+inline int waveformFollowSetting() {
     const char* e = std::getenv("ULTRA_WAVEFORM_FOLLOW");
-    return e != nullptr && (e[0] == '1' || e[0] == '2') && e[1] == '\0';
+    if (e == nullptr || e[0] == '\0' || e[1] != '\0') return 2;
+    if (e[0] == '0') return 0;
+    if (e[0] == '1') return 1;
+    return 2;
 }
-inline bool waveformFollowDualListen() {
-    const char* e = std::getenv("ULTRA_WAVEFORM_FOLLOW");
-    return e != nullptr && e[0] == '2' && e[1] == '\0';
-}
+inline bool waveformFollowEnabled() { return waveformFollowSetting() != 0; }
+inline bool waveformFollowDualListen() { return waveformFollowSetting() == 2; }
 
 // The receiver's evidence for an UP-crossing (MC-DPSK -> OFDM): after each clean MC-DPSK burst the
 // connect-time pick runs on the readings of the current MC-DPSK spell; when it names an OFDM rung

@@ -30,6 +30,20 @@ Gram matrix, image terms included) for the training channel, and the same leakag
 data-aided estimate; or the RRC pulse shaping of BUG-TX-SPLATTER-SYMBOL-EDGES, which makes the carriers
 orthogonal enough to remove the problem.
 
+### BUG-FOLLOW-DIP-COST (open, 2026-11-11) — P2: a two-minute dip costs ~9 % with follow on
+
+GUI gate, ITU Good 20 -> 0 -> 20 dB (32-150 s), 20 KB, 6 seeds, dual-listen with the landing fix:
+237.7 s mean against 218.0 s with follow off (paired +19.7 s, sd 15.8; 5 of 6 seeds slower). Follow
+crosses to MC-DPSK after 60 s of silence; MC-DPSK carries ~6 B/s in the dip (a few hundred bytes) and
+coming back costs (1) the MC-DPSK burst in flight when the channel returns (3 frames, 16 s) plus its
+ACK, against OFDM's own resend at half an RTO, and (2) OFDM restarting with fresh ladder controllers
+(short groups, authority climb) where follow-off resumes exactly where it was. Candidates: a fallback
+spell that starts with single-frame bursts until MC-DPSK proves itself (faster return; costs MC-DPSK
+throughput in a permanent drop), keeping the OFDM ladder state across a short spell, and for total
+outages (60 s outage: +12..+20 %) a down-crossing on probation (no ACK for the first MC-DPSK burst ->
+back to the OFDM rung). Worth it: the wins elsewhere are step-ups 3.3x and ramps/drops that fail or
+stall without follow.
+
 ### BUG-TX-SPLATTER-SYMBOL-EDGES (open, 2026-11-11) — P3: data symbols switch hard; their splatter shows on every waterfall
 
 **What.** Operator report: the waterfall "isn't smooth". Measured on the transmitted audio

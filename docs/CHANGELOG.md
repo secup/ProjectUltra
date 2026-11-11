@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — DEFAULT: waveform follow on, as dual-listen (ULTRA_WAVEFORM_FOLLOW unset = 2)
+
+**Decision.** Follow with dual-listen receivers is the default; `ULTRA_WAVEFORM_FOLLOW=0` turns it off,
+`=1` keeps crossing by agreement for A/B (REMOVAL_BACKLOG). Same setting on both stations.
+
+**Evidence** (GUI gate: two real stations over OTASim, ITU Good unless noted, CFO 7.3 Hz, half-duplex
+radios; dual-listen with the landing fix, fc837a0, unless noted; seconds, file CRC-verified):
+
+| Scenario | Dual-listen | Follow off | |
+|---|---|---|---|
+| Step-up 0 -> 20 dB at 60-70 s, 4 KB (s43/s45/s46) | 112 / 110 / 109 | 366 / 364 / 364 | 3.3x faster |
+| AWGN ramp -3 -> 20 dB over 2 min, 20 KB (s44) | 154 PASS | FAIL (stuck on MC-DPSK) | |
+| AWGN ramp 20 -> 0 dB over 2 min, 30 KB (s44) | 860 PASS | FAIL (stuck on OFDM) | |
+| Drop 20 -> 0 dB at 27 s and stay, 8 KB (s44) | 7.7 KB delivered at the 1200 s cap, steadily | FAIL, nothing after the drop | |
+| Dip 20 -> 0 -> 20 dB (118 s at 0 dB), 20 KB, 6 seeds | 237.7 mean | 218.0 mean | +9.0 % (BUG-FOLLOW-DIP-COST) |
+| QSB, 40 s dips to 2 dB every 90 s, 30 KB | 352 / 322 / 357 (s44/s45/s46) | 312 / 331 / 334 | +5.5 % |
+| Total outage 60 s (s44/s45) | 184 / 189 | 160 / 160 | +17 % |
+| Total outage 240 s (s44) | 358 | 339 | +5.6 % |
+| Steady AWGN 20 / Good 20 / Good 0 dB | 59 / 54 / 200 | 59 / 55 / 188-299 | nothing crosses |
+
+Every dual-listen run passed or, in the drop cell, was still delivering at the cap; none stalled or
+left the stations on different waveforms. The cost is on temporary dips: crossing to MC-DPSK (a few
+percent of OFDM's rate) and back costs about one MC-DPSK burst plus OFDM's fresh ladder state
+(BUG-FOLLOW-DIP-COST, open): +9 % on a two-minute dip, +5.5 % on QSB, +6..+17 % on total outages
+(where MC-DPSK cannot help either). What it buys is the session moving with the band: a session that
+connected weak climbs to OFDM, one that connected strong survives the band closing.
+
+**Tests.** `WaveformFollow` checks the default is dual-listen and pins off with `=0`;
+`DualListenEngine`'s control pins `=0`. Dev tree ctest 111/111 with the new default.
+
+---
+
 ## 2026-11-11 — FIX(follow): the way back up reads the burst being acknowledged, not the fade
 
 **What was broken.** Dual-listen, ITU Good 20 -> 0 -> 20 dB dip, 6 seeds: 233-263 s against 207-224 s

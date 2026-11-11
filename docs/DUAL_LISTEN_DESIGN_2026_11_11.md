@@ -1,6 +1,6 @@
 # Dual-listen: the receiver hears both waveforms (2026-11-11)
 
-Knob `ULTRA_DUAL_LISTEN` (same setting on both stations; default off until the GUI gate proves it).
+Knob `ULTRA_WAVEFORM_FOLLOW`: dual-listen (`2`) is the default since 2026-11-11; `0` turns follow off, `1` keeps crossing by agreement for A/B. Same setting on both stations.
 Builds on waveform follow (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md, commit 1d695ab).
 
 ## Why

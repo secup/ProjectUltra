@@ -250,8 +250,9 @@ void test_waveform_follow_sender_crossings_switch_modem_first() {
 
 // Knob off (the default): crossing words change nothing.
 void test_waveform_follow_knob_off_ignores_crossing_words() {
-    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    setenv("ULTRA_WAVEFORM_FOLLOW", "0", 1);
     Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
     ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
     int crossings = 0;
@@ -753,6 +754,10 @@ void test_waveform_follow_return_reads_the_latest_burst() {
 int main() {
     // Production defaults on purpose (see the header); only the follow knob is set per test.
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    if (!connection_policy::waveformFollowEnabled() || !connection_policy::waveformFollowDualListen()) {
+        std::cout << "WaveformFollow: the default must be dual-listen follow\n";
+        return 1;
+    }
     if (!rxRateAuthorityEnabled()) {
         std::cout << "WaveformFollow: needs ULTRA_RX_RATE_AUTHORITY on (the production default)\n";
         return 1;
