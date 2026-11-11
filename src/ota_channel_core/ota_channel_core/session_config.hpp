@@ -39,6 +39,19 @@ struct SessionConfig {
     // The path's SNR over time, both directions (empty = default_snr_db for good). The noise
     // floor stays at default_snr_db's level; set default_snr_db to the profile's maximum.
     std::vector<SnrProfilePoint> snr_profile;
+    // Every station is a half-duplex radio: its receiver is deaf while its own transmitter is
+    // keyed. Stations stream their audio continuously (zeros when idle), so the PTT is read from
+    // the content the way the modem keys it: down ptt_lead_ms before its first non-zero sample
+    // (the TX lead-in silence), up ptt_tail_ms after its last (the TX tail), then tr_recovery_ms
+    // more of deafness (T/R relay + receiver recovery; rigs 5-30 ms, IC-7300 ~15, FT-891 ~20).
+    // Defaults = ModemEngine's TX guards (kDefaultTxLeadInMs / kDefaultTxTailMs). The medium still
+    // carries every signal; only the keyed station's receive is blanked. false = the full-duplex
+    // stations the GUI simulator had from 2026-05-30 (client-side radio model retired) to
+    // 2026-11-11.
+    bool half_duplex_radios = true;
+    float ptt_lead_ms = 150.0f;
+    float ptt_tail_ms = 50.0f;
+    float tr_recovery_ms = 20.0f;
 
     ChannelConfig channelConfig() const {
         return {.type = default_channel_model,

@@ -41,6 +41,7 @@ TX_PA=""
 RX_FILTER=""
 RX_GAIN_DB=""
 SNR_PROFILE=""
+FULL_DUPLEX=0
 TX_MODEL="sim"
 RECORD=0
 SEED="42"
@@ -89,6 +90,8 @@ usage() {
   printf '                                 sample, piecewise linear, both directions), e.g. 0:-3,120:-3,150:20.\n'
   printf '                                 The noise floor stays put and the signal rises and falls; sets\n'
   printf '                                 --snr-db to the profile'"'"'s maximum (default: none = fixed SNR)\n'
+  printf '  --full-duplex                  Stations hear while they transmit (default: half-duplex radios,\n'
+  printf '                                 receive blanked while keyed + 20 ms T/R recovery, like a rig)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
@@ -208,6 +211,7 @@ while [[ $# -gt 0 ]]; do
     --rx-filter) RX_FILTER="${2:?}"; shift 2 ;;
     --rx-gain-db) RX_GAIN_DB="${2:?}"; shift 2 ;;
     --snr-profile) SNR_PROFILE="${2:?}"; shift 2 ;;
+    --full-duplex) FULL_DUPLEX=1; shift ;;
     --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
@@ -727,6 +731,7 @@ write_summary() {
     echo "RX_FILTER=$RX_FILTER"
     echo "RX_GAIN_DB=$RX_GAIN_DB"
     echo "SNR_PROFILE=$SNR_PROFILE"
+    echo "RADIOS=$([[ "$FULL_DUPLEX" -eq 1 ]] && echo full-duplex || echo half-duplex)"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -882,6 +887,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   ${RX_FILTER:+--lobby-rx-filter "$RX_FILTER"} \
   ${RX_GAIN_DB:+--lobby-rx-gain-db "$RX_GAIN_DB"} \
   ${SNR_PROFILE:+--lobby-snr-profile "$SNR_PROFILE"} \
+  $([[ "$FULL_DUPLEX" -eq 1 ]] && echo --lobby-full-duplex) \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

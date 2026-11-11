@@ -52,6 +52,8 @@ struct ServeOptions {
     float lobby_rx_filter_high_hz = 0.0f;
     float lobby_rx_gain_db = 0.0f;         // --lobby-rx-gain-db G (every receiver's audio level)
     std::vector<channel::SnrProfilePoint> lobby_snr_profile;  // --lobby-snr-profile "0:-3,120:20"
+    bool lobby_half_duplex = true;          // --lobby-full-duplex turns the radios' T/R blanking off
+    float lobby_tr_recovery_ms = 20.0f;     // --lobby-tr-recovery-ms MS
     uint32_t shutdown_deadline_seconds = 60;
     std::filesystem::path noise_bed_wav;
 };
@@ -67,7 +69,9 @@ void usage() {
         << "      [--lobby-rx-filter LOW-HIGH]  receivers' IF filter passband in Hz, e.g. 1250-1750\n"
         << "      [--lobby-rx-gain-db G]  receivers' audio level in dB (AF/line/sound-card gain), e.g. -30\n"
         << "      [--lobby-snr-profile T:DB,...]  the path's SNR over time (s since the first TX sample),\n"
-        << "          piecewise linear; the noise floor stays at --lobby-snr-db (use the profile's maximum)\n";
+        << "          piecewise linear; the noise floor stays at --lobby-snr-db (use the profile's maximum)\n"
+        << "      [--lobby-full-duplex]  stations hear while they transmit (default: half-duplex radios,\n"
+        << "          receive blanked while keyed + --lobby-tr-recovery-ms MS, default 20)\n";
 }
 
 void handleStopSignal(int signal) {
@@ -224,6 +228,13 @@ ServeOptions parseServeOptions(int argc, char** argv) {
                     "and -60 <= DB <= 80");
             }
             options.lobby_snr_profile = *parsed;
+        } else if (arg == "--lobby-full-duplex") {
+            options.lobby_half_duplex = false;
+        } else if (arg == "--lobby-tr-recovery-ms") {
+            options.lobby_tr_recovery_ms = std::stof(requireValue(i, argc, argv, arg));
+            if (!(options.lobby_tr_recovery_ms >= 0.0f && options.lobby_tr_recovery_ms <= 500.0f)) {
+                throw std::runtime_error("--lobby-tr-recovery-ms needs 0 <= MS <= 500");
+            }
         } else if (arg == "--lobby-station-cap") {
             options.lobby_station_cap = parseUint32(
                 requireValue(i, argc, argv, arg), 1024, arg);
@@ -280,6 +291,8 @@ int runServe(int argc, char** argv) {
     lobby.rx_filter_high_hz = options.lobby_rx_filter_high_hz;
     lobby.rx_gain_db = options.lobby_rx_gain_db;
     lobby.snr_profile = options.lobby_snr_profile;
+    lobby.half_duplex_radios = options.lobby_half_duplex;
+    lobby.tr_recovery_ms = options.lobby_tr_recovery_ms;
     for (const auto& point : options.lobby_snr_profile) {
         if (point.snr_db > options.lobby_snr_db) {
             std::cerr << "ota_simulator: --lobby-snr-profile reaches " << point.snr_db
@@ -347,6 +360,8 @@ int runServe(int argc, char** argv) {
                             std::to_string(static_cast<int>(options.lobby_rx_filter_high_hz));
                  }()
               << " lobby_rx_gain_db=" << options.lobby_rx_gain_db
+              << " lobby_radios=" << (options.lobby_half_duplex ? "half-duplex" : "full-duplex")
+              << " lobby_tr_recovery_ms=" << options.lobby_tr_recovery_ms
               << " lobby_snr_profile=" << [&] {
                      std::string out;
                      for (const auto& point : options.lobby_snr_profile) {

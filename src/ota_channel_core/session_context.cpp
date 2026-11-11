@@ -116,6 +116,7 @@ bool SessionContext::leaveStation(std::string_view station_id) {
     stations_.erase(it);
     audio_queues_.erase(std::string(station_id));
     rx_channels_.erase(std::string(station_id));
+    own_tx_last_end_.erase(std::string(station_id));
     appendEventLocked("station_left", std::string(station_id), 0);
     return true;
 }
@@ -156,6 +157,43 @@ void SessionContext::setChannel(ChannelConfig config) {
         }
     }
     appendEventLocked("channel_set", {}, 0);
+}
+
+void SessionContext::blankWhileKeyedLocked(const std::string& station_id, uint64_t start_sample,
+                                           std::vector<float>& rx) {
+    const auto samples_for = [&](float ms) {
+        return static_cast<uint64_t>(std::max(0.0f, ms) * static_cast<float>(config_.sample_rate) /
+                                     1000.0f);
+    };
+    const uint64_t lead = samples_for(config_.ptt_lead_ms);
+    const uint64_t hang = samples_for(config_.ptt_tail_ms + config_.tr_recovery_ms);
+    const size_t n = rx.size();
+    // The station's own transmission over this tick plus the lead ahead (already-scheduled audio
+    // is in the mixer; past ticks are not, hence own_tx_last_end_ for the hang).
+    std::vector<float> own;
+    mixer_.mixForStation(station_id, start_sample, n + static_cast<size_t>(lead), own);
+    std::vector<uint32_t> nonzero(own.size() + 1, 0);
+    for (size_t k = 0; k < own.size(); ++k) {
+        nonzero[k + 1] = nonzero[k] + (own[k] != 0.0f ? 1u : 0u);
+    }
+    uint64_t& last_end = own_tx_last_end_[station_id];
+    for (size_t i = 0; i < n; ++i) {
+        const uint64_t abs = start_sample + i;
+        // Keyed (or recovering) when a non-zero transmitted sample lies in [abs - hang, abs + lead].
+        const size_t lo = (i > hang) ? i - static_cast<size_t>(hang) : 0;
+        const size_t hi = std::min(own.size(), i + static_cast<size_t>(lead) + 1);
+        const bool keyed_here = nonzero[hi] > nonzero[lo];
+        const bool hanging = last_end > 0 && abs < last_end + hang;
+        if (keyed_here || hanging) {
+            rx[i] = 0.0f;
+        }
+    }
+    for (size_t i = n; i-- > 0;) {
+        if (own[i] != 0.0f) {
+            last_end = std::max(last_end, start_sample + i + 1);
+            break;
+        }
+    }
 }
 
 std::unique_ptr<IChannelModel> SessionContext::createRxChannelLocked(
@@ -359,6 +397,11 @@ SessionClockTick SessionContext::advanceSessionClock() {
         std::vector<float> rx;
         rxChannelForLocked(receiver_id)->process(
             mixed, channelSampleIndexLocked(tick.start_sample), rx);
+        if (config_.half_duplex_radios) {
+            // A keyed transceiver hears nothing (the medium still carries the peer, and the
+            // channel model keeps running so its state stays continuous).
+            blankWhileKeyedLocked(receiver_id, tick.start_sample, rx);
+        }
         auto& outbox = audio_queues_[receiver_id].rx_outbox;
         outbox.push_back({
             .start_sample = tick.start_sample,

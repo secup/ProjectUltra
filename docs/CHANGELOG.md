@@ -10,6 +10,51 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(sim): every simulated station is a half-duplex radio again
+
+**What was broken.** OTASim's server is the medium and carries every signal at once; half-duplex is a
+property of each radio and lived in the client-side radio model (`SimulatedStation`'s PTT state
+machine, 2026-05-19). That model was retired with `cli_simulator` on 2026-05-30 and the GUI's OTASim
+path never had one: a keyed GUI station kept receiving its peer. Found from a failed run (ITU Good
+-3 -> 20 dB, waveform follow on): the receiver re-acknowledged duplicate frames in the middle of the
+sender's 17 s MC-DPSK burst, the sender HEARD those ACKs while transmitting and queued its next
+burst behind the one still playing, and its ACK window - armed when the burst was queued, not when
+it aired - closed before the real end-of-turn ACK arrived: 72 timeouts, FAIL. On a rig none of it
+can happen: a keyed transceiver hears nothing, and the receiver's own ACK blanks its reception.
+
+**Fix.** `SessionConfig::half_duplex_radios` (default on). Stations stream audio continuously (zeros
+when idle), so the PTT is read from each station's own transmitted content, as the modem keys it:
+down `ptt_lead_ms` = 150 before its first non-zero sample, up `ptt_tail_ms` = 50 after its last, then
+`tr_recovery_ms` = 20 more (T/R relay + receiver recovery; rigs 5-30 ms). The station's received
+audio is zero meanwhile; the medium still carries its signal to everyone else and the channel model
+keeps running. Both TX paths: the paced queue and the audio plane's scheduled blocks, which the GUI
+uses (the lead looks ahead into audio already scheduled). `ota_simulator --lobby-full-duplex` /
+`gui_qso_scenario.sh --full-duplex` restore the old behaviour for A/B.
+
+A first version keyed only on the per-tick TX queue; the GUI's audio plane schedules its blocks
+straight into the mixer, so it never blanked a GUI station (server log: ALPHA heard audio in 19 358 of
+19 790 keyed ticks). Its A/B (ITU Good 0 dB 349 s vs 194 s) measured run-to-run spread, not
+half-duplex, and is void.
+
+**Tests.** `SessionHalfDuplexBlackout`: queued TX (deaf while keyed + tail + recovery, across tick
+boundaries, the others hear it) and scheduled TX (deaf from 150 ms before a burst to 70 ms after);
+the full-duplex medium assertion kept with the flag off. End to end, the server log (new
+`check` of every keyed tick): ALPHA heard nothing in 0 of 14 238 / 23 298 / 17 612 keyed ticks;
+BRAVO in at most 1 tick per run (a burst whose first audio arrives just in time for the look-ahead).
+GUI gate, current build, waveform follow off, one seed per cell:
+
+| Cell (MC-DPSK, 1 KB) | Half-duplex | Full-duplex (old) |
+|---|---|---|
+| AWGN 0 dB, seed 42 | 131 s, 0 timeouts | 131 s, 0 |
+| ITU Good 0 dB, seed 43 | 201 s, 3 timeouts | 194 s, 3 |
+| ITU Good 0 dB, seed 44 | 289 s, 9 | 253 s, 9 |
+| AWGN -6 dB, seed 42 | 442 s, 18 | 396 s, 12 |
+
+The full-duplex gate flattered lossy MC-DPSK by 4-14 % on these cells; GUI-gate numbers from
+2026-05-30 to 2026-11-11 that depend on ACK timing should be re-measured before they are relied on.
+
+---
+
 ## 2026-11-11 — FIX(sync): chirps ramp in and out (the full-width lines on the waterfall)
 
 **What was broken.** Operator report with a waterfall screenshot: the dual-chirp anchor "overlaps" and

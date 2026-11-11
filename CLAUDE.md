@@ -350,6 +350,11 @@ unvalidated on hardware" caveat.
    connected, BUG-RX-ABSOLUTE-LEVEL). Every receive decision is a ratio or relative to measured
    noise; the only absolute test is digital silence. Any receive-path change passes
    `gui_qso_scenario.sh --rx-gain-db G` at -40, 0 and +10 dB.
+7. **Every simulated station is a half-duplex radio** (2026-11-11): OTASim blanks a station's receive
+   while its own transmitter is keyed - read from its transmitted audio: 150 ms lead-in before the
+   first non-zero sample, 50 ms tail + 20 ms T/R recovery after the last (`--full-duplex` turns it
+   off for A/B). From 2026-05-30 until then a keyed GUI station still heard its peer - a sender could
+   act on an ACK sent into its own burst, which no rig can do.
 
 ---
 

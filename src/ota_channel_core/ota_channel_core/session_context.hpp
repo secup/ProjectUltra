@@ -130,6 +130,11 @@ private:
     SampleIndexedMixer mixer_;
     std::set<std::string> stations_;
     std::map<std::string, StationAudioQueues> audio_queues_;
+    // Half-duplex radios: the session sample just past each station's last non-zero transmitted
+    // sample (its PTT hang and T/R recovery run from there; the mixer forgets past blocks).
+    std::map<std::string, uint64_t> own_tx_last_end_;
+    void blankWhileKeyedLocked(const std::string& station_id, uint64_t start_sample,
+                               std::vector<float>& rx);
     CaptureState capture_;
     std::vector<SessionEvent> events_;
     uint64_t session_clock_samples_ = 0;
