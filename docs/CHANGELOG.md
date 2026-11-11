@@ -10,6 +10,50 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — REMOVE(rx): the receive level normalizer (`ULTRA_RX_AGC`) and the fixed erasure-gate A/B arm (`ULTRA_BURST_ERASURE_ABSOLUTE`) (REMOVAL_BACKLOG R21)
+
+**What they were.** `ULTRA_RX_AGC` (default off, 2026-06-16): a slow, amplify-only gain in
+`StreamingDecoder::feedAudio` that lifted a quiet input toward 0.176 RMS, the level the absolute
+receive gates had been set at (engage below a third of that, update only above 0.030 RMS, at most
+x6). Only a no-op control and an engagement control were ever run; its benefit never was.
+`ULTRA_BURST_ERASURE_ABSOLUTE` (default off): forced the legacy fixed 0.015 RMS burst erasure gate,
+kept as the OFF arm of a rig A/B of the relative gate.
+
+**Why they go.** Since 2026-11-10 no receive gate reads the absolute level (INV-RX-LEVEL-001,
+BUG-RX-ABSOLUTE-LEVEL), so there is nothing left for a normalizer to make up for, and the AGC's own
+constants were hand-set levels of exactly the kind that fix removed. The erasure A/B arm was kept
+for a rig measurement whose level half the simulator now answers: `--rx-gain-db` lowers the receive
+level without lowering SNR, and at -40 dB every frame the relative gate keeps decodes. The fixed
+0.015 floor is wrong by construction (it erases every frame of a station 30 dB quieter). The backlog
+entry asked for a rig session first; the user waived it ("we can remove the old agc").
+
+**What changed.**
+- `streaming_decoder.cpp` `feedAudio`: the AGC block is gone; the ring gets the samples as the sound
+  card delivered them. `reset()` no longer re-arms it. `streaming_decoder.hpp`: `agc_level_est_`,
+  `agc_gain_`, `agc_log_counter_` removed.
+- `streaming_burst_interleave.cpp`: one erasure threshold, 0.055 x this group's anchor RMS with the
+  digital-silence backstop, nothing erased without a captured anchor.
+- Both knobs were off by default, so default behavior is unchanged.
+- Docs: MODEM_INFRASTRUCTURE_MAP rows marked REMOVED; ENV_KNOBS_DEFAULT_OFF inventory rows, latching
+  note and stale-row entry resolved, shortlist #7 is `ULTRA_BURST_RMS_DIAG` alone with the simulator
+  result; REMOVAL_BACKLOG R21 DONE (queued as R20, which collided with the `huntForCodeword` entry).
+
+**Tests.** ctest 115/115 (TNCSession disabled as before). GUI gate (`gui_qso_scenario.sh`, seed 42,
+CFO 7.3 Hz, 4 KB, `--rx-gain-db G`), same numbers as on 2026-11-10:
+
+| Channel | Receive level | Result | Rung | Goodput | 2026-11-10 |
+|---|---|---|---|---|---|
+| AWGN 20 dB | -40 dB | PASS, 0 retx, 0 erasures | QPSK R1/2 | 1230 bps | 1230 |
+| AWGN 20 dB | 0 dB | PASS, 0 retx | QPSK R1/2 | 1230 bps | 1230 |
+| AWGN 20 dB | +10 dB (clips) | PASS, 0 retx | 16QAM R2/3 | 1810 bps | 1820 |
+| ITU Good 20 dB | -30 dB | PASS, 1 retx | 8PSK R2/3 | 1510 bps | 1510 |
+| Narrowband, AWGN 20 dB | -30 dB | PASS, 0 retx | 8PSK R2/3 | 430 bps | 430 |
+
+The +10 dB row ran the same rung with no retransmissions. The deleted code never ran by default, so
+the 10 bps is the timing variation between two real-time runs.
+
+---
+
 ## 2026-11-10 — FIX(rx): the receiver reads no absolute level; simulator receive-level control (BUG-RX-ABSOLUTE-LEVEL)
 
 **What was broken.** A station hears its peer at whatever level its operator set (AF gain, USB
@@ -57,7 +101,7 @@ its floor, so the sender retransmitted on timeout), -20 dB passed. Narrowband fa
   fixed 0.04 RMS -> under 0.15 x this frame's RMS (the old value at the simulator's frame level).
 - Simulator: `RxGainChannelModel` / `ota_simulator --lobby-rx-gain-db` / `gui_qso_scenario.sh
   --rx-gain-db` (scale after the IF filter, full-scale clip; 0 = byte-identical).
-- `ULTRA_RX_AGC` is superseded (REMOVAL_BACKLOG R20).
+- `ULTRA_RX_AGC` is superseded (REMOVAL_BACKLOG R21; deleted 2026-11-11).
 
 **Tests.** `ToneBurstAckRoundTrip` (noise never reaches the floor; the same ACK at 0, -40, +20 dB
 decodes with the identical ratio 7.957), `ChannelIdleNoiseSNRCalibration` (level invariance),

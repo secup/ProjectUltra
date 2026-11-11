@@ -455,7 +455,12 @@ the new defaults first (BUG-TEST-GAP-FAST-DEFAULT); then proceed with R15 and R1
 `ULTRA_RATE_EVM=1` FULL mode while BUG-EVM-FULL-CHASES-WINDOW is open (an experiment, not a
 default), `measure_ack_fer --frame-log`.
 
-### R20. The receive operating-level AGC (`ULTRA_RX_AGC`) — `QUEUED 2026-11-10`
+### R21. The receive operating-level AGC (`ULTRA_RX_AGC`) — `DONE 2026-11-11`
+
+> **DONE 2026-11-11 (local commit).** Both knobs deleted on the user's go-ahead ("we can remove the old
+> agc"), without waiting for the rig session below: the `--rx-gain-db` sweep (-40, 0, +10 dB) is the
+> evidence that nothing downstream needs a normalized level. (Numbered R20 when queued, which collided
+> with the `huntForCodeword` entry below.)
 
 **Why.** A default-off, amplify-only AGC in `StreamingDecoder::feedAudio` that raised a quiet input
 toward the simulator's operating level (0.176 RMS) "so the absolute gates work". Since
@@ -571,6 +576,7 @@ _(none currently — R7 done, see Completed removals)_
 | 2026-05-30 | `cli_simulator` + `test_waveform_simple` + `SimulatedStation` (~14k lines) | `207a0af` |
 | 2026-06-02 | **R7** `ultra_tnc` in-process AWGN: `applyAwgn`, `rng_`, `inject_channel*` config + `--inject-channel`/`--no-inject-channel` flags. OTASim is now the TNC's only channel (covered by the re-enabled `UltraTncSimAudio` 8 KB file test). | _pending_ |
 | (earlier) | OFDM_COX as a selectable mode (enum `0x00` now reserved; S-C primitive kept) | — |
+| 2026-11-11 | **R21** `ULTRA_RX_AGC` (receive level normalizer in `feedAudio` + its three members) and the `ULTRA_BURST_ERASURE_ABSOLUTE` A/B arm (legacy fixed 0.015 erasure gate) | _local_ |
 
 ## R11 (2026-07-07): wideOFDM short-reanchor charge machinery
 - **Scope:** `shouldUseWideOFDMShortReanchor` (now constant false), `wideOFDMShortReanchorChirpDurationMs`, `kWideOFDMShortReanchor*Ms` constants, the `reanchor_ms` parameters threaded through `wideOFDMBurstAirtimeMs`/`wideOFDMSackDelayMs` + 5 connection.cpp call sites + test_connection_policy reanchor rows. The encoder feature was removed in May (R4); the charge was a phantom that mis-priced every airtime budget (GROUP_SIZE_LEVER brief §1).

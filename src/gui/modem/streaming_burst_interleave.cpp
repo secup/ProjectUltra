@@ -1009,16 +1009,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // gate; the cheap-card per-carrier decodability of the now-KEPT weak frames is a separate
     // lever (see docs/KNOWN_BUGS.md BUG-IONOS-PI5-CHEAP-DAC / per-carrier LLR work).
     constexpr float kBurstErasureAnchorFrac = 0.055f;  // ~25 dB below the group anchor
-    // ULTRA_BURST_ERASURE_ABSOLUTE=1 forces the legacy fixed 0.015 gate (A/B harness for the
-    // relative-gate benefit; default uses the operating-level-relative gate).
-    static const bool kBurstErasureAbsolute = [] {
-        const char* e = std::getenv("ULTRA_BURST_ERASURE_ABSOLUTE");
-        return e && e[0] == '1';
-    }();
     const float erase_thresh =
-        kBurstErasureAbsolute
-            ? 0.015f
-        : (std::isfinite(burst_anchor_rms_) && burst_anchor_rms_ > 0.0f)
+        (std::isfinite(burst_anchor_rms_) && burst_anchor_rms_ > 0.0f)
             ? std::max(kBurstErasureAnchorFrac * burst_anchor_rms_, signal_policy::kDigitalSilenceRms)
             : signal_policy::kDigitalSilenceRms;  // no anchor captured: only a dead input is erased
     if (next_rms < erase_thresh) {

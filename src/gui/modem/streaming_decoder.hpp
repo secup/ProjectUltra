@@ -1178,23 +1178,6 @@ private:
     std::atomic<bool> audio_activity_{false};
     std::atomic<uint64_t> audio_activity_events_{0};
 
-    // RX operating-level AGC (ULTRA_RX_AGC, default off). A SLOW, AMPLIFY-ONLY normalizer that
-    // raises a low received operating level toward the modem reference so the absolute-amplitude
-    // thresholds (burst erasure gate, sync RMS floor, CCA quiet gate) work regardless of gain
-    // staging / channel attenuation. Tracks the SIGNAL level over seconds (gated on activity so it
-    // never chases idle noise or fade nulls), engages only below a deadband (so a normally-leveled
-    // signal — every TX-normalized sim run — is an exact no-op), is slewed slowly so the gain never
-    // moves within a burst (which would flatten fading / corrupt the constellation), and only ever
-    // amplifies (a hot signal already clears every low threshold). Applied to the ring-buffer path
-    // only; the §15 tone-burst ACK monitor stays on raw audio. Single audio thread → no lock needed.
-    float agc_level_est_ = 0.5f;    // smoothed active-signal broadband RMS. Init HIGH so the
-                                    // amplify-only gain never engages until the EMA has converged
-                                    // DOWN and confirmed a genuinely low operating level (a normal-
-                                    // level sim run stays above the engage point → exact no-op; a
-                                    // transient noise blip can't trigger spurious amplification)
-    float agc_gain_ = 1.0f;         // current applied gain (slewed; always >= 1)
-    uint64_t agc_log_counter_ = 0;  // throttle the engaged-gain log
-
     // Active waveform for demodulation (handles its own sync internally)
     WaveformFactory waveform_factory_;
     std::unique_ptr<IWaveform> waveform_;
