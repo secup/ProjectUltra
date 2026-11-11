@@ -890,6 +890,13 @@ private:
     Modulation pending_descriptor_mod_ = Modulation::DQPSK;
     CodeRate pending_descriptor_rate_ = CodeRate::R1_4;
     void applyPendingDescriptorDataMode();  // called at top of processBuffer
+    // setMCDPSKConfig/setMCDPSKCarriers rebuild the MC-DPSK waveform; like every waveform swap they
+    // are deferred to the top of processBuffer (decode thread, buffer mutex held): a swap from the
+    // protocol/GUI thread freed the waveform under a running chirp search (SIGSEGV in
+    // ChirpSync::detectChirpTemplateFFT, 2026-11-11, once MC-DPSK changed constellation mid-session).
+    void applyPendingMCDPSKConfig();
+    MultiCarrierDPSKConfig pending_mc_dpsk_config_;
+    bool pending_mc_dpsk_config_set_ = false;
 
     // End the descriptor-owned LDPC geometry as one invariant-preserving
     // operation.  The descriptor latch is the decoder-side source of truth,

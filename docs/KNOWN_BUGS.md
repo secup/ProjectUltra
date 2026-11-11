@@ -2491,6 +2491,15 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-MCDPSK-CONFIG-SWAP-SIGSEGV (FIXED 2026-11-11) — the MC-DPSK waveform was freed under the chirp search
+
+`StreamingDecoder::setMCDPSKConfig`/`setMCDPSKCarriers` replaced `waveform_` from the caller's thread
+while the decode thread ran `searchForSync` -> `MCDPSKWaveform::detectSync` on it outside the ring
+mutex: SIGSEGV in `ChirpSync::detectChirpTemplateFFT` (ultra_gui-2026-11-11-084958.ips, -105718.ips),
+made frequent by mid-session MC-DPSK constellation changes. Fix: both setters store a pending config;
+`applyPendingMCDPSKConfig` rebuilds at the top of `processBuffer`, the pattern of the 2026-05-28
+`setDataMode` fix.
+
 ### BUG-CONNECT-BOOST-NO-EVIDENCE (FIXED 2026-11-11) — a weak fading link was selected 11 dB above its reading
 
 On ITU Good at -3 dB (GUI gate, seed 42) the responder read -3.9 dB data-aided and selected 7.1 dB:

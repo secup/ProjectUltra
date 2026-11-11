@@ -669,6 +669,7 @@ void StreamingDecoder::processBuffer() {
         // reconfigures). Both routes through deferred pending so RX never
         // crashes in HilbertTransform::process when ALPHA adapts its rate.
         applyPendingConnectedOFDMMode();
+        applyPendingMCDPSKConfig();
         applyPendingDescriptorDataMode();
 
         // BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV: release waveforms retired by a
@@ -1315,23 +1316,30 @@ void StreamingDecoder::applyPendingConfigForTesting() {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     applyPendingActiveBurstDescriptorGeometryReset();
     applyPendingConnectedOFDMMode();
+    applyPendingMCDPSKConfig();
     applyPendingDescriptorDataMode();
 }
 
 void StreamingDecoder::setMCDPSKCarriers(int n) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    if (mc_dpsk_carriers_ == n) return;
-    mc_dpsk_carriers_ = n;
-    mc_dpsk_config_.num_carriers = n;
-    if (mode_ == protocol::WaveformMode::MC_DPSK) {
-        waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
-        frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
-            mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
-    }
+    MultiCarrierDPSKConfig config = pending_mc_dpsk_config_set_ ? pending_mc_dpsk_config_
+                                                                : mc_dpsk_config_;
+    config.num_carriers = n;
+    pending_mc_dpsk_config_ = config;
+    pending_mc_dpsk_config_set_ = true;
 }
 
 void StreamingDecoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    pending_mc_dpsk_config_ = config;
+    pending_mc_dpsk_config_set_ = true;
+}
+
+void StreamingDecoder::applyPendingMCDPSKConfig() {
+    // Caller holds the buffer mutex on the decode thread (top of processBuffer).
+    if (!pending_mc_dpsk_config_set_) return;
+    pending_mc_dpsk_config_set_ = false;
+    const MultiCarrierDPSKConfig config = pending_mc_dpsk_config_;
     const bool changed =
         mc_dpsk_config_.num_carriers != config.num_carriers ||
         mc_dpsk_config_.samples_per_symbol != config.samples_per_symbol ||

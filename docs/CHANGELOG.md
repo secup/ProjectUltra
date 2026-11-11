@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(rx): MC-DPSK waveform swap freed under the chirp search (BUG-MCDPSK-CONFIG-SWAP-SIGSEGV)
+
+**What was broken.** Two `ultra_gui` crashes on the GUI gate (08:49 and 10:57), both SIGSEGV in
+`ChirpSync::detectChirpTemplateFFT` <- `MCDPSKWaveform::detectSync` <- `StreamingDecoder::searchForSync`
+on the decode thread. `StreamingDecoder::setMCDPSKConfig` (and `setMCDPSKCarriers`) replaced
+`waveform_` at once from the caller's thread, holding only the ring-buffer mutex, while the decode
+thread runs the chirp search on the waveform outside that mutex: the old waveform (and its
+`ChirpSync`) was freed under it. The race was old (the call came only at connect); the MC-DPSK
+constellation change made it frequent (every sender-side change re-profiles the modem through
+`notifyDataModeChanged` -> `setMCDPSKProfile`).
+
+**Fix.** Same pattern as the 2026-05-28 `setDataMode` crash fix (§14.36): both setters store a
+pending config, and `applyPendingMCDPSKConfig` rebuilds the waveform at the top of
+`processBuffer`, on the decode thread, before the deferred data mode is applied.
+
+**Tests.** ctest 116/116 (with the compact-frame change, next entry up). No crash report since the
+fix: the 18 `ultra_gui` processes of that entry's A/B, whose sessions change constellation
+mid-session, all exited cleanly.
+
+---
+
 ## 2026-11-11 — FEAT(mcdpsk): the constellation changes during a session (ULTRA_MCDPSK_RATE_ADAPT)
 
 **What was missing.** An MC-DPSK session kept its connect-time constellation for good. A wrong pick
