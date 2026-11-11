@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — REMOVE(dsp): the unused `AGC` class
+
+**What it was.** `ultra::AGC` (`include/ultra/dsp.hpp`, `src/dsp/filters.cpp`): a per-sample
+attack/decay gain control (target 0.5, gain clamped to 0.001-1000). Nothing called it; its only
+user was its own unit test (`DSPPrimitives` `test_agc`).
+
+**Why it goes.** Dead code, and a level normalizer has no job on a receive path that reads no
+absolute level (INV-RX-LEVEL-001).
+
+**What changed.** The class, its definition and `test_agc` are deleted; `COVERAGE_MAP.md` and
+`QUALITY_AUDIT.md` no longer list AGC among the DSP primitives.
+
+**Tests.** Build clean (no new warnings); ctest 115/115 (TNCSession disabled as before), including
+`DSPPrimitives`.
+
+---
+
 ## 2026-11-11 — REMOVE(rx): the receive level normalizer (`ULTRA_RX_AGC`) and the fixed erasure-gate A/B arm (`ULTRA_BURST_ERASURE_ABSOLUTE`) (REMOVAL_BACKLOG R21)
 
 **What they were.** `ULTRA_RX_AGC` (default off, 2026-06-16): a slow, amplify-only gain in

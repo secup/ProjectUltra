@@ -113,20 +113,6 @@ void test_biquad_filter() {
     CHECK(near(low.process(1.0f), first), "biquad reset should restore deterministic state");
 }
 
-void test_agc() {
-    AGC agc(0.5f, 0.1f, 0.01f);
-    float loud = agc.process(10.0f);
-    CHECK(std::isfinite(loud), "AGC loud output finite");
-    CHECK(agc.getGain() < 1.0f, "AGC should reduce gain for loud input");
-
-    agc.reset();
-    CHECK(near(agc.getGain(), 1.0f), "AGC reset should restore unity gain");
-    for (int i = 0; i < 100; ++i) {
-        (void)agc.process(0.01f);
-    }
-    CHECK(agc.getGain() > 1.0f, "AGC should increase gain for weak input");
-}
-
 void test_nco() {
     NCO dc(0.0f, 48000.0f);
     for (int i = 0; i < 4; ++i) {
@@ -189,7 +175,6 @@ int main() {
     test_windows();
     test_fir_filter();
     test_biquad_filter();
-    test_agc();
     test_nco();
     test_hilbert_transform();
 

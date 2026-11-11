@@ -123,26 +123,6 @@ private:
 };
 
 /**
- * AGC (Automatic Gain Control)
- */
-class AGC {
-public:
-    AGC(float target_level = 0.5f, float attack = 0.01f, float decay = 0.001f);
-
-    Sample process(Sample in);
-    Samples process(SampleSpan in);
-
-    float getGain() const { return gain_; }
-    void reset();
-
-private:
-    float target_;
-    float attack_;
-    float decay_;
-    float gain_ = 1.0f;
-};
-
-/**
  * Hilbert Transform (for SSB processing)
  */
 class HilbertTransform {

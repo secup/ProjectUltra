@@ -577,6 +577,7 @@ _(none currently — R7 done, see Completed removals)_
 | 2026-06-02 | **R7** `ultra_tnc` in-process AWGN: `applyAwgn`, `rng_`, `inject_channel*` config + `--inject-channel`/`--no-inject-channel` flags. OTASim is now the TNC's only channel (covered by the re-enabled `UltraTncSimAudio` 8 KB file test). | _pending_ |
 | (earlier) | OFDM_COX as a selectable mode (enum `0x00` now reserved; S-C primitive kept) | — |
 | 2026-11-11 | **R21** `ULTRA_RX_AGC` (receive level normalizer in `feedAudio` + its three members) and the `ULTRA_BURST_ERASURE_ABSOLUTE` A/B arm (legacy fixed 0.015 erasure gate) | _local_ |
+| 2026-11-11 | Unused `ultra::AGC` class (`include/ultra/dsp.hpp`, `src/dsp/filters.cpp`) and its `DSPPrimitives` test | _local_ |
 
 ## R11 (2026-07-07): wideOFDM short-reanchor charge machinery
 - **Scope:** `shouldUseWideOFDMShortReanchor` (now constant false), `wideOFDMShortReanchorChirpDurationMs`, `kWideOFDMShortReanchor*Ms` constants, the `reanchor_ms` parameters threaded through `wideOFDMBurstAirtimeMs`/`wideOFDMSackDelayMs` + 5 connection.cpp call sites + test_connection_policy reanchor rows. The encoder feature was removed in May (R4); the charge was a phantom that mis-priced every airtime budget (GROUP_SIZE_LEVER brief §1).

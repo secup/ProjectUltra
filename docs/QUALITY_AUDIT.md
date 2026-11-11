@@ -81,7 +81,6 @@ smaller units with direct tests around their real invariants.
 2. DSP direct tests:
 - FIR low/high/bandpass sanity and reset behavior.
 - Biquad low/high/bandpass/notch finite output and reset behavior.
-- AGC convergence and clamp behavior.
 - NCO phase/frequency behavior.
 - Hilbert finite analytic output.
 

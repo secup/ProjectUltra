@@ -191,39 +191,6 @@ void BiquadFilter::reset() {
     z1_ = z2_ = 0;
 }
 
-// ============ AGC ============
-
-AGC::AGC(float target_level, float attack, float decay)
-    : target_(target_level), attack_(attack), decay_(decay) {}
-
-Sample AGC::process(Sample in) {
-    float abs_in = std::abs(in);
-
-    // Update gain
-    if (abs_in * gain_ > target_) {
-        gain_ -= attack_ * (abs_in * gain_ - target_);
-    } else {
-        gain_ += decay_ * (target_ - abs_in * gain_);
-    }
-
-    // Clamp gain to reasonable range
-    gain_ = std::max(0.001f, std::min(gain_, 1000.0f));
-
-    return in * gain_;
-}
-
-Samples AGC::process(SampleSpan in) {
-    Samples out(in.size());
-    for (size_t i = 0; i < in.size(); ++i) {
-        out[i] = process(in[i]);
-    }
-    return out;
-}
-
-void AGC::reset() {
-    gain_ = 1.0f;
-}
-
 // ============ NCO ============
 
 NCO::NCO(float frequency, float sample_rate)
