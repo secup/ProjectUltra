@@ -8,18 +8,27 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-MCDPSK-RTO-FULL-WINDOW (fix landed 2026-11-11, `ULTRA_MCDPSK_INFLIGHT_RTO`; GUI A/B in progress) — P2: an MC-DPSK resend of one frame waits a full-window timeout
+### BUG-TX-SPLATTER-SYMBOL-EDGES (open, 2026-11-11) — P3: data symbols switch hard; their splatter shows on every waterfall
 
-**What.** `computeMCDPSKAckTimeoutMs` sizes the sender's retransmission timeout for a full window
-(window x frame airtime for the burst, the same again for the receiver's decode, the ACK path and
-3 s: 43.6 s for DBPSK R1/4 with 3 frames), and that one timeout applies whatever is in flight. On
-the GUI gate at ITU Good -3 dB (DBPSK, 1 KB, seed 42, 2026-11-11) frames and ACKs lost to fades were
-resent one at a time, each after the full wait: seq 10 went out at 249, 293, 336 and 380 s. The
-transfer had reached frame 21 of about 22 when the 600 s limit stopped it. Wideband OFDM already
-scales its timeout with what is in flight (the INFLIGHT-RTO table).
+**What.** Operator report: the waterfall "isn't smooth". Measured on the transmitted audio
+(`ultra ptx` = ModemEngine's TX path, `tools/tx_spectrum.py`):
+- MC-DPSK: rectangular DPSK symbols. Each symbol also restarts every carrier's phase at 0, and the
+  carriers (500-2500 Hz, evenly spaced) run 10.67, 16.76, ... cycles per 1024-sample symbol, so every
+  boundary steps in phase: the 12 largest sample steps of a burst all sit at offset 1023 of 1024.
+  Splatter: worst bin -20 dB against the in-band average, -36 dB average outside the band.
+- OFDM: no symbol windowing and hard frame edges: worst bin -20 dB, edge rows -28/-30 dB.
+The chirp edges (full-width clicks, the worst part on the waterfall) are fixed (2026-11-11).
 
-**Fix direction.** Derive the MC-DPSK timeout from the frames actually in flight (their airtime,
-the receiver's decode time for them, its SACK hold and the ACK), as the OFDM path does.
+**Modelled options (MC-DPSK, random DQPSK).** Whole-cycle carriers alone change nothing (the data
+steps dominate). A raised-cosine transition of 2 ms gives -26 dB worst, 5 ms -47 dB, but blends ~23 %
+of each 21 ms symbol: about 1 dB at the floor with today's rectangular-window receiver. The cost-free
+path is root-raised-cosine pulse shaping with a matched receiver (the carriers are 285 Hz apart, so
+each is shaped inside its own spacing): a receiver rework (filtering, timing, the data-aided SNR and
+the margin test). OFDM: WOLA inside the cyclic prefix plus ramped frame edges.
+
+**Impact.** Decoding is unaffected (the receiver integrates its own carriers). On air the radio's SSB
+filter removes what falls outside its passband; what remains is inside our own channel. Below the
+throughput work in priority.
 
 ### BUG-CONNECT-PICK-LOW-SNR-FADING (open, 2026-11-10) — P2: OFDM picked at Good@4-6 from a "selection SNR" 6-9 dB above the measured CONNECT
 
@@ -2490,6 +2499,13 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-RTO-FULL-WINDOW (FIXED 2026-11-11, 07f41a1, `ULTRA_MCDPSK_INFLIGHT_RTO`) — an MC-DPSK resend of one frame waited a full-window timeout
+
+`computeMCDPSKAckTimeoutMs` sized every retransmission timeout for a full window (43.6 s for DBPSK
+R1/4 x 3 frames). Fix: a timeout table over the frames in flight, also used to arm resends; a
+one-frame DBPSK resend waits 22.0 s. GUI A/B (all new MC-DPSK features off vs on, CHANGELOG
+2026-11-11 compact-frame entry): ITU Good -3 dB FAIL -> PASS 387 s, Good 0 dB 490 -> 231 s.
 
 ### BUG-MCDPSK-CONFIG-SWAP-SIGSEGV (FIXED 2026-11-11) — the MC-DPSK waveform was freed under the chirp search
 

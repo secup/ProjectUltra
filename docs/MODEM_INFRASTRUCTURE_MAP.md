@@ -69,7 +69,9 @@ it's post-decode delivery/routing only.
 | MC-DPSK compact DATA frames (2026-11-11) | in a connected session, DATA frames are one turbo codeword of the session's codewords x 648 bits with a 4-byte header and a session-seeded CRC (`protocol/mcdpsk_frame`); the first frame is tried as compact (configured, then other constellation) before the v2 path; the burst continues at fixed positions past a failed frame, up to the sender's window; the search resumes at the first trailing failure (INV-MCDPSK-FRAME-001) | `streaming_ofdm_decode.cpp` `decodeMcDpskCompactFirstFrame`, `deliverMcDpskCompactFirstFrame`, `continueMCDPSKCompactBurst`; `streaming_encoder.cpp` `encodeFrameBytes`; `connection.cpp` `currentDataPayloadCapacity`, `enterConnected` (session addresses) | MC-DPSK data | 🟢 default ON (`ULTRA_MCDPSK_COMPACT_FRAME=0` keeps the v2 chain) |
 
 **CFO correction chain (the load-bearing invariant — 5 stages, all 🟢):**
-1. Chirp coarse CFO — `chirp_sync.hpp:457` (gap-error). Coarse; ±2 Hz on fading.
+1. Chirp coarse CFO — `chirp_sync.hpp:457` (gap-error). Coarse; ±2 Hz on fading. Every chirp (TX and the
+   matched-filter templates) ramps in and out over `ChirpConfig::edge_ramp_ms` = 10 ms (raised cosine,
+   2026-11-11): a hard on/off was a full-width click on the waterfall (edge rows -19..-25 dB -> -50 dB).
 2. Apply pre-correction + initial phase — `ofdm_chirp_waveform.cpp:915` → `setFrequencyOffsetWithPhase` → `toBaseband` NCO. INVARIANT: `processPresynced` must NOT reset the pre-set CFO/phase (`ofdm_stream_processor.cpp:824`).
 3. LTS residual refine — `channel_equalizer_lts.cpp:310` (phase between 2 LTS symbols, ~0.3 Hz threshold).
 4. Per-symbol pilot CPE tracking — `channel_equalizer_pilot.cpp:601` (±15° clamp).

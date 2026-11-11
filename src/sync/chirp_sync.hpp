@@ -18,6 +18,7 @@
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
 #include <vector>
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <memory>
@@ -32,6 +33,14 @@ struct ChirpConfig {
     float f_end = 2700.0f;       // End frequency (Hz)
     float duration_ms = 500.0f;  // Chirp duration (ms)
     float gap_ms = 100.0f;       // Gap between up and down chirps (ms)
+    // Raised-cosine ramp at each end of every chirp (ms; 0 = hard gating). A hard on/off at full
+    // amplitude is a broadband click in any spectrogram row that contains it: -25..-29 dB of
+    // splatter beyond +-300 Hz of the chirp in a 2048-sample waterfall row, the full-width
+    // lines on the waterfall. 10 ms takes that to -51 dB for 0.11 dB of chirp energy (5 ms -49,
+    // 2 ms does nothing: under one cycle at 300 Hz); the ramp's main lobe (2/ramp = 200 Hz)
+    // stays inside the band that row is judged on. The matched-filter templates carry the same
+    // envelope, so detection stays matched.
+    float edge_ramp_ms = 10.0f;
     float amplitude = 0.5f;      // Output amplitude
     float tx_cfo_hz = 0.0f;      // TX simulation: frequency offset in Hz
     bool use_dual_chirp = true;  // Use up+down chirp pair for robust CFO/timing
@@ -89,7 +98,7 @@ public:
         for (size_t i = 0; i < chirp_samples; i++) {
             float t = static_cast<float>(i) / config_.sample_rate;
             float phase = 2.0f * M_PI * (f_start_up * t + 0.5f * k * t * t);
-            output[i] = config_.amplitude * std::sin(phase);
+            output[i] = config_.amplitude * edgeGain(i, chirp_samples) * std::sin(phase);
         }
 
         if (config_.use_dual_chirp) {
@@ -100,7 +109,7 @@ public:
                 float t = static_cast<float>(i) / config_.sample_rate;
                 // Down-chirp: starts at f_end, decreases by k*t
                 float phase = 2.0f * M_PI * (f_start_down * t - 0.5f * k * t * t);
-                output[down_start + i] = config_.amplitude * std::sin(phase);
+                output[down_start + i] = config_.amplitude * edgeGain(i, chirp_samples) * std::sin(phase);
             }
         }
 
@@ -974,6 +983,17 @@ private:
         return std::abs(corr) / denom;
     }
 
+    // Chirp envelope at sample i of n: a raised-cosine ramp over edge_ramp_ms at each end, 1 between.
+    float edgeGain(size_t i, size_t n) const {
+        const size_t ramp = std::min(
+            n / 2, static_cast<size_t>(config_.sample_rate * config_.edge_ramp_ms / 1000.0f));
+        if (ramp == 0) return 1.0f;
+        const size_t from_edge = std::min(i, n - 1 - i);
+        if (from_edge >= ramp) return 1.0f;
+        return 0.5f - 0.5f * std::cos(static_cast<float>(M_PI) * static_cast<float>(from_edge) /
+                                      static_cast<float>(ramp));
+    }
+
     // Generate phase for UP-chirp at time t
     float generateUpChirpPhase(float t) const {
         float T = config_.duration_ms / 1000.0f;
@@ -1004,8 +1024,9 @@ private:
         for (size_t i = 0; i < chirp_samples; i++) {
             float t = static_cast<float>(i) / config_.sample_rate;
             float phase = generateUpChirpPhase(t);
-            up_chirp_template_[i] = std::sin(phase);
-            up_chirp_template_cos_[i] = std::cos(phase);
+            const float g = edgeGain(i, chirp_samples);
+            up_chirp_template_[i] = g * std::sin(phase);
+            up_chirp_template_cos_[i] = g * std::cos(phase);
             template_energy_ += up_chirp_template_[i] * up_chirp_template_[i];
         }
 
@@ -1016,8 +1037,9 @@ private:
         for (size_t i = 0; i < chirp_samples; i++) {
             float t = static_cast<float>(i) / config_.sample_rate;
             float phase = generateDownChirpPhase(t);
-            down_chirp_template_[i] = std::sin(phase);
-            down_chirp_template_cos_[i] = std::cos(phase);
+            const float g = edgeGain(i, chirp_samples);
+            down_chirp_template_[i] = g * std::sin(phase);
+            down_chirp_template_cos_[i] = g * std::cos(phase);
             down_template_energy_ += down_chirp_template_[i] * down_chirp_template_[i];
         }
     }

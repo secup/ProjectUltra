@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(sync): chirps ramp in and out (the full-width lines on the waterfall)
+
+**What was broken.** Operator report with a waterfall screenshot: the dual-chirp anchor "overlaps" and
+"isn't smooth". Measured on the transmitted audio (`ultra ptx`, ModemEngine's TX path, new
+`tools/tx_spectrum.py`):
+- Timing is right: up-chirp 500 ms, 100 ms of silence, down-chirp 500 ms, 100 ms, then the frame. A
+  waterfall row is 2048 samples (43 ms), so the 100 ms gap shows as two or three rows next to bright
+  chirp ends - the apparent overlap.
+- The lines are real. Every chirp switched to full level at its first sample (RMS of the first
+  millisecond 0.374 against 0.345 steady) and off at its last: a hard on/off is a broadband click in
+  any spectrogram row that contains it, -19 to -25 dB against the chirp in the edge row, the
+  full-width horizontal lines at each chirp's start and end. The averaged spectrum hides it (-76 dB:
+  one click per 500 ms); one waterfall row does not.
+
+**Fix.** `ChirpConfig::edge_ramp_ms` = 10: a raised-cosine ramp at both ends of every chirp, on the
+transmitted chirp and on the receiver's matched-filter templates alike (one place, `ChirpSync`,
+serves MC-DPSK, OFDM, narrowband and the short anchor). Measured edge-row splatter by ramp length:
+none -29/-25 dB, 2 ms no change (under one cycle at 300 Hz), 5 ms -49, 10 ms -51 (0.11 dB of chirp
+energy), 20 ms -52.5 (0.22 dB).
+
+**Still open** (BUG-TX-SPLATTER-SYMBOL-EDGES): the data symbols. MC-DPSK switches phase at every
+symbol boundary with no pulse shaping (worst splatter bin -20 dB vs in-band), OFDM symbols are not
+windowed (-20 dB).
+
+**Tests.** Dev tree ctest 109/109 (chirp detection, CFO, MC-DPSK and OFDM sync against tapered chirps).
+`tools/tx_spectrum.py` on `ultra ptx` OFDM: chirp edge rows -19/-25 -> -50/-52 dB, first/last
+millisecond RMS 0.374 -> 0.006. GUI gate, every run on the ramp build (one seed each, against the same cells before the ramp):
+AWGN 20 dB OFDM 4 KB 1230 / 1220 bps (was 1230); ITU Good 20 dB 1530 bps (was 1530); AWGN 0 dB
+MC-DPSK 1 KB 131 s (was 131); AWGN -6 dB PASS 385-452 s (was 451); ITU Good 0 dB PASS (194-349 s
+over three runs of seed 43: that cell's run-to-run spread, not the ramp). Detection, CFO and the
+first-frame paths unchanged.
+
+---
+
 ## 2026-11-11 — RETRACTED: "compact frames report the session's SNR again" (a5f7bee)
 
 That entry claimed compact MC-DPSK frames reported `SYNC_QUALITY` and froze the session's SNR. They
