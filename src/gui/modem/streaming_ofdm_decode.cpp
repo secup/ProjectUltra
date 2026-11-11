@@ -1199,20 +1199,20 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
         return frame_policy::evaluatePingFrame(
             frame_buffer.data(), frame_buffer.size(), ping_training_skip,
-            ping_check_samples, sync_correlation_, sync_gap_error_samples_,
+            ping_check_samples, sync_correlation_, sync_chirp_cfo_hz_,
             ldpc_decode_succeeded, ldpc_magic_valid, ldpc_attempted,
             idle_noise_rms, data_inband_rms);
     };
     auto emitPingFrame = [&](const frame_policy::PingFrameDecision& ping_decision,
                              bool ldpc_attempted) {
         LOG_MODEM(INFO, "[%s] PING detected: path1=%d path2=%d ratio=%.3f "
-                  "chirp_corr=%.3f gap_error=%.1f ldpc_attempted=%d "
+                  "chirp_corr=%.3f gap_error=%.1f chirp_cfo=%.2f Hz ldpc_attempted=%d "
                   "ldpc_ok=%s magic=%s "
                   "SNR=%.1f dB (%s) CFO=%.1f Hz",
                   log_prefix_.c_str(), ping_decision.ping_by_silence ? 1 : 0,
                   ping_decision.ping_by_chirp_lock ? 1 : 0,
                   ping_decision.ratio, ping_decision.chirp_corr,
-                  ping_decision.gap_error_samples,
+                  sync_gap_error_samples_, ping_decision.chirp_cfo_hz,
                   ldpc_attempted ? 1 : 0,
                   ldpc_attempted
                       ? (ping_decision.ldpc_decode_succeeded ? "1" : "0")
@@ -1235,7 +1235,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         ping.ping_data_rms = ping_decision.data_rms;
         ping.ping_data_to_training_ratio = ping_decision.ratio;
         ping.ping_chirp_corr = ping_decision.chirp_corr;
-        ping.ping_gap_error_samples = ping_decision.gap_error_samples;
+        ping.ping_gap_error_samples = sync_gap_error_samples_;
         ping.ping_by_silence = ping_decision.ping_by_silence;
         ping.ping_by_chirp_lock = ping_decision.ping_by_chirp_lock;
         ping.ping_ldpc_attempted = ldpc_attempted;
@@ -1281,12 +1281,13 @@ void StreamingDecoder::decodeCurrentFrame() {
         const auto ping_decision = evaluatePingDecision(ldpc_attempted, false, false);
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
-                  "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
+                  "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f chirp_cfo=%.2f Hz (max=%.0f Hz), "
                   "valid_frame=0, reason=%s, inband_rms=%.4f noise_rms=%.4f "
                   "gap_is_noise=%d, path1=%d, path2=%d",
                   log_prefix_.c_str(), ping_decision.ratio,
                   ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
-                  ping_decision.gap_error_samples, frame_policy::kPingMaxGapError,
+                  sync_gap_error_samples_, ping_decision.chirp_cfo_hz,
+                  frame_policy::kPingMaxChirpCfoHz,
                   reason,
                   ping_decision.data_inband_rms, ping_decision.idle_noise_rms,
                   ping_decision.gap_is_noise ? 1 : 0,
@@ -1312,7 +1313,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                   log_prefix_.c_str(), ping_decision.data_rms,
                   ping_decision.training_rms, ping_decision.ratio,
                   frame_policy::kPingMaxDataToTrainingRMSRatio,
-                  ping_decision.chirp_corr, ping_decision.gap_error_samples,
+                  ping_decision.chirp_corr, sync_gap_error_samples_,
                   ping_decision.ping_by_silence ? 1 : 0,
                   ping_training_skip, sync_position_);
 
@@ -2188,13 +2189,13 @@ void StreamingDecoder::decodeCurrentFrame() {
                 if (data_bearing_mcdpsk && robust_idle_ping &&
                     reject_ping.gap_is_noise &&
                     reject_ping.chirp_corr >= frame_policy::kPingCorrFloor &&
-                    std::abs(reject_ping.gap_error_samples) <=
-                        frame_policy::kPingMaxGapError) {
+                    std::abs(reject_ping.chirp_cfo_hz) <=
+                        frame_policy::kPingMaxChirpCfoHz) {
                     LOG_MODEM(INFO, "[%s] robust idle PING by chirp-lock "
-                              "(ratio=%.2f corr=%.2f gap=%.1f inband_rms=%.4f "
+                              "(ratio=%.2f corr=%.2f chirp_cfo=%.2f Hz inband_rms=%.4f "
                               "noise_rms=%.4f) — gap is NOISE, not data",
                               log_prefix_.c_str(), reject_ping.ratio,
-                              reject_ping.chirp_corr, reject_ping.gap_error_samples,
+                              reject_ping.chirp_corr, reject_ping.chirp_cfo_hz,
                               reject_ping.data_inband_rms,
                               reject_ping.idle_noise_rms);
                     emitPingFrame(reject_ping, false);
@@ -3033,12 +3034,13 @@ void StreamingDecoder::decodeCurrentFrame() {
             evaluatePingDecision(true, ldpc_decode_succeeded, ldpc_magic_valid);
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
-                  "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f (max=%.0f), "
+                  "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f chirp_cfo=%.2f Hz (max=%.0f Hz), "
                   "ldpc_ok=%d, magic=%d, inband_rms=%.4f noise_rms=%.4f "
                   "gap_is_noise=%d, path1=%d, path2=%d",
                   log_prefix_.c_str(), ping_decision.ratio,
                   ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
-                  ping_decision.gap_error_samples, frame_policy::kPingMaxGapError,
+                  sync_gap_error_samples_, ping_decision.chirp_cfo_hz,
+                  frame_policy::kPingMaxChirpCfoHz,
                   ping_decision.ldpc_decode_succeeded ? 1 : 0,
                   ping_decision.ldpc_magic_valid ? 1 : 0,
                   ping_decision.data_inband_rms, ping_decision.idle_noise_rms,

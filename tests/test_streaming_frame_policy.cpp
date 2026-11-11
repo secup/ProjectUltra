@@ -66,28 +66,45 @@ void test_ping_chirp_lock_fallback() {
     auto no_lock = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor - 0.001f, 83.0f,
+        kPingCorrFloor - 0.001f, 8.3f,
         false, false);
     CHECK(!no_lock.is_ping, "chirp fallback should reject below correlation floor");
 
     auto wide_gap = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, kPingMaxGapError + 1.0f,
+        kPingCorrFloor, kPingMaxChirpCfoHz + 0.1f,
         false, false);
-    CHECK(!wide_gap.is_ping, "chirp fallback should reject loose dual-chirp gap");
+    CHECK(!wide_gap.is_ping, "chirp fallback should reject a dual chirp implying > 50 Hz CFO");
+
+    // BUG-NARROW-PING-GAP: the bound is an offset in Hz, whatever the chirp's sweep rate. A 7.3 Hz
+    // narrowband handshake chirp (500 Hz in 1 s, 96 samples/Hz) spreads its up/down pair by 1402
+    // samples, beyond the old 1000-sample bound written for the wideband chirp (10 samples/Hz).
+    auto narrow_chirp = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        kPingCorrFloor, 1402.0f / (2.0f * 96.0f),
+        false, false, false);
+    CHECK(narrow_chirp.ping_by_chirp_lock,
+          "a narrowband chirp at 7.3 Hz is a real chirp signature (1402-sample gap error)");
+    auto edge = evaluatePingFrame(
+        busy_band.data(), busy_band.size(),
+        kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        kPingCorrFloor, -kPingMaxChirpCfoHz,
+        false, false, false);
+    CHECK(edge.ping_by_chirp_lock, "exactly the 50 Hz acquisition range still counts");
 
     auto valid_frame = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, 145.0f,
+        kPingCorrFloor, 14.5f,
         true, true, true);
     CHECK(!valid_frame.is_ping, "valid LDPC frame should not classify as ping");
 
     auto full_ldpc_failure = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, -145.0f,
+        kPingCorrFloor, -14.5f,
         false, false, true);
     CHECK(!full_ldpc_failure.is_ping,
           "chirp-locked full-LDPC failure with data energy should stay a frame failure");
@@ -343,7 +360,7 @@ void test_unwritten_slice_is_not_a_ping() {
     // The rig's exact conditions: real chirp lock, no LDPC attempt, zero-filled slice.
     auto d = evaluatePingFrame(zeros.data(), zeros.size(),
                                kPingTrainingSkipSamples, kPingRMSCheckSamples,
-                               /*chirp_corr=*/0.837f, /*gap_error_samples=*/-27.0f,
+                               /*chirp_corr=*/0.837f, /*chirp_cfo_hz=*/-2.7f,
                                /*ldpc_decode_succeeded=*/false, /*ldpc_magic_valid=*/false,
                                /*ldpc_decode_attempted=*/false);
     CHECK(d.buffer_invalid, "a zero-filled training window must be flagged invalid");
@@ -366,7 +383,7 @@ void test_unwritten_slice_is_not_a_ping() {
     }
     auto g = evaluatePingFrame(real.data(), real.size(),
                                kPingTrainingSkipSamples, kPingRMSCheckSamples,
-                               /*chirp_corr=*/0.837f, /*gap_error_samples=*/-27.0f,
+                               /*chirp_corr=*/0.837f, /*chirp_cfo_hz=*/-2.7f,
                                false, false, false);
     CHECK(!g.buffer_invalid, "a real training window is not flagged invalid");
     CHECK(g.is_ping, "a genuine low-level PING must still be detected");
@@ -374,11 +391,11 @@ void test_unwritten_slice_is_not_a_ping() {
     // Boundary: exactly at the threshold counts as invalid (<=), just above does not.
     std::vector<float> at(n, kMinTrainingRMSForPingRatio);
     auto a = evaluatePingFrame(at.data(), at.size(), kPingTrainingSkipSamples,
-                               kPingRMSCheckSamples, 0.837f, -27.0f, false, false, false);
+                               kPingRMSCheckSamples, 0.837f, -2.7f, false, false, false);
     CHECK(a.buffer_invalid, "training rms exactly at the floor is invalid");
     std::vector<float> above(n, kMinTrainingRMSForPingRatio * 4.0f);
     auto b = evaluatePingFrame(above.data(), above.size(), kPingTrainingSkipSamples,
-                               kPingRMSCheckSamples, 0.837f, -27.0f, false, false, false);
+                               kPingRMSCheckSamples, 0.837f, -2.7f, false, false, false);
     CHECK(!b.buffer_invalid, "training rms above the floor is valid");
 }
 

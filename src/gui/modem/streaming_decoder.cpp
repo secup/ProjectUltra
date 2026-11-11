@@ -1868,6 +1868,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     pending_handshake_mcdpsk_connect_ = {};
     sync_correlation_ = 0.0f;
     sync_gap_error_samples_ = 0.0f;
+    sync_chirp_cfo_hz_ = 0.0f;
     samples_since_sync_ = 0;
     sync_controller_.ring_.total_fed_ = 0;
     feed_iter_ = 0;

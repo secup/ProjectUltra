@@ -32,7 +32,12 @@ inline constexpr float kPingChirpLockMaxDataRMS = 0.16f;
 inline constexpr float kPingNoiseGapFactor = 1.5f;
 inline constexpr float kMinIdleNoiseRMSForPingGap = 1e-4f;
 inline constexpr float kPingCorrFloor = 0.30f;
-inline constexpr float kPingMaxGapError = 1000.0f;
+// A real dual chirp's up/down spacing implies a CFO inside the modem's acquisition range, +/-50 Hz.
+// The bound is in HERTZ because the same offset moves the pair by 2·CFO·fs/chirp_rate samples: 10
+// samples/Hz on the wideband chirp (2400 Hz in 500 ms) but 96 on the narrowband handshake chirp (500
+// Hz in 1 s). The old 1000-sample bound was +/-50 Hz on wideband and +/-5.2 Hz on narrowband, so a
+// 7.3 Hz narrowband link lost the low-SNR PING path (BUG-NARROW-PING-GAP, 2026-11-10).
+inline constexpr float kPingMaxChirpCfoHz = 50.0f;
 inline constexpr size_t kDefaultFalseLockAdvanceSamples = 1024;
 inline constexpr size_t kMinFalseLockAdvanceSamples = 512;
 inline constexpr float kMinSyncRecoveryCorrelation = 0.80f;
@@ -54,7 +59,7 @@ struct PingFrameDecision {
     float data_rms = 0.0f;
     float ratio = 0.0f;
     float chirp_corr = 0.0f;
-    float gap_error_samples = std::numeric_limits<float>::infinity();
+    float chirp_cfo_hz = std::numeric_limits<float>::infinity();  // CFO implied by the dual chirp's spacing
     bool ldpc_decode_attempted = false;
     bool ldpc_decode_succeeded = false;
     bool ldpc_magic_valid = false;
@@ -77,7 +82,7 @@ inline PingFrameDecision evaluatePingFrame(
     size_t training_skip_samples = kPingTrainingSkipSamples,
     size_t rms_check_samples = kPingRMSCheckSamples,
     float chirp_corr = 0.0f,
-    float gap_error_samples = std::numeric_limits<float>::infinity(),
+    float chirp_cfo_hz = std::numeric_limits<float>::infinity(),
     bool ldpc_decode_succeeded = false,
     bool ldpc_magic_valid = false,
     bool ldpc_decode_attempted = false,
@@ -116,7 +121,7 @@ inline PingFrameDecision evaluatePingFrame(
         ? decision.data_rms / decision.training_rms
         : 0.0f;
     decision.chirp_corr = chirp_corr;
-    decision.gap_error_samples = gap_error_samples;
+    decision.chirp_cfo_hz = chirp_cfo_hz;
     decision.ldpc_decode_attempted = ldpc_decode_attempted;
     decision.ldpc_decode_succeeded = ldpc_decode_succeeded;
     decision.ldpc_magic_valid = ldpc_magic_valid;
@@ -128,7 +133,7 @@ inline PingFrameDecision evaluatePingFrame(
         !decision.buffer_invalid && decision.ratio < kPingMaxDataToTrainingRMSRatio;
     const bool chirp_signature_real =
         chirp_corr >= kPingCorrFloor &&
-        std::abs(gap_error_samples) <= kPingMaxGapError;
+        std::abs(chirp_cfo_hz) <= kPingMaxChirpCfoHz;
     const bool no_valid_frame = !ldpc_decode_succeeded || !ldpc_magic_valid;
     // PATH2 is for chirp-only probes whose payload area was too weak/noisy to
     // justify an LDPC decode. Once a full LDPC attempt has been made on a

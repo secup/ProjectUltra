@@ -1136,6 +1136,7 @@ private:
     mutable std::array<float, kPhysicalSnrRing> physical_ring_db_{};
     mutable size_t physical_ring_count_ = 0;
     float sync_gap_error_samples_ = 0.0f; // Dual-chirp timing error for current frame
+    float sync_chirp_cfo_hz_ = 0.0f;      // CFO the dual chirp's spacing implies (before the tracker)
     size_t last_decoded_sync_pos_ = SIZE_MAX;  // Last successfully decoded sync position (to prevent duplicates)
     bool sync_from_warm_timed_window_ = false;
     bool sync_from_full_anchor_fallback_ = false;

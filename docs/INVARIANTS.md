@@ -214,6 +214,11 @@ where: cfo_to_samples = sample_rate / chirp_rate = 48000 / 4800 = 10 samples/Hz
 
 **Location:** `src/sync/chirp_sync.hpp:439-456`
 
+**cfo_to_samples depends on the chirp:** 10 samples/Hz on the wideband chirp, 96 on the narrowband
+handshake chirp (500 Hz in 1 s). A bound on a CFO-dependent timing quantity must be written in Hz and
+converted with the chirp's own rate, never as a fixed sample count (BUG-NARROW-PING-GAP: 1000 samples
+was +/-50 Hz wideband and +/-5.2 Hz narrowband).
+
 ---
 
 ### INV-SYNC-CHIRP-002: a normalized chirp correlation never exceeds 1 (2026-11-10)

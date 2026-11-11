@@ -1096,6 +1096,7 @@ void StreamingDecoder::searchForSync() {
         sync_snr_ = chirpSyncQualityDb(sync_result.correlation, sync_controller_.ring_.noise_floor_);
         sync_correlation_ = sync_result.correlation;
         sync_gap_error_samples_ = sync_result.gap_error_samples;
+        sync_chirp_cfo_hz_ = sync_result.cfo_hz;
         sync_start_time_ = std::chrono::steady_clock::now();
         pending_total_cw_ = 0;
         sync_from_warm_timed_window_ = used_warm_timed_window;

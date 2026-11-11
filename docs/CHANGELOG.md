@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX(narrow): the low-SNR PING path accepts narrowband chirps (BUG-NARROW-PING-GAP)
+
+**What was broken.** Forced narrowband at AWGN 5 dB needed 4 PINGs and 91 s to connect. Below ~5 dB a
+bare PING's silent gap fills with noise and only the noise-relative chirp-lock path recognizes it;
+that path bounded the dual chirp's gap error at 1000 samples, which is +/-50 Hz on the wideband chirp
+(10 samples/Hz) and +/-5.2 Hz on the narrowband handshake chirp (96 samples/Hz). A 7.3 Hz offset gave
+1402 samples and every PING was refused.
+
+**What changed.** `streaming_frame_policy.hpp`: `kPingMaxGapError` (samples) -> `kPingMaxChirpCfoHz` =
+50 Hz; `evaluatePingFrame` takes the chirp's implied CFO in Hz. `StreamingDecoder` keeps the raw
+dual-chirp CFO per sync (`sync_chirp_cfo_hz_`, before the tracker). Logs keep `gap_error=` and add
+`chirp_cfo=`. Wideband behaviour is identical (gap / 20 <= 50 Hz is gap <= 1000).
+
+**Verified.** GUI gate, forced narrowband, 2 KB, 7.3 Hz: AWGN 5 dB connects at 34.9 s (was 91 s) and
+AWGN 3 dB at 38.3 s, both PASS (QPSK R1/4, 90 bps); wideband AWGN 5 dB unchanged (connects at 23.8 s,
+PASS). `StreamingFramePolicy`, `PingDetector`, `CliLoopback` pass.
+
 ## 2026-11-10 — PERF(narrow): geometry-normalized TX level (~9 dB per rung), 500 ms anchor chirp, 4-frame bursts, re-measured ladder (BUG-NARROW-TX-LEVEL)
 
 **What was broken.** Coherent narrowband worked but ran at 210-280 bps where a 500 Hz channel at

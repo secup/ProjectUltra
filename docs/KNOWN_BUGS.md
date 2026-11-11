@@ -69,15 +69,6 @@ acquisition and 8/8 with chirp acquisition. Since 2026-11-10 `ultra prx` and the
 `--monitor` modes call `sync::preferChirpAcquisitionWithoutHandshake()` (chirp unless
 `ULTRA_BURST_ACQ` is set); remove that call when this bug is fixed.
 
-### BUG-NARROW-PING-GAP (open, 2026-11-10) — P2: narrowband PING detection fails around 5 dB
-
-The responder tells a PING (a bare dual chirp) from a frame by the RMS of the region after the chirp
-against the training RMS (ratio < 0.5, plus the noise-relative `gap_is_noise` arm). For a narrowband
-chirp the gap is measured over the 3 kHz band while the signal sits in 500 Hz, so the gap carries ~7.8
-dB more noise than the narrowband signal's own band: at AWGN 5 dB the ratios read 0.488-0.56 and two
-of four PINGs were decoded as frames instead (GUI gate, forced narrowband; connect took 91 s). Measure
-the gap in the waveform's own band (or compare it with the receiver's noise floor in that band).
-
 ### BUG-TX-LEVEL-HANDSET (open, 2026-11-10) — P3 cleanup: the OFDM data level is a hand-set number
 
 `ModemConfig::output_scale = 40` sets OFDM data loudness relative to the chirp ("to match chirp /
@@ -2480,6 +2471,23 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-NARROW-PING-GAP (FIXED 2026-11-10) — narrowband PING detection failed near 5 dB
+
+**Symptom.** Forced narrowband at AWGN 5 dB (7.3 Hz offset): 4 PINGs and 91 s to connect, after
+which QPSK R1/4 ran out of the scenario budget. **Cause.** Below ~5 dB a bare PING's silent gap
+fills with noise, the data/training RMS ratio crosses 0.5, and only the noise-relative chirp-lock
+path can recognize it. That path required |gap_error| <= 1000 samples (`kPingMaxGapError`), a bound
+written for the wideband chirp: the up/down pair moves 2·CFO·fs/chirp_rate samples, 10 samples/Hz on
+the wideband chirp (so 1000 = +/-50 Hz) but 96 on the narrowband handshake chirp (500 Hz in 1 s), so
+on narrowband the bound was +/-5.2 Hz and every PING at 7.3 Hz (1402 samples) was refused. (The first
+diagnosis filed here, "the gap is measured over 3 kHz", was wrong: the ratio test fails near 5 dB on
+every geometry; the noise-relative path is what was missing.) **Fix.** The classifier takes the
+chirp's implied CFO in Hz (`sync_chirp_cfo_hz_`, the raw dual-chirp estimate before the tracker) and
+bounds it at `kPingMaxChirpCfoHz` = 50 Hz, the acquisition range, on every chirp geometry; wideband is
+unchanged (1000 samples / 20 = 50 Hz). **Verified.** GUI gate, forced narrowband, 2 KB: AWGN 5 dB
+connects at 34.9 s (was 91 s), AWGN 3 dB at 38.3 s, both PASS; wideband AWGN 5 dB unchanged (connects
+at 23.8 s, PASS). Test: `StreamingFramePolicy` (a 7.3 Hz narrowband chirp signature, the 50 Hz edge).
 
 ### BUG-NARROW-MCDPSK-CONNECT (FIXED 2026-11-10) — no narrowband session could connect
 
