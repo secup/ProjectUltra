@@ -469,6 +469,9 @@ public:
     using WaveformCrossingCallback =
         std::function<void(WaveformMode mode, Modulation mod, CodeRate rate, int cw_count,
                            int mc_dpsk_num_carriers, int mc_dpsk_samples_per_symbol)>;
+    // Dual-listen (ULTRA_WAVEFORM_FOLLOW=2): a frame or group arrived on `mode` while this session
+    // ran the other wideband waveform - the peer switched; follow it before the frame is processed.
+    void noteRxWaveform(WaveformMode mode);
     void setWaveformCrossingCallback(WaveformCrossingCallback cb) {
         on_waveform_crossing_ = std::move(cb);
     }
@@ -1389,6 +1392,7 @@ private:
     uint32_t crossing_probe_revert_ms_ = 0;   // receiver: countdown while no OFDM burst arrived
     Modulation crossing_return_mod_ = Modulation::DBPSK;
     bool waveform_follow_enabled_ = connection_policy::waveformFollowEnabled();  // the knob
+    bool waveform_follow_dual_listen_ = connection_policy::waveformFollowDualListen();  // "=2"
     bool waveform_follow_allowed_ = false;    // this QSO lets the ladder cross (no operator pin)
     int rx_follow_crater_streak_ = 0;        // OFDM receiver: groups in a row that delivered nothing
     int up_crossing_held_groups_ = -1;      // delivering OFDM groups since the last up-crossing's
@@ -1405,6 +1409,10 @@ private:
     uint64_t follow_ofdm_busy_at_delivery_ms_ = 0;  // ... at its last delivery
     double follow_ofdm_bytes_ = 0.0;              // delivered in this OFDM spell
     uint64_t rx_follow_empty_since_ms_ = 0;      // receiver: when the current empty-group streak began
+    // Sender: timeout rounds in a row with no ACK at all - the down-crossing's evidence floor. Its own
+    // count: the collapse escapes consume zero_progress_rounds_, which made the crossing time
+    // depend on when they last fired (GUI: 113 s of silence instead of the 60 s patience).
+    int follow_silent_rounds_ = 0;
     Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
     uint32_t rx_mcdpsk_frames_since_command_ = 0;
     int mcdpsk_last_command_group_seq_ = -1;
@@ -1529,6 +1537,8 @@ private:
     void endCrossingProbe(bool held);
     // OFDM receiver: a group (or anchored burst) and what it delivered - the floor-crater rule.
     void noteRxOfdmGroupForFollow(bool delivered_any);
+    bool dualListenActive() const;
+    bool rx_dual_up_commanded_ = false;  // dual-listen receiver: its last ACK commanded OFDM
     // Down-crossing economics: feed and read the OFDM spell meter, and the silent time after which a
     // down-crossing pays (ski rental, capped where the ARQ would abandon a frame; the receiver's is
     // half a round earlier so it listens when the sender's first MC-DPSK burst comes).

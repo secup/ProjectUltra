@@ -5113,6 +5113,7 @@ void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
 void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     if (progress_frames > 0) {
         noteFollowOfdmDelivery(progress_frames);  // what OFDM delivers, for the down-crossing
+        follow_silent_rounds_ = 0;
         if (retx_pace_hold_ms_ > 0) {
             LOG_MODEM(INFO,
                       "Connection: TROUGH-PACING early release (%d frames progressed, %s)",
@@ -5140,6 +5141,9 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     }
     if (progress_frames < 0) {
         return;  // duplicate/stale ack — never a phantom round (§1.1 dedup)
+    }
+    if (std::strcmp(origin, "rto") == 0) {
+        ++follow_silent_rounds_;  // a round that drew no ACK at all
     }
     burst_clean_group_streak_ = 0;  // zero-progress round: back to the base ceiling
     if (!retxPacingScopeActive()) {
@@ -8803,8 +8807,10 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
         if (const uint8_t up = upCrossingWordForAck(clean); up != 0) {
             return up;
         }
-    } else if (rx_crossing_apply_pending_) {
-        return rx_crossing_word_;  // a repeat of the ACK that carries an up-crossing
+    } else if (rx_crossing_apply_pending_ || rx_dual_up_commanded_) {
+        // A repeat of the ACK that carries an up-crossing: the same command, or a sender that
+        // crossed on the first copy would read the constellation word as a command back down.
+        return rx_crossing_word_;
     }
     return connection_policy::encodeMcDpskRungCommand(mcdpsk_rate_ctl_.command());
 }
@@ -8908,6 +8914,46 @@ Connection::SessionPick Connection::sessionLadderPick() const {
     return pick;
 }
 
+bool Connection::dualListenActive() const {
+    return waveform_follow_dual_listen_ && waveformFollowActive();
+}
+
+void Connection::noteRxWaveform(WaveformMode mode) {
+    if (!dualListenActive() || mode == negotiated_mode_) {
+        return;
+    }
+    if ((mode != WaveformMode::MC_DPSK && mode != WaveformMode::OFDM_CHIRP) ||
+        (negotiated_mode_ != WaveformMode::MC_DPSK && negotiated_mode_ != WaveformMode::OFDM_CHIRP)) {
+        return;
+    }
+    // The receiver side of the sender's crossing. OFDM: the rung this end commanded (the burst's
+    // descriptor confirms it per group), else the floor. MC-DPSK: DBPSK, the down target.
+    uint8_t word = 0;
+    if (mode == WaveformMode::OFDM_CHIRP) {
+        const uint8_t commanded = connection_policy::decodeOfdmRungCommand(rx_crossing_word_);
+        word = (rx_dual_up_commanded_ && commanded != kRungIdxNone) ? rx_crossing_word_
+                                                                     : kRungIdxQpskR14;
+    } else {
+        word = connection_policy::encodeMcDpskRungCommand(0);
+    }
+    const WaveformMode from = negotiated_mode_;
+    const bool had_up_command = rx_dual_up_commanded_;
+    rx_crossing_apply_pending_ = false;
+    rx_crossing_word_ = 0;
+    rx_dual_up_commanded_ = false;
+    if (!applyWaveformCrossing(word, "dual-listen: the peer is on it")) {
+        return;
+    }
+    if (mode == WaveformMode::OFDM_CHIRP) {
+        // Held once OFDM delivers UpCrossingGate::kHeldGroups groups (noteRxOfdmGroupForFollow).
+        up_crossing_held_groups_ = had_up_command ? 0 : -1;
+    } else if (from == WaveformMode::OFDM_CHIRP && up_crossing_held_groups_ >= 0) {
+        // Back to MC-DPSK before the up-crossing held: it failed, the next one waits longer.
+        up_crossing_gate_.crossingFailed();
+        up_crossing_held_groups_ = -1;
+    }
+}
+
 bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason) {
     if (!waveformFollowActive()) {
         return false;
@@ -8999,8 +9045,14 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
     if (!waveformFollowActive() || negotiated_mode_ != WaveformMode::MC_DPSK) {
         return 0;
     }
-    if (rx_crossing_apply_pending_) {
+    if (rx_crossing_apply_pending_ && !dualListenActive()) {
         return rx_crossing_word_;  // a repeat of the ACK that carries the command
+    }
+    if (dualListenActive() && rx_dual_up_commanded_ && clean) {
+        // This end commanded OFDM and the peer's next burst is MC-DPSK again: it did not cross
+        // (missed the command, or its OFDM burst failed and it fell back). The next run is longer.
+        up_crossing_gate_.crossingFailed();
+        rx_dual_up_commanded_ = false;
     }
     const SessionPick pick = sessionLadderPick();
     const uint8_t ofdm_rung = (pick.rung.waveform == WaveformMode::OFDM_CHIRP)
@@ -9017,6 +9069,12 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
         return 0;
     }
     rx_crossing_word_ = command;
+    if (dualListenActive()) {
+        // Dual-listen: the command rides this ACK; the switch happens when OFDM arrives
+        // (noteRxWaveform). Every burst recomputes it.
+        rx_dual_up_commanded_ = true;
+        return command;
+    }
     rx_crossing_apply_pending_ = true;
     return command;
 }
@@ -9116,6 +9174,11 @@ void Connection::noteRxOfdmGroupForFollow(bool delivered_any) {
         rx_follow_crater_streak_ = 0;
         rx_follow_silence_ms_ = 0;
         rx_follow_empty_since_ms_ = 0;
+        if (dualListenActive() && rx_crossing_apply_pending_) {
+            // OFDM delivers again: withdraw the down command this end was stamping on its ACKs.
+            rx_crossing_apply_pending_ = false;
+            rx_crossing_word_ = 0;
+        }
         if (up_crossing_held_groups_ >= 0 &&
             ++up_crossing_held_groups_ >= connection_policy::UpCrossingGate::kHeldGroups) {
             up_crossing_gate_.crossingHeld();
@@ -9132,7 +9195,8 @@ void Connection::noteRxOfdmGroupForFollow(bool delivered_any) {
     if (rx_follow_empty_since_ms_ == 0) {
         rx_follow_empty_since_ms_ = std::max<uint64_t>(1, follow_clock_ms_);
     }
-    if (!waveformFollowActive() || rx_crossing_apply_pending_ || crossing_probe_active_) {
+    if (!waveformFollowActive() || crossing_probe_active_ ||
+        (rx_crossing_apply_pending_ && !dualListenActive())) {
         return;
     }
     // The economics as for silence: a link that was delivering waits for the empty streak to
@@ -9183,6 +9247,7 @@ void Connection::crossDownLocally(const char* reason) {
 }
 
 void Connection::resetFollowOfdmSpell() {
+    follow_silent_rounds_ = 0;
     follow_ofdm_busy_ms_ = 0;
     follow_ofdm_busy_at_delivery_ms_ = 0;
     follow_ofdm_bytes_ = 0.0;
@@ -9245,7 +9310,7 @@ uint64_t Connection::followDownCrossingMs(bool receiver_side) const {
 
 void Connection::maybeCrossDownOnCollapse() {
     if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || crossing_probe_active_ ||
-        zero_progress_rounds_ < connection_policy::kFollowRoundsWithoutProgressToCross ||
+        follow_silent_rounds_ < connection_policy::kFollowRoundsWithoutProgressToCross ||
         arq_.getTxInFlightBytes() == 0 || !waveformFollowActive()) {
         return;
     }
@@ -9264,12 +9329,13 @@ void Connection::maybeCrossDownOnCollapse() {
     LOG_MODEM(INFO,
               "Connection: WAVEFORM FOLLOW tx: %d rounds without progress at %s %s, silent %llu ms "
               "(crossing pays after %llu ms: OFDM delivered %.1f B/s%s) -> MC-DPSK",
-              zero_progress_rounds_, modulationToString(data_modulation_),
+              follow_silent_rounds_, modulationToString(data_modulation_),
               codeRateToString(data_code_rate_),
               static_cast<unsigned long long>(followOfdmSilentMs()),
               static_cast<unsigned long long>(wait_ms), followOfdmBytesPerSecond(),
               abandon_close ? "; a frame is about to be abandoned" : "");
     zero_progress_rounds_ = 0;
+    follow_silent_rounds_ = 0;
     crossDownLocally("rounds without progress");
 }
 
@@ -9280,6 +9346,11 @@ void Connection::tickWaveformFollow(uint32_t elapsed_ms) {
          file_transfer_.getState() == FileTransferState::RECEIVING ||
          !rx_reassembly_buffer_.empty())) {
         follow_ofdm_busy_ms_ += elapsed_ms;  // the down-crossing's clock: busy time only
+    }
+    if (dualListenActive()) {
+        // Dual-listen: this end hears both waveforms; it switches when the peer's frames arrive
+        // on the other one (noteRxWaveform), never on its own command or on silence.
+        return;
     }
     if (rx_crossing_apply_pending_) {
         // The ACK carrying the command is out: this end crosses now.
@@ -9688,6 +9759,7 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     up_crossing_gate_.reset();
     rx_crossing_word_ = 0;
     rx_crossing_apply_pending_ = false;
+    rx_dual_up_commanded_ = false;
     crossing_probe_active_ = false;
     crossing_probe_rx_side_ = false;
     crossing_probe_revert_ms_ = 0;

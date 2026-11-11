@@ -10,6 +10,60 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FEAT(follow): dual-listen - the receiver hears both waveforms (ULTRA_WAVEFORM_FOLLOW=2)
+
+**What was wrong with following by agreement.** Waveform follow (previous entry) switches a session
+between MC-DPSK and OFDM by agreement over the link that is failing: a command that must get through,
+a timeout when it does not, a probation, a fallback - each a guess about time. Measured: dips +7.6 %
+over 4 seeds; one 40 s QSB dip left the stations on different waveforms for 78 s.
+
+**What changed** (docs/DUAL_LISTEN_DESIGN_2026_11_11.md, INV-DUAL-LISTEN-001; knob value
+`ULTRA_WAVEFORM_FOLLOW=2`, default off, same on both stations).
+- `ModemEngine` owns its receive decoders through `RxDecoderPair`: a primary (the session's
+  waveform; every existing `streaming_decoder_->` call means it) and, while a wideband session is
+  connected, a listener on the other waveform. Both are fed the same audio, each on a decode thread
+  bound to its object. A crossing flips which is primary (`setWaveformMode`); neither is rebuilt, so
+  neither loses sync, CFO, clock-drift or warm state. Knob off: one decoder, unchanged behaviour.
+- The MC-DPSK chirp and the OFDM anchor chirp are identical, so each decoder locks on the other's
+  bursts and fails them. A listener therefore reports only what decoded; every failure report
+  (MC-DPSK frame lost, anchored burst without a group, outcome unknown, descriptor, data sync, PING,
+  decode diagnostics) comes from the primary (`wireDecoderRoleCallbacks`).
+- Before a listener's DATA frame or group is delivered, the engine reports its waveform
+  (`setRxWaveformObservedCallback` -> `Connection::noteRxWaveform`): the connection crosses to it
+  (the commanded rung, or the floor; DBPSK down) and the decoders flip, then the frame is processed.
+  A control frame on the other waveform is delivered without moving the session.
+- The receiver only commands: up on one clean MC-DPSK burst whose fresh readings name OFDM (an ACK
+  repeat carries the same command - the constellation word there would have sent a crossed sender
+  straight back down), down on empty groups at the floor (withdrawn when a group delivers). It never
+  switches on its own: no receiver probation, revert window or silence crossing. MC-DPSK arriving
+  again after an up command = the crossing did not happen: the run doubles.
+- Shared: tone-ACK monitor armed on the primary (either decoder's monitor reports), the
+  listen-before-ACK air-end gate takes the larger of the two, the TX echo clear follows each decoder's
+  own waveform.
+
+- Fixed on the way (both follow modes): the sender's down-crossing read its evidence floor ("two
+  timeout rounds without an ACK") from `zero_progress_rounds_`, which the collapse escapes consume;
+  the crossing time then depended on when an escape last fired (GUI dip, seed 44: crossed after
+  113 s of silence instead of the 60 s patience, 10 s before the channel came back). Follow keeps its
+  own count (`follow_silent_rounds_`).
+
+**Tests.** `DualListenEngine` (new): a sender crosses down (ROBUST_MID, compact frames) and sends a
+DATA frame, crosses up and sends another; a receiver connected on OFDM with dual-listen delivers both,
+each after its waveform report and on a receiver already switched; the control receiver without
+dual-listen misses the MC-DPSK frame. `WaveformFollow` 80/80 (13 dual-listen checks: commands without
+switching, repeat ACK, follows what arrives on the commanded rung, holds after two groups, down
+command withdrawn by a delivering group, two minutes of silence move nothing, a missed up-crossing
+backs off). Dev tree ctest 111/111.
+
+GUI gate (ITU Good, CFO 7.3 Hz, half-duplex), first runs: step-up 0 -> 20 dB (seed 45) 110 s
+(agreement follow 109, off 364): the receiver commanded 8PSK R2/3 and stayed on MC-DPSK, the sender
+crossed, the receiver's OFDM listener decoded the first burst and the receiver followed - no
+probation, no revert. Two-minute dip 20 -> 0 -> 20 dB (seed 44) 224 s (agreement 244, off 219): one
+crossing down, one up, each followed on arrival. The scenario matrix (dips x4 seeds, QSB, step-ups,
+steady, a channel that drops and stays down, outages, ramps) is recorded in the next entry.
+
+---
+
 ## 2026-11-11 — FEAT(follow): a session crosses between MC-DPSK and OFDM as the channel moves (ULTRA_WAVEFORM_FOLLOW)
 
 **What was missing.** The waveform was chosen once, at connect. A session that connected weak stayed

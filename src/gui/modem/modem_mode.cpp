@@ -45,6 +45,17 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     LOG_MODEM(INFO, "Switching waveform mode: %d -> %d",
               static_cast<int>(waveform_mode_), static_cast<int>(mode));
 
+    // Dual-listen: the listener already runs `mode` with live state - it becomes the primary and
+    // the primary the listener, no decoder is rebuilt (docs/DUAL_LISTEN_DESIGN_2026_11_11.md).
+    const bool flip = connected_ && streaming_decoder_.listenerActive() &&
+                      listener_waveform_.load(std::memory_order_acquire) == mode;
+    if (flip) {
+        listener_waveform_.store(waveform_mode_, std::memory_order_release);
+        streaming_decoder_.flip();
+        LOG_MODEM(INFO, "[%s] Listener: %s decoder is now primary, %s listens",
+                  log_prefix_.c_str(), protocol::waveformModeToString(mode),
+                  protocol::waveformModeToString(waveform_mode_));
+    }
     waveform_mode_ = mode;
     applyOfdmGeometryFor(mode);
     // Tone-burst ACKs follow the session's channel: a narrowband session keeps them inside its
@@ -54,12 +65,12 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                               ? ultra::waveform::tone_burst_ack::ToneAckBand::Narrowband
                               : ultra::waveform::tone_burst_ack::ToneAckBand::Wideband;
         if (streaming_encoder_) streaming_encoder_->setToneAckBand(band);
-        if (streaming_decoder_) streaming_decoder_->setToneAckBand(band);
+        forEachRxDecoder([&](StreamingDecoder* d) { d->setToneAckBand(band); });
     }
 
     // Update StreamingDecoder to use the new waveform
     // When disconnected, always use MC_DPSK for PING detection (chirp-based sync)
-    if (streaming_decoder_) {
+    if (streaming_decoder_ && !flip) {
         protocol::WaveformMode decoder_mode = connected_ ? mode : protocol::WaveformMode::MC_DPSK;
         if (connected_ && protocol::isOFDMMode(mode)) {
             streaming_decoder_->setConnectedOFDMMode(mode, config_, data_modulation_, data_code_rate_);
@@ -113,6 +124,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                       connected_ ? "connected" : "disconnected");
             break;
     }
+    updateDualListen();
 }
 
 // OFDM_NARROW is its own geometry (FFT 2048, 21 carriers, 1250-1750 Hz chirp), not a label on
@@ -167,11 +179,6 @@ void ModemEngine::crossConnectedWaveform(protocol::WaveformMode mode, Modulation
         setMCDPSKProfile(mc_dpsk_num_carriers, mc_dpsk_samples_per_symbol,
                          mod == Modulation::DBPSK ? 1 : mod == Modulation::D8PSK ? 3 : 2);
     }
-    if (mode == protocol::WaveformMode::MC_DPSK) {
-        // A session crosses into MC-DPSK only when its channel collapsed: the physical-SNR
-        // distribution restarts, as at a new QSO (the connection drops its copy with the crossing).
-        streaming_decoder_->resetPhysicalSnrEvidence();
-    }
     // The data mode the new waveform is built with (setWaveformMode reads these); the encoder and
     // decoder are reconfigured once the waveform is the new one.
     data_modulation_ = mod;
@@ -181,6 +188,12 @@ void ModemEngine::crossConnectedWaveform(protocol::WaveformMode mode, Modulation
     config_.use_pilots = true;
     config_.pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
     setWaveformMode(mode);
+    if (mode == protocol::WaveformMode::MC_DPSK) {
+        // A session crosses into MC-DPSK only when its channel collapsed: the physical-SNR
+        // distribution restarts, as at a new QSO (the connection drops its copy with the crossing).
+        // After the switch, so it is the MC-DPSK decoder's (dual-listen flips the decoders).
+        streaming_decoder_->resetPhysicalSnrEvidence();
+    }
     setDataMode(mod, rate);
     if (cw_count > 0) {
         setFixedFrameCodewords(cw_count);
@@ -212,6 +225,7 @@ void ModemEngine::setConnected(bool connected) {
     if (connected_ == connected) return;
 
     connected_ = connected;
+    updateDualListen();  // off before a disconnect reconfigures the primary
 
     if (connected) {
         // Reset handshake state - we'll complete it when we receive first post-ACK frame
@@ -324,6 +338,7 @@ void ModemEngine::setConnected(bool connected) {
                   static_cast<int>(disconnect_waveform_));
         handshake_complete_ = false;  // Reset for next connection
     }
+    updateDualListen();
 }
 
 void ModemEngine::setHandshakeComplete(bool complete) {
@@ -339,6 +354,7 @@ void ModemEngine::setHandshakeComplete(bool complete) {
         LOG_MODEM(INFO, "Handshake complete, TX now uses waveform_mode_=%d",
                   static_cast<int>(waveform_mode_));
     }
+    updateDualListen();
 }
 
 void ModemEngine::setDataMode(Modulation mod, CodeRate rate) {
@@ -482,10 +498,8 @@ void ModemEngine::setCodecType(fec::CodecType type) {
     // Recreate decoder with new codec type (encoder is managed by StreamingEncoder)
     decoder_ = fec::CodecFactory::create(type, data_code_rate_);
 
-    // Update StreamingDecoder to use the same codec
-    if (streaming_decoder_) {
-        streaming_decoder_->setCodecType(type);
-    }
+    // Update the StreamingDecoders to use the same codec
+    forEachRxDecoder([&](StreamingDecoder* d) { d->setCodecType(type); });
 
     LOG_MODEM(INFO, "Codec type set to: %s", decoder_->getName().c_str());
 }

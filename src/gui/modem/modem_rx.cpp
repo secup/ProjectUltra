@@ -35,34 +35,49 @@ void ModemEngine::setSynchronousMode(bool enabled) {
     synchronous_mode_ = enabled;
 
     if (enabled) {
-        // Stop decode thread — caller will drive processRxBuffer() directly
+        // Stop decode threads — caller will drive processRxBuffer() directly
+        stopRxListenerThread();
         stopRxDecodeThread();
         LOG_MODEM(INFO, "[%s] Synchronous RX mode enabled (no decode thread)", log_prefix_.c_str());
     } else {
-        // Restart decode thread for async operation
+        // Restart decode threads for async operation
         startRxDecodeThread();
+        startRxListenerThread();
         LOG_MODEM(INFO, "[%s] Asynchronous RX mode enabled (decode thread)", log_prefix_.c_str());
     }
 }
 
-void ModemEngine::processRxBuffer() {
-    if (!streaming_decoder_) return;
-
-    // Same as one iteration of rxDecodeLoop — process + deliver frames
-    streaming_decoder_->processBuffer();
-
-    while (streaming_decoder_->hasFrame()) {
-        auto result = streaming_decoder_->getFrame();
-
+void ModemEngine::drainDecodedFrames(StreamingDecoder* decoder) {
+    // Frame delivery happens via callback (set when the decoder was wired); this queue is for
+    // stats. A listener's failures are not this session's evidence (dual-listen design).
+    const bool primary = streaming_decoder_.isPrimary(decoder);
+    while (decoder->hasFrame()) {
+        auto result = decoder->getFrame();
         if (result.success) {
             updateStats([&](LoopbackStats& s) {
                 s.frames_received++;
                 copySNRMetrics(s, result);
                 s.synced = true;
             });
-        } else if (result.codewords_failed > 0) {
+        } else if (primary && !result.is_ping && result.codewords_failed > 0) {
             updateStats([](LoopbackStats& s) { s.frames_failed++; });
         }
+    }
+}
+
+void ModemEngine::processRxBuffer() {
+    if (!streaming_decoder_) return;
+
+    // Same as one iteration of rxDecodeLoop — process + deliver frames (both decoders while
+    // dual-listen runs; each slot is an object, whichever role it has)
+    for (int slot = 0; slot < 2; ++slot) {
+        StreamingDecoder* decoder = streaming_decoder_.slot(slot);
+        if (decoder == nullptr ||
+            (!streaming_decoder_.isPrimary(decoder) && !streaming_decoder_.listenerActive())) {
+            continue;
+        }
+        decoder->processBuffer();
+        drainDecodedFrames(decoder);
     }
 }
 
@@ -80,9 +95,10 @@ void ModemEngine::stopRxDecodeThread() {
     rx_decode_running_ = false;
     rx_decode_cv_.notify_all();
 
-    // Signal StreamingDecoder to wake up and exit
-    if (streaming_decoder_) {
-        streaming_decoder_->stop();
+    // Signal the slot-0 StreamingDecoder (this thread's object) to wake up and exit
+    StreamingDecoder* decoder = streaming_decoder_.slot(0);
+    if (decoder) {
+        decoder->stop();
     }
 
     if (rx_decode_thread_.joinable()) {
@@ -92,62 +108,60 @@ void ModemEngine::stopRxDecodeThread() {
     // Clear shutdown flag so decoder can be reused:
     // - In synchronous mode via processRxBuffer()
     // - Or via a new decode thread (startRxDecodeThread)
-    if (streaming_decoder_) {
-        streaming_decoder_->clearShutdown();
+    if (decoder) {
+        decoder->clearShutdown();
     }
 
     LOG_MODEM(INFO, "[%s] RX decode thread stopped", log_prefix_.c_str());
 }
 
 void ModemEngine::rxDecodeLoop() {
+    // The slot-0 decoder object: the primary unless dual-listen flipped the roles.
+    rxDecodeLoopFor(streaming_decoder_.slot(0), rx_decode_running_);
+}
+
+void ModemEngine::rxDecodeLoopFor(StreamingDecoder* decoder, std::atomic<bool>& running) {
     LOG_MODEM(INFO, "[%s] RX decode loop starting", log_prefix_.c_str());
 
-    while (rx_decode_running_) {
+    while (running) {
         // ====================================================================
-        // StreamingDecoder is PRIMARY decoder
-        // ====================================================================
-        // Handles BOTH connected and disconnected modes:
+        // StreamingDecoder handles BOTH connected and disconnected modes:
         // - Circular buffer with sliding window chirp detection
         // - Correct IWaveform call sequence (fixes BUG-002)
         // - PING detection via energy ratio
-        // - Frame delivery via callbacks (set in constructor)
+        // - Frame delivery via callbacks (set when the decoder was wired)
+        // This loop drives one decoder object; dual-listen runs a second loop on the other slot.
         // ====================================================================
 
-        if (!streaming_decoder_) {
+        if (decoder == nullptr) {
             // Fallback: no decoder available, just sleep
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
 
         // Drive the decode process (blocks until data available or timeout)
-        streaming_decoder_->processBuffer();
-
-        // Check for decoded frames
-        // Note: Frame delivery happens via callback (set in constructor)
-        // This loop is for logging and stats updates
-        while (streaming_decoder_->hasFrame()) {
-            auto result = streaming_decoder_->getFrame();
-
-            if (result.success) {
-                // Frame already logged by StreamingDecoder - just update stats
-                updateStats([&](LoopbackStats& s) {
-                    s.frames_received++;
-                    copySNRMetrics(s, result);
-                    s.synced = true;
-                });
-
-            } else if (result.is_ping) {
-                // PING already logged by StreamingDecoder
-                // PING callback already fired
-
-            } else if (result.codewords_failed > 0) {
-                // Failure already logged by StreamingDecoder
-                updateStats([](LoopbackStats& s) { s.frames_failed++; });
-            }
-        }
+        decoder->processBuffer();
+        drainDecodedFrames(decoder);
     }
 
     LOG_MODEM(INFO, "[%s] RX decode loop exiting", log_prefix_.c_str());
+}
+
+void ModemEngine::stopRxListenerThread() {
+    if (!rx_listener_running_) {
+        return;
+    }
+    rx_listener_running_ = false;
+    StreamingDecoder* decoder = streaming_decoder_.slot(1);
+    if (decoder) {
+        decoder->stop();
+    }
+    if (rx_listener_thread_.joinable()) {
+        rx_listener_thread_.join();
+    }
+    if (decoder) {
+        decoder->clearShutdown();
+    }
 }
 
 // ============================================================================
@@ -174,6 +188,10 @@ void ModemEngine::feedAudio(const float* samples, size_t count) {
 
     if (streaming_decoder_) {
         streaming_decoder_->feedAudio(samples, count);
+    }
+    // Dual-listen: the listener on the other waveform hears the same audio.
+    if (StreamingDecoder* listener = streaming_decoder_.listener()) {
+        listener->feedAudio(samples, count);
     }
 
     // Carrier sense (listen-before-talk): feed the shared detector the same RX

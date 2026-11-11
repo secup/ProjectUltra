@@ -7,6 +7,7 @@
 #include "ultra/types.hpp"
 #include "ultra/ofdm.hpp"
 #include "ultra/fec.hpp"  // Interleaver, ChannelInterleaver
+#include <algorithm>
 #include "fec/codec_factory.hpp"  // ICodec, CodecFactory
 #include "ultra/dsp.hpp"  // FIRFilter
 #include "psk/dpsk.hpp"   // DPSKModulator, DPSKDemodulator
@@ -19,6 +20,7 @@
 #include "waveform/waveform_interface.hpp"  // IWaveform abstraction
 #include "audio/channel_busy_detector.hpp"  // shared carrier-sense (listen-before-talk)
 #include "streaming_decoder.hpp"  // StreamingDecoder - primary decoder
+#include "rx_decoder_pair.hpp"     // primary + dual-listen listener (docs/DUAL_LISTEN_DESIGN_2026_11_11.md)
 #include "streaming_encoder.hpp"  // StreamingEncoder - unified TX encoder
 #include <memory>
 #include <vector>
@@ -220,52 +222,63 @@ public:
     // mode-hop BURST_HEADER notification (streaming_decoder.hpp typedef) to the
     // protocol layer — wired by wireModemToProtocol like the tone-burst ACK path.
     // Only fires when the knob is ON (decoder-gated); byte-identical OFF.
+    // The listen-before-ACK gate: an incoming burst may be on either waveform (dual-listen).
     uint64_t burstAirSamplesRemaining() const {
-        return streaming_decoder_ ? streaming_decoder_->burstAirSamplesRemaining() : 0;
+        uint64_t remaining = streaming_decoder_ ? streaming_decoder_->burstAirSamplesRemaining() : 0;
+        if (StreamingDecoder* listener = streaming_decoder_.listener()) {
+            remaining = std::max(remaining, listener->burstAirSamplesRemaining());
+        }
+        return remaining;
     }
     const std::vector<float>& getLastGroupCarrierGammas() const {
         static const std::vector<float> kEmpty;
         return streaming_decoder_ ? streaming_decoder_->getLastGroupCarrierGammas()
                                   : kEmpty;
     }
+    // Decoder callbacks the protocol installs. They are stored and wired on every decoder through
+    // wireDecoderRoleCallbacks: a decoder that is not the primary (dual-listen's listener) never
+    // reports its failures (docs/DUAL_LISTEN_DESIGN_2026_11_11.md).
     void setAnchoredBurstNoGroupCallback(
         std::function<void(bool payload_seen)> callback) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setAnchoredBurstNoGroupCallback(std::move(callback));
-        }
+        anchored_no_group_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
     }
     // Compact MC-DPSK DATA frames (protocol/mcdpsk_frame.hpp) need the session's addresses: the
     // decoder seeds the CRC with them and rebuilds the v2 frame; the encoder uses compact frames
     // only inside a session.
     void setMcDpskSessionAddresses(uint32_t local_hash, uint32_t peer_hash) {
-        if (streaming_decoder_) streaming_decoder_->setMcDpskSessionAddresses(local_hash, peer_hash);
+        mcdpsk_local_hash_ = local_hash;
+        mcdpsk_peer_hash_ = peer_hash;
+        forEachRxDecoder([&](StreamingDecoder* d) { d->setMcDpskSessionAddresses(local_hash, peer_hash); });
         if (streaming_encoder_) {
             streaming_encoder_->setMcDpskCompactFrames(local_hash != 0 && peer_hash != 0);
         }
     }
     void setMcDpskMarginCallback(std::function<void(bool upper_rung_margin)> callback) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setMcDpskMarginCallback(std::move(callback));
-        }
+        mcdpsk_margin_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
     }
     void setMcDpskFrameLostCallback(std::function<void(int modulation)> callback) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setMcDpskFrameLostCallback(std::move(callback));
-        }
+        mcdpsk_frame_lost_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
     }
     void setBurstOutcomeUnknownCallback(std::function<void()> callback) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setBurstOutcomeUnknownCallback(std::move(callback));
-        }
+        burst_outcome_unknown_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
     }
     void setDescriptorModeChangeCallback(DescriptorModeChangeCallback callback) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setDescriptorModeChangeCallback(std::move(callback));
-        }
+        descriptor_mode_change_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
     }
     void setBurstTransportRxEnabled(bool enabled) {
         burst_transport_rx_enabled_ = enabled;
-        if (streaming_decoder_) streaming_decoder_->setBurstTransportRxEnabled(enabled);
+        forEachRxDecoder([&](StreamingDecoder* d) { d->setBurstTransportRxEnabled(enabled); });
+    }
+    // Dual-listen: a decoder that is not the primary decoded a frame or group; the engine reports
+    // the waveform it arrived on BEFORE delivering it, so the protocol can follow the peer to it.
+    using RxWaveformObservedCallback = std::function<void(protocol::WaveformMode mode)>;
+    void setRxWaveformObservedCallback(RxWaveformObservedCallback callback) {
+        rx_waveform_observed_cb_ = std::move(callback);
     }
 
     using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
@@ -298,17 +311,16 @@ public:
         ultra::waveform::tone_burst_ack::ToneBurstAckCallback;
     using ToneBurstAckAcceptancePredicate =
         ultra::waveform::tone_burst_ack::ToneBurstAckAcceptancePredicate;
+    // ACKs are the same tones on either waveform: whichever decoder's monitor is armed reports.
     void setToneBurstAckCallback(ToneBurstAckCallback callback) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setToneBurstAckCallback(std::move(callback));
-        }
+        tone_ack_cb_ = std::move(callback);
+        forEachRxDecoder([&](StreamingDecoder* d) { d->setToneBurstAckCallback(tone_ack_cb_); });
     }
     void setToneBurstAckAcceptancePredicate(
         ToneBurstAckAcceptancePredicate predicate) {
-        if (streaming_decoder_) {
-            streaming_decoder_->setToneBurstAckAcceptancePredicate(
-                std::move(predicate));
-        }
+        tone_ack_predicate_ = std::move(predicate);
+        forEachRxDecoder(
+            [&](StreamingDecoder* d) { d->setToneBurstAckAcceptancePredicate(tone_ack_predicate_); });
     }
 
     // §15 step 4d-late: arm the receiver's tone-burst ACK monitor for an
@@ -501,8 +513,10 @@ public:
         if (streaming_decoder_) streaming_decoder_->setFixedFrameHeaderDiscovery(enable);
     }
     void setCarrierLdpcInterleaver(bool enable) {
+        carrier_ldpc_interleaver_ = enable;
+        carrier_ldpc_interleaver_set_ = true;
         if (streaming_encoder_) streaming_encoder_->setCarrierLdpcInterleaver(enable);
-        if (streaming_decoder_) streaming_decoder_->setCarrierLdpcInterleaver(enable);
+        forEachRxDecoder([&](StreamingDecoder* d) { d->setCarrierLdpcInterleaver(enable); });
     }
 
     // Pass-throughs so the headless ultra_tnc can drive the modem through ModemEngine
@@ -591,7 +605,44 @@ private:
     // - Sliding window chirp detection
     // - Correct IWaveform call sequence (fixes BUG-002)
     // - Thread-safe with condition variable
-    std::unique_ptr<StreamingDecoder> streaming_decoder_;
+    // `->` and the boolean test address the PRIMARY (the session's current waveform); with
+    // dual-listen the pair also holds a listener on the other waveform (rx_decoder_pair.hpp).
+    RxDecoderPair streaming_decoder_;
+    // Dual-listen (ULTRA_WAVEFORM_FOLLOW=2): the second decoder slot runs the other waveform while
+    // a wideband session is connected (modem_dual_listen.cpp). Stored here so a decoder created or
+    // re-roled later gets the same callbacks and settings as the first.
+    bool dual_listen_enabled_ = false;  // set in the constructor from the knob
+    std::function<void(bool)> anchored_no_group_cb_;
+    std::function<void(bool)> mcdpsk_margin_cb_;
+    std::function<void(int)> mcdpsk_frame_lost_cb_;
+    std::function<void()> burst_outcome_unknown_cb_;
+    DescriptorModeChangeCallback descriptor_mode_change_cb_;
+    ToneBurstAckCallback tone_ack_cb_;
+    ToneBurstAckAcceptancePredicate tone_ack_predicate_;
+    StreamingDecoder::HarqProvisionalContextCallback harq_context_cb_;
+    fec::SoftCombineBuffer* soft_combine_buffer_ = nullptr;
+    uint32_t mcdpsk_local_hash_ = 0;
+    uint32_t mcdpsk_peer_hash_ = 0;
+    bool carrier_ldpc_interleaver_ = false;
+    bool carrier_ldpc_interleaver_set_ = false;
+    RxWaveformObservedCallback rx_waveform_observed_cb_;
+
+    template <typename Fn>
+    void forEachRxDecoder(Fn&& fn) {
+        for (int slot = 0; slot < 2; ++slot) {
+            if (StreamingDecoder* d = streaming_decoder_.slot(slot)) fn(d);
+        }
+    }
+    void wireDecoderCoreCallbacks(StreamingDecoder* decoder);
+    void wireDecoderRoleCallbacks();
+    void applyStoredDecoderSettings(StreamingDecoder* decoder);
+    void updateDualListen();
+    void configureListener(StreamingDecoder* listener, protocol::WaveformMode waveform);
+    void noteListenerDelivery(StreamingDecoder* decoder);
+    void startRxListenerThread();
+    // The waveform the listener runs (set when configured, swapped at a flip): read instead of the
+    // decoder's mode, which a deferred reconfiguration applies only on its next processBuffer.
+    std::atomic<protocol::WaveformMode> listener_waveform_{protocol::WaveformMode::OFDM_CHIRP};
 
     // ========================================================================
     // RX ARCHITECTURE
@@ -602,9 +653,15 @@ private:
     std::thread rx_decode_thread_;
     std::atomic<bool> rx_decode_running_{false};
     std::condition_variable rx_decode_cv_;
+    // Dual-listen: the second decoder slot's own decode thread (bound to the object, not the role).
+    std::thread rx_listener_thread_;
+    std::atomic<bool> rx_listener_running_{false};
     std::mutex rx_decode_mutex_;
 
     void rxDecodeLoop();
+    void rxDecodeLoopFor(StreamingDecoder* decoder, std::atomic<bool>& running);
+    void drainDecodedFrames(StreamingDecoder* decoder);
+    void stopRxListenerThread();
     void startRxDecodeThread();
     void stopRxDecodeThread();
 

@@ -85,85 +85,17 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     // ========================================================================
     // Initialize StreamingDecoder (primary RX path)
     // ========================================================================
-    streaming_decoder_ = std::make_unique<StreamingDecoder>();
+    streaming_decoder_.setSlot(0, std::make_unique<StreamingDecoder>());
     // Production engine = real-time audio: enable the search load-shed
     // (BUG-DECODE-BACKLOG). Batch decoders (tests/tools) construct
     // StreamingDecoder directly and never shed.
     streaming_decoder_->setRealTimeAudio(true);
 
-    // Set callbacks to wire into existing ModemEngine callbacks
-    streaming_decoder_->setFrameCallback([this](const DecodeResult& result) {
-        // Update SNR/sync stats before delivering frame so downstream callbacks
-        // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
-        updateStats([&](LoopbackStats& s) {
-            copySNRMetrics(s, result);
-            s.synced = result.success;
-        });
-
-        if (result.success && !result.frame_data.empty()) {
-            if (decode_observer_) decode_observer_(result);
-            if (deliverFrame(result)) {
-                notifyFrameParsed(result.frame_data, result.frame_type);
-            }
-        } else if (!result.success && result.codewords_failed > 0) {
-            char fields[192];
-            std::snprintf(fields, sizeof(fields),
-                          "{\"cw_ok\":%d,\"cw_failed\":%d,\"snr_db\":%.1f,"
-                          "\"snr_source\":\"%s\"}",
-                          result.codewords_ok, result.codewords_failed, result.snr_db,
-                          snrSourceToString(result.snr_source));
-            ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
-                "phy", "decode.fail", fields);
-        }
-        // Save peer CFO for future frames
-        if (std::abs(result.cfo_hz) > 0.1f) {
-            peer_cfo_hz_ = result.cfo_hz;
-        }
-        last_rx_complete_time_ = std::chrono::steady_clock::now();
-    });
-
-    // §14.27: forward a decoded interleaved burst (delivered as a unit) to the
-    // protocol layer's burst transport. Only fires when burst-transport RX is
-    // enabled on the decoder.
-    streaming_decoder_->setBurstGroupCallback(
-        [this](uint16_t group_seq, const std::vector<Bytes>& frames, bool all_ok,
-               float quality, uint16_t frame_mask, bool interleaved, uint8_t group_size,
-               bool geometry_proven) {
-            updateStats([&](LoopbackStats& s) { s.synced = all_ok; });
-            if (burst_group_callback_) {
-                burst_group_callback_(group_seq, frames, all_ok, quality, frame_mask,
-                                      interleaved, group_size, geometry_proven);
-            }
-            last_rx_complete_time_ = std::chrono::steady_clock::now();
-        });
-
-    streaming_decoder_->setDataSyncAcceptedCallback([this](float sync_correlation) {
-        if (data_sync_accepted_callback_) {
-            data_sync_accepted_callback_(sync_correlation);
-        }
-    });
-
-    streaming_decoder_->setPingCallback([this](float snr_db, float cfo_hz) {
-        // If narrowband chirp detected, switch control waveform for PONG/CONNECT_ACK
-        if (streaming_decoder_->getDetectedBandwidth() == BandwidthMode::NARROW) {
-            if (streaming_encoder_) {
-                streaming_encoder_->setNarrowbandControl(true);
-            }
-            LOG_MODEM(INFO, "Narrowband chirp detected, switching control waveform");
-        }
-        if (ping_observer_) ping_observer_(snr_db, cfo_hz);
-        if (ping_received_callback_) {
-            ping_received_callback_(snr_db);
-        }
-        updateStats([&](LoopbackStats& s) {
-            s.frames_received++;
-            s.snr_db = snr_db;
-            s.snr_source = SNRSource::SYNC_QUALITY;
-            s.sync_quality_db = snr_db;
-            s.synced = true;
-        });
-        last_rx_complete_time_ = std::chrono::steady_clock::now();
-    });
+    // The callbacks every decoder slot gets (modem_dual_listen.cpp): the frame, burst-group,
+    // data-sync and PING paths into the engine.
+    dual_listen_enabled_ = protocol::connection_policy::waveformFollowDualListen();
+    wireDecoderCoreCallbacks(streaming_decoder_.slot(0));
+    wireDecoderRoleCallbacks();
 
     // Sync StreamingDecoder with initial waveform mode
     // When disconnected, use MC_DPSK for PING detection (chirp-based sync)
@@ -189,14 +121,14 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
 }
 
 ModemEngine::~ModemEngine() {
+    stopRxListenerThread();
     stopRxDecodeThread();
 }
 
 void ModemEngine::setLogPrefix(const std::string& prefix) {
     log_prefix_ = prefix;
-    if (streaming_decoder_) {
-        streaming_decoder_->setLogPrefix(prefix);
-    }
+    if (StreamingDecoder* d = streaming_decoder_.slot(0)) d->setLogPrefix(prefix);
+    if (StreamingDecoder* d = streaming_decoder_.slot(1)) d->setLogPrefix(prefix + "/listen");
 }
 
 void ModemEngine::setLocalCallsign(const std::string& call) {
@@ -209,16 +141,14 @@ void ModemEngine::setLocalCallsign(const std::string& call) {
 }
 
 void ModemEngine::setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) {
-    if (streaming_decoder_) {
-        streaming_decoder_->setSoftCombineBuffer(buffer);
-    }
+    soft_combine_buffer_ = buffer;
+    forEachRxDecoder([&](StreamingDecoder* d) { d->setSoftCombineBuffer(buffer); });
 }
 
 void ModemEngine::setHarqProvisionalContextCallback(
     StreamingDecoder::HarqProvisionalContextCallback cb) {
-    if (streaming_decoder_) {
-        streaming_decoder_->setHarqProvisionalContextCallback(std::move(cb));
-    }
+    harq_context_cb_ = std::move(cb);
+    forEachRxDecoder([&](StreamingDecoder* d) { d->setHarqProvisionalContextCallback(harq_context_cb_); });
 }
 
 // ============================================================================
@@ -1241,10 +1171,8 @@ void ModemEngine::reset() {
     adaptive_.reset();
     use_connected_waveform_once_ = false;
 
-    // Reset StreamingDecoder (primary decoder)
-    if (streaming_decoder_) {
-        streaming_decoder_->reset();
-    }
+    // Reset the StreamingDecoders (the primary and a dual-listen listener)
+    forEachRxDecoder([](StreamingDecoder* d) { d->reset(); });
 
     {
         std::lock_guard<std::mutex> lock2(stats_mutex_);
@@ -1277,12 +1205,20 @@ void ModemEngine::clearRxBuffer(bool for_tx_echo) {
         const char* e = std::getenv("ULTRA_WARM_TURNAROUND_OFF");
         return e && e[0] == '1';
     }();
-    if (for_tx_echo && !kWarmTurnaroundOff && connected_ &&
-        protocol::isOFDMMode(waveform_mode_)) {
-        return;  // preserve warm-sync state + ring timeline across the turnaround
-    }
-
-    streaming_decoder_->reset(/*reset_doppler_coherence=*/false);
+    // Each decoder by its own waveform (dual-listen runs one of each): an OFDM decoder keeps its
+    // warm timeline across the turnaround, an MC-DPSK one is cleared.
+    forEachRxDecoder([&](StreamingDecoder* d) {
+        if (!streaming_decoder_.isPrimary(d) && !streaming_decoder_.listenerActive()) {
+            return;  // an idle slot is not fed
+        }
+        const protocol::WaveformMode mode =
+            streaming_decoder_.isPrimary(d) ? waveform_mode_
+                                            : listener_waveform_.load(std::memory_order_acquire);
+        if (for_tx_echo && !kWarmTurnaroundOff && connected_ && protocol::isOFDMMode(mode)) {
+            return;  // preserve warm-sync state + ring timeline across the turnaround
+        }
+        d->reset(/*reset_doppler_coherence=*/false);
+    });
 }
 
 } // namespace gui

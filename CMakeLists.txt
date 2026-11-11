@@ -568,6 +568,7 @@ set(ULTRA_MODEM_ENGINE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_rx.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_rx_decode.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_mode.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_dual_listen.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/modem/modem_carrier_sense.cpp
     ${ULTRA_STREAMING_MODEM_SOURCES}
     ${CMAKE_CURRENT_SOURCE_DIR}/src/gui/adaptive_mode.cpp

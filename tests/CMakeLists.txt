@@ -761,6 +761,7 @@ add_executable(test_hardware_tx_normalization
     ../src/gui/modem/modem_rx.cpp
     ../src/gui/modem/modem_rx_decode.cpp
     ../src/gui/modem/modem_mode.cpp
+    ../src/gui/modem/modem_dual_listen.cpp
     ../src/gui/modem/modem_carrier_sense.cpp
     ../src/gui/adaptive_mode.cpp
     ${ULTRA_STREAMING_DECODER_SOURCES}
@@ -775,6 +776,28 @@ add_test(NAME TxBurstHardwareNormalization COMMAND test_hardware_tx_normalizatio
 set_tests_properties(TxBurstHardwareNormalization PROPERTIES
     TIMEOUT 90
     LABELS regression)
+
+# Dual-listen at the engine (2026-11-11): a receiver on one wideband waveform delivers what the
+# sender sent on the other (docs/DUAL_LISTEN_DESIGN_2026_11_11.md).
+add_executable(test_dual_listen_engine
+    test_dual_listen_engine.cpp
+    ../src/gui/modem/modem_engine.cpp
+    ../src/gui/modem/modem_rx.cpp
+    ../src/gui/modem/modem_rx_decode.cpp
+    ../src/gui/modem/modem_mode.cpp
+    ../src/gui/modem/modem_dual_listen.cpp
+    ../src/gui/modem/modem_carrier_sense.cpp
+    ../src/gui/adaptive_mode.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_dual_listen_engine PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+)
+target_link_libraries(test_dual_listen_engine PRIVATE ultra_core ota_channel_core)
+add_test(NAME DualListenEngine COMMAND test_dual_listen_engine)
+set_tests_properties(DualListenEngine PROPERTIES TIMEOUT 300)
 
 # Idle-noise SNR calibration — needs the idle-noise estimator, not SimulatedStation.
 add_executable(test_idle_noise_snr_calibration

@@ -143,6 +143,13 @@ struct ConnectionAdaptiveTestAccess {
     static uint32_t crossingRevertMs(const Connection& c) { return c.crossing_probe_revert_ms_; }
     static int upCrossingRun(const Connection& c) { return c.up_crossing_gate_.run(); }
     static void failUpCrossing(Connection& c) { c.up_crossing_gate_.crossingFailed(); }
+    static void noteRxWaveform(Connection& c, WaveformMode mode) { c.noteRxWaveform(mode); }
+    static bool dualListen(const Connection& c) { return c.dualListenActive(); }
+    // A repeat of the last MC-DPSK ACK (no new frame since the command).
+    static uint8_t mcDpskRepeatAckWord(Connection& c) {
+        c.tone_ack_group_complete_context_ = false;
+        return c.mcDpskRungCommandForAck(0);
+    }
     // Down-crossing economics: OFDM deliveries feed the spell meter (busy time comes from ticks).
     // As onBurstGroupReceived does for a delivering group.
     static void deliverOfdm(Connection& c, int frames) {
@@ -166,9 +173,11 @@ struct ConnectionAdaptiveTestAccess {
         return c.arq_.sendFixedDataWithFlags(Bytes(64, 0x42), 0);
     }
     static void senderCollapsePoll(Connection& c, int rounds_without_progress) {
-        c.zero_progress_rounds_ = rounds_without_progress;
+        c.follow_silent_rounds_ = rounds_without_progress;
         c.maybeCrossDownOnCollapse();
     }
+    // The collapse escape consumed the shared counter: follow keeps its own.
+    static void escapeConsumesEvidence(Connection& c) { c.zero_progress_rounds_ = 0; }
 };
 
 }  // namespace protocol
@@ -582,9 +591,91 @@ void test_waveform_follow_sender_waits_out_a_fade() {
           "a delivering link does not leave OFDM on two silent rounds");
     const uint64_t wait = ConnectionAdaptiveTestAccess::downCrossingMs(delivering, false);
     ConnectionAdaptiveTestAccess::tickFollow(delivering, static_cast<uint32_t>(wait));
+    ConnectionAdaptiveTestAccess::escapeConsumesEvidence(delivering);
     ConnectionAdaptiveTestAccess::senderCollapsePoll(delivering, 3);
     CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(delivering) == WaveformMode::MC_DPSK,
           "silent past the crossing time: MC-DPSK");
+}
+
+// Dual-listen (ULTRA_WAVEFORM_FOLLOW=2): the receiver hears both waveforms. It commands an
+// up-crossing but does not switch; a repeat of that ACK carries the same command; it switches when
+// OFDM arrives, to the commanded rung; two delivering groups hold the crossing.
+void test_dual_listen_receiver_commands_up_and_follows_the_peer() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    CHECK(ConnectionAdaptiveTestAccess::dualListen(c), "knob 2 latches dual-listen");
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    const uint8_t word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
+    const uint8_t rung = connection_policy::decodeOfdmRungCommand(word);
+    CHECK(rung != kRungIdxNone, "a clean burst at 22 dB commands OFDM");
+    CHECK(ConnectionAdaptiveTestAccess::mcDpskRepeatAckWord(c) == word,
+          "a repeat of that ACK carries the same command (not the constellation word)");
+    ConnectionAdaptiveTestAccess::tickFollow(c, 30000);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
+              !ConnectionAdaptiveTestAccess::crossingProbeActive(c),
+          "the receiver does not switch on its own command");
+    ConnectionAdaptiveTestAccess::noteRxWaveform(c, WaveformMode::OFDM_CHIRP);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::OFDM_CHIRP &&
+              coherentRungIndexFor(ConnectionAdaptiveTestAccess::dataModulation(c),
+                                   ConnectionAdaptiveTestAccess::dataCodeRate(c)) == rung,
+          "OFDM arrived: the receiver follows, on the rung it commanded");
+    ConnectionAdaptiveTestAccess::noteOfdmGroup(c, true);
+    ConnectionAdaptiveTestAccess::noteOfdmGroup(c, true);
+    CHECK(ConnectionAdaptiveTestAccess::upCrossingRun(c) == 1, "two delivering groups hold it");
+}
+
+// Dual-listen receiver in OFDM: empty groups command MC-DPSK on its ACKs, it does not switch; a
+// delivering group withdraws the command; silence never moves it; MC-DPSK arriving does.
+void test_dual_listen_receiver_commands_down_and_follows_the_peer() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_4, 3.0f, 0.05f,
+                                                    Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::setRxReassembly(c, 600);
+    ConnectionAdaptiveTestAccess::noteOfdmGroup(c, false);
+    ConnectionAdaptiveTestAccess::noteOfdmGroup(c, false);
+    CHECK(connection_policy::decodeMcDpskRungCommand(
+              ConnectionAdaptiveTestAccess::pendingCrossingWord(c)) == 0,
+          "two empty groups at the floor: the ACK commands MC-DPSK");
+    ConnectionAdaptiveTestAccess::tickFollow(c, 120000);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::OFDM_CHIRP,
+          "the receiver does not switch on its command, nor on two minutes of silence");
+    ConnectionAdaptiveTestAccess::noteOfdmGroup(c, true);
+    CHECK(ConnectionAdaptiveTestAccess::pendingCrossingWord(c) == 0,
+          "OFDM delivers again: the down command is withdrawn");
+    ConnectionAdaptiveTestAccess::noteRxWaveform(c, WaveformMode::MC_DPSK);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
+              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK,
+          "MC-DPSK arrived: the receiver follows, DBPSK");
+}
+
+// Dual-listen receiver: it commanded OFDM and the peer's next burst is MC-DPSK again - the crossing
+// did not happen (missed command, or the OFDM burst failed and the sender fell back): the next
+// up-crossing waits twice as long.
+void test_dual_listen_missed_up_crossing_backs_off() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    CHECK(connection_policy::decodeOfdmRungCommand(
+              ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) != kRungIdxNone,
+          "commanded OFDM");
+    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    CHECK(connection_policy::decodeOfdmRungCommand(
+              ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) == kRungIdxNone &&
+              ConnectionAdaptiveTestAccess::upCrossingRun(c) == 2,
+          "MC-DPSK came again: backed off to a run of 2, no command on this burst");
+    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    CHECK(connection_policy::decodeOfdmRungCommand(
+              ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) != kRungIdxNone,
+          "the second clean burst of the longer run commands again");
 }
 
 }  // namespace
@@ -607,6 +698,9 @@ int main() {
     test_waveform_follow_delivering_link_rides_out_a_silence();
     test_waveform_follow_empty_groups_follow_the_economics();
     test_waveform_follow_sender_waits_out_a_fade();
+    test_dual_listen_receiver_commands_up_and_follows_the_peer();
+    test_dual_listen_receiver_commands_down_and_follows_the_peer();
+    test_dual_listen_missed_up_crossing_backs_off();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

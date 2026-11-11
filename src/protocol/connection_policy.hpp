@@ -809,11 +809,18 @@ inline uint8_t decodeOfdmRungCommand(uint8_t word) {
 }
 
 // ULTRA_WAVEFORM_FOLLOW (same setting on both stations): a session crosses between MC-DPSK and
-// wideband OFDM as the channel changes (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md). "1" turns it
-// on; default off until the GUI gate proves it. Read once per Connection, at construction.
+// wideband OFDM as the channel changes (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md). "1": crossing by
+// agreement (the receiver commands and switches, probation checks the sender followed). "2": the
+// same with dual-listen receivers (docs/DUAL_LISTEN_DESIGN_2026_11_11.md): the receiver decodes
+// either waveform at any time and follows what arrives; only the sender switches. Default off until
+// the GUI gate proves it. Read once per Connection / ModemEngine, at construction.
 inline bool waveformFollowEnabled() {
     const char* e = std::getenv("ULTRA_WAVEFORM_FOLLOW");
-    return e != nullptr && e[0] == '1' && e[1] == '\0';
+    return e != nullptr && (e[0] == '1' || e[0] == '2') && e[1] == '\0';
+}
+inline bool waveformFollowDualListen() {
+    const char* e = std::getenv("ULTRA_WAVEFORM_FOLLOW");
+    return e != nullptr && e[0] == '2' && e[1] == '\0';
 }
 
 // The receiver's evidence for an UP-crossing (MC-DPSK -> OFDM): after each clean MC-DPSK burst the

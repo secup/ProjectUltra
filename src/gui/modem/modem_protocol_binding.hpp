@@ -198,6 +198,10 @@ inline void wireModemToProtocol(ModemEngine& modem,
             modem.crossConnectedWaveform(mode, mod, rate, cw_count, mc_dpsk_num_carriers,
                                          mc_dpsk_samples_per_symbol);
         });
+    // Dual-listen: a frame arrived on the other wideband waveform - the connection follows the peer
+    // to it before the frame is processed (the engine calls this first, then delivers).
+    modem.setRxWaveformObservedCallback(
+        [&protocol](protocol::WaveformMode mode) { protocol.noteRxWaveform(mode); });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);

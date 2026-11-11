@@ -129,6 +129,8 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 4. With `ULTRA_WAVEFORM_FOLLOW=1` (default OFF, 2026-11-11, INV-FOLLOW-001) a connected wideband session
    then crosses between MC-DPSK and OFDM_CHIRP as the channel moves: the receiver commands the crossing in
    its tone ACK (session rung word 1..10 OFDM, 11/12 MC-DPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
+   `ULTRA_WAVEFORM_FOLLOW=2` (dual-listen, INV-DUAL-LISTEN-001): the receiver runs a second decoder on the
+   other waveform and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md).
 5. `enterConnected()` → `configureArqForCurrentDataMode()` sets ARQ window per mode: MC-DPSK timing-derived 1–5, OFDM_NARROW 3, wideband OFDM 8 default / up to 16. (Only `BurstStopAndWaitController` on the burst-transport path is true window=1.)
 6. StreamingEncoder/Decoder check `mode_`; `isOFDMMode()` unifies the OFDM family.
 

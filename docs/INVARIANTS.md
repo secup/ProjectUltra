@@ -814,6 +814,26 @@ ConnectionAdaptive pins the authority off), `ConnectionPolicy` (word codec, gate
 
 ---
 
+### INV-DUAL-LISTEN-001: a listener's failures never reach the protocol; its successes switch first (2026-11-11)
+
+**Rule:** with `ULTRA_WAVEFORM_FOLLOW=2` the engine's second decoder (the listener, on the wideband
+waveform the session is not running) delivers only frames and groups that decoded; every failure
+report (MC-DPSK frame lost, anchored burst without a group, burst outcome unknown, descriptor, data
+sync, PING, decode-failure diagnostics) comes from the primary alone (`wireDecoderRoleCallbacks`,
+`wireDecoderCoreCallbacks`). A listener's successful delivery is preceded by the waveform report
+(`noteListenerDelivery`), so the connection crosses to that waveform and the decoders flip before the
+frame is processed. Decoder threads are bound to slots (objects), never to roles.
+**Why:** the MC-DPSK chirp and the OFDM anchor chirp are identical, so each decoder locks on the
+other's bursts and fails them: an OFDM listener would fire the anchored-burst backstop ACK on every
+MC-DPSK frame, an MC-DPSK listener would feed the constellation controller a loss per OFDM anchor.
+A frame processed before the switch would land in the wrong ARQ geometry and ACK semantics.
+**Test:** `DualListenEngine` (both frames delivered, each after its report, receiver already on its
+waveform; the control without dual-listen misses the MC-DPSK frame), `WaveformFollow` dual-listen
+cases (receiver commands but does not switch; a repeat ACK carries the same command; it follows what
+arrives; a missed up-crossing backs off).
+
+---
+
 ## Modulation Invariants
 
 ### INV-MOD-001: DQPSK Uses Previous Symbol as Reference
