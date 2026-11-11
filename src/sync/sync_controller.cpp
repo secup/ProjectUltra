@@ -786,7 +786,7 @@ bool SyncController::detectConnectedLightSync(
         return (k > 1) ? uint64_t{4} : signal_policy::kConnectedOFDMReanchorEscalateStreak;
     }();
     if (!found && connected &&
-        mode == protocol::WaveformMode::OFDM_CHIRP &&
+        protocol::isOFDMMode(mode) &&
         !expect_full_ofdm_anchor_ &&
         sync_reject_streak_ >= kEscalateStreak) {
         std::lock_guard<std::mutex> lock(ring_.buffer_mutex_);

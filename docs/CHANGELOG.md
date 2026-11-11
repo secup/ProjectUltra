@@ -10,6 +10,72 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FEAT(narrow): coherent OFDM_NARROW returns and works end to end; narrowband handshake, anchoring, ACK band, timing and rate fixed (BUG-NARROW-MCDPSK-CONNECT, BUG-NARROW-NO-ANCHOR, BUG-NARROW-ACK-OUT-OF-BAND, BUG-NARROW-TIMING)
+
+**What was broken.** Narrowband (500 Hz) sessions did not work at any level. OFDM_NARROW had been
+dropped from the capability set on 2026-05-31 with the differential OFDM demod and never returned, so
+a forced narrowband session negotiated wideband data. Underneath that: (1) the narrowband handshake
+never connected (also on v0.6.2): the narrowband MC-DPSK preset's carriers were not orthogonal (133 Hz
+apart at 93.75 baud, -10 dB leakage: a noiseless frame read ~8 dB) and the receiver demodulated the
+DBPSK handshake with the preset's DQPSK; (2) a coherent narrowband receiver never anchored a burst:
+the chirp-anchor machinery was gated on OFDM_CHIRP and `detectDataSync` rejected every narrowband warm
+window (6656 < 3 x 2240 samples); (3) tone ACKs used the wideband plan (2400-2625 + 1075-1300 Hz),
+outside a 500 Hz channel; (4) the narrowband ACK timeout timed every rung with one fixed pilot
+spacing and did not budget the burst's chirp anchor and descriptor, so a QPSK R1/4 ACK arrived after
+the monitor window; (5) the rate rule ("QPSK R1/2 from 18 dB AWGN / 20 dB Good, else R1/4", from
+the retired cli_simulator's DQPSK sweeps) held a 20 dB link at R1/2 and a 15 dB one at R1/4.
+
+**What changed.**
+- `frame_v2.hpp`: OFDM_NARROW back in `ModeCapabilities::ALL`; only requested sessions reach it
+  (automatic negotiation never picks it; `ConnectionPolicy` asserts it over an SNR x fading grid).
+- MC-DPSK narrowband preset: 4 orthogonal carriers (3 symbol rates apart, 1289-1711 Hz), 1024-sample
+  symbols, 375 bps raw; `WaveformFactory::createNarrowbandMCDPSK(session)` gives every modem-side
+  narrowband waveform the session's constellation (encoder x3, decoder narrowband switch).
+- Acquisition: the full-anchor search, `expectFullOFDMAnchorOnce`, light-reject escalation, crater
+  re-anchor, burst marker, arrival prediction, ACK-listen suppression and the connect-time full
+  preamble/anchor expectation take any OFDM mode; structure acquisition stays wideband-only on both
+  ends (the narrowband sender never drops the chirp); `detectDataSync` accepts the LTS pair + 1.
+- Tone ACK band plan (`ToneAckBand`, from the negotiated waveform on both stations): narrowband tones
+  1375-1600 Hz, no diversity subband, full amplitude; the detector reports the unshifted dial offset.
+- `narrowOFDMFrameTiming(mod, rate, cw)` uses the rung's own pilot spacing (control frames at QPSK
+  R1/4) and `computeNarrowOFDMAckTimeoutMs` budgets `kNarrowOFDMFullAnchorExtraMs` (2.2 s) and the
+  descriptor (QPSK R1/2 window 3: 15.6 -> 19.1 s; R1/4: 20.6 s).
+- Rate: `kNarrowCoherentLadder` / `selectNarrowCoherentOFDM`, one fading-safe column for every
+  channel class (a flat fade looks like AWGN to the narrowband fading index, and the rate is fixed
+  for the session): QPSK R1/2 from 10 dB, R2/3 15, R3/4 18, 8PSK R2/3 22 (turbo), else R1/4. Data:
+  `docs/data/narrowband_rung_fer_2026_11_10.csv`. The wideband entry caps that start low for the
+  rate controller to climb from (`capInitialOFDMRate`, the RX-authority first-group probe to QPSK
+  R1/2) apply only when the session's rate adapts (`Connection::entryRateCapsApply`: wideband, or
+  narrowband with `ULTRA_RATE_ADAPT=1`); they had pinned every narrowband session to QPSK R1/2.
+- OTASim: the receivers' IF filter, `RxBandpassChannelModel` (`gui_qso_scenario.sh --rx-filter
+  LOW-HIGH`); `measure_ack_fer --waveform narrow`; `ptx -w narrow` sends narrowband control frames.
+
+**Measured (narrowband FER sweep, `measure_ack_fer --waveform narrow --geometry production`, turbo,
+7.3 Hz, 2 seeds x 20 frames; FER 10 % points, the 5 % floor is the harness's first frame).** AWGN:
+QPSK R1/4 5.7, R1/2 8.0, R2/3 8.8, R3/4 9.0, 8PSK R2/3 14.8, 16QAM R1/2 14.9, R2/3 17.8, R3/4 17.9,
+32QAM R2/3 20.8 dB. ITU Good fades flat (500 Hz has no frequency diversity): FER falls slowly (QPSK
+R1/4 25 % at 10 dB, 7 % at 18); goodput crossovers QPSK R1/2 7, R3/4 12, 8PSK R2/3 17, 16QAM R2/3
+19, R3/4 21, 32QAM 25 dB. ITU Moderate is harder (QPSK R3/4 55 % at 15 dB, 8PSK R2/3 12 % at 24,
+16QAM 55-72 % at 22-28 dB). At the same in-band SNR narrowband needs about what wideband needs (QPSK
+R1/2 6 dB, R3/4 9 dB on both): the modulator keeps the per-carrier amplitude, so narrowband data
+leaves the TX 4.8 dB below wideband and its 7.5 dB per-carrier advantage is spent there (open lever).
+
+**GUI gate (forced OFDM_NARROW, 2 KB, 7.3 Hz).** AWGN 20 dB QPSK R1/2 (old rule): PASS, 190 bps, 0
+retransmissions. Behind a 500 Hz IF filter (1250-1750 Hz): every frame and every narrowband ACK
+decoded (normalized peak 0.95-0.97), 0 retransmissions; the old rule's R1/4 ran out of the 218 s
+scenario at 75 %. With the measured ladder and no entry caps (seed 42, 2 KB, 7.3 Hz, every file
+byte-exact):
+
+| Narrowband session | before (R1/2 / R1/4 rule) | after |
+|---|---|---|
+| AWGN 20 dB | QPSK R1/2, 190 bps | QPSK R3/4, 280 bps, 0 retransmissions |
+| AWGN 20 dB, 500 Hz IF filter | QPSK R1/4, did not finish in 218 s | QPSK R2/3, 270 bps, 0 retransmissions |
+| ITU Good 20 dB | QPSK R1/2, 160 bps | QPSK R3/4, 210 bps, 3 retransmissions |
+
+Single-seed checks with a 2 KB file, so connection setup and the first burst weigh heavily.
+Wideband unchanged (seed 42, 21 KB, final build): AWGN 20 dB 4010 -> 4000 bps (32QAM R2/3), Good 20
+dB 3210 -> 3210 bps. Full ctest 115/115 (TNCSession disabled as before).
+
 ## 2026-11-10 — FIX(cli): `ultra ptx`/`prx` run the GUI's modem path; OFDM_NARROW geometry in ModemEngine; chirp correlation over silence; WAV resampler (BUG-CLI-PTX-PRX-BROKEN, BUG-GUI-NARROW-WIDEBAND-GEOMETRY, BUG-CHIRP-NORM-SILENCE, BUG-RESAMPLER-RATIO)
 
 **What was broken.** A user reported that `ultra ptx`/`prx` did not work. Loopback (`ptx` ->

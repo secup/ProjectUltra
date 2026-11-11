@@ -31,6 +31,9 @@ struct SessionConfig {
     std::map<std::string, float> rx_clock_ppm;
     // The sending radios' ALC/PA (one radio model for every sender; disabled = none).
     TxPaConfig tx_pa;
+    // Every receiving radio's IF filter passband (Hz); high <= low = none.
+    float rx_filter_low_hz = 0.0f;
+    float rx_filter_high_hz = 0.0f;
 
     ChannelConfig channelConfig() const {
         return {.type = default_channel_model,
@@ -47,6 +50,8 @@ struct SessionConfig {
         const auto ck = rx_clock_ppm.find(std::string(receiver_id));
         if (ck != rx_clock_ppm.end()) c.clock_ppm = ck->second;
         c.tx_pa = tx_pa;
+        c.rx_filter_low_hz = rx_filter_low_hz;
+        c.rx_filter_high_hz = rx_filter_high_hz;
         return c;
     }
 };

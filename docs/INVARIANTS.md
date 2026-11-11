@@ -681,6 +681,54 @@ not talk to a TNC in narrowband (BUG-GUI-NARROW-WIDEBAND-GEOMETRY).
 
 ---
 
+## Narrowband Invariants (coherent OFDM_NARROW, 2026-11-10)
+
+### INV-NARROW-ANCHOR-001: every narrowband burst is chirp-anchored, and its receiver searches for the chirp
+**Rule:** connected-OFDM acquisition (full-anchor search, `expectFullOFDMAnchorOnce`, light-reject
+escalation, crater re-anchor, burst-group marker, arrival prediction, ACK-listen suppression,
+connect-time full preamble) is gated on `isOFDMMode`, never on `OFDM_CHIRP`. Structure acquisition is
+the one wideband-only part, on BOTH ends: the receiver runs it only for OFDM_CHIRP and the sender never
+omits a narrowband chirp (`chirp_skip_allowed`). A `detectDataSync` window is valid from the LTS pair
+plus one candidate offset.
+**Why:** the wideband-only gates left coherent narrowband unanchored (BUG-NARROW-NO-ANCHOR); a fixed
+3-symbol window minimum rejected every narrowband warm window (6656 < 3 x 2240).
+**Test:** `measure_ack_fer --waveform narrow --config data4_full` (19/20 at 12-25 dB, 7.3 Hz); GUI gate
+`ULTRA_FORCE_WAVEFORM=OFDM_NARROW`.
+
+### INV-NARROW-TIMING-001: narrowband timing is derived from the rung's own layout and includes the anchor
+**Rule:** `narrowOFDMFrameTiming(mod, rate, cw)` uses `recommendedPilotSpacing(mod, rate)` on the 21
+carriers (control frames at QPSK R1/4); the ACK timeout budgets `kNarrowOFDMFullAnchorExtraMs` (2 x
+1000 ms chirp + 2 x 100 ms gap), the descriptor, the window's frames, the turnaround and the receiver
+SACK hold.
+**Why:** a fixed pilot spacing timed QPSK R1/4 frames (83 symbols) as 74 and the anchor was not
+budgeted: the ACK of an R1/4 burst arrived 0.4 s after the monitor window closed.
+**Test:** `ConnectionPolicy` (`test_narrow_ofdm_timing_and_timeout`, coverage loop).
+
+### INV-NARROW-ENTRY-001: an entry cap applies only to a session whose rate adapts
+**Rule:** `capInitialOFDMRate` and the RX-authority first-group probe run only when
+`Connection::entryRateCapsApply()` (wideband OFDM, or any OFDM mode with `ULTRA_RATE_ADAPT=1`).
+**Why:** both start a session below its measured pick for the rate controller to climb from; a
+narrowband session has no controller, so they pinned it at QPSK R1/2 for the whole session.
+**Test:** GUI gate `ULTRA_FORCE_WAVEFORM=OFDM_NARROW` at AWGN 20 dB enters at the ladder's QPSK R3/4.
+
+### INV-TONE-ACK-BAND-001: tone ACKs stay inside the session's channel
+**Rule:** both stations set `ToneAckBand` from the negotiated waveform (`ModemEngine::setWaveformMode`);
+OFDM_NARROW uses the narrowband plan (1375-1600 Hz, no diversity). The detector searches the shifted
+tones and reports the carrier offset without the shift.
+**Why:** the wideband plan (2400-2625 + 1075-1300 Hz) does not pass a 500 Hz filter
+(BUG-NARROW-ACK-OUT-OF-BAND).
+**Test:** `ToneBurstAckRoundTrip` (`test_narrowband_band_plan`); GUI gate `--rx-filter 1250-1750`.
+
+### INV-MCDPSK-ORTHO-001: MC-DPSK carriers are orthogonal over a symbol
+**Rule:** carrier spacing x symbol time is a whole number (>= 2 preferred) for any shipped MC-DPSK
+layout. Production layouts: 8 carriers 500-2500 Hz at 1024 samples (6.1, -28.5 dB worst leakage) and
+the narrowband preset (3.0, exact).
+**Why:** a spacing of 1.42 symbol rates leaked -10 dB between carriers; the narrowband handshake never
+decoded (BUG-NARROW-MCDPSK-CONNECT).
+**Test:** `CliLoopback` (`narrow_connect`); reported SNR of a noiseless narrowband frame is ~48 dB.
+
+---
+
 ## Modulation Invariants
 
 ### INV-MOD-001: DQPSK Uses Previous Symbol as Reference

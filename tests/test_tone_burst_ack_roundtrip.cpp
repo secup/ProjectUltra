@@ -396,7 +396,84 @@ void test_costas_alias_in_payload_does_not_hide_the_preamble() {
 
 }  // namespace
 
+// Narrowband band plan (2026-11-10): a narrowband session's ACK lies inside its 500 Hz channel
+// (1250-1750 Hz), decodes on a narrowband detector with a dial offset reported as the dial offset,
+// and is not mistaken for a wideband ACK (nor the reverse).
+void test_narrowband_band_plan() {
+    std::printf("[test] narrowband_band_plan\n");
+    ToneBurstEncoder enc;
+    enc.setBand(ToneAckBand::Narrowband);
+    EXPECT(!enc.diversity());
+    const auto orig = samplePayload(2);
+    const auto burst = enc.encode(orig, 25);
+
+    // Power inside 1250-1750 Hz, by direct DFT on a 5 Hz grid.
+    double inside = 0.0, total = 0.0;
+    for (int f = 0; f <= 4000; f += 5) {
+        double re = 0.0, im = 0.0;
+        for (size_t n = 0; n < burst.size(); ++n) {
+            const double ph = 2.0 * M_PI * f * static_cast<double>(n) / kSampleRate;
+            re += burst[n] * std::cos(ph);
+            im -= burst[n] * std::sin(ph);
+        }
+        const double pw = re * re + im * im;
+        total += pw;
+        if (f >= 1250 && f <= 1750) inside += pw;
+    }
+    std::printf("  power inside 1250-1750 Hz: %.2f %%\n", 100.0 * inside / total);
+    EXPECT(inside / total > 0.99);
+
+    // +20 Hz dial offset, 150 ms of silence either side, 10 dB in-band SNR.
+    std::vector<float> buf((kSampleRate * 150u) / 1000u, 0.0f);
+    const size_t start = buf.size();
+    for (size_t n = 0; n < burst.size(); ++n) buf.push_back(0.0f);
+    buf.insert(buf.end(), (kSampleRate * 150u) / 1000u, 0.0f);
+    // The same ACK with a +20 Hz dial offset, synthesized independently of the encoder: the
+    // on-air dibits, each tone at its plan frequency + 20 Hz, phase-continuous.
+    {
+        const auto dibits = buildOnAirDibits(orig);
+        const uint32_t spp = (kSampleRate * 25u) / 1000u;
+        double phase = 0.0;
+        size_t idx = start;
+        for (uint8_t d : dibits) {
+            const double f = kToneFreqHz[d] + kNarrowbandToneShiftHz + 20.0;
+            for (uint32_t n = 0; n < spp; ++n) {
+                buf[idx++] = kToneAmplitude * static_cast<float>(std::sin(phase));
+                phase += 2.0 * M_PI * f / kSampleRate;
+            }
+        }
+    }
+    std::mt19937 rng(7);
+    addAWGN(buf, sigmaForInBandSNR(10.0f, kToneAmplitude), rng);
+
+    ToneBurstDetector narrow;
+    narrow.setBand(ToneAckBand::Narrowband);
+    narrow.setFrequencyPrior(0.0f, kToneAckCfoAcquisitionHalfWidthHz);
+    const auto r = narrow.detectAndDecode(buf.data(), buf.size(), 25);
+    EXPECT(r.sync_acquired);
+    EXPECT(r.decode.payload.has_value());
+    if (r.decode.payload) EXPECT(payloadsEqual(*r.decode.payload, orig));
+    std::printf("  narrowband detector: acquired=%d offset=%.1f Hz (true +20)\n",
+                r.sync_acquired ? 1 : 0, r.detected_frequency_offset_hz);
+    EXPECT(std::fabs(r.detected_frequency_offset_hz - 20.0f) < 10.0f);
+
+    ToneBurstDetector wide;  // default wideband plan
+    wide.setFrequencyPrior(0.0f, kToneAckCfoAcquisitionHalfWidthHz);
+    const auto w = wide.detectAndDecode(buf.data(), buf.size(), 25);
+    EXPECT(!w.sync_acquired);
+
+    // And a wideband ACK is not taken for a narrowband one.
+    ToneBurstEncoder wide_enc;
+    const auto wide_burst = wide_enc.encode(orig, 25);
+    std::vector<float> wbuf((kSampleRate * 150u) / 1000u, 0.0f);
+    wbuf.insert(wbuf.end(), wide_burst.begin(), wide_burst.end());
+    wbuf.insert(wbuf.end(), (kSampleRate * 150u) / 1000u, 0.0f);
+    const auto n2 = narrow.detectAndDecode(wbuf.data(), wbuf.size(), 25);
+    EXPECT(!n2.sync_acquired);
+}
+
 int main() {
+    test_narrowband_band_plan();
     test_costas_alias_in_payload_does_not_hide_the_preamble();
     test_encode_output_size_and_amplitude();
     test_phase_continuity_at_symbol_boundaries();

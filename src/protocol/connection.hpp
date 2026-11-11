@@ -1154,6 +1154,11 @@ private:
     // ULTRA_LOCK_RATE=1. adaptive_rate_enabled_/ULTRA_ADAPTIVE_RATE only enables the
     // feedback computation + GUI bar; this gates the rate physically changing.
     bool rateAdaptationActive() const;
+    // Whether this session's rate adapts after connect (wideband OFDM; any OFDM mode with
+    // ULTRA_RATE_ADAPT=1). The entry caps that start low for the controller to climb from
+    // (capInitialOFDMRate, the RX-authority first-group probe) apply only then: a narrowband
+    // session keeps its entry rung, so it enters at its measured ladder pick.
+    bool entryRateCapsApply() const;
     // Polled from tick(): a frame stuck at a too-aggressive rate (the fade troughs keep killing it,
     // so it produces no group ACK and the clean-boundary gate can't help) escape-drops one rung.
     void maybeEscapeStuckFrame();

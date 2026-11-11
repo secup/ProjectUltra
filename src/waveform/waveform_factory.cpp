@@ -70,6 +70,17 @@ WaveformPtr WaveformFactory::createNarrowbandMCDPSK() {
     return std::make_unique<MCDPSKWaveform>(mc_dpsk_presets::narrowband());
 }
 
+WaveformPtr WaveformFactory::createNarrowbandMCDPSK(const MultiCarrierDPSKConfig& session) {
+    // Until 2026-11-10 the modem built narrowband waveforms from the preset alone (DQPSK) while
+    // the handshake rides DBPSK (streaming_control_profile::profileForMCDPSK): the receiver
+    // demodulated every narrowband CONNECT with the wrong constellation (BUG-NARROW-MCDPSK-CONNECT).
+    MultiCarrierDPSKConfig cfg = mc_dpsk_presets::narrowband();
+    cfg.bits_per_symbol = session.bits_per_symbol;
+    cfg.track_clock_offset = session.track_clock_offset;
+    cfg.tx_cfo_hz = session.tx_cfo_hz;
+    return std::make_unique<MCDPSKWaveform>(cfg);
+}
+
 std::vector<protocol::WaveformMode> WaveformFactory::getAvailableModes() {
     return {
         protocol::WaveformMode::MC_DPSK,

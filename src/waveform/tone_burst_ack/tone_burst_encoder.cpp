@@ -36,9 +36,9 @@ Samples ToneBurstEncoder::encodeDibits(const std::vector<uint8_t>& dibits,
 
     for (uint8_t dibit : dibits) {
         const uint8_t tone_idx = (dibit < kNumTones) ? dibit : 0;
-        const float freq = kToneFreqHz[tone_idx];
+        const float freq = kToneFreqHz[tone_idx] + shift_hz_;
         const float phase_inc = kTwoPi * freq * dt;
-        const float phase_inc_b = kTwoPi * kToneFreqHzDiversity[tone_idx] * dt;
+        const float phase_inc_b = kTwoPi * (kToneFreqHzDiversity[tone_idx] + shift_hz_) * dt;
 
         for (uint32_t n = 0; n < samples_per_symbol; ++n) {
             if (diversity_) {

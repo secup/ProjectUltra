@@ -33,6 +33,11 @@ public:
 
     // Create narrowband MC-DPSK (4 carriers, 500 Hz band, narrowband chirp)
     static WaveformPtr createNarrowbandMCDPSK();
+    // The session's MC-DPSK waveform on the narrowband geometry: carriers, symbol length and
+    // chirp from mc_dpsk_presets::narrowband(), the constellation (bits per symbol) from the
+    // session config, as createMCDPSK(session) takes it. Every modem-side narrowband waveform is
+    // built this way so it carries the same constellation as its wideband counterpart.
+    static WaveformPtr createNarrowbandMCDPSK(const MultiCarrierDPSKConfig& session);
 
     // Get list of all available waveform modes
     static std::vector<protocol::WaveformMode> getAvailableModes();

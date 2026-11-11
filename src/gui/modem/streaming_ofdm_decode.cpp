@@ -2030,7 +2030,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // decision promote it into group accumulation: this recovery knows cw/Z but
     // deliberately knows no N. It must remain an independently decoded frame.
     bool burst_marker = !classic_long_on_entry && connected_ && is_ofdm
-                        && mode_ == protocol::WaveformMode::OFDM_CHIRP
+                        && protocol::isOFDMMode(mode_)
                         && waveform_->wasBurstInterleaved()
                         && (use_burst_interleave_ || burst_transport_rx_);
     if (ultra::phyDiagnosticsEnabled() && connected_ && is_ofdm
@@ -3288,7 +3288,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         } else {
             force_chirp = (crater_reanchor_streak_ % kChirpEvery == 0);  // periodic probe
         }
-        if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo &&
+        if (protocol::isOFDMMode(mode_) && !ack_listen_self_echo &&
             force_chirp) {
             resetFrameArrivalTrackingLocked();
             sync_controller_.expect_full_ofdm_anchor_ = true;
@@ -3296,7 +3296,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             LOG_MODEM(WARN,
                       "[%s] OFDM decode failed with 0/%d CWs; forcing full chirp+LTS re-anchor",
                       log_prefix_.c_str(), result.codewords_failed);
-        } else if (mode_ == protocol::WaveformMode::OFDM_CHIRP && !ack_listen_self_echo) {
+        } else if (protocol::isOFDMMode(mode_) && !ack_listen_self_echo) {
             // HOLD warm sync (no chirp). Cheap re-anchor: un-poison the CFO to the last
             // certified value so the warm retry uses a proven CFO, not a fade-walked one.
             const bool rolled = kCheapReanchor && cfo_tracker_.rollbackToCertified();

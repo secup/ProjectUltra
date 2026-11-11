@@ -413,7 +413,7 @@ void StreamingDecoder::searchForSync() {
     }();
     sync_controller_.setAckListenSuppressDataSync(
         kAckListenSuppressOfdm && connected_ &&
-        mode_ == protocol::WaveformMode::OFDM_CHIRP && tone_burst_monitor_.isArmed());
+        protocol::isOFDMMode(mode_) && tone_burst_monitor_.isArmed());
 
     // Save generation counter - if reset() is called during our search,
     // we'll detect it and discard our results
@@ -466,9 +466,12 @@ void StreamingDecoder::searchForSync() {
     }
     size_t chirp_min_search = std::min(preamble + 65000, CHIRP_MAX_SEARCH);
     bool connected_data_preamble = connected_ && waveform_->supportsDataPreamble();
+    // Any connected OFDM waveform anchors its groups on a dual chirp (wideband 300-2700 Hz,
+    // narrowband 1250-1750 Hz). Until 2026-11-10 only OFDM_CHIRP searched for it, so a coherent
+    // OFDM_NARROW receiver never anchored a burst (BUG-NARROW-NO-ANCHOR).
     bool use_full_ofdm_anchor_search =
         connected_data_preamble && sync_controller_.expect_full_ofdm_anchor_ &&
-        mode_ == protocol::WaveformMode::OFDM_CHIRP;
+        protocol::isOFDMMode(mode_);
     // F147: each search attempt re-derives the expected-anchor mark; only the
     // connected full-anchor accept below sets it.
     last_sync_expected_full_anchor_ = false;
@@ -482,8 +485,11 @@ void StreamingDecoder::searchForSync() {
     // after a 2.5 s chirp-search window. In-group frames keep the warm light-LTS path unchanged.
     // The handshake-confirmation window keeps the chirp search: the half-open MC-DPSK CONNECT
     // fallback needs a real dual-chirp lock (MC-DPSK has no OFDM structure to detect).
+    // The structure detector is built on the wideband grid; OFDM_NARROW keeps the chirp search
+    // (and its sender never omits the chirp, streaming_encoder.cpp burst anchor rule).
     const size_t structure_span =
-        (use_full_ofdm_anchor_search && sync::structureAcquisitionEnabled())
+        (use_full_ofdm_anchor_search && sync::structureAcquisitionEnabled() &&
+         mode_ == protocol::WaveformMode::OFDM_CHIRP)
             ? waveform_->frameStructureSpanSamples()
             : 0;
     const bool structure_anchor_search =
@@ -763,7 +769,7 @@ void StreamingDecoder::searchForSync() {
             detected_bandwidth_ = BandwidthMode::NARROW;
             // Switch only after the training position is live. A deferred lock
             // must not mutate the active decoder before it is accepted.
-            waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+            waveform_ = WaveformFactory::createNarrowbandMCDPSK(mc_dpsk_config_);
             LOG_MODEM(INFO,
                       "[%s] Dual-listen: NARROWBAND chirp detected! corr=%.3f, "
                       "CFO=%.1f Hz, switched to narrowband MC-DPSK",

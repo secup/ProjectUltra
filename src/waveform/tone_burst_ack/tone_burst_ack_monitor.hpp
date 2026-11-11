@@ -135,7 +135,11 @@ public:
     //   sum over kCostasSymbols of (samples_per_symbol/2) × kToneAmplitude
     // (Goertzel magnitude for a matched tone of amplitude A over N
     // samples is N·A/2.)
-    static float idealCostasPeak(uint32_t symbol_ms);
+    static float idealCostasPeak(uint32_t symbol_ms, bool diversity = toneAckDiversityEnabled());
+
+    // Band plan of the ACKs this monitor listens for (ToneBurstDetector::setBand).
+    void setBand(ToneAckBand band) { detector_.setBand(band); }
+    bool diversity() const { return detector_.diversity(); }
 
     ToneBurstAckMonitor();
     explicit ToneBurstAckMonitor(Config cfg);

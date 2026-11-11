@@ -322,6 +322,12 @@ public:
     int getFixedFrameCodewords() const { return fixed_frame_codewords_; }
     void setFixedFrameHeaderDiscovery(bool enable) { fixed_frame_header_discovery_ = enable; }
 
+    // Tone-burst ACK band plan (tone_burst_constants.hpp ToneAckBand): narrowband sessions keep
+    // their ACKs inside the 500 Hz channel. Any thread; the monitor picks it up on its next feed.
+    void setToneAckBand(ultra::waveform::tone_burst_ack::ToneAckBand band) {
+        tone_ack_band_.store(band, std::memory_order_relaxed);
+    }
+
     void setSoftCombineBuffer(fec::SoftCombineBuffer* buffer) { harq_buffer_ = buffer; }
     using HarqProvisionalContextCallback =
         std::function<std::optional<fec::SoftCombineBuffer::ProvisionalContext>()>;
@@ -1671,6 +1677,8 @@ private:
     // default to bound CPU; a burst is 850+ ms so a 480 ms cadence still
     // guarantees full coverage). See constructor body.
     ultra::waveform::tone_burst_ack::ToneBurstAckMonitor tone_burst_monitor_;
+    std::atomic<ultra::waveform::tone_burst_ack::ToneAckBand> tone_ack_band_{
+        ultra::waveform::tone_burst_ack::ToneAckBand::Wideband};
 };
 
 } // namespace gui

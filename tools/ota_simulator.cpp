@@ -47,6 +47,8 @@ struct ServeOptions {
     std::map<std::string, float> lobby_rx_cfo_hz;  // --lobby-rx-cfo-hz "BRAVO:2.5,ALPHA:-2.5"
     std::map<std::string, float> lobby_rx_clock_ppm;  // --lobby-rx-clock-ppm "BRAVO:50,ALPHA:-50"
     channel::TxPaConfig lobby_tx_pa;  // --lobby-tx-pa "pep=0.5,drive_db=3" (the senders' ALC/PA)
+    float lobby_rx_filter_low_hz = 0.0f;   // --lobby-rx-filter LOW-HIGH (every receiver's IF filter)
+    float lobby_rx_filter_high_hz = 0.0f;
     uint32_t shutdown_deadline_seconds = 60;
     std::filesystem::path noise_bed_wav;
 };
@@ -58,7 +60,8 @@ void usage() {
         << "  ota_simulator serve --bind HOST:PORT --tokens FILE [--udp-bind HOST:PORT]\n"
         << "      [--noise-bed-wav FILE.wav]\n"
         << "      [--lobby-rx-cfo-hz RX:HZ,...] [--lobby-rx-clock-ppm RX:PPM,...]\n"
-        << "      [--lobby-tx-pa on|pep=0.5,drive_db=3,p=2,sat_db=3,attack_ms=2,release_ms=300]\n";
+        << "      [--lobby-tx-pa on|pep=0.5,drive_db=3,p=2,sat_db=3,attack_ms=2,release_ms=300]\n"
+        << "      [--lobby-rx-filter LOW-HIGH]  receivers' IF filter passband in Hz, e.g. 1250-1750\n";
 }
 
 void handleStopSignal(int signal) {
@@ -188,6 +191,19 @@ ServeOptions parseServeOptions(int argc, char** argv) {
                     "attack_ms, release_ms");
             }
             options.lobby_tx_pa = *parsed;
+        } else if (arg == "--lobby-rx-filter") {
+            const std::string spec = requireValue(i, argc, argv, arg);
+            const auto dash = spec.find('-');
+            if (dash == std::string::npos || dash == 0) {
+                throw std::runtime_error("--lobby-rx-filter expects LOW-HIGH in Hz, e.g. 1250-1750");
+            }
+            options.lobby_rx_filter_low_hz = std::stof(spec.substr(0, dash));
+            options.lobby_rx_filter_high_hz = std::stof(spec.substr(dash + 1));
+            if (!(options.lobby_rx_filter_low_hz > 0.0f &&
+                  options.lobby_rx_filter_high_hz > options.lobby_rx_filter_low_hz &&
+                  options.lobby_rx_filter_high_hz < 24000.0f)) {
+                throw std::runtime_error("--lobby-rx-filter needs 0 < LOW < HIGH < 24000");
+            }
         } else if (arg == "--lobby-station-cap") {
             options.lobby_station_cap = parseUint32(
                 requireValue(i, argc, argv, arg), 1024, arg);
@@ -240,6 +256,8 @@ int runServe(int argc, char** argv) {
     lobby.rx_cfo_hz = options.lobby_rx_cfo_hz;
     lobby.rx_clock_ppm = options.lobby_rx_clock_ppm;
     lobby.tx_pa = options.lobby_tx_pa;
+    lobby.rx_filter_low_hz = options.lobby_rx_filter_low_hz;
+    lobby.rx_filter_high_hz = options.lobby_rx_filter_high_hz;
     lobby.real_hf_loop_noise = real_hf_loop_noise;
 
     service::OtaSimulatorServiceConfig config;
@@ -290,6 +308,13 @@ int runServe(int argc, char** argv) {
                          out += rx + ":" + std::to_string(ppm);
                      }
                      return out.empty() ? std::string("none") : out;
+                 }()
+              << " lobby_rx_filter=" << [&] {
+                     if (!(options.lobby_rx_filter_high_hz > options.lobby_rx_filter_low_hz)) {
+                         return std::string("none");
+                     }
+                     return std::to_string(static_cast<int>(options.lobby_rx_filter_low_hz)) + "-" +
+                            std::to_string(static_cast<int>(options.lobby_rx_filter_high_hz));
                  }()
               << " lobby_tx_pa=" << [&] {
                      if (!options.lobby_tx_pa.enabled) return std::string("none");

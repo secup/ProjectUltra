@@ -1579,14 +1579,28 @@ inline MultiCarrierDPSKConfig level12_ultra() {
     return cfg;
 }
 
-// Narrowband preset: 4 carriers in 500 Hz band (1300-1700 Hz)
-// Uses narrowband chirp (1250-1750 Hz, 1000ms) for dual-listen compatibility
+// Narrowband preset: 4 DQPSK carriers inside the 500 Hz narrowband chirp band (1250-1750 Hz,
+// 1000 ms chirps for dual-listen).
+//
+// The carriers must be ORTHOGONAL over one symbol: a rectangular symbol of T = sps/fs seconds
+// leaks a carrier spaced df into its neighbour's correlator by sinc(df*T), zero only when df is
+// a whole multiple of the symbol rate 1/T. Until 2026-11-10 this preset put 4 carriers 133.3 Hz
+// apart (1300-1700 Hz) at 93.75 baud (df*T = 1.42): each carrier took -10 dB of its neighbours,
+// so even a noiseless frame read ~8 dB, the clock/jitter trackers took that leakage for a 6.9 Hz
+// dial offset and 31 deg of jitter, and no narrowband CONNECT ever decoded
+// (BUG-NARROW-MCDPSK-CONNECT). Now: the handshake's 21.3 ms symbol (1024 samples, 46.875 baud,
+// the same multipath/Doppler tolerance as the wideband connect waveform) and a spacing of 3 symbol
+// rates (140.625 Hz) centred on 1500 Hz: 1289.1 / 1429.7 / 1570.3 / 1710.9 Hz, main lobes
+// 1242-1758 Hz, 375 bps raw. Three symbol rates rather than one keeps the neighbours' leakage
+// small under the timing and multipath errors that break exact orthogonality.
 inline MultiCarrierDPSKConfig narrowband() {
     MultiCarrierDPSKConfig cfg;
     cfg.num_carriers = 4;
-    cfg.freq_low = 1300.0f;
-    cfg.freq_high = 1700.0f;
-    cfg.samples_per_symbol = 512;
+    cfg.samples_per_symbol = 1024;
+    const float symbol_rate = cfg.sample_rate / static_cast<float>(cfg.samples_per_symbol);
+    const float spacing = 3.0f * symbol_rate;
+    cfg.freq_low = 1500.0f - 1.5f * spacing;
+    cfg.freq_high = 1500.0f + 1.5f * spacing;
     cfg.bits_per_symbol = 2;       // DQPSK
     cfg.chirp_f_start = 1250.0f;
     cfg.chirp_f_end = 1750.0f;

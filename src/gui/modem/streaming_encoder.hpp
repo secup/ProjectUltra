@@ -136,6 +136,8 @@ public:
     // structure — the Costas pattern at the start is its own sync).
     // Caller is responsible for queueing the samples on the audio
     // output ring at the right time after the burst-data turnaround.
+    // Tone-burst ACK band plan (tone_burst_constants.hpp ToneAckBand), from the negotiated waveform.
+    void setToneAckBand(ultra::waveform::tone_burst_ack::ToneAckBand band) { tone_ack_band_ = band; }
     std::vector<float> encodeToneBurstAck(
         const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload,
         uint32_t symbol_ms =
@@ -287,6 +289,8 @@ private:
     // CarrierLDPC permutation is a different wire image and is not decodable
     // by legacy peers.
     bool use_carrier_ldpc_interleaver_ = false;
+    ultra::waveform::tone_burst_ack::ToneAckBand tone_ack_band_ =
+        ultra::waveform::tone_burst_ack::ToneAckBand::Wideband;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;

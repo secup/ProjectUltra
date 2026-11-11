@@ -38,6 +38,7 @@ SNR_DB="20"
 CFO_HZ="0"
 CLOCK_PPM="0"
 TX_PA=""
+RX_FILTER=""
 TX_MODEL="sim"
 RECORD=0
 SEED="42"
@@ -77,6 +78,8 @@ usage() {
   printf '                                 OFDM rides lower than MC-DPSK (sets ULTRA_SIM_PAPR_PENALTY=1)\n'
   printf '  --tx-pa SPEC                   Senders'"'"' radio ALC/PA: on, or pep=0.5,drive_db=3,p=2,sat_db=3,\n'
   printf '                                 attack_ms=2,release_ms=300 (default: none)\n'
+  printf '  --rx-filter LOW-HIGH           Both receivers'"'"' IF filter passband in Hz, e.g. 1250-1750 for a\n'
+  printf '                                 500 Hz filter (default: none = the whole audio band)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
@@ -193,6 +196,7 @@ while [[ $# -gt 0 ]]; do
     --clock-ppm) CLOCK_PPM="${2:?}"; shift 2 ;;
     --tx-model) TX_MODEL="${2:?}"; shift 2 ;;
     --tx-pa) TX_PA="${2:?}"; shift 2 ;;
+    --rx-filter) RX_FILTER="${2:?}"; shift 2 ;;
     --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
@@ -704,6 +708,7 @@ write_summary() {
     echo "CLOCK_PPM=$CLOCK_PPM"
     echo "TX_MODEL=$TX_MODEL"
     echo "TX_PA=$TX_PA"
+    echo "RX_FILTER=$RX_FILTER"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -856,6 +861,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   --lobby-rx-cfo-hz "BRAVO:${CFO_HZ},ALPHA:$(awk -v c="$CFO_HZ" 'BEGIN{printf "%g", -c}')" \
   --lobby-rx-clock-ppm "ALPHA:${CLOCK_PPM},BRAVO:$(awk -v c="$CLOCK_PPM" 'BEGIN{printf "%g", -c}')" \
   ${TX_PA:+--lobby-tx-pa "$TX_PA"} \
+  ${RX_FILTER:+--lobby-rx-filter "$RX_FILTER"} \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

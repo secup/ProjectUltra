@@ -96,34 +96,35 @@ void test_ofdm_rate_thresholds() {
 }
 
 void test_narrow_data_mode() {
-    // OFDM_NARROW: DQPSK only. R1/2 promoted in clean-enough conditions
-    // (relaxed 2026-05-03 after cli_simulator sweeps); R1/4 elsewhere.
+    // OFDM_NARROW (2026-11-10): the measured, fading-safe narrowband ladder
+    // (kNarrowCoherentLadder): one threshold per rung for every channel class, since a flat fade
+    // looks like AWGN to the narrowband fading index and the rate is fixed for the session.
     Modulation mod;
     CodeRate rate;
-
-    // Hard floor: in-band SNR=18 good fading must stay at R1/4 (CLAUDE.md baseline).
-    recommendDataMode(18.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
-    CHECK(mod == Modulation::DQPSK, "narrow forces DQPSK");
-    CHECK(rate == CodeRate::R1_4, "narrow in-band SNR=18 good fading must stay R1/4");
-
-    // AWGN path: in-band SNR>=18 + fading<0.15 -> R1/2
-    recommendDataMode(18.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.05f);
-    CHECK(rate == CodeRate::R1_2, "narrow in-band SNR=18 AWGN should allow R1/2");
-
-    // Good-fading path: in-band SNR>=20 + fading<kFadingGoodMax -> R1/2
-    recommendDataMode(20.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
-    CHECK(rate == CodeRate::R1_2, "narrow in-band SNR=20 good fading should allow R1/2");
-
-    recommendDataMode(25.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
-    CHECK(rate == CodeRate::R1_2, "narrow in-band SNR=25 good fading should allow R1/2");
-
-    // Just under SNR threshold should drop to R1/4
-    recommendDataMode(19.9f, WaveformMode::OFDM_NARROW, mod, rate, 0.40f);
-    CHECK(rate == CodeRate::R1_4, "narrow in-band SNR=19.9 good fading should drop to R1/4");
-
-    // Moderate fading should always stay R1/4
-    recommendDataMode(25.0f, WaveformMode::OFDM_NARROW, mod, rate, 0.90f);
-    CHECK(rate == CodeRate::R1_4, "narrow moderate fading should stay R1/4");
+    const bool turbo = v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
+    struct Case { float snr; Modulation mod; CodeRate rate; };
+    const Case cases[] = {
+        {6.0f, Modulation::QPSK, CodeRate::R1_4},
+        {9.9f, Modulation::QPSK, CodeRate::R1_4},
+        {10.0f, Modulation::QPSK, CodeRate::R1_2},
+        {14.9f, Modulation::QPSK, CodeRate::R1_2},
+        {15.4f, Modulation::QPSK, CodeRate::R2_3},  // the 500 Hz-filtered GUI session
+        {18.0f, Modulation::QPSK, CodeRate::R3_4},
+        {21.9f, Modulation::QPSK, CodeRate::R3_4},
+        {22.0f, turbo ? Modulation::QAM8 : Modulation::QPSK, turbo ? CodeRate::R2_3 : CodeRate::R3_4},
+        {30.0f, turbo ? Modulation::QAM8 : Modulation::QPSK, turbo ? CodeRate::R2_3 : CodeRate::R3_4},
+    };
+    for (const auto& c : cases) {
+        for (float fading : {0.0f, 0.4f, 0.8f}) {  // AWGN, Good, Moderate: one column
+            recommendDataMode(c.snr, WaveformMode::OFDM_NARROW, mod, rate, fading);
+            CHECK(mod == c.mod && rate == c.rate,
+                  "narrow ladder pick at " + std::to_string(c.snr) + " dB, fading " +
+                      std::to_string(fading));
+        }
+    }
+    // Poor keeps the R1/4 floor.
+    recommendDataMode(30.0f, WaveformMode::OFDM_NARROW, mod, rate, 1.5f);
+    CHECK(mod == Modulation::QPSK && rate == CodeRate::R1_4, "narrow Poor keeps QPSK R1/4");
 }
 
 void test_coherent_ladder_selection() {

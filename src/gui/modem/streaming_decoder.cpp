@@ -278,7 +278,7 @@ StreamingDecoder::StreamingDecoder(size_t buffer_capacity_samples)
                           d.correlation_peak,
                           d.correlation_peak /
                               ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::
-                                  idealCostasPeak(d.symbol_ms_used),
+                                  idealCostasPeak(d.symbol_ms_used, tone_burst_monitor_.diversity()),
                           d.min_symbol_confidence,
                           static_cast<unsigned>(d.symbol_ms_used),
                           d.hamming_corrected_blocks,
@@ -312,7 +312,7 @@ void StreamingDecoder::setToneBurstAckCallback(ToneBurstAckCallback cb) {
                       d.correlation_peak,
                       d.correlation_peak /
                           ultra::waveform::tone_burst_ack::ToneBurstAckMonitor::
-                              idealCostasPeak(d.symbol_ms_used),
+                              idealCostasPeak(d.symbol_ms_used, tone_burst_monitor_.diversity()),
                       d.min_symbol_confidence,
                       d.hamming_corrected_blocks,
                       static_cast<unsigned>(d.symbol_ms_used),
@@ -446,7 +446,7 @@ void StreamingDecoder::noteFrameArrivalSuccess(size_t frame_start_abs,
 
 void StreamingDecoder::noteFrameArrivalSuccessLocked(size_t frame_start_abs,
                                                      size_t frame_end_abs) {
-    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+    if (!connected_ || !protocol::isOFDMMode(mode_)) {
         return;
     }
     sync_controller_.noteFrameArrivalSuccess(frame_start_abs, frame_end_abs);
@@ -487,6 +487,9 @@ void StreamingDecoder::feedAudio(const float* samples, size_t count) {
             halfwidth_hz = cfo_tracker_.pilotSeeded() ? 0.0f : toneAckChirpPhantomBoundHz();
         }
         tone_burst_monitor_.setFrequencyPrior(prior_hz, halfwidth_hz);
+        // The band plan of the ACKs to expect, set by the owner from the negotiated waveform
+        // (setToneAckBand); applied here, on the thread that feeds the monitor.
+        tone_burst_monitor_.setBand(tone_ack_band_.load(std::memory_order_relaxed));
     }
     tone_burst_monitor_.feedAudio(samples, count);
 
@@ -1268,7 +1271,7 @@ void StreamingDecoder::setCarrierLdpcInterleaver(bool enable) {
 
 void StreamingDecoder::expectFullOFDMAnchorOnce() {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+    if (!connected_ || !protocol::isOFDMMode(mode_)) {
         sync_controller_.expect_full_ofdm_anchor_ = false;
         return;
     }
@@ -1706,7 +1709,7 @@ void StreamingDecoder::setExpectedFrameGapSamples(size_t samples) {
 void StreamingDecoder::seedExpectedFrameArrivalAfterSamples(size_t delay_samples,
                                                             float confidence) {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    if (!connected_ || mode_ != protocol::WaveformMode::OFDM_CHIRP) {
+    if (!connected_ || !protocol::isOFDMMode(mode_)) {
         return;
     }
     sync_controller_.seedArrivalAfterDelay(sync_controller_.ring_.total_fed_, delay_samples, confidence);

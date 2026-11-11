@@ -284,7 +284,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     std::vector<float> hyps;
     hyps.reserve(static_cast<size_t>(2 * per_side + 1));
     for (int j = -per_side; j <= per_side; ++j) {
-        hyps.push_back(freq_prior_hz_ + static_cast<float>(j) * hyp_step);
+        hyps.push_back(freq_prior_hz_ + shift_hz_ + static_cast<float>(j) * hyp_step);
     }
     result.frequency_hypotheses = static_cast<int>(hyps.size());
 
@@ -456,7 +456,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
 
     result.detected_offset_samples = best_decode.stats.crc_ok ? best_decode_offset : global_offset;
     result.detected_frequency_offset_hz =
-        best_decode.stats.crc_ok ? best_decode_hyp_hz : global_hyp_hz;
+        (best_decode.stats.crc_ok ? best_decode_hyp_hz : global_hyp_hz) - shift_hz_;
     result.costas_correlation_peak = global_peak;
     result.decode = std::move(best_decode);
     result.sync_acquired = result.decode.stats.crc_ok;

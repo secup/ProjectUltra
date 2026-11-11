@@ -70,7 +70,7 @@ void printUsage(const char* prog) {
     std::cerr << "                  connect, disconnect: narrow = narrowband control waveform\n";
     std::cerr << "                  prx: auto, ofdm, narrow, mcdpsk (default: auto = MC-DPSK\n";
     std::cerr << "                  handshake and data, wideband OFDM at every rung, and\n";
-    std::cerr << "                  narrowband QPSK R1/4 and R1/2). One ModemEngine receiver\n";
+    std::cerr << "                  the narrowband ladder's rungs). One ModemEngine receiver\n";
     std::cerr << "                  per state hears the whole recording, like the GUI\n";
     std::cerr << "  -m <mod>        OFDM data modulation: qpsk, 8psk, 16qam, 32qam\n";
     std::cerr << "                  (ptx default: qpsk; prx default: every rung)\n";
@@ -491,9 +491,13 @@ int runProtocolRx(const char* input_file, WaveformType waveform,
     if (waveform == WaveformType::OFDM_NARROW) {
         plans.push_back({protocol::WaveformMode::OFDM_NARROW, pinned(allOfdmRungs())});
     } else if (waveform == WaveformType::AUTO && !mod_opt && !rate_opt) {
-        // Narrowband sessions run QPSK R1/4 and R1/2.
-        plans.push_back({protocol::WaveformMode::OFDM_NARROW,
-                         {{Modulation::QPSK, CodeRate::R1_4}, {Modulation::QPSK, CodeRate::R1_2}}});
+        // The rungs a narrowband session can run: its ladder and the QPSK R1/4 floor.
+        std::vector<std::pair<Modulation, CodeRate>> narrow_rungs = {
+            {Modulation::QPSK, CodeRate::R1_4}};
+        for (const auto& row : protocol::kNarrowCoherentLadder) {
+            narrow_rungs.emplace_back(row.mod, row.rate);
+        }
+        plans.push_back({protocol::WaveformMode::OFDM_NARROW, narrow_rungs});
     }
     for (const auto& plan : plans) {
         for (const auto& [mod, rate] : plan.rungs) {

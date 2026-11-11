@@ -19,13 +19,13 @@ ToneBurstAckMonitor::ToneBurstAckMonitor(Config cfg) : cfg_(std::move(cfg)) {
     buffer_.reserve(cfg_.buffer_capacity_samples);
 }
 
-float ToneBurstAckMonitor::idealCostasPeak(uint32_t symbol_ms) {
+float ToneBurstAckMonitor::idealCostasPeak(uint32_t symbol_ms, bool diversity) {
     const uint32_t spp = (kSampleRate * symbol_ms) / 1000u;
     // Goertzel magnitude for matched tone of amplitude A over N samples: N·A/2.
     const float per_symbol = (static_cast<float>(spp) / 2.0f) * kToneAmplitude;
     // Diversity ACK (equal peak, two half-amplitude tones, square-law combined): the clean
     // combined magnitude is sqrt(2 (N A/4)^2) = (N A/2) / sqrt(2).
-    const float combine = toneAckDiversityEnabled() ? 0.70710678f : 1.0f;
+    const float combine = diversity ? 0.70710678f : 1.0f;
     return per_symbol * static_cast<float>(kCostasSymbols) * combine;
 }
 
@@ -222,7 +222,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
         const auto r = detector_.detectAndDecode(
             buffer_.data() + tail_base, window, symbol_ms,
             cfg_.sweep_step_samples, acceptance_predicate_,
-            idealCostasPeak(symbol_ms) * cfg_.min_peak_fraction);
+            idealCostasPeak(symbol_ms, detector_.diversity()) * cfg_.min_peak_fraction);
         if (r.semantic_rejections > 0) {
             semantic_candidates_rejected_ += r.semantic_rejections;
             if (r.strongest_rejected_payload.has_value()) {
@@ -237,7 +237,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
                     last_semantic_rejection_stream_offset_ =
                         rejected_stream_offset;
                     const auto& p = *r.strongest_rejected_payload;
-                    const float ideal = idealCostasPeak(symbol_ms);
+                    const float ideal = idealCostasPeak(symbol_ms, detector_.diversity());
                     const float normalized_peak =
                         ideal > 0.0f
                             ? r.strongest_rejected_correlation_peak / ideal
@@ -267,7 +267,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
                 const char* e = std::getenv("ULTRA_TONE_ACK_TRACE");
                 return e && e[0] == '1';
             }();
-            const float ideal_t = idealCostasPeak(symbol_ms);
+            const float ideal_t = idealCostasPeak(symbol_ms, detector_.diversity());
             if (kTrace && ideal_t > 0.0f && r.costas_correlation_peak > 0.25f * ideal_t) {
                 LOG_MODEM(INFO,
                           "TONE_TRACE pass=%llu ms=%u win=%zu tail_base=%zu buf=%zu "
@@ -289,7 +289,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
         // 12 ms duration on a 25 ms burst that aliases into a noise-floor
         // peak). Real bursts have peaks at ~30%+ of ideal even at SNR=-10.
         const float min_peak =
-            idealCostasPeak(symbol_ms) * cfg_.min_peak_fraction;
+            idealCostasPeak(symbol_ms, detector_.diversity()) * cfg_.min_peak_fraction;
         if (r.costas_correlation_peak < min_peak) continue;
 
         const uint64_t detected_stream_offset =

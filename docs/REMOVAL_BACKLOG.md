@@ -187,7 +187,9 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
   modulator). The RX twin — the dead `lts_carrier_phases` / `lts_phase_offset` / `phase_advance` DQPSK
   reference computation in `estimateChannelFromLTS` (write-only after A3) — was deleted too. The OFDM
   TX+RX path is now differential-free end-to-end.
-- **▶ LATER — revamp OFDM_NARROW as COHERENT** (reuses the coherent OFDM machinery with a narrowband
+- **✅ DONE 2026-11-10 — OFDM_NARROW returned as COHERENT** (CHANGELOG 2026-11-10 narrowband entry;
+  floors re-measured with `measure_ack_fer --waveform narrow`). Original note kept below.
+- **(was) ▶ LATER — revamp OFDM_NARROW as COHERENT** (reuses the coherent OFDM machinery with a narrowband
   config; no differential code needed). **⚠ real PHY re-validation, NOT a config flip:** narrowband
   ~17 dB / 500 Hz is where differential's no-phase-reference robustness is the point, so coherent narrow
   may land at a HIGHER SNR floor (fewer carriers to track phase across). Don't assume it reaches the

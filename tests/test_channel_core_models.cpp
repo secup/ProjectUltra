@@ -415,8 +415,72 @@ void checkStreamingCfoAcrossChunks() {
     }
 }
 
+// Receive IF filter (2026-11-10): a 500 Hz filter at 1500 Hz passes the band at unity gain,
+// rejects what lies outside, and is chunk-invariant.
+void checkRxBandpassFilter() {
+    using ultra::ota_channel_core::RxBandpassChannelModel;
+    ChannelConfig cfg;
+    cfg.type = ChannelType::PASSTHROUGH;
+    cfg.rx_filter_low_hz = 1250.0f;
+    cfg.rx_filter_high_hz = 1750.0f;
+    RngRoot root(0x77u);
+    const size_t n = 96000;
+    const size_t settle = RxBandpassChannelModel::kTaps;  // filter fill
+    auto gainDb = [&](double tone_hz) {
+        auto model = createChannelModel(cfg, root, "bp");
+        assert(dynamic_cast<RxBandpassChannelModel*>(model.get()) != nullptr);
+        std::vector<float> tone(n), out;
+        for (size_t i = 0; i < n; ++i) {
+            tone[i] = static_cast<float>(std::sin(2.0 * M_PI * tone_hz * i / kSampleRate));
+        }
+        model->process(tone, 0, out);
+        double pin = 0.0, pout = 0.0;
+        for (size_t i = settle; i < n; ++i) {
+            pin += static_cast<double>(tone[i]) * tone[i];
+            pout += static_cast<double>(out[i]) * out[i];
+        }
+        return 10.0 * std::log10(pout / pin + 1e-30);
+    };
+    const double mid = gainDb(1500.0), edge_lo = gainDb(1250.0), edge_hi = gainDb(1750.0);
+    const double stop_lo = gainDb(1000.0), stop_hi = gainDb(2000.0), ack = gainDb(2475.0);
+    std::cout << "rx_bandpass 1500=" << mid << " 1250=" << edge_lo << " 1750=" << edge_hi
+              << " 1000=" << stop_lo << " 2000=" << stop_hi << " 2475=" << ack << " dB\n";
+    assert(std::abs(mid) < 0.1);
+    assert(std::abs(edge_lo + 6.0) < 1.0 && std::abs(edge_hi + 6.0) < 1.0);
+    assert(stop_lo < -60.0 && stop_hi < -60.0 && ack < -60.0);
+
+    // Chunk-invariant, bit for bit.
+    auto chunked_model = createChannelModel(cfg, root, "bp");
+    auto whole_model = createChannelModel(cfg, root, "bp");
+    std::vector<float> x(n);
+    uint32_t lcg = 99u;
+    for (size_t i = 0; i < n; ++i) {
+        lcg = lcg * 1664525u + 1013904223u;
+        x[i] = static_cast<float>(static_cast<int32_t>(lcg >> 8) % 1000) / 1000.0f;
+    }
+    std::vector<float> chunked, whole;
+    size_t pos = 0;
+    while (pos < n) {
+        lcg = lcg * 1664525u + 1013904223u;
+        const size_t chunk = std::min<size_t>(n - pos, 96 + (lcg >> 8) % 1824);
+        std::vector<float> in(x.begin() + pos, x.begin() + pos + chunk), o;
+        chunked_model->process(in, pos, o);
+        chunked.insert(chunked.end(), o.begin(), o.end());
+        pos += chunk;
+    }
+    whole_model->process(x, 0, whole);
+    assert(chunked == whole);
+
+    // No filter configured: no wrapper.
+    ChannelConfig plain;
+    plain.type = ChannelType::PASSTHROUGH;
+    auto none = createChannelModel(plain, root, "bp-none");
+    assert(dynamic_cast<RxBandpassChannelModel*>(none.get()) == nullptr);
+}
+
 int main() {
     checkStreamingCfoAcrossChunks();
+    checkRxBandpassFilter();
     {
         PassthroughChannelModel model;
         const std::vector<float> input{0.0f, 1.0f, -0.5f, 0.25f};

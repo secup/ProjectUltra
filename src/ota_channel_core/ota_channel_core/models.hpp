@@ -67,6 +67,11 @@ struct ChannelConfig {
     float clock_ppm = 0.0f;
     // The sending radio's ALC/PA; disabled = byte-identical models.
     TxPaConfig tx_pa;
+    // The RECEIVING radio's IF filter passband (Hz), e.g. 1250-1750 for a 500 Hz filter at
+    // 1500 Hz audio. high <= low = none (byte-identical models). Applied last: it filters what
+    // the station hears, signal and noise alike (RxBandpassChannelModel).
+    float rx_filter_low_hz = 0.0f;
+    float rx_filter_high_hz = 0.0f;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
@@ -208,6 +213,37 @@ private:
 // time-varying gain: the Hilbert filter (255-tap Blackman) only estimates the envelope and its
 // limited low-frequency accuracy never reaches the signal path. Below PEP with drive_db <= 0 the
 // output is the input delayed by kDelaySamples. Chunk-invariant.
+// The receiving radio's IF filter (2026-11-10): a linear-phase FIR bandpass applied to the
+// OUTPUT of the inner chain (after fading and noise), as a crystal or DSP filter sits ahead of
+// the soundcard. Windowed sinc (Blackman, kTaps taps: -6 dB at the band edges, ~130 Hz
+// transition, more than 70 dB stopband), group delay (kTaps - 1) / 2 samples, chunk-invariant.
+// Real radios add passband ripple and group-delay variation near the edges; this models only
+// the band limit, which is what decides whether a signal outside the passband reaches the modem.
+class RxBandpassChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+    static constexpr int kTaps = 2047;
+
+    RxBandpassChannelModel(std::unique_ptr<IChannelModel> inner, float low_hz, float high_hz,
+                           uint32_t sample_rate);
+
+    void reset() override;
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
+
+    float lowHz() const { return low_hz_; }
+    float highHz() const { return high_hz_; }
+
+private:
+    std::unique_ptr<IChannelModel> inner_;
+    float low_hz_ = 0.0f;
+    float high_hz_ = 0.0f;
+    std::vector<float> taps_;
+    std::vector<float> history_;  // last kTaps - 1 inner output samples
+    std::vector<float> scratch_;
+};
+
 class TxPaAlcChannelModel final : public IChannelModel {
 public:
     using IChannelModel::process;

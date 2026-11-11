@@ -1071,8 +1071,14 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     const int symbol_samples = getSamplesPerSymbol();
     const int search_window = symbol_samples * 4;  // Search first 4 symbols worth
 
-    if (samples.size() < static_cast<size_t>(symbol_samples * 3)) {
-        return false;  // Need at least 3 symbols (2 LTS + margin)
+    // The LTS pair plus at least one candidate offset. The caller sizes the window (the warm
+    // window is its timing uncertainty in samples plus the pair); a fixed "3 symbols" minimum
+    // rejected every warm window of the narrowband geometry, whose 2240-sample symbols make
+    // that 6720 samples against a 6656-sample window (BUG-NARROW-NO-ANCHOR). Every bound
+    // below already stops at samples.size() - 2 symbols.
+    const size_t min_window_samples = static_cast<size_t>(symbol_samples) * 2 + 1;
+    if (samples.size() < min_window_samples) {
+        return false;
     }
 
     // Energy-based gate: find where signal starts
@@ -1116,7 +1122,7 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
     data_sync_hilbert_.reset();
     auto& analytic = data_sync_analytic_scratch_;
     data_sync_hilbert_.process(samples, analytic);
-    if (analytic.size() < static_cast<size_t>(symbol_samples * 3)) {
+    if (analytic.size() < min_window_samples) {
         return false;
     }
 

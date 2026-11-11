@@ -66,7 +66,9 @@ run_case(ofdm_narrow narrow.f32 "Hello narrow;-w;narrow;-m;qpsk;-r;r1_4" "-w;nar
          "OFDM narrow QPSK R1/4 +DATA .*\"Hello narrow\"" "1")
 
 # Narrowband control waveform (500 Hz chirp and MC-DPSK), as a station forced to OFDM_NARROW sends
-# it. The narrowband CONNECT is left out: it does not decode even on a clean signal
-# (BUG-NARROW-MCDPSK-CONNECT, open); add it here when that is fixed.
+# it. The CONNECT rides the fixed DBPSK handshake profile: until 2026-11-10 a receiver demodulated
+# it with the preset's DQPSK on non-orthogonal carriers and no narrowband session could connect
+# (BUG-NARROW-MCDPSK-CONNECT).
 run_case(narrow_ping nb_ping.f32 "ping;-w;narrow" "-w;mcdpsk" "MC-DPSK +PING" "1")
+run_case(narrow_connect nb_connect.f32 "connect;-w;narrow" "-w;mcdpsk" "CONNECT from VE2ABC" "1")
 run_case(narrow_disconnect nb_disconnect.f32 "disconnect;-w;narrow" "-w;mcdpsk" "DISCONNECT" "1")

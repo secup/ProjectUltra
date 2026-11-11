@@ -1230,6 +1230,55 @@ void TxPaAlcChannelModel::process(std::span<const float> input, uint64_t start_s
     inner_->process(std::span<const float>(pa_out_.data(), pa_out_.size()), start_sample, output);
 }
 
+RxBandpassChannelModel::RxBandpassChannelModel(std::unique_ptr<IChannelModel> inner,
+                                               float low_hz, float high_hz,
+                                               uint32_t sample_rate)
+    : inner_(std::move(inner)), low_hz_(low_hz), high_hz_(high_hz) {
+    const double fs = static_cast<double>(sample_rate);
+    const double f1 = static_cast<double>(low_hz) / fs;   // cycles per sample
+    const double f2 = static_cast<double>(high_hz) / fs;
+    const int m = kTaps - 1;
+    taps_.resize(kTaps);
+    for (int n = 0; n < kTaps; ++n) {
+        const double t = static_cast<double>(n) - 0.5 * m;
+        // Ideal bandpass = lowpass(f2) - lowpass(f1), each 2 f sinc(2 f t).
+        auto lp = [&](double f) {
+            return (std::abs(t) < 1e-12) ? 2.0 * f
+                                         : std::sin(2.0 * M_PI * f * t) / (M_PI * t);
+        };
+        const double w = 0.42 - 0.5 * std::cos(2.0 * M_PI * n / m) +
+                         0.08 * std::cos(4.0 * M_PI * n / m);
+        taps_[static_cast<size_t>(n)] = static_cast<float>((lp(f2) - lp(f1)) * w);
+    }
+    history_.assign(static_cast<size_t>(kTaps - 1), 0.0f);
+}
+
+void RxBandpassChannelModel::reset() {
+    inner_->reset();
+    std::fill(history_.begin(), history_.end(), 0.0f);
+}
+
+void RxBandpassChannelModel::process(std::span<const float> input, uint64_t start_sample,
+                                     std::vector<float>& output) {
+    inner_->process(input, start_sample, scratch_);
+    const size_t n = scratch_.size();
+    // y[k] = sum_j h[j] x[k - j] over the concatenation history_ + scratch_.
+    std::vector<float> x;
+    x.reserve(history_.size() + n);
+    x.insert(x.end(), history_.begin(), history_.end());
+    x.insert(x.end(), scratch_.begin(), scratch_.end());
+    output.resize(n);
+    const size_t h = history_.size();
+    for (size_t k = 0; k < n; ++k) {
+        const float* xp = x.data() + k + h;  // x[k] in the concatenated buffer
+        double acc = 0.0;
+        for (int j = 0; j < kTaps; ++j) acc += static_cast<double>(taps_[static_cast<size_t>(j)]) * xp[-j];
+        output[k] = static_cast<float>(acc);
+    }
+    // Keep the last kTaps - 1 samples for the next chunk.
+    std::copy(x.end() - static_cast<std::ptrdiff_t>(h), x.end(), history_.begin());
+}
+
 namespace {
 std::unique_ptr<IChannelModel> createChannelModelUnshifted(const ChannelConfig& config,
                                                            const RngRoot& rng_root,
@@ -1252,6 +1301,12 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
     if (std::abs(config.clock_ppm) > 0.001f) {
         model = std::make_unique<ClockOffsetChannelModel>(std::move(model), config.clock_ppm,
                                                           config.sample_rate);
+    }
+    if (config.rx_filter_high_hz > config.rx_filter_low_hz && config.rx_filter_low_hz > 0.0f) {
+        // Filters the chain's OUTPUT, so outermost = last: the receiver's IF filter.
+        model = std::make_unique<RxBandpassChannelModel>(std::move(model), config.rx_filter_low_hz,
+                                                         config.rx_filter_high_hz,
+                                                         config.sample_rate);
     }
     return model;
 }

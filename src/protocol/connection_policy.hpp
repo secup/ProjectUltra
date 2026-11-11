@@ -269,7 +269,14 @@ inline float designDopplerForFadingIndex(float fading_index) {
 inline constexpr float kClarkeCoherenceNumerator = 0.423f;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
-inline constexpr uint32_t kNarrowOFDMPilotSpacing = 10;
+// The narrowband burst anchor: a dual chirp of two 1000 ms sweeps with two 100 ms gaps
+// (presets::narrowbandOFDM chirp, OFDMChirpWaveform::getChirpConfig gap), counted the way
+// kWideOFDMFullAnchorExtraSamples counts the wideband one. Coherent OFDM_NARROW sends it before
+// every burst descriptor (its receiver has no structure detector).
+inline constexpr uint32_t kNarrowOFDMChirpDurationMs = 1000;
+inline constexpr uint32_t kNarrowOFDMChirpGapMs = 100;
+inline constexpr uint32_t kNarrowOFDMFullAnchorExtraMs =
+    2 * kNarrowOFDMChirpDurationMs + 2 * kNarrowOFDMChirpGapMs;
 inline constexpr uint32_t kLDPCBitsPerCodeword = 648;  // z=27 (n=648) short LDPC
 
 // Coded bits per LDPC codeword for a given lifting size. The 802.11n base matrix has
@@ -713,14 +720,14 @@ inline LadderRung ladderRungForId(LadderRungId id) {
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::OFDM_CHIRP:
             // Coherent-only wideband OFDM (thread A, 2026-05-31). Nominal mod is
-            // QPSK; the real data mod still comes from recommendDataMode(). NARROW
-            // below stays DQPSK — narrowband/low-SNR is a robust differential regime.
+            // QPSK; the real data mod still comes from recommendDataMode().
             return {id, "OFDM_CHIRP", WaveformMode::OFDM_CHIRP,
                     Modulation::QPSK, CodeRate::R1_4, 0, 0,
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::OFDM_NARROW:
+            // Coherent too since its 2026-11-10 return (OFDM has no differential path).
             return {id, "OFDM_NARROW", WaveformMode::OFDM_NARROW,
-                    Modulation::DQPSK, CodeRate::R1_4, 0, 0,
+                    Modulation::QPSK, CodeRate::R1_4, 0, 0,
                     v2::kDefaultFixedFrameCodewords};
         case LadderRungId::UNKNOWN:
         default:
@@ -2330,7 +2337,12 @@ inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
                       std::max<uint32_t>(72000u, physical_rtt_ms));
 }
 
-inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
+// Airtime of a narrowband OFDM frame at this rung: the rung's own pilot spacing on the 21
+// narrowband carriers (the waveform's layout, ofdm_link_adaptation::recommendedPilotSpacing),
+// 2 LTS symbols plus the codewords. The control frame (ACK, burst descriptor) rides the control
+// profile, QPSK R1/4. Until 2026-11-10 this used one fixed pilot spacing for every rung (the
+// differential era's), timing a QPSK R1/4 frame (83 symbols) as 74.
+inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod, CodeRate rate,
                                              int cw_count = v2::kDefaultFixedFrameCodewords) {
     cw_count = v2::sanitizeFixedFrameCodewords(cw_count);
     constexpr float symbol_ms =
@@ -2338,12 +2350,16 @@ inline OFDMFrameTiming narrowOFDMFrameTiming(Modulation mod,
         static_cast<float>(kOFDMSampleRate);
 
     const uint32_t bits_per_symbol = bitsPerOFDMSymbol(
-        kNarrowOFDMCarriers, true, static_cast<int>(kNarrowOFDMPilotSpacing), mod);
+        kNarrowOFDMCarriers, true, ofdm_link_adaptation::recommendedPilotSpacing(mod, rate), mod);
+    const uint32_t control_bits_per_symbol = bitsPerOFDMSymbol(
+        kNarrowOFDMCarriers, true,
+        ofdm_link_adaptation::recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_4),
+        Modulation::QPSK);
 
     const uint32_t data_cw_symbols =
         (static_cast<uint32_t>(cw_count) * kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
     const uint32_t ack_cw_symbols =
-        (kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
+        (kLDPCBitsPerCodeword + control_bits_per_symbol - 1) / control_bits_per_symbol;
 
     OFDMFrameTiming timing;
     timing.data_symbols = 2 + data_cw_symbols;
@@ -2369,16 +2385,21 @@ inline constexpr bool shouldGradeAnchoredBackstopAsCrater(bool payload_seen) {
 
 inline uint32_t computeNarrowOFDMAckTimeoutMs(
         Modulation mod,
+        CodeRate rate,
         int cw_count = v2::kDefaultFixedFrameCodewords,
         size_t window_size = 1,
         uint32_t configured_sack_delay_ms = kToneBurstReceiverSackHoldMs) {
-    const OFDMFrameTiming timing = narrowOFDMFrameTiming(mod, cw_count);
+    const OFDMFrameTiming timing = narrowOFDMFrameTiming(mod, rate, cw_count);
     // For window>1 selective-repeat, we hold the ARQ window full during
     // the burst, so the ACK timeout has to cover the full TX burst plus
     // ACK turnaround plus a generous decode margin. Without this scale
     // the timer fires while later frames are still on the wire.
-    const uint32_t tx_burst_ms = timing.data_ms *
-                                 static_cast<uint32_t>(std::max<size_t>(1, window_size));
+    // The burst is the chirp anchor, the descriptor (a control frame) and the window's frames
+    // (2026-11-10: the anchor and descriptor were not budgeted, so a QPSK R1/4 burst's ACK
+    // arrived after the monitor window closed).
+    const uint32_t tx_burst_ms =
+        kNarrowOFDMFullAnchorExtraMs + timing.ack_ms +
+        timing.data_ms * static_cast<uint32_t>(std::max<size_t>(1, window_size));
     // 2026-06-19: budget the receiver's tone-burst SACK-coalesce hold (the term the formula
     // OMITTED — narrow QPSK/8PSK/QAM16 at window=3 went 0.3-1.5 s short of the 1.5 s hold, the
     // same premature-resend class as wide-OFDM E5). Match the larger of the configured delay and

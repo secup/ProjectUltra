@@ -63,6 +63,9 @@ struct Args {
     // and MEDIUM CP, i.e. what the GUI actually transmits. Off by default so historical
     // invocations stay comparable.
     bool geometry_production = false;
+    // OFDM_CHIRP (wideband) or OFDM_NARROW (presets::narrowbandOFDM geometry: FFT 2048,
+    // 21 carriers, 1250-1750 Hz chirp), --waveform wide|narrow.
+    ultra::protocol::WaveformMode waveform = ultra::protocol::WaveformMode::OFDM_CHIRP;
     // Channel-noise pre-roll fed to the decoder before EACH burst. A real receiver always
     // hears band noise before a burst (INV-SIM-AWGN-001); without it the first trial on a
     // fresh decoder arms the anchor wait mid-burst and misses its chirp (the constant
@@ -147,7 +150,7 @@ void usage(const char* argv0) {
         << " --snr <db> --config <ack_light|data4_light|data4_full|ack_full|warm_sync_light|burst_chunk>"
         << " --seed <u64> --n <frames|chunks>"
         << " [--channel awgn|good|moderate|poor]"
-        << " [--mod dqpsk|qpsk|d8psk|qam8|qam16|qam32]"
+        << " [--waveform wide|narrow] [--mod dqpsk|qpsk|d8psk|qam8|qam16|qam32]"
         << " [--rate r1_4|r1_2|r2_3|r3_4]"
         << " [--carrier-interleave 0|1]"
         << " [--group <2..8>] [--burst-interleave 0|1]\n"
@@ -273,6 +276,15 @@ Args parseArgs(int argc, char** argv) {
             args.genie_clean_snr_db = std::stof(requireValue("--genie-clean-snr"));
         } else if (key == "--ldpc-z") {
             args.ldpc_z = std::stoi(requireValue("--ldpc-z"));
+        } else if (key == "--waveform") {
+            const std::string w = requireValue("--waveform");
+            if (w == "wide" || w == "ofdm") {
+                args.waveform = ultra::protocol::WaveformMode::OFDM_CHIRP;
+            } else if (w == "narrow") {
+                args.waveform = ultra::protocol::WaveformMode::OFDM_NARROW;
+            } else {
+                throw std::runtime_error("unknown --waveform: " + w);
+            }
         } else if (key == "--geometry") {
             const std::string g = requireValue("--geometry");
             if (g != "production" && g != "legacy") {
@@ -305,17 +317,23 @@ Args parseArgs(int argc, char** argv) {
         // by presets::balanced(). Explicit flags given AFTER --geometry do not override
         // this; give the explicit flags instead of --geometry to measure other shapes.
         args.frame_cw = ultra::protocol::connection_policy::recommendCWCount(
-            args.mod, args.rate, ultra::protocol::WaveformMode::OFDM_CHIRP);
+            args.mod, args.rate, args.waveform);
         args.cp_name = "medium";
     }
     return args;
 }
 
 ultra::ModemConfig makeOFDMConfig(ultra::Modulation mod, ultra::CodeRate rate,
-                                  const std::string& cp_name = "long") {
+                                  const std::string& cp_name = "long",
+                                  ultra::protocol::WaveformMode waveform =
+                                      ultra::protocol::WaveformMode::OFDM_CHIRP) {
     ultra::ModemConfig cfg;
-    cfg.fft_size = 1024;
-    cfg.num_carriers = 59;
+    if (waveform == ultra::protocol::WaveformMode::OFDM_NARROW) {
+        cfg = ultra::presets::narrowbandOFDM();  // the geometry ModemEngine runs for it
+    } else {
+        cfg.fft_size = 1024;
+        cfg.num_carriers = 59;
+    }
     cfg.sample_rate = kSampleRate;
     cfg.center_freq = 1500.0f;
     cfg.cp_mode = cp_name == "medium" ? ultra::CyclicPrefixMode::MEDIUM
@@ -336,8 +354,8 @@ bool usesFullPreamble(MeasureConfig config) {
 }
 
 void configureEncoder(gui::StreamingEncoder& encoder, const Args& args) {
-    const auto ofdm = makeOFDMConfig(args.mod, args.rate, args.cp_name);
-    encoder.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    const auto ofdm = makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform);
+    encoder.setMode(args.waveform);
     encoder.setOFDMConfig(ofdm);
     encoder.setDataMode(args.mod, args.rate);
     encoder.setFixedFrameCodewords(args.frame_cw);
@@ -349,7 +367,7 @@ void configureEncoder(gui::StreamingEncoder& encoder, const Args& args) {
 }
 
 void configureDecoder(gui::StreamingDecoder& decoder, const Args& args) {
-    const auto ofdm = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+    const auto ofdm = makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform);
     // Only 1-CW control frames decode on the cold setMode() path. 4-CW DATA
     // frames are a connected-mode construct, so Data4Full uses the connected
     // decoder too — its full chirp preamble is admitted via
@@ -357,11 +375,11 @@ void configureDecoder(gui::StreamingDecoder& decoder, const Args& args) {
     // fade depth WITHOUT the cold-light-sync selection bias that hides the
     // deep-fade decode failures we are trying to measure.
     if (args.config == MeasureConfig::AckFull) {
-        decoder.setMode(protocol::WaveformMode::OFDM_CHIRP, false);
+        decoder.setMode(args.waveform, false);
         decoder.setOFDMConfig(ofdm);
         decoder.setDataMode(args.mod, args.rate);
     } else {
-        decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
+        decoder.setConnectedOFDMMode(args.waveform,
                                      ofdm,
                                      args.mod,
                                      args.rate);
@@ -963,7 +981,7 @@ Counts measure(const Args& args) {
             gtrue::buffer().clear();
             {   // same provenance gate as --chest-nmse: only the pass whose geometry
                 // matches the transmitted profile, never the control-first peek.
-                const auto want = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                const auto want = makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform);
                 auto& x = gtrue::expect();
                 x.active = true;
                 x.pilot_spacing = static_cast<uint32_t>(want.pilot_spacing);
@@ -981,7 +999,7 @@ Counts measure(const Args& args) {
             const auto& est = gtrue::buffer();
             const float nv = std::max(gtrue::capturedNoiseVar(), 1e-12f);
             if (!est.empty() && gamma_out.is_open()) {
-                const auto cfg = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                const auto cfg = makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform);
                 std::vector<int> all, data, pilot;
                 std::vector<size_t> dlog, plog;
                 std::vector<bool> isp;
@@ -1002,7 +1020,7 @@ Counts measure(const Args& args) {
 
             // Phase 6 shadow scoring on the SAME grid, raw (un-renormalized) gamma.
             if (shadow_table.usable() && !est.empty()) {
-                const auto cfg2 = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                const auto cfg2 = makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform);
                 std::vector<int> a2, d2, p2;
                 std::vector<size_t> dl2, pl2;
                 std::vector<bool> ip2;
@@ -1054,7 +1072,7 @@ Counts measure(const Args& args) {
             gtrue::buffer().clear();
             {   // Accept only the pass matching the TRANSMITTED profile. Without this
                 // the control-first QPSK R1/4 peek is captured instead of the data pass.
-                const auto want = makeOFDMConfig(args.mod, args.rate, args.cp_name);
+                const auto want = makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform);
                 auto& x = gtrue::expect();
                 x.active = true;
                 x.pilot_spacing = static_cast<uint32_t>(want.pilot_spacing);
@@ -1067,7 +1085,7 @@ Counts measure(const Args& args) {
                                     /*reset_decoder=*/true,
                                     /*expect_full_anchor=*/expect_anchor);
             gtrue::mode() = gtrue::Mode::Off;
-            accumulateChestNmse(channel, makeOFDMConfig(args.mod, args.rate, args.cp_name), chest_acc);
+            accumulateChestNmse(channel, makeOFDMConfig(args.mod, args.rate, args.cp_name, args.waveform), chest_acc);
             classify(outcome, trial.frame_bytes, counts);
             continue;
         }
@@ -1234,7 +1252,7 @@ BurstCounts measureBurst(const Args& args) {
         expected = gui::streaming_frame_policy::preparePhysicalBurstFrames(
             expected,
             gui::streaming_frame_policy::shouldStampPhysicalBurstEnd(
-                expected.size(), protocol::WaveformMode::OFDM_CHIRP,
+                expected.size(), args.waveform,
                 /*supports_data_preamble=*/true, args.burst_interleave));
 
         // HARNESS FIDELITY (2026-07-29): FULL chirp+LTS anchor at the group start.

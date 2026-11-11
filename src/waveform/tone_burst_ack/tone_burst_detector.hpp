@@ -88,6 +88,13 @@ public:
     void setDiversity(bool on) { diversity_ = on; }
     bool diversity() const { return diversity_; }
 
+    // Band plan (toneShiftHzFor / toneDiversityFor). The search runs on the shifted tones; the
+    // reported carrier offset stays the dial offset (the shift is taken back out).
+    void setBand(ToneAckBand band) {
+        shift_hz_ = toneShiftHzFor(band);
+        diversity_ = toneDiversityFor(band);
+    }
+
     // Carrier-offset prior: the expected shift (Hz) of every tone and the half-width (Hz) of
     // its uncertainty. detectAndDecode searches prior + j * step, step =
     // frequencyHypothesisStepHz(symbol_ms), |j| <= frequencyHypothesesPerSide(halfwidth,
@@ -113,7 +120,7 @@ public:
     DecodeAlignedResult decodeAligned(SampleSpan samples,
                                       size_t num_samples,
                                       uint32_t symbol_ms = kBaselineSymbolMs) {
-        return decodeAlignedAt(samples, num_samples, symbol_ms, freq_prior_hz_);
+        return decodeAlignedAt(samples, num_samples, symbol_ms, freq_prior_hz_ + shift_hz_);
     }
     // As decodeAligned, with every tone shifted by offset_hz.
     DecodeAlignedResult decodeAlignedAt(SampleSpan samples, size_t num_samples,
@@ -162,6 +169,7 @@ public:
 private:
     bool diversity_ = true;
     float freq_prior_hz_ = 0.0f;
+    float shift_hz_ = 0.0f;  // band plan shift of every tone
     float freq_halfwidth_hz_ = 0.0f;
 };
 

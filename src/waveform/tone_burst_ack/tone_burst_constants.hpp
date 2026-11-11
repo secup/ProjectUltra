@@ -97,6 +97,24 @@ inline bool toneAckDiversityEnabled() {
     return on;
 }
 
+// BAND PLAN (2026-11-10). A narrowband session (OFDM_NARROW, the 500 Hz channel 1250-1750 Hz)
+// keeps its ACKs inside that channel: a radio's 500 Hz filter passes nothing of the wideband
+// plan (2400-2625 Hz, diversity 1075-1300 Hz). The narrowband plan moves the four tones down by
+// kNarrowbandToneShiftHz to 1375 / 1450 / 1525 / 1600 Hz (on the 25 Hz grid; with the +-50 Hz
+// acquisition search and the main lobe of the shortest 12 ms symbol they stay inside the
+// channel) and has no diversity subband: a second subband inside 500 Hz fades with the first
+// (branch power correlation cos^2(pi df tau) = 0.8 at df = 225 Hz, tau = 0.5 ms), so the single
+// tone keeps the full amplitude instead (+3 dB on AWGN). Both stations pick the plan from the
+// negotiated waveform, so it needs no signalling.
+enum class ToneAckBand : uint8_t { Wideband, Narrowband };
+inline constexpr float kNarrowbandToneShiftHz = -1025.0f;
+inline float toneShiftHzFor(ToneAckBand band) {
+    return band == ToneAckBand::Narrowband ? kNarrowbandToneShiftHz : 0.0f;
+}
+inline bool toneDiversityFor(ToneAckBand band) {
+    return band == ToneAckBand::Wideband && toneAckDiversityEnabled();
+}
+
 // Carrier-offset search when the receiver holds NO estimate of the reverse-link dial offset:
 // the modem's specified acquisition range (+-50 Hz; the dual-chirp estimator itself spans
 // +-60 Hz, chirp_sync.hpp estimateCFO). Below the 75 Hz tone spacing, so a hypothesis one

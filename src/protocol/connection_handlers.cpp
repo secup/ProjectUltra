@@ -386,7 +386,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // fade-averaged estimate). Start one step more robust when channel is
         // borderline; ULTRA_ENTRY_CAP_R34 (default OFF) lets a data-aided reading that
         // clears the R3/4 anchor by >= 1 sigma enter at R3/4 (waveform_selection.hpp).
-        if (isOFDMMode(negotiated_mode_)) {
+        if (isOFDMMode(negotiated_mode_) && entryRateCapsApply()) {
             CodeRate capped = capInitialOFDMRate(ofdm_selection_snr_db, rate_fading, rec_rate, rec_mod,
                                                  selection_snr_data_aided);
             if (capped != rec_rate) {
@@ -491,7 +491,8 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // while QPSK R1/2 subsequently ran 24/24 groups clean.  The connect sample
         // is MC-DPSK-domain evidence, not a coherent-OFDM payload measurement.
         const auto authority_entry = capRxAuthorityInitialRung(
-            rec_mod, rec_rate, rxRateAuthorityEnabled(), environment_forced_rung);
+            rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply(),
+            environment_forced_rung);
         if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
             LOG_MODEM(INFO,
                       "Connection: RX-AUTHORITY measured-entry probe %s %s -> QPSK R1/2 "

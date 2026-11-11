@@ -96,8 +96,23 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 ### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)
 - OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake; since 2026-11-09 (`ULTRA_FAST`) group starts carry NO chirp — the receiver finds each burst descriptor by frame-structure detection (chirp only at connect, the first groups and an RTO resend) — and data frames are ONE turbo codeword (`ULTRA_DATA_FEC`). Key: `decodeFixedFrame()` in frame_v2.cpp.
 
-### Mode 3: OFDM_NARROW (narrowband chirp 1250-1750 Hz, 500 Hz BW, low SNR)
-- OFDM, FFT=2048, 21 carriers, 492 Hz BW. Same frame format as wideband (4-CW data, 1-CW control), frame + optional channel interleaving, light preamble for data. Dual-listen: idle RX listens for both wideband and narrowband chirps. ARQ selective-repeat **window=3** (ACK timeout ~14 s). ~200 bps (R1/4) to ~450 bps (R1/2) — ~5× slower than wideband but works ~7.5 dB lower SNR.
+### Mode 3: OFDM_NARROW (narrowband chirp 1250-1750 Hz, 500 Hz channel) — coherent since 2026-11-10
+- Disabled 2026-05-31 with differential OFDM; RETURNED 2026-11-10 as **coherent** OFDM (QPSK) on
+  FFT=2048, 21 carriers (1265.6-1757.8 Hz), the geometry applied inside ModemEngine
+  (`applyOfdmGeometryFor`) for GUI, TNC and CLI alike. Negotiated only when asked for (forced
+  waveform, or the responder heard a narrowband chirp); automatic sessions never pick it.
+- Same burst transport as wideband (descriptor + 4-CW frames, light LTS members) but EVERY burst
+  carries a chirp anchor: no structure acquisition on narrowband (its detector is wideband-only).
+  ARQ selective-repeat **window=3**; timing from `narrowOFDMFrameTiming(mod, rate, cw)` incl. the
+  2.2 s anchor + descriptor (ACK timeout ~19-21 s). Tone ACKs use the narrowband band plan
+  (1375-1600 Hz, no diversity). The narrowband handshake (MC-DPSK) is 4 orthogonal carriers
+  1289-1711 Hz, 1024-sample symbols. Per-carrier SNR is 7.5 dB above wideband at the same in-band
+  SNR, but a 500 Hz channel fades FLAT (no frequency diversity). Measured: 190 bps QPSK R1/2 at
+  AWGN 20 dB (2 KB); works through a 500 Hz IF filter (`gui_qso_scenario.sh --rx-filter
+  1250-1750`). Rate: fixed per session (adaptation is wideband-only) from the measured
+  `kNarrowCoherentLadder` (QPSK R1/2 10, R2/3 15, R3/4 18, 8PSK R2/3 22 dB; one column for every
+  channel class, capped below 16QAM which fails on Moderate). Open levers: BUG-NARROW-TX-LEVEL (data
+  leaves the TX 4.8 dB below wideband), BUG-NARROW-NO-ADAPT.
 
 ### Mode Selection Flow
 1. Connection starts in MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp).

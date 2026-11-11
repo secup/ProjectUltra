@@ -49,12 +49,13 @@ namespace ModeCapabilities {
     constexpr uint8_t OFDM_CHIRP = 0x20;  // OFDM with chirp sync, coherent QPSK (fading)
     constexpr uint8_t OFDM_NARROW = 0x40; // Narrowband OFDM (500 Hz, 3-10 dB)
     constexpr uint8_t PHY_MASK_V1 = 0x80; // Optional per-frame PHY carrier mask header
-    // OFDM_NARROW DISABLED (thread A, 2026-05-31): dropped from ALL so it is never
-    // advertised/negotiated/constructed. This makes the differential OFDM demod dead
-    // (the only OFDM mode still on DQPSK) so it can be removed; OFDM_NARROW returns
-    // later as COHERENT OFDM with a narrowband config (separate re-validation — see
-    // docs/REMOVAL_BACKLOG.md R3). The bit value 0x40 stays reserved for that return.
-    constexpr uint8_t ALL        = MC_DPSK | OFDM_CHIRP;
+    // OFDM_NARROW was dropped from ALL on 2026-05-31 with the differential OFDM demod (its last
+    // user) and RETURNED 2026-11-10 as COHERENT OFDM on the narrowband geometry (FFT 2048,
+    // 21 carriers; ModemEngine::applyOfdmGeometryFor), REMOVAL_BACKLOG R3. Advertising it never
+    // changes an automatic session: recommendWaveformAndRate returns only MC_DPSK / OFDM_CHIRP,
+    // so selectNegotiatedMode reaches OFDM_NARROW only when a station asks for it (forced
+    // waveform, or the responder heard a narrowband chirp).
+    constexpr uint8_t ALL        = MC_DPSK | OFDM_CHIRP | OFDM_NARROW;
 }
 
 const char* waveformModeToString(WaveformMode mode);

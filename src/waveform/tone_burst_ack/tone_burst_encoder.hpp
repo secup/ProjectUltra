@@ -40,6 +40,13 @@ public:
     void setDiversity(bool on) { diversity_ = on; }
     bool diversity() const { return diversity_; }
 
+    // Band plan (toneShiftHzFor / toneDiversityFor): where the tones sit and whether the
+    // diversity subband is sent.
+    void setBand(ToneAckBand band) {
+        shift_hz_ = toneShiftHzFor(band);
+        diversity_ = toneDiversityFor(band);
+    }
+
     // Encode one full tone-burst ACK: [4 Costas symbols][kPayloadSymbols (30) payload symbols].
     // symbol_ms picks the duration per the §15.5 staircase (default = baseline
     // ~25 ms = mid-SNR regime). Each symbol is symbol_ms * Fs / 1000 samples.
@@ -64,6 +71,7 @@ private:
     float phase_ = 0.0f;
     float phase_b_ = 0.0f;  // diversity subband
     bool diversity_ = true;
+    float shift_hz_ = 0.0f;  // band plan shift of every tone
 };
 
 }  // namespace tone_burst_ack

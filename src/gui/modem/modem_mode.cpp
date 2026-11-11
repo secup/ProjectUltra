@@ -47,6 +47,15 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
 
     waveform_mode_ = mode;
     applyOfdmGeometryFor(mode);
+    // Tone-burst ACKs follow the session's channel: a narrowband session keeps them inside its
+    // 500 Hz (tone_burst_constants.hpp, band plan). Same decision on both stations.
+    {
+        const auto band = mode == protocol::WaveformMode::OFDM_NARROW
+                              ? ultra::waveform::tone_burst_ack::ToneAckBand::Narrowband
+                              : ultra::waveform::tone_burst_ack::ToneAckBand::Wideband;
+        if (streaming_encoder_) streaming_encoder_->setToneAckBand(band);
+        if (streaming_decoder_) streaming_decoder_->setToneAckBand(band);
+    }
 
     // Update StreamingDecoder to use the new waveform
     // When disconnected, always use MC_DPSK for PING detection (chirp-based sync)
@@ -54,9 +63,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         protocol::WaveformMode decoder_mode = connected_ ? mode : protocol::WaveformMode::MC_DPSK;
         if (connected_ && protocol::isOFDMMode(mode)) {
             streaming_decoder_->setConnectedOFDMMode(mode, config_, data_modulation_, data_code_rate_);
-            if (mode == protocol::WaveformMode::OFDM_CHIRP) {
-                streaming_decoder_->expectFullOFDMAnchorOnce();
-            }
+            streaming_decoder_->expectFullOFDMAnchorOnce();  // any OFDM waveform anchors on a chirp
             LOG_MODEM(INFO, "setWaveformMode: StreamingDecoder connected OFDM config set (FFT=%d, carriers=%d)",
                       config_.fft_size, config_.num_carriers);
         } else {
@@ -76,7 +83,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         streaming_encoder_->setMode(mode);
         if (protocol::isOFDMMode(mode)) {
             streaming_encoder_->setOFDMConfig(config_);
-            if (connected_ && mode == protocol::WaveformMode::OFDM_CHIRP) {
+            if (connected_) {
                 streaming_encoder_->forceNextFrameFullPreamble();
             }
         }
@@ -217,7 +224,7 @@ void ModemEngine::setConnected(bool connected) {
                 streaming_decoder_->setKnownCFO(peer_cfo_hz_);
                 LOG_MODEM(INFO, "setConnected: seeded CFO=%.2f Hz from handshake", peer_cfo_hz_);
             }
-            if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+            if (protocol::isOFDMMode(waveform_mode_)) {
                 streaming_decoder_->expectFullOFDMAnchorOnce();
             }
         }
@@ -228,9 +235,7 @@ void ModemEngine::setConnected(bool connected) {
             if (protocol::isOFDMMode(waveform_mode_)) {
                 streaming_encoder_->setOFDMConfig(config_);
                 streaming_encoder_->setDataMode(data_modulation_, data_code_rate_);
-                if (waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP) {
-                    streaming_encoder_->forceNextFrameFullPreamble();
-                }
+                streaming_encoder_->forceNextFrameFullPreamble();
             }
         }
 

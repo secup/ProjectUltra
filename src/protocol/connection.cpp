@@ -813,7 +813,7 @@ void Connection::acceptCall() {
     // quality (historically the chirp snapshot; since #58 it is the data-aided
     // fade-averaged estimate). ULTRA_ENTRY_CAP_R34 (default OFF) lets a data-aided
     // reading clearing the R3/4 anchor by >= 1 sigma enter at R3/4.
-    if (isOFDMMode(negotiated_mode_)) {
+    if (isOFDMMode(negotiated_mode_) && entryRateCapsApply()) {
         CodeRate capped = capInitialOFDMRate(accept_selection_snr_db, entry_fading, rec_rate, rec_mod,
                                              accept_snr_data_aided);
         if (capped != rec_rate) {
@@ -890,7 +890,8 @@ void Connection::acceptCall() {
     // intentionally before the forced-mode overrides below: an operator probing
     // an exact rung still gets the requested modulation/rate unchanged.
     const auto authority_entry = capRxAuthorityInitialRung(
-        rec_mod, rec_rate, rxRateAuthorityEnabled(), environment_forced_rung);
+        rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply(),
+        environment_forced_rung);
     if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
         LOG_MODEM(INFO,
                   "Connection: RX-AUTHORITY measured-entry probe %s %s -> QPSK R1/2 "
@@ -3005,6 +3006,13 @@ void Connection::noteQam16Demoted(int weight) {
     qam16_reclimb_cooldown_ = qam16ReclimbCooldownBase() * scale;
     qam16_clean_streak_ = 0;
     qam16_r34_clean_streak_ = 0;  // leaving QAM16 — any pending crest-rung walk dies with it
+}
+
+bool Connection::entryRateCapsApply() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) return true;
+    if (!isOFDMMode(negotiated_mode_)) return false;
+    const char* e = std::getenv("ULTRA_RATE_ADAPT");
+    return e != nullptr && std::atoi(e) != 0;
 }
 
 bool Connection::rateAdaptationActive() const {
@@ -7025,7 +7033,7 @@ uint32_t Connection::currentDataFrameAirtimeMs() const {
     }
     if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
         return connection_policy::narrowOFDMFrameTiming(
-            data_modulation_, data_frame_cw_count_).data_ms;
+            data_modulation_, data_code_rate_, data_frame_cw_count_).data_ms;
     }
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         return connection_policy::mcDpskFrameTiming(
@@ -7049,7 +7057,7 @@ uint32_t Connection::currentControlFrameAirtimeMs() const {
     }
     if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
         return connection_policy::narrowOFDMFrameTiming(
-            data_modulation_, data_frame_cw_count_).ack_ms;
+            data_modulation_, data_code_rate_, data_frame_cw_count_).ack_ms;
     }
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
         return connection_policy::mcDpskFrameTiming(
@@ -7586,9 +7594,10 @@ void Connection::configureArqForCurrentDataMode() {
         arq_.setAckRepeatPeerBurstGuardMs(arq_.getSackDelay());
 
         const auto timing = connection_policy::narrowOFDMFrameTiming(
-            data_modulation_, data_frame_cw_count_);
+            data_modulation_, data_code_rate_, data_frame_cw_count_);
         uint32_t timeout_ms = connection_policy::computeNarrowOFDMAckTimeoutMs(
-            data_modulation_, data_frame_cw_count_, kNarrowWindow, arq_.getSackDelay());
+            data_modulation_, data_code_rate_, data_frame_cw_count_, kNarrowWindow,
+            arq_.getSackDelay());
         arq_.setAckTimeout(timeout_ms);
 
         LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.2fs (data=%ums, ack=%ums), carrier_sense_sack_coalesce=%ums, ack_repeat=%d, cw=%d (OFDM_NARROW %s %s)",

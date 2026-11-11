@@ -279,37 +279,41 @@ void test_wide_ofdm_timing_and_timeout() {
 }
 
 void test_narrow_ofdm_timing_and_timeout() {
-    auto narrow = narrowOFDMFrameTiming(Modulation::DQPSK);
-    CHECK(narrow.data_symbols == 74, "narrow OFDM DQPSK data symbols");
-    CHECK(narrow.ack_symbols == 20, "narrow OFDM DQPSK ACK symbols");
-    CHECK(narrow.data_ms == 3453, "narrow OFDM DQPSK data frame ms");
-    CHECK(narrow.ack_ms == 933, "narrow OFDM DQPSK ACK frame ms");
-    auto narrow_8cw = narrowOFDMFrameTiming(Modulation::DQPSK, 8);
-    CHECK(narrow_8cw.data_ms > narrow.data_ms,
+    // Coherent OFDM_NARROW (2026-11-10): each rung's own pilot spacing on the 21 narrowband
+    // carriers, as the waveform lays it out (sessions measured 74-symbol QPSK R1/2 frames and
+    // 83-symbol QPSK R1/4 frames; the control frame is 23 symbols at the QPSK R1/4 profile).
+    auto r12 = narrowOFDMFrameTiming(Modulation::QPSK, CodeRate::R1_2);
+    CHECK(r12.data_symbols == 74, "narrow QPSK R1/2: 2 LTS + 2592/36 data symbols");
+    CHECK(r12.data_ms == 3453, "narrow QPSK R1/2 data frame ms");
+    CHECK(r12.ack_symbols == 23, "narrow control frame: 2 LTS + 648/32 (QPSK R1/4) symbols");
+    CHECK(r12.ack_ms == 1073, "narrow control frame ms");
+    auto r14 = narrowOFDMFrameTiming(Modulation::QPSK, CodeRate::R1_4);
+    CHECK(r14.data_symbols == 83, "narrow QPSK R1/4: 2 LTS + 2592/32 data symbols (denser pilots)");
+    CHECK(r14.data_ms > r12.data_ms, "the rate's pilot spacing changes the frame airtime");
+    auto narrow_8cw = narrowOFDMFrameTiming(Modulation::QPSK, CodeRate::R1_2, 8);
+    CHECK(narrow_8cw.data_ms > r12.data_ms,
           "narrow OFDM data duration should scale with fixed-frame CW count");
-    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK) == 8665,
-          "narrow OFDM DQPSK ACK timeout (window=1, default) — +1500ms receiver SACK hold (2026-06-19)");
-    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 8) >
-              computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK),
-          "narrow OFDM ACK timeout should scale with fixed-frame CW count");
 
-    // Selective-repeat window=2/3 added 2026-05-03 per Codex audit. The
-    // timeout has to cover the full multi-frame TX burst plus ACK
-    // turnaround — without scaling, the ARQ would fire while later
-    // frames are still on-air and trigger a phantom timeout retry.
-    const uint32_t w1 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 1);
-    const uint32_t w2 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 2);
-    const uint32_t w3 = computeNarrowOFDMAckTimeoutMs(Modulation::DQPSK, 4, 3);
-    CHECK(w1 == 8665, "window=1 timeout matches default behavior (+1500ms SACK hold)");
+    // The ACK timeout covers the whole burst: chirp anchor (2 x 1000 ms + 2 x 100 ms), the
+    // descriptor (a control frame) and the window's frames, then the ACK turnaround and the
+    // receiver's SACK hold. QPSK R1/2, window 3:
+    //   tx_burst = 2200 + 1073 + 3 x 3453 = 13632
+    //   timeout  = 13632 + 2 x 1073 + 120 + max(700, 1726) + 1500 = 19124 ms
+    const uint32_t w1 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 4, 1);
+    const uint32_t w2 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 4, 2);
+    const uint32_t w3 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 4, 3);
+    CHECK(w1 == 12218, "window=1: 2200 + 1073 + 3453 + 2146 + 120 + 1726 + 1500");
     CHECK(w2 > w1, "window=2 timeout scales above window=1");
-    CHECK(w3 > w2, "window=3 timeout scales above window=2");
-    // For 4-CW DQPSK narrow, data_ms=3453, ack_ms=933, plus the +1500 ms receiver SACK hold:
-    //   window=2: tx_burst_ms = 2*3453 = 6906; timeout = 6906 + 2*933
-    //             + 120 + max(700, 1726) + 1500 = 12118 ms
-    //   window=3: tx_burst_ms = 3*3453 = 10359; timeout = 10359 + 2*933
-    //             + 120 + max(700, 1726) + 1500 = 15571 ms (current narrow default)
-    CHECK(w2 >= 11500 && w2 <= 12500, "window=2 timeout ~12.1 s");
-    CHECK(w3 >= 15000 && w3 <= 16000, "window=3 timeout ~15.6 s (current narrow default)");
+    CHECK(w3 == 19124, "window=3 (the narrow default) covers anchor + descriptor + 3 frames");
+    // A QPSK R1/4 burst is longer, and its timeout must cover it (the 2026-11-10 session whose
+    // R1/4 ACK arrived 0.4 s after a window sized for R1/2 frames).
+    const uint32_t w3_r14 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_4, 4, 3);
+    CHECK(w3_r14 >= kNarrowOFDMFullAnchorExtraMs + r14.ack_ms + 3 * r14.data_ms +
+                       kToneBurstReceiverSackHoldMs,
+          "R1/4 window=3 timeout covers its own burst and the SACK hold");
+    CHECK(w3_r14 > w3, "a longer frame gets a longer timeout");
+    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 8) > w1,
+          "narrow OFDM ACK timeout should scale with fixed-frame CW count");
 }
 
 void test_mc_dpsk_window_timing() {
@@ -470,13 +474,24 @@ void test_negotiated_mode_selection() {
                                WaveformMode::AUTO, 20.0f, 0.0f) == WaveformMode::MC_DPSK,
           "remote explicit preference should win when common");
 
-    // OFDM_NARROW DISABLED (thread A, 2026-05-31 — dropped from ModeCapabilities::ALL):
-    // a narrowband override can no longer select it (not a common capability), so it
-    // falls back to the supported local preference. Restore the OFDM_NARROW expectation
-    // when OFDM_NARROW returns as coherent (REMOVAL_BACKLOG R3).
+    // OFDM_NARROW returned as coherent OFDM (2026-11-10, REMOVAL_BACKLOG R3): a station that
+    // heard a narrowband chirp keeps the session narrowband, and a CONNECT that asks for it
+    // gets it.
     CHECK(selectNegotiatedMode(all, all, WaveformMode::AUTO, WaveformMode::OFDM_NARROW,
-                               WaveformMode::OFDM_CHIRP, 20.0f, 0.0f) == WaveformMode::OFDM_CHIRP,
-          "narrowband override is moot while OFDM_NARROW is disabled (falls back to OFDM_CHIRP)");
+                               WaveformMode::OFDM_CHIRP, 20.0f, 0.0f) == WaveformMode::OFDM_NARROW,
+          "narrowband override selects OFDM_NARROW");
+    CHECK(selectNegotiatedMode(all, all, WaveformMode::OFDM_NARROW, WaveformMode::AUTO,
+                               WaveformMode::AUTO, 20.0f, 0.0f) == WaveformMode::OFDM_NARROW,
+          "a CONNECT that prefers OFDM_NARROW gets it");
+    // An automatic session never lands on narrowband: the auto pick is MC-DPSK or wideband.
+    for (float snr : {0.0f, 5.0f, 10.0f, 20.0f, 30.0f}) {
+        for (float fading : {0.0f, 0.5f, 1.0f}) {
+            CHECK(selectNegotiatedMode(all, all, WaveformMode::AUTO, WaveformMode::AUTO,
+                                       WaveformMode::AUTO, snr, fading) !=
+                      WaveformMode::OFDM_NARROW,
+                  "an automatic negotiation never picks OFDM_NARROW");
+        }
+    }
 
     CHECK(selectNegotiatedMode(all, all, WaveformMode::AUTO, WaveformMode::AUTO,
                                WaveformMode::OFDM_CHIRP, 20.0f, 0.0f) == WaveformMode::OFDM_CHIRP,
@@ -861,27 +876,33 @@ void test_unified_burst_ack_timeout() {
     // deadline must cover window burst airtime + the receiver hold + the ack turnaround, every
     // narrow mod/cw/window. (Narrow's tone-burst listen window already floors to getAckTimeout
     // because isOFDMMode(OFDM_NARROW) is true, so the timeout fix is sufficient here.)
-    const Modulation narrow_mods[] = {Modulation::QPSK, Modulation::QAM8, Modulation::QAM16,
-                                      Modulation::DBPSK, Modulation::DQPSK};
+    // Every coherent narrow rung (its own pilot spacing), CW count and window: the timeout covers
+    // the chirp anchor, the descriptor, the window's frames, the ACK turnaround and the hold.
+    const std::pair<Modulation, CodeRate> narrow_rungs[] = {
+        {Modulation::QPSK, CodeRate::R1_4}, {Modulation::QPSK, CodeRate::R1_2},
+        {Modulation::QPSK, CodeRate::R3_4}, {Modulation::QAM8, CodeRate::R2_3},
+        {Modulation::QAM16, CodeRate::R1_2}, {Modulation::QAM16, CodeRate::R3_4},
+        {Modulation::QAM32, CodeRate::R2_3}};
     const int narrow_cws[] = {1, 4, 8};
     const size_t narrow_windows[] = {1, 2, 3};
     bool narrow_cover = true;
-    for (Modulation m : narrow_mods)
+    for (const auto& [m, r] : narrow_rungs)
         for (int cw : narrow_cws)
             for (size_t w : narrow_windows) {
-                const uint32_t to = computeNarrowOFDMAckTimeoutMs(m, cw, w);
-                const OFDMFrameTiming t = narrowOFDMFrameTiming(m, cw);
+                const uint32_t to = computeNarrowOFDMAckTimeoutMs(m, r, cw, w);
+                const OFDMFrameTiming t = narrowOFDMFrameTiming(m, r, cw);
                 const uint32_t required =
+                    kNarrowOFDMFullAnchorExtraMs + t.ack_ms +
                     static_cast<uint32_t>(w) * t.data_ms +
                     kToneBurstReceiverSackHoldMs + 2 * t.ack_ms;
                 if (to < required) narrow_cover = false;
             }
     CHECK(narrow_cover,
-          "narrow OFDM ACK timeout must cover window burst + 1500ms receiver SACK hold + ack "
-          "turnaround for every narrow mod/cw/window");
+          "narrow OFDM ACK timeout must cover anchor + descriptor + window burst + 1500ms "
+          "receiver SACK hold + ack turnaround for every narrow rung/cw/window");
     // The receiver hold is actually budgeted (the fix): the deadline includes >= the 1500 ms hold.
-    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::QAM16, 4, 3) >
-              3u * narrowOFDMFrameTiming(Modulation::QAM16, 4).data_ms +
+    CHECK(computeNarrowOFDMAckTimeoutMs(Modulation::QAM16, CodeRate::R3_4, 4, 3) >
+              3u * narrowOFDMFrameTiming(Modulation::QAM16, CodeRate::R3_4, 4).data_ms +
                   kToneBurstReceiverSackHoldMs,
           "narrow QAM16 win=3 deadline must exceed burst + receiver SACK hold (the live short case)");
 }

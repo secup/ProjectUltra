@@ -180,6 +180,28 @@ inline bool coherentRungUsableWithDataFec(const CoherentRung& row) {
     return !row.turbo_only || v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
 }
 
+// OFDM_NARROW ladder (coherent, 2026-11-10). ONE fading-safe threshold per rung, used for every
+// channel class, because (1) a 500 Hz channel fades FLAT (no frequency diversity) and a flat fade
+// is invisible to the across-carrier fading index a narrowband handshake measures, so a narrowband
+// session cannot tell AWGN, Good and Moderate apart at connect; and (2) its rate is fixed for the
+// session (rate adaptation is wideband-only), so a rung that does not hold strands the transfer.
+// Measured with measure_ack_fer --waveform narrow --geometry production (turbo data frames,
+// 7.3 Hz, 2 seeds x 20 frames per point): the GOODPUT crossover of each rung (bits per carrier x
+// (1 - FER) above every lower rung's) is QPSK R1/2 7 dB, R3/4 12, 8PSK R2/3 17, 16QAM R2/3 19,
+// R3/4 21, 32QAM R2/3 25 on ITU Good, but ITU Moderate is harder: QPSK R3/4 FER 55 % at 15 dB and
+// 28 % at 19, 8PSK R2/3 38 % at 20 and 12 % at 24, and 16QAM 55-72 % even at 22-28 dB (0.5 Hz
+// Doppler against 46.7 ms symbols). Each threshold is where the rung still wins on Moderate, which
+// also clears Good by >= 3 dB for the connect SNR's snapshot error; 16QAM and 32QAM are left out
+// until narrowband sessions adapt their rate. On AWGN this leaves capacity unused (16QAM R3/4
+// holds at 18 dB there). The 8PSK rung was measured only on the turbo data frame (turbo_only).
+inline constexpr CoherentRung kNarrowCoherentLadder[] = {
+    // mod              rate            AWGN    GOOD    MODERATE (one column, see above)
+    {Modulation::QAM8,  CodeRate::R2_3, {22.0f, 22.0f, 22.0f}, /*turbo_only=*/true},
+    {Modulation::QPSK,  CodeRate::R3_4, {18.0f, 18.0f, 18.0f}},
+    {Modulation::QPSK,  CodeRate::R2_3, {15.0f, 15.0f, 15.0f}},
+    {Modulation::QPSK,  CodeRate::R1_2, {10.0f, 10.0f, 10.0f}},
+};
+
 inline constexpr CoherentRung kCoherentLadder[] = {
     // mod              rate            AWGN             GOOD             MODERATE
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
@@ -299,6 +321,22 @@ struct CoherentPick {
 
 // Highest ladder rung whose per-class anchor the (snr, fading) clears. Falls back
 // to the QPSK R1/4 floor (the last entry always qualifies once above the entry floor).
+// The connect-time narrowband pick: the highest kNarrowCoherentLadder rung the SNR clears, else
+// QPSK R1/4. Poor fading (which the narrowband index can still flag through time variation) keeps
+// the R1/4 floor.
+inline CoherentPick selectNarrowCoherentOFDM(float snr_db, float fading_index) {
+    if (fading_index >= kFadingModerateMax) {
+        return {Modulation::QPSK, CodeRate::R1_4};
+    }
+    for (const auto& row : kNarrowCoherentLadder) {
+        if (!coherentRungUsableWithDataFec(row)) continue;
+        if (snr_db >= row.min_snr_db[0]) {
+            return {row.mod, row.rate};
+        }
+    }
+    return {Modulation::QPSK, CodeRate::R1_4};
+}
+
 inline CoherentPick selectCoherentOFDM(float snr_db, float fading_index) {
     // Poor (>= kFadingModerateMax) routes to MC-DPSK upstream and OFDM is never
     // selected there; hold the QPSK R1/4 floor defensively if ever reached.
@@ -1217,28 +1255,13 @@ inline void recommendDataMode(float snr_db, WaveformMode waveform,
         return;
     }
 
-    // OFDM_NARROW: DQPSK only, R1/4 default, R1/2 for clean-enough
-    // conditions. Sweeps in cli_simulator (2026-05-03) verified R1/2
-    // narrow + window=3 passes 7-message test at:
-    //   legacy SNR=8  AWGN          (PASS)
-    //   legacy SNR=10 good fading   (PASS)
-    //   legacy SNR=12 good fading   (PASS)
-    //   legacy SNR=15 good fading   (PASS)
-    // and R1/4 narrow + window=3 passes:
-    //   SNR=8  good fading   (PASS — documented baseline)
-    //   SNR=8  moderate      (PASS, slow but recovers)
-    // The hard floor (SNR=8 good fading R1/4) is preserved by the
-    // in-band SNR>=20 gate on good fading. AWGN keeps the in-band SNR>=18 trigger
-    // because near-AWGN is a much easier channel.
+    // OFDM_NARROW: the measured narrowband ladder (kNarrowCoherentLadder). It replaced, on
+    // 2026-11-10, a "QPSK R1/2 from 18 dB (AWGN) / 20 dB (Good), else R1/4" rule taken from the
+    // retired cli_simulator's DQPSK sweeps, which held a 20 dB link at QPSK R1/2.
     if (waveform == WaveformMode::OFDM_NARROW) {
-        mod = Modulation::DQPSK;
-        const bool awgn_path = fading_index < kFadingAwgnMax && snr_db >= 18.0f;
-        const bool good_path = fading_index < kFadingGoodMax && snr_db >= 20.0f;
-        if (awgn_path || good_path) {
-            rate = CodeRate::R1_2;
-        } else {
-            rate = CodeRate::R1_4;
-        }
+        const CoherentPick pick = selectNarrowCoherentOFDM(snr_db, fading_index);
+        mod = pick.mod;
+        rate = pick.rate;
         apply_environment_force();
         return;
     }

@@ -69,21 +69,25 @@ acquisition and 8/8 with chirp acquisition. Since 2026-11-10 `ultra prx` and the
 `--monitor` modes call `sync::preferChirpAcquisitionWithoutHandshake()` (chirp unless
 `ULTRA_BURST_ACQ` is set); remove that call when this bug is fixed.
 
-### BUG-NARROW-MCDPSK-CONNECT (open, 2026-11-10) — P2: a narrowband session cannot connect
+### BUG-NARROW-TX-LEVEL (open, 2026-11-10) — P2 lever: narrowband data leaves the transmitter 4.8 dB below wideband
 
-A GUI session forced to OFDM_NARROW (`ULTRA_FORCE_WAVEFORM=OFDM_NARROW tools/gui_qso_scenario.sh
---channel awgn --snr-db 20 --seed 42 --cfo-hz 7.3 --file-kb 2`) gets PING/PONG through and then
-fails all 10 CONNECT attempts: the responder detects every narrowband chirp (correlation 0.99) and
-fails CW0 of the 2-codeword CONNECT each time. Released v0.6.2 (a18a6b8) fails the same way, so it
-predates the 2026-11-10 CLI work; not bisected (the 2-codeword CONNECT of 0c0c920 is one suspect).
+The OFDM modulator keeps the per-carrier amplitude, so the 21-carrier narrowband data section has an
+RMS 4.8 dB (peak 6.7 dB) below the 59-carrier wideband one (`ptx` frames: 0.101 vs 0.175). Both
+simulators normalize a whole burst, chirp included, so narrowband data gets less of it, and a radio
+driven once for wideband would send narrowband weaker. The physical per-carrier advantage of putting
+the same power in 500 Hz (+7.5 dB) does not show: measured, narrowband and wideband need the same
+in-band SNR per rung (QPSK R1/2 6 dB, R3/4 9 dB on AWGN). Normalizing OFDM output power to the
+carrier count (a TX scale only; receivers are level-agnostic) should move every narrowband threshold
+down by several dB. Not done: it changes every narrowband frame's level and needs its own A/B.
 
-Offline repro: `ultra ptx connect -w narrow -o c.f32 && ultra prx -w mcdpsk c.f32` -> 0 frames.
-On that clean signal (no noise, 0 Hz) the narrowband MC-DPSK receiver (`mc_dpsk_presets::narrowband()`
-on both ends, via `WaveformFactory::createNarrowbandMCDPSK`) reads training SNR 40.8 dB but
-data-aided SNR 7.7 dB, its jitter tracker a 31 degree phase RMS, and its clock tracker a 6.9 Hz
-dial that is not there. The 1-codeword narrowband DISCONNECT still decodes, at a reported 10.7 dB.
-The demodulation itself is degraded; the edge-carrier trackers on the 4-carrier geometry are the
-first thing to check. While open, narrowband mode is unusable in the GUI and the TNC.
+### BUG-NARROW-NO-ADAPT (open, 2026-11-10) — P2: a narrowband session keeps its connect-time rate
+
+Rate adaptation (latent/EVM controller, descriptor mode switch, retransmission pacing) is wideband-only
+(`connection.cpp` `rateAdaptationActive`, `tryDescriptorModeSwitch`, `retxPacingScopeActive`), and the
+connect-time fading index cannot see a flat fade, so the narrowband ladder is one conservative column
+capped at 8PSK R2/3 (`kNarrowCoherentLadder`). Measured headroom it leaves: 16QAM R3/4 holds on AWGN
+from 18 dB and wins goodput on Good from 21 dB (not on Moderate). `ULTRA_RATE_ADAPT=1` enables the
+wideband machinery on any OFDM mode; it is not validated on narrowband.
 
 ### BUG-IDLE-PING-FROM-OFDM-CHIRP (open, 2026-11-10) — P3: an idle receiver reports the chirp of a short OFDM frame as a PING
 
@@ -2466,6 +2470,54 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-NARROW-MCDPSK-CONNECT (FIXED 2026-11-10) — no narrowband session could connect
+
+**Symptom.** Forced OFDM_NARROW sessions (`ULTRA_FORCE_WAVEFORM=OFDM_NARROW`) got PING/PONG through and
+failed all 10 CONNECT attempts, on released v0.6.2 too; offline `ultra ptx connect -w narrow` -> `prx`
+decoded nothing, even noiseless. **Two causes.** (1) The narrowband MC-DPSK preset put 4 carriers
+133.3 Hz apart at 93.75 baud (spacing x symbol time = 1.42, not an integer): each carrier took -10 dB
+of its neighbours, a noiseless frame read ~8 dB data-aided SNR, and the clock/jitter trackers took the
+leakage for a 6.9 Hz dial offset and 31 deg of jitter. (2) Every modem-side narrowband waveform was
+built from the preset alone (DQPSK) while the handshake rides the fixed DBPSK profile
+(`profileForMCDPSK`), so the receiver demodulated the CONNECT with the wrong constellation (the 1-CW
+DISCONNECT, sent at the preset's DQPSK, decoded by luck). **Fix.** The preset is orthogonal (1024-sample
+symbols, 3 symbol rates = 140.625 Hz apart around 1500 Hz, 1242-1758 Hz, 375 bps raw), and
+`WaveformFactory::createNarrowbandMCDPSK(session)` gives every narrowband waveform the session's
+constellation, as `createMCDPSK(session)` does for wideband. `CliLoopback` `narrow_connect`.
+
+### BUG-NARROW-NO-ANCHOR (FIXED 2026-11-10) — coherent OFDM_NARROW never anchored a burst
+
+Re-enabling OFDM_NARROW (it was dropped from the capability set on 2026-05-31 with the differential
+OFDM demod) showed the connected narrowband receiver could not acquire bursts: the chirp-anchor
+machinery (full-anchor search, `expectFullOFDMAnchorOnce`, light-reject escalation, crater re-anchor,
+burst-group marker, arrival prediction, ACK-listen suppression, the connect-time full-preamble and
+anchor expectation in ModemEngine) was gated on `mode_ == OFDM_CHIRP`, and `detectDataSync` refused
+windows under 3 symbols, which rejected every narrowband warm window (6656 samples < 3 x 2240). The
+sender's chirp-less descriptors (structure acquisition) would have stranded it too. **Fix.** Those
+gates take any OFDM mode (`isOFDMMode`); structure acquisition stays wideband-only on both ends (its
+detector is built on the wideband grid: the receiver keeps the chirp search, the sender never omits a
+narrowband chirp); `detectDataSync` needs the LTS pair plus one candidate offset.
+
+### BUG-NARROW-TIMING (FIXED 2026-11-10) — the narrowband ACK window was shorter than a QPSK R1/4 burst
+
+`narrowOFDMFrameTiming(mod, cw)` timed every rung with one fixed pilot spacing (10, the differential
+era's), so a QPSK R1/4 frame (83 symbols with its spacing-5 pilots) was timed as 74, and the ACK
+timeout did not include the burst's 2.2 s chirp anchor and descriptor. Behind a 500 Hz filter the
+session ran QPSK R1/4 and its first ACK was decoded 0.4 s after the 15.57 s monitor window closed.
+Now `narrowOFDMFrameTiming(mod, rate, cw)` and `computeNarrowOFDMAckTimeoutMs(mod, rate, ...)` follow
+the waveform's layout and budget the anchor (R1/4 window 3: 20.6 s; every ACK arrived in time).
+`ConnectionPolicy` (`test_narrow_ofdm_timing_and_timeout` and the coverage loop over coherent rungs).
+
+### BUG-NARROW-ACK-OUT-OF-BAND (FIXED 2026-11-10) — narrowband sessions acknowledged outside their channel
+
+Tone-burst ACKs used the wideband plan (2400-2625 Hz plus the 1075-1300 Hz diversity subband) in every
+session, so behind a radio's 500 Hz filter a narrowband session would never hear an ACK; the simulator,
+with no IF filter, could not show it. **Fix.** A narrowband band plan (`ToneAckBand::Narrowband`: tones
+1375-1600 Hz, no diversity subband, full amplitude) chosen by both stations from the negotiated
+waveform (`ModemEngine::setWaveformMode`); the detector reports the dial offset without the plan shift.
+OTASim gained the receivers' IF filter (`RxBandpassChannelModel`, `gui_qso_scenario.sh --rx-filter
+LOW-HIGH`) to test it. CTests `ToneBurstAckRoundTrip` (narrowband plan) and `ChannelCoreModels`.
 
 ### BUG-CLI-PTX-PRX-BROKEN (FIXED 2026-11-10) — `ultra ptx`/`prx` did not decode most frames
 

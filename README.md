@@ -111,7 +111,7 @@ other HF data modems; that needs paired on-air testing.
 
 8PSK R3/4 now decodes on fading, but 16QAM R2/3 delivers more at every SNR measured.
 
-MC-DPSK runs 47–375 bps; narrowband OFDM 193–386 bps.
+MC-DPSK runs 47–375 bps; narrowband OFDM 171–771 bps (QPSK R1/4 to 8PSK R2/3, raw).
 
 ---
 
@@ -226,7 +226,7 @@ before transmitting, use the minimum power needed, and be ready to move.
 | Carriers | 8 | 59 | 21 |
 | FFT size | — | 1024 | 2048 |
 | Cyclic prefix | — | 128 samples (2.67 ms) | 192 samples (4.0 ms) |
-| Modulation | DBPSK / DQPSK / D8PSK | QPSK, 8PSK, 16QAM | QPSK |
+| Modulation | DBPSK / DQPSK / D8PSK | QPSK, 8PSK, 16QAM, 32QAM | QPSK, 8PSK |
 | Sample rate | 48 kHz | 48 kHz | 48 kHz |
 
 ---

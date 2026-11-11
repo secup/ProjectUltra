@@ -354,11 +354,11 @@ void StreamingEncoder::setMCDPSKConfig(const MultiCarrierDPSKConfig& config) {
 void StreamingEncoder::setNarrowbandControl(bool narrowband) {
     narrowband_control_ = narrowband;
     if (narrowband) {
-        control_waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+        control_waveform_ = WaveformFactory::createNarrowbandMCDPSK(mc_dpsk_config_);
         // When in MC-DPSK mode (handshake), also switch main waveform to narrowband
         // so CONNECT/CONNECT_ACK frames use narrowband chirp + carriers
         if (mode_ == protocol::WaveformMode::MC_DPSK) {
-            waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+            waveform_ = WaveformFactory::createNarrowbandMCDPSK(mc_dpsk_config_);
         }
         LOG_MODEM(INFO, "[%s] Control waveform: narrowband MC-DPSK (500 Hz)", log_prefix_.c_str());
     } else {
@@ -755,8 +755,11 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         const bool reactive_skip_enabled =
             kAnchorSkipK > 1 && anchor_skip_clean_streak_ >= kReactiveCleanStreak;
         const uint32_t anchor_ordinal = burst_anchor_ordinal_++;
+        // Only wideband groups may go chirp-less: OFDM_NARROW has no structure detector, so its
+        // receiver finds every group on the chirp (streaming_sync_acquisition.cpp).
+        const bool chirp_skip_allowed = mode_ == protocol::WaveformMode::OFDM_CHIRP;
         const bool skip_chirp_descriptor =
-            reactive_skip_enabled && warm_descriptor &&
+            chirp_skip_allowed && reactive_skip_enabled && warm_descriptor &&
             (static_cast<int>(anchor_ordinal % static_cast<uint32_t>(kAnchorSkipK)) != 0);
         last_burst_starts_chirpless_ = skip_chirp_descriptor;  // the descriptor leads the burst
         // Credit the prior clean delivery represented by warm_descriptor before deciding what this
@@ -767,6 +770,7 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         // 13 emitted LIGHT; the receiver correctly waited for a chirp and lost the whole group.
         if (warm_descriptor) ++anchor_skip_clean_streak_;  // count the just-observed clean prior group
         const bool next_group_light =
+            chirp_skip_allowed &&
             streaming_frame_policy::shouldAnnounceNextLightAnchor(
                 anchor_ordinal, kAnchorSkipK, anchor_skip_clean_streak_, kReactiveCleanStreak);
 
@@ -976,6 +980,7 @@ std::vector<float> StreamingEncoder::encodeToneBurstAck(
     // so there's no benefit to caching across calls and a fresh instance
     // avoids any cross-call phase leak.
     ultra::waveform::tone_burst_ack::ToneBurstEncoder enc;
+    enc.setBand(tone_ack_band_);
     auto samples = enc.encode(payload, symbol_ms);
     LOG_MODEM(INFO,
               "[%s] ToneBurstAck encoded: group_seq=%u type=%s frame_mask=0x%04X "
@@ -1107,7 +1112,7 @@ void StreamingEncoder::createWaveform() {
     switch (mode_) {
         case protocol::WaveformMode::MC_DPSK:
             if (narrowband_control_) {
-                waveform_ = WaveformFactory::createNarrowbandMCDPSK();
+                waveform_ = WaveformFactory::createNarrowbandMCDPSK(mc_dpsk_config_);
             } else {
                 waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
             }
