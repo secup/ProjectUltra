@@ -21,6 +21,12 @@ physical-SNR terms); which term lifts it this far is not yet analysed.
 **Next.** Log the terms of `connectSelectionSnrDb` at the pick and compare with the OFDM SNR the
 data then actually sees, across Good 4-10 dB seeds.
 
+**Update 2026-11-11.** Two terms lift it. With no physical SNR measurement the fade basis stood
+uncapped, up to +11 dB (fixed: BUG-CONNECT-BOOST-NO-EVIDENCE). With one, the cap allows up to
+physical mean + 2 dB: `SNR=2.0 sel=8.1` is a 6.1 dB physical mean plus that margin, enough for the
+Good OFDM floor (8) at a dial of 4-6 dB. That second case remains open; the margin is on the
+optimistic side of the physical measurement.
+
 ### BUG-BACKSTOP-RACES-RTO (open, 2026-11-10) — P2: the backstop's re-confirm ACK fires as the sender's resend starts
 
 **What.** The anchored-burst ACK backstop (`streaming_sync_acquisition.cpp`, F165) fires 14.6 s
@@ -2471,6 +2477,21 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-CONNECT-BOOST-NO-EVIDENCE (FIXED 2026-11-11) — a weak fading link was selected 11 dB above its reading
+
+On ITU Good at -3 dB (GUI gate, seed 42) the responder read -3.9 dB data-aided and selected 7.1 dB:
+`Adaptive ladder selected Robust (SNR=-3.9 sel=7.1 ...)` -> DQPSK R1/4, which never decoded, and
+MC-DPSK has no rate change after the pick, so the transfer failed after 27 retransmissions. The
+fading basis in `connectSelectionSnrDb` raises the reading toward a dial-equivalent; the default
+affine map is `clamp(19.55 - reading, +2, +11)`, fitted on 48 connects all at 20 dB, so every
+reading below 8.55 dB gets +11. The physical cap that bounds it (`min(sel, physical mean + 2)`)
+had no input: every physical producer records only frames whose signal power exceeds the noise,
+so below 0 dB the ring is empty, and the cap was skipped. Fix: the boost stands only with a
+physical measurement to bound it; without one the selection is the reading, a lower bound on the
+channel SNR (`boundByPhysicalEvidenceDb`), and the GUI's "~dial" readouts follow the same rule.
+After: Good -3 selects -3.8 -> DBPSK R1/4; Good 20 and Moderate 20 select 17.3 and 19.5 as before
+(physical measurement present). Test: `ConnectionPolicy` `test_connect_selection_needs_physical_evidence`.
 
 ### BUG-RX-ABSOLUTE-LEVEL (FIXED 2026-11-10) — receive gates read the audio level, not the noise
 

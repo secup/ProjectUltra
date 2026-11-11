@@ -10,6 +10,48 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(connect): the fading SNR boost needs a physical measurement (BUG-CONNECT-BOOST-NO-EVIDENCE)
+
+**What was broken.** On ITU Good at -3 dB (GUI gate, 1 KB, seed 42, 7.3 Hz) the responder read
+-3.9 dB data-aided and selected 7.1 dB, above the Good DQPSK floor (7.0): the session ran DQPSK
+R1/4, which never decoded, and since MC-DPSK has no rate change after the pick, the transfer
+failed after 27 retransmissions. The same sweep found the documented MC-DPSK floor stale: AWGN
++3/0/-3 dB pass with no retransmissions (40 bps), -6 dB passes (13 retransmissions, 20 bps),
+-9 dB fails at the CONNECT frame (both chirps heard, both CONNECT codewords fail); Good 0 dB
+passes (22 retransmissions, 20 bps).
+
+**Root cause.** On fading channels `connectSelectionSnrDb` raises the reading toward a
+dial-equivalent before comparing it with the dial-calibrated floors. The default affine map,
+`clamp(19.55 - reading, +2, +11)`, was fitted on 48 connects all at 20 dB, so it adds +11 to every
+reading below 8.55 dB. A cap, `min(sel, physical mean + 2)`, was meant to bound it, but every
+physical-SNR producer records only frames whose signal power exceeds the noise (S > N), so on a
+channel below 0 dB the ring is empty and the cap was skipped.
+
+**Fix.** The data-aided reading is a lower bound on the channel SNR (measurement error only adds
+to the EVM); the boost is a bet calibrated on strong links. `boundByPhysicalEvidenceDb` lets the
+boost stand only with a physical measurement to cap it; without one, the selection is the reading,
+or a bound derived from the reading itself (the Moderate saturation bound still applies). The two
+GUI "~dial" readouts use the same rule (`evidenceBoundedDialEquivalentSnrDb`), so the meter shows
+what the pick uses. No new constant: the 2 dB cap margin is now named `kPhysicalEntryCapMarginDb`.
+
+**Also.** CLAUDE.md floors updated (MC-DPSK AWGN -6 dB, was 5 dB). Map rows corrected: the affine
+basis is ON by default (map said OFF), the flat basis is 5.0 dB (map said 2.0).
+BUG-CONNECT-PICK-LOW-SNR-FADING notes the case this does not cover (a physical mean exists and the
++2 margin lets OFDM in at Good 4-6 dB).
+
+**Tests.** `ConnectionPolicy` 482/482: new `test_connect_selection_needs_physical_evidence` (the
+-3.9 dB Good case picks DBPSK; a binding cap and a non-binding cap behave as before; the Moderate
+saturation bound needs no physical measurement; AWGN unchanged); the boost-math checks now pass a
+non-binding physical measurement. GUI gate, seed 42, CFO 7.3 Hz:
+
+| Run | Before | After |
+|---|---|---|
+| Good 20 dB, 4 KB | sel 17.3, OFDM, 1510 bps | sel 17.3, OFDM, 1510 bps |
+| Moderate 20 dB, 4 KB | sel 19.5, OFDM, 1510 bps | sel 19.5, OFDM, 1510 bps |
+| Good -3 dB, 1 KB | sel 7.1, DQPSK, FAIL (27 retx) | sel -3.8, DBPSK, frames decode; file not done in 600 s (43.6 s retransmission waits) |
+
+---
+
 ## 2026-11-11 — REMOVE(dsp): the unused `AGC` class
 
 **What it was.** `ultra::AGC` (`include/ultra/dsp.hpp`, `src/dsp/filters.cpp`): a per-sample

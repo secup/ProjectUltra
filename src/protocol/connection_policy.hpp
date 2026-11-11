@@ -1173,6 +1173,27 @@ inline float connectAffineCorrectionDb(float reading_db) {
     return std::min(kConnectAffineCorrMaxDb, std::max(kConnectAffineCorrMinDb, corr));
 }
 
+// Margin of the physical entry cap (handoff §6): the payload-referenced definition's ~0.5 dB
+// offset from dial + ~1.5 dB single/few-frame measurement spread.
+inline constexpr float kPhysicalEntryCapMarginDb = 2.0f;
+
+// EVIDENCE RULE for the fading basis (2026-11-11, BUG-CONNECT-BOOST-NO-EVIDENCE). The data-aided
+// reading is a LOWER bound on the channel SNR: measurement error only adds to the EVM. Raising it
+// to a dial-equivalent is a bet (the flat basis and the affine map were both calibrated on
+// strong links, the affine one on 48 connects all at 20 dB), so it stands only where an
+// independent physical measurement bounds it: min(boost, physical mean + margin). With no physical
+// measurement, the reading and the bounds derived from the reading itself are all the evidence
+// there is. Every physical producer records only frames whose signal power exceeds the noise, so
+// on a channel below 0 dB the ring is empty: the bet then stood uncapped, and on ITU Good at
+// -3 dB a -3.9 dB reading was selected as 7.1 dB -> DQPSK, which never decoded.
+inline float boundByPhysicalEvidenceDb(float boosted_db, float reading_bound_db,
+                                       float physical_mean_db, uint32_t physical_n) {
+    if (physical_n == 0) {
+        return reading_bound_db;
+    }
+    return std::min(boosted_db, physical_mean_db + kPhysicalEntryCapMarginDb);
+}
+
 // ONE source of truth for reading -> dial-equivalent SNR: the entry SELECTION
 // (connectSelectionSnrDb below) and BOTH GUI dial-equivalent displays (status bar +
 // sidebar "dB eff" sites, app.cpp) call this, so the dial number the operator sees is
@@ -1222,9 +1243,12 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
         // The 6.5 zone test stays keyed to the RAW reading under the affine basis
         // too (the saturation physics is about what the ESTIMATOR emitted, not the
         // corrected value); only the sel it maxes against changes.
+        // reading_bound: what the reading ALONE proves (itself, or this saturation bound).
+        float reading_bound = measured_snr_db;
         if (snr_is_data_aided &&
             fading_index >= kFadingGoodMax && measured_snr_db >= 6.5f) {
-            sel = std::max(sel, kOFDMEntryFloorModerateDb + 0.5f);
+            reading_bound = std::max(reading_bound, kOFDMEntryFloorModerateDb + 0.5f);
+            sel = std::max(sel, reading_bound);
         }
         // ═══ PHYSICAL ENTRY CAP (handoff §6, 2026-07-08) ═══
         // The dial-equivalent estimate can never exceed what the channel
@@ -1239,10 +1263,9 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
         // Margin +2.0 dB = the payload-referenced definition's ~0.5 dB offset
         // from dial + ~1.5 dB single/few-frame measurement spread. AWGN is
         // outside this branch entirely (reading==dial basis there).
-        if (physical_n >= 1 && physical_mean_db > 0.0f) {
-            sel = std::min(sel, physical_mean_db + 2.0f);
-        }
-        return sel;
+        // Without a physical measurement the basis has nothing to bound it and is not
+        // applied (boundByPhysicalEvidenceDb above).
+        return boundByPhysicalEvidenceDb(sel, reading_bound, physical_mean_db, physical_n);
     }
     return measured_snr_db;  // AWGN: reading and thresholds share the basis already
 }
@@ -1258,6 +1281,18 @@ inline float connectSelectionSnrDb(float measured_snr_db, float fading_index,
                                    bool snr_is_data_aided) {
     return connectSelectionSnrDb(measured_snr_db, fading_index, snr_is_data_aided,
                                  connectAffineBasisEnabled());
+}
+
+// Operator readout ("~X dial") under the same evidence rule as the selection, so the meter never
+// shows a boost the entry pick would not use.
+inline float evidenceBoundedDialEquivalentSnrDb(float reading_db, float fading_index,
+                                                bool affine_enabled, float physical_mean_db,
+                                                uint32_t physical_n) {
+    if (fading_index < kFadingAwgnMax) {
+        return reading_db;
+    }
+    return boundByPhysicalEvidenceDb(dialEquivalentSnrDb(reading_db, fading_index, affine_enabled),
+                                     reading_db, physical_mean_db, physical_n);
 }
 
 // The wideband OFDM entry floor per channel class (dB, in-band SNR of the OFDM data itself).

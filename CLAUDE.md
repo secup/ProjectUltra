@@ -137,7 +137,7 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 
 | Mode | Channel | In-band floor | Notes |
 |------|---------|---------------|-------|
-| MC-DPSK R1/4 | AWGN | **5 dB** | 3/3 seeds + OTASim fixture |
+| MC-DPSK R1/4 | AWGN | **-6 dB** | GUI gate 2026-11-11, 1 seed (13 retx); -9 fails at the CONNECT frame. ITU Good: 0 dB passes, -3 connects but crawls (RTO waits). Was "5 dB" |
 | OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER 4.875% @10, 0% @14-20 |
 | OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that tool + CTest are now RETIRED (2026-05-30); the floor is UNBACKED, re-establish on `gui_qso_scenario.sh` (the trusted floor gate) during the ladder rework. |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
@@ -441,7 +441,7 @@ count means one more carrier above DC than below (29/30), so the band is **not**
 
 | Mode | Sync | In-band floor | Max bps | CFO | Fading |
 |------|------|---------------|---------|-----|--------|
-| MC-DPSK | dual chirp | 5 dB AWGN | 938 | ±50 Hz | Good |
+| MC-DPSK | dual chirp | -6 dB AWGN | 938 | ±50 Hz | Good |
 | OFDM_NARROW | NB chirp + LTS | ~17 dB AWGN | ~450 (R1/2, w=3) | ±50 Hz | Good (R1/4) |
 | OFDM_CHIRP R1/4 | dual chirp + LTS anchor, warm LTS data | 10 dB AWGN / 15 dB Good | 5.1 k (32QAM R2/3) | ±50 Hz | Good (R1/4) |
 | SC-DPSK | Barker-13 | -8 to -3 dB | 125 | N/A | Good |
@@ -453,7 +453,7 @@ Selection: Poor HF (2 ms delay) → MC-DPSK; low SNR 5-10 dB AWGN → MC-DPSK (t
 ## Known Limitations
 1. OFDM_COX removed from the protocol enum (0x00 reserved); only the Schmidl-Cox sync primitive remains. Poor HF needs MC-DPSK (see #2).
 2. Poor HF (2 ms delay): OFDM fails — use MC-DPSK.
-3. MC-DPSK floor in-band 5 dB AWGN; sub-0 dB is future work.
+3. MC-DPSK floor in-band -6 dB AWGN, 0 dB ITU Good (GUI gate, 2026-11-11, 1 seed); below that the CONNECT frame (AWGN -9) and 43.6 s retransmission waits (Good -3) are the limits.
 4. File transfer: DATA_START/DATA_END not fully implemented.
 
 ## Protocol v2 Flow

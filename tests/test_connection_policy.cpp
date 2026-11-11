@@ -911,6 +911,10 @@ void test_unified_burst_ack_timeout() {
           "narrow QAM16 win=3 deadline must exceed burst + receiver SACK hold (the live short case)");
 }
 
+// The fading basis only stands with a physical measurement to bound it
+// (boundByPhysicalEvidenceDb). Checks of the basis MATH pass this one, high enough never to bind.
+constexpr float kNonBindingPhysicalDb = 60.0f;
+
 // Saturation bound (2026-07-02): on Moderate-class fading the data-aided
 // differential-EVM estimator saturates at the Doppler-EVM floor, so an
 // at/above-zone reading LOWER-BOUNDS true SNR and justifies OFDM entry. The
@@ -937,12 +941,12 @@ void test_connect_selection_saturation_bound() {
           "below-zone data-aided reading keeps the MC-DPSK fallback");
 
     // Good-class fading (< kFadingGoodMax): bound never applies; basis only.
-    CHECK(std::fabs(connectSelectionSnrDb(7.7f, 0.40f, true) -
+    CHECK(std::fabs(connectSelectionSnrDb(7.7f, 0.40f, true, false, kNonBindingPhysicalDb, 1) -
                     (7.7f + connectSnrFadeBasisDb())) < 0.01f,
           "Good-class fading gets basis only, no saturation bound");
 
     // The good@20 s43 recalibration case is pure basis (10.6 -> 15.6).
-    CHECK(std::fabs(connectSelectionSnrDb(10.6f, 0.40f, true) -
+    CHECK(std::fabs(connectSelectionSnrDb(10.6f, 0.40f, true, false, kNonBindingPhysicalDb, 1) -
                     (10.6f + connectSnrFadeBasisDb())) < 0.01f,
           "fading basis path unchanged for Good-class readings");
 
@@ -1005,7 +1009,8 @@ void test_connect_affine_basis() {
     // ── Entry-rate table check: the user-critical dial-20 case ──
     // Reading 9.5 at Good-class fading: flat +5 gave sel 14.5 -> QPSK R1/2;
     // affine gives sel 19.55 -> QPSK R2/3 (Good anchors: R2/3=15, R3/4=20).
-    const float sel_95 = connectSelectionSnrDb(9.5f, 0.50f, true, /*affine=*/true);
+    const float sel_95 = connectSelectionSnrDb(9.5f, 0.50f, true, /*affine=*/true,
+                                               kNonBindingPhysicalDb, 1);
     CHECK(std::fabs(sel_95 - kConnectAffineDialEquivDb) < 1e-3f,
           "reading 9.5 data-aided Good -> sel 19.55");
     CHECK(selectOFDMCodeRate(sel_95, 0.50f) == CodeRate::R2_3,
@@ -1021,7 +1026,7 @@ void test_connect_affine_basis() {
           "the plateau does not land ON the zero-margin Good R3/4 anchor");
 
     // ── Knob-off identity: byte-identical flat path ──
-    CHECK(std::fabs(connectSelectionSnrDb(9.5f, 0.50f, true, false) -
+    CHECK(std::fabs(connectSelectionSnrDb(9.5f, 0.50f, true, false, kNonBindingPhysicalDb, 1) -
                     (9.5f + connectSnrFadeBasisDb())) < 1e-4f,
           "knob off: selection is exactly the flat basis");
     CHECK(std::fabs(dialEquivalentSnrDb(9.5f, 0.50f, false) -
@@ -1042,17 +1047,17 @@ void test_connect_affine_basis() {
     // Training snapshot fade-crest OVER-reads (7.8 measured at true Moderate@8);
     // +11 on that crest would push a true-8dB channel deep into OFDM. Training
     // readings keep the flat basis even with the knob ON (MPM@8 safety case).
-    CHECK(std::fabs(connectSelectionSnrDb(7.8f, 0.70f, false, true) -
+    CHECK(std::fabs(connectSelectionSnrDb(7.8f, 0.70f, false, true, kNonBindingPhysicalDb, 1) -
                     (7.8f + connectSnrFadeBasisDb())) < 1e-4f,
           "training-routed reading keeps the flat basis under the affine knob");
-    CHECK(connectSelectionSnrDb(7.8f, 0.70f, false, true) <
+    CHECK(connectSelectionSnrDb(7.8f, 0.70f, false, true, kNonBindingPhysicalDb, 1) <
               kOFDMEntryFloorModerateDb,
           "MPM@8 training-crest safety unchanged: stays below the Moderate floor");
 
     // ── Saturation-bound composition unchanged, and RAW-keyed ──
     // Data-aided 7.7 on Moderate: the bound applies; the affine sel (18.7) already
     // exceeds floor+0.5 so max() keeps it — composition is exactly one max().
-    const float sel_mod = connectSelectionSnrDb(7.7f, 0.70f, true, true);
+    const float sel_mod = connectSelectionSnrDb(7.7f, 0.70f, true, true, kNonBindingPhysicalDb, 1);
     CHECK(std::fabs(sel_mod -
                     std::max(7.7f + connectAffineCorrectionDb(7.7f),
                              kOFDMEntryFloorModerateDb + 0.5f)) < 1e-4f,
@@ -1062,8 +1067,49 @@ void test_connect_affine_basis() {
     // RAW-keying proof: raw 3.0 (< 6.5 zone) maps to affine sel 14.0; were the 6.5
     // zone test keyed on the CORRECTED value (14.0 >= 6.5) the bound would lift it
     // to 14.5. It must stay 14.0.
-    CHECK(std::fabs(connectSelectionSnrDb(3.0f, 0.70f, true, true) - 14.0f) < 1e-4f,
+    CHECK(std::fabs(connectSelectionSnrDb(3.0f, 0.70f, true, true, kNonBindingPhysicalDb, 1) -
+                    14.0f) < 1e-4f,
           "the 6.5 saturation-zone test stays keyed to the RAW reading");
+}
+
+// BUG-CONNECT-BOOST-NO-EVIDENCE (2026-11-11): the fading basis is a bet calibrated on strong links.
+// With no physical measurement to bound it, the reading (a lower bound on the channel SNR) is the
+// selection; with one, the boost stands up to physical mean + margin, exactly as before.
+void test_connect_selection_needs_physical_evidence() {
+    // The failing GUI run (ITU Good -3 dB, seed 42): data-aided reading -3.9 dB, fading 0.53, no
+    // physical sample (every producer needs signal power above the noise). The affine map turned
+    // it into 7.1 dB -> DQPSK R1/4, which never decoded.
+    const float weak = connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/true, 0.0f, 0);
+    CHECK(std::fabs(weak - (-3.9f)) < 1e-4f,
+          "no physical measurement: the reading is the selection (affine basis)");
+    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::DBPSK,
+          "a -3.9 dB reading on Good picks DBPSK, not DQPSK");
+    CHECK(std::fabs(connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/false, 0.0f, 0) -
+                    (-3.9f)) < 1e-4f,
+          "no physical measurement: the reading is the selection (flat basis)");
+    CHECK(std::fabs(evidenceBoundedDialEquivalentSnrDb(-3.9f, 0.53f, true, 0.0f, 0) - (-3.9f)) <
+              1e-4f,
+          "the operator's dial readout follows the same rule");
+
+    // With a physical measurement the boost stands, capped at physical + margin (unchanged path).
+    CHECK(std::fabs(connectSelectionSnrDb(12.4f, 0.50f, true, true, 15.3f, 3) -
+                    (15.3f + kPhysicalEntryCapMarginDb)) < 1e-4f,
+          "a binding physical cap sets the selection (Good 20 dB GUI case: 17.3)");
+    CHECK(std::fabs(connectSelectionSnrDb(12.4f, 0.50f, true, true, 25.0f, 3) -
+                    kConnectAffineDialEquivDb) < 1e-4f,
+          "a non-binding physical cap keeps the calibrated boost");
+    CHECK(std::fabs(evidenceBoundedDialEquivalentSnrDb(12.4f, 0.50f, true, 15.3f, 3) -
+                    (15.3f + kPhysicalEntryCapMarginDb)) < 1e-4f,
+          "the dial readout shows the capped value the selection uses");
+
+    // A bound derived from the reading itself needs no physical measurement.
+    CHECK(std::fabs(connectSelectionSnrDb(7.7f, 0.85f, true, true, 0.0f, 0) -
+                    (kOFDMEntryFloorModerateDb + 0.5f)) < 1e-4f,
+          "the Moderate saturation bound (reading-derived) still stands without one");
+
+    // AWGN never had a basis.
+    CHECK(std::fabs(connectSelectionSnrDb(-3.9f, 0.05f, true, true, 0.0f, 0) - (-3.9f)) < 1e-4f,
+          "AWGN: the reading, with or without a physical measurement");
 }
 
 void test_coherent_window_override_disabled_keeps_default() {
@@ -1741,6 +1787,7 @@ int main() {
     test_unified_burst_ack_timeout();
     test_connect_selection_saturation_bound();
     test_connect_affine_basis();
+    test_connect_selection_needs_physical_evidence();
     test_coherent_window_override_disabled_keeps_default();
     test_qam16_r34_cap_knob_off_keeps_r23();
     test_retx_trough_defer();
