@@ -7577,14 +7577,14 @@ void Connection::configureArqForCurrentDataMode() {
         //   window=3:         92 s (-49 %, +96 % throughput)
         //   window=4:         69 s (-62 %)
         //   window=8:         87 s (diminishing returns)
-        // Settled on 3 because Codex audit explicitly capped at "2, maybe
-        // 3 after tests"; window=4 hasn't been audited even though it
-        // also passes every documented baseline. 30 m fading coherence
-        // on real channels could correlate across a 4-frame burst (each
-        // frame ~3.4 s) and turn one fade into 4 retransmits. If real-
-        // OTA testing later shows we have headroom, bump to 4 after a
-        // fresh audit. If correlated fades chew throughput, drop to 2.
-        constexpr size_t kNarrowWindow = 3;
+        // 2026-11-10: 4 (was 3). Every coherent narrowband burst pays a chirp anchor, a
+        // descriptor and a turnaround (~3.4 s at 500 ms chirps) whatever its length; at 3
+        // frames that was 30 % of the cycle. A fade that hits several frames costs the same
+        // retransmissions at any window under selective repeat; the window only sets how
+        // often the fixed cost is paid. The ACK timeout scales with it
+        // (computeNarrowOFDMAckTimeoutMs). The old sweep above (differential narrowband,
+        // retired simulator) also had 4 fastest.
+        constexpr size_t kNarrowWindow = 4;
         arq_.setWindowSize(kNarrowWindow);
         arq_.setMaxRetries(15);
         arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);

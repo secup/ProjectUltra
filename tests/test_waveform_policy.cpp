@@ -105,13 +105,13 @@ void test_narrow_data_mode() {
     struct Case { float snr; Modulation mod; CodeRate rate; };
     const Case cases[] = {
         {6.0f, Modulation::QPSK, CodeRate::R1_4},
-        {9.9f, Modulation::QPSK, CodeRate::R1_4},
-        {10.0f, Modulation::QPSK, CodeRate::R1_2},
-        {14.9f, Modulation::QPSK, CodeRate::R1_2},
-        {15.4f, Modulation::QPSK, CodeRate::R2_3},  // the 500 Hz-filtered GUI session
-        {18.0f, Modulation::QPSK, CodeRate::R3_4},
-        {21.9f, Modulation::QPSK, CodeRate::R3_4},
-        {22.0f, turbo ? Modulation::QAM8 : Modulation::QPSK, turbo ? CodeRate::R2_3 : CodeRate::R3_4},
+        {7.9f, Modulation::QPSK, CodeRate::R1_4},
+        {8.0f, Modulation::QPSK, CodeRate::R1_2},
+        {11.9f, Modulation::QPSK, CodeRate::R1_2},
+        {12.0f, Modulation::QPSK, CodeRate::R2_3},
+        {15.4f, Modulation::QPSK, CodeRate::R3_4},  // the 500 Hz-filtered GUI session
+        {16.9f, Modulation::QPSK, CodeRate::R3_4},
+        {17.0f, turbo ? Modulation::QAM8 : Modulation::QPSK, turbo ? CodeRate::R2_3 : CodeRate::R3_4},
         {30.0f, turbo ? Modulation::QAM8 : Modulation::QPSK, turbo ? CodeRate::R2_3 : CodeRate::R3_4},
     };
     for (const auto& c : cases) {

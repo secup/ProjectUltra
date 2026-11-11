@@ -333,12 +333,23 @@ struct OFDMModulator::Impl {
     }
 
     const Samples& complexToReal(const std::vector<Complex>& complex_signal) {
-        // Mix up to center frequency, take real part, and apply output scaling
-        // OFDM raw output has very low RMS due to FFT spreading (num_carriers/fft_size)
-        // Scale up to match chirp/preamble levels for consistent audio
+        // Mix up to center frequency, take real part, and apply output scaling.
+        // The SAME average power per OFDM symbol for every geometry: with the 1/N inverse FFT a
+        // symbol of Ncar unit-power carriers has real passband power (Ncar / 2)(scale / N)^2, so
+        // the scale grows as N / sqrt(Ncar) from the wideband geometry output_scale was set on
+        // (1024-point FFT, 59 carriers: factor exactly 1, wideband unchanged). Until 2026-11-10
+        // one scale served every geometry and the narrowband symbol (2048, 21 carriers) left the
+        // modulator 10.5 dB below the wideband one; the transmission's 0.8 peak normalization
+        // (ModemEngine::postProcessTx) then let the constant-envelope chirp set the peak, and the
+        // narrowband data rode 6.7 dB under the transmitter's budget (BUG-NARROW-TX-LEVEL).
         auto& real_signal = real_signal_scratch;
         real_signal.resize(complex_signal.size());
-        float scale = config.output_scale;
+        constexpr float kLevelReferenceFft = 1024.0f;
+        constexpr float kLevelReferenceCarriers = 59.0f;
+        const float scale =
+            config.output_scale * (static_cast<float>(config.fft_size) / kLevelReferenceFft) *
+            std::sqrt(kLevelReferenceCarriers /
+                      std::max(1.0f, static_cast<float>(config.num_carriers)));
         for (size_t i = 0; i < complex_signal.size(); ++i) {
             Complex mixed = complex_signal[i] * mixer.next();
             real_signal[i] = mixed.real() * scale;

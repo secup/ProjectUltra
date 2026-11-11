@@ -10,6 +10,52 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — PERF(narrow): geometry-normalized TX level (~9 dB per rung), 500 ms anchor chirp, 4-frame bursts, re-measured ladder (BUG-NARROW-TX-LEVEL)
+
+**What was broken.** Coherent narrowband worked but ran at 210-280 bps where a 500 Hz channel at
+20 dB carries kilobits. Three losses multiplied: (1) the OFDM modulator used one output scale for
+every geometry, so with the 1/N inverse FFT a narrowband symbol (2048 FFT, 21 carriers) left it 10.5
+dB below a wideband one, the transmission's 0.8 peak normalization let the constant-envelope chirp
+set the peak, and narrowband data rode 6.7 dB under the transmitter's budget: its 7.5 dB per-carrier
+advantage was spent at the TX and it needed the same in-band SNR as wideband per rung; (2) each
+burst paid a 2.2 s chirp anchor, a 1.1 s descriptor and a turnaround for only 3 frames (31 % of the
+cycle); (3) the ladder, fixed for the session, was measured on the weak TX level.
+
+**What changed.**
+- `src/ofdm/modulator.cpp`: the output scale grows as N / sqrt(Ncar) from the wideband geometry
+  `output_scale` was set on (Parseval: the same power per OFDM symbol for every geometry); wideband
+  frames are byte-identical (factor exactly 1). Narrowband data RMS 0.101 -> 0.194.
+- `presets::narrowbandOFDM()`: 500 ms anchor sweeps (was 1000; time-bandwidth 250, ~24 dB of
+  processing gain; the narrowband MC-DPSK handshake chirp keeps 1000 ms); `kNarrowOFDMChirpDurationMs`
+  follows it (test-pinned). Narrowband window 3 -> 4 frames per burst.
+- `kNarrowCoherentLadder` re-measured on the new TX level: QPSK R1/2 8, R2/3 12, R3/4 15, 8PSK R2/3
+  17 dB (was 10 / 15 / 18 / 22), still one column capped at 8PSK R2/3 for Moderate.
+  Data: `docs/data/narrowband_rung_fer_txlevel_2026_11_10.csv`.
+
+**Measured.** `measure_ack_fer --waveform narrow` AWGN 10 % FER points fell ~9 dB on every rung:
+QPSK R1/4 5.7 -> -1.2, R1/2 8.0 -> -0.3, R3/4 9.0 -> 1.8, 8PSK R2/3 14.8 -> 5.8, 16QAM R3/4 17.9 ->
+8.9, 32QAM R2/3 20.8 -> 11.8 dB (the harness normalizes whole bursts, chirp included, so it credits
+~2 dB more than a peak-limited radio's +6.7 dB). Narrowband now needs 6-9 dB less in-band SNR than
+wideband, as the per-carrier physics says. Moderate still holds 16QAM at >= 30 % FER and 32QAM at >=
+60 % (0.5 Hz Doppler against 46.7 ms symbols).
+
+**GUI gate (forced OFDM_NARROW, 4 KB, seed 42, 7.3 Hz, every file byte-exact).**
+
+| Narrowband session | earlier today (2 KB) | now |
+|---|---|---|
+| AWGN 20 dB | QPSK R3/4, 280 bps | 8PSK R2/3, 430 bps, 0 retransmissions |
+| AWGN 20 dB, 500 Hz IF filter | QPSK R2/3, 270 bps | QPSK R3/4, 340 bps, 0 retransmissions |
+| ITU Good 20 dB | QPSK R3/4, 210 bps | 8PSK R2/3, 430 bps, 0 retransmissions |
+| ITU Moderate 20 dB | — | 8PSK R2/3, 390 bps, 2 retransmissions |
+| AWGN 10 dB | — | QPSK R1/2, 230 bps, 0 retransmissions |
+| AWGN 5 dB | — | connected only at 91 s, then QPSK R1/4 ran out of the scenario budget |
+
+At 5 dB the narrowband PING/PONG is marginal: the responder classifies a bare chirp by the gap RMS
+against the training RMS (threshold 0.5), measured over the 3 kHz band while the signal occupies 500
+Hz; two of four PINGs read 0.50-0.56 and were taken for frames (BUG-NARROW-PING-GAP, open). Full
+ctest 115/115.
+Single seed each; the file size doubled (less setup weight), so read the gains as indicative.
+
 ## 2026-11-10 — FEAT(narrow): coherent OFDM_NARROW returns and works end to end; narrowband handshake, anchoring, ACK band, timing and rate fixed (BUG-NARROW-MCDPSK-CONNECT, BUG-NARROW-NO-ANCHOR, BUG-NARROW-ACK-OUT-OF-BAND, BUG-NARROW-TIMING)
 
 **What was broken.** Narrowband (500 Hz) sessions did not work at any level. OFDM_NARROW had been

@@ -184,22 +184,24 @@ inline bool coherentRungUsableWithDataFec(const CoherentRung& row) {
 // channel class, because (1) a 500 Hz channel fades FLAT (no frequency diversity) and a flat fade
 // is invisible to the across-carrier fading index a narrowband handshake measures, so a narrowband
 // session cannot tell AWGN, Good and Moderate apart at connect; and (2) its rate is fixed for the
-// session (rate adaptation is wideband-only), so a rung that does not hold strands the transfer.
-// Measured with measure_ack_fer --waveform narrow --geometry production (turbo data frames,
-// 7.3 Hz, 2 seeds x 20 frames per point): the GOODPUT crossover of each rung (bits per carrier x
-// (1 - FER) above every lower rung's) is QPSK R1/2 7 dB, R3/4 12, 8PSK R2/3 17, 16QAM R2/3 19,
-// R3/4 21, 32QAM R2/3 25 on ITU Good, but ITU Moderate is harder: QPSK R3/4 FER 55 % at 15 dB and
-// 28 % at 19, 8PSK R2/3 38 % at 20 and 12 % at 24, and 16QAM 55-72 % even at 22-28 dB (0.5 Hz
-// Doppler against 46.7 ms symbols). Each threshold is where the rung still wins on Moderate, which
-// also clears Good by >= 3 dB for the connect SNR's snapshot error; 16QAM and 32QAM are left out
-// until narrowband sessions adapt their rate. On AWGN this leaves capacity unused (16QAM R3/4
-// holds at 18 dB there). The 8PSK rung was measured only on the turbo data frame (turbo_only).
+// session (rate adaptation is wideband-only, BUG-NARROW-NO-ADAPT), so a rung that does not hold
+// strands the transfer. Measured with measure_ack_fer --waveform narrow --geometry production
+// (turbo data frames, 7.3 Hz, 2 seeds x 20 frames per point) after the geometry-normalized TX
+// level (BUG-NARROW-TX-LEVEL, ~9 dB on every rung): AWGN 10 % FER points QPSK R1/2 -0.3, R3/4 1.8,
+// 8PSK R2/3 5.8, 16QAM R3/4 8.9, 32QAM R2/3 11.8 dB; ITU Good goodput crossovers 8PSK R2/3 5,
+// 16QAM R2/3 8, 32QAM R2/3 14 dB; but ITU Moderate holds 16QAM R2/3 at >= 30 % FER and 16QAM R3/4
+// / 32QAM at >= 48 % at any SNR measured (0.5 Hz Doppler against 46.7 ms symbols), while 8PSK
+// R2/3 reaches 12 % at 18 dB. Each threshold is where the rung's Moderate FER is down to ~10-18 %
+// (QPSK R1/2 5 % at 10 dB, R2/3 18 % at 10 and 7 % at 14, R3/4 12 % at 14, 8PSK R2/3 18 % at 14
+// and 12 % at 18); the ladder stops at 8PSK R2/3 until narrowband sessions adapt their rate. On
+// AWGN and Good this leaves capacity unused (32QAM R2/3 from ~14 dB on Good). The 8PSK rung was
+// measured only on the turbo data frame (turbo_only).
 inline constexpr CoherentRung kNarrowCoherentLadder[] = {
     // mod              rate            AWGN    GOOD    MODERATE (one column, see above)
-    {Modulation::QAM8,  CodeRate::R2_3, {22.0f, 22.0f, 22.0f}, /*turbo_only=*/true},
-    {Modulation::QPSK,  CodeRate::R3_4, {18.0f, 18.0f, 18.0f}},
-    {Modulation::QPSK,  CodeRate::R2_3, {15.0f, 15.0f, 15.0f}},
-    {Modulation::QPSK,  CodeRate::R1_2, {10.0f, 10.0f, 10.0f}},
+    {Modulation::QAM8,  CodeRate::R2_3, {17.0f, 17.0f, 17.0f}, /*turbo_only=*/true},
+    {Modulation::QPSK,  CodeRate::R3_4, {15.0f, 15.0f, 15.0f}},
+    {Modulation::QPSK,  CodeRate::R2_3, {12.0f, 12.0f, 12.0f}},
+    {Modulation::QPSK,  CodeRate::R1_2, {8.0f, 8.0f, 8.0f}},
 };
 
 inline constexpr CoherentRung kCoherentLadder[] = {

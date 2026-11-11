@@ -107,12 +107,13 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
   2.2 s anchor + descriptor (ACK timeout ~19-21 s). Tone ACKs use the narrowband band plan
   (1375-1600 Hz, no diversity). The narrowband handshake (MC-DPSK) is 4 orthogonal carriers
   1289-1711 Hz, 1024-sample symbols. Per-carrier SNR is 7.5 dB above wideband at the same in-band
-  SNR, but a 500 Hz channel fades FLAT (no frequency diversity). Measured: 190 bps QPSK R1/2 at
-  AWGN 20 dB (2 KB); works through a 500 Hz IF filter (`gui_qso_scenario.sh --rx-filter
-  1250-1750`). Rate: fixed per session (adaptation is wideband-only) from the measured
-  `kNarrowCoherentLadder` (QPSK R1/2 10, R2/3 15, R3/4 18, 8PSK R2/3 22 dB; one column for every
-  channel class, capped below 16QAM which fails on Moderate). Open levers: BUG-NARROW-TX-LEVEL (data
-  leaves the TX 4.8 dB below wideband), BUG-NARROW-NO-ADAPT.
+  SNR (the modulator keeps the per-symbol power across geometries since 2026-11-10), but a 500 Hz
+  channel fades FLAT (no frequency diversity). 500 ms anchor sweeps, 4 frames per burst. Measured
+  (GUI, 4 KB): 8PSK R2/3 430 bps at AWGN 20 and Good 20, 390 at Moderate 20; QPSK R3/4 340 bps behind
+  a 500 Hz IF filter (`gui_qso_scenario.sh --rx-filter 1250-1750`). Rate: fixed per session
+  (adaptation is wideband-only, BUG-NARROW-NO-ADAPT) from the measured `kNarrowCoherentLadder`
+  (QPSK R1/2 8, R2/3 12, R3/4 15, 8PSK R2/3 17 dB; one column for every channel class, capped below
+  16QAM which fails on Moderate).
 
 ### Mode Selection Flow
 1. Connection starts in MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp).

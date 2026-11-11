@@ -719,6 +719,16 @@ tones and reports the carrier offset without the shift.
 (BUG-NARROW-ACK-OUT-OF-BAND).
 **Test:** `ToneBurstAckRoundTrip` (`test_narrowband_band_plan`); GUI gate `--rx-filter 1250-1750`.
 
+### INV-TX-LEVEL-001: every OFDM geometry leaves the modulator at the same per-symbol power
+**Rule:** the modulator scales by `output_scale` x N/1024 x sqrt(59/Ncar) (Parseval with the 1/N
+inverse FFT), so a symbol's average power does not depend on FFT size or carrier count; the wideband
+geometry is the reference (factor 1, byte-identical).
+**Why:** one scale for every geometry put narrowband data 10.5 dB under wideband in the modulator and,
+after the 0.8 peak normalization, 6.7 dB under the transmitter's budget (BUG-NARROW-TX-LEVEL): ~9 dB
+per narrowband rung. The level reference itself (`output_scale = 40`) is still hand-set
+(BUG-TX-LEVEL-HANDSET).
+**Test:** `ptx` narrowband vs wideband frame RMS (0.194 / 0.175); wideband `ptx` frame byte-identical.
+
 ### INV-MCDPSK-ORTHO-001: MC-DPSK carriers are orthogonal over a symbol
 **Rule:** carrier spacing x symbol time is a whole number (>= 2 preferred) for any shipped MC-DPSK
 layout. Production layouts: 8 carriers 500-2500 Hz at 1024 samples (6.1, -28.5 dB worst leakage) and

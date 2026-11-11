@@ -308,7 +308,8 @@ struct ModemConfig {
     // OFDM raw output has very low RMS (~0.01) due to FFT spreading
     // Scale up to match chirp/preamble levels for consistent audio output
     // Default 40x gives RMS ~0.4, matching chirp amplitude ~0.5
-    float output_scale = 40.0f;
+    float output_scale = 40.0f;  // OFDM TX level at the wideband geometry (1024 FFT, 59 carriers);
+                                 // the modulator keeps the per-symbol power for other geometries
 
     // Chirp sync parameters (wideband defaults, backward compatible)
     // Narrowband mode overrides these to 1250-1750 Hz @ 1000ms
@@ -488,7 +489,12 @@ inline ModemConfig narrowbandOFDM() {
     cfg.pilot_spacing = 10;                 // Will be adjusted by PilotConfig
     cfg.chirp_f_start = 1250.0f;            // Narrowband chirp: 1250-1750 Hz
     cfg.chirp_f_end = 1750.0f;
-    cfg.chirp_duration_ms = 1000.0f;        // 1000ms for processing gain
+    // 500 ms sweeps (2026-11-10, was 1000 ms): time-bandwidth product 250, ~24 dB of
+    // processing gain, far above any narrowband rung's floor; CFO resolution 48 samples/Hz (5x
+    // the wideband chirp's). Every coherent narrowband burst carries this anchor, so the long
+    // sweeps cost 1.1 s of each ~14 s burst. The narrowband MC-DPSK handshake chirp (dual-listen,
+    // mc_dpsk_presets::narrowband) keeps its 1000 ms sweeps.
+    cfg.chirp_duration_ms = 500.0f;
     cfg.speed_profile = SpeedProfile::CONSERVATIVE;
     return cfg;
 }

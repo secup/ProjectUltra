@@ -169,8 +169,10 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
 heard narrowband chirp; chirp-anchored bursts, `narrowOFDMFrameTiming(mod, rate, cw)` +
 `kNarrowOFDMFullAnchorExtraMs`, narrowband tone-ACK band plan, rate fixed per session from
 `kNarrowCoherentLadder` / `selectNarrowCoherentOFDM` (`waveform_selection.hpp`): one fading-safe column,
-QPSK R1/2 10, R2/3 15, R3/4 18, 8PSK R2/3 22 dB, else R1/4; data
-`docs/data/narrowband_rung_fer_2026_11_10.csv`; BUG-NARROW-NO-ADAPT, BUG-NARROW-TX-LEVEL open). `isOFDMMode()`
+QPSK R1/2 8, R2/3 12, R3/4 15, 8PSK R2/3 17 dB, else R1/4; data
+`docs/data/narrowband_rung_fer_txlevel_2026_11_10.csv`; window 4; 500 ms anchor sweeps; TX level
+geometry-normalized in `modulator.cpp` `complexToReal` (N/sqrt(Ncar) from the wideband reference);
+BUG-NARROW-NO-ADAPT open). `isOFDMMode()`
 (`frame_v2.hpp:107`) = `OFDM_CHIRP||OFDM_NARROW`.
 
 **Joining a session without a handshake** 🟢 (2026-11-10): `ModemEngine::joinConnectedSession(mode,

@@ -294,17 +294,21 @@ void test_narrow_ofdm_timing_and_timeout() {
     CHECK(narrow_8cw.data_ms > r12.data_ms,
           "narrow OFDM data duration should scale with fixed-frame CW count");
 
-    // The ACK timeout covers the whole burst: chirp anchor (2 x 1000 ms + 2 x 100 ms), the
+    // The anchor the timing budgets IS the narrowband preset's chirp (one source of truth).
+    CHECK(kNarrowOFDMChirpDurationMs ==
+              static_cast<uint32_t>(presets::narrowbandOFDM().chirp_duration_ms),
+          "kNarrowOFDMChirpDurationMs matches presets::narrowbandOFDM()");
+    // The ACK timeout covers the whole burst: chirp anchor (2 x 500 ms + 2 x 100 ms), the
     // descriptor (a control frame) and the window's frames, then the ACK turnaround and the
     // receiver's SACK hold. QPSK R1/2, window 3:
-    //   tx_burst = 2200 + 1073 + 3 x 3453 = 13632
-    //   timeout  = 13632 + 2 x 1073 + 120 + max(700, 1726) + 1500 = 19124 ms
+    //   tx_burst = 1200 + 1073 + 3 x 3453 = 12632
+    //   timeout  = 12632 + 2 x 1073 + 120 + max(700, 1726) + 1500 = 18124 ms
     const uint32_t w1 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 4, 1);
     const uint32_t w2 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 4, 2);
     const uint32_t w3 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_2, 4, 3);
-    CHECK(w1 == 12218, "window=1: 2200 + 1073 + 3453 + 2146 + 120 + 1726 + 1500");
+    CHECK(w1 == 11218, "window=1: 1200 + 1073 + 3453 + 2146 + 120 + 1726 + 1500");
     CHECK(w2 > w1, "window=2 timeout scales above window=1");
-    CHECK(w3 == 19124, "window=3 (the narrow default) covers anchor + descriptor + 3 frames");
+    CHECK(w3 == 18124, "window=3 covers anchor + descriptor + 3 frames");
     // A QPSK R1/4 burst is longer, and its timeout must cover it (the 2026-11-10 session whose
     // R1/4 ACK arrived 0.4 s after a window sized for R1/2 frames).
     const uint32_t w3_r14 = computeNarrowOFDMAckTimeoutMs(Modulation::QPSK, CodeRate::R1_4, 4, 3);

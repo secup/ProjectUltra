@@ -269,11 +269,11 @@ inline float designDopplerForFadingIndex(float fading_index) {
 inline constexpr float kClarkeCoherenceNumerator = 0.423f;
 inline constexpr uint32_t kNarrowOFDMSymbolSamples = 2240;
 inline constexpr uint32_t kNarrowOFDMCarriers = 21;
-// The narrowband burst anchor: a dual chirp of two 1000 ms sweeps with two 100 ms gaps
+// The narrowband burst anchor: a dual chirp of two 500 ms sweeps with two 100 ms gaps
 // (presets::narrowbandOFDM chirp, OFDMChirpWaveform::getChirpConfig gap), counted the way
 // kWideOFDMFullAnchorExtraSamples counts the wideband one. Coherent OFDM_NARROW sends it before
 // every burst descriptor (its receiver has no structure detector).
-inline constexpr uint32_t kNarrowOFDMChirpDurationMs = 1000;
+inline constexpr uint32_t kNarrowOFDMChirpDurationMs = 500;  // = presets::narrowbandOFDM() (test-pinned)
 inline constexpr uint32_t kNarrowOFDMChirpGapMs = 100;
 inline constexpr uint32_t kNarrowOFDMFullAnchorExtraMs =
     2 * kNarrowOFDMChirpDurationMs + 2 * kNarrowOFDMChirpGapMs;

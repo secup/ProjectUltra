@@ -69,16 +69,26 @@ acquisition and 8/8 with chirp acquisition. Since 2026-11-10 `ultra prx` and the
 `--monitor` modes call `sync::preferChirpAcquisitionWithoutHandshake()` (chirp unless
 `ULTRA_BURST_ACQ` is set); remove that call when this bug is fixed.
 
-### BUG-NARROW-TX-LEVEL (open, 2026-11-10) — P2 lever: narrowband data leaves the transmitter 4.8 dB below wideband
+### BUG-NARROW-PING-GAP (open, 2026-11-10) — P2: narrowband PING detection fails around 5 dB
 
-The OFDM modulator keeps the per-carrier amplitude, so the 21-carrier narrowband data section has an
-RMS 4.8 dB (peak 6.7 dB) below the 59-carrier wideband one (`ptx` frames: 0.101 vs 0.175). Both
-simulators normalize a whole burst, chirp included, so narrowband data gets less of it, and a radio
-driven once for wideband would send narrowband weaker. The physical per-carrier advantage of putting
-the same power in 500 Hz (+7.5 dB) does not show: measured, narrowband and wideband need the same
-in-band SNR per rung (QPSK R1/2 6 dB, R3/4 9 dB on AWGN). Normalizing OFDM output power to the
-carrier count (a TX scale only; receivers are level-agnostic) should move every narrowband threshold
-down by several dB. Not done: it changes every narrowband frame's level and needs its own A/B.
+The responder tells a PING (a bare dual chirp) from a frame by the RMS of the region after the chirp
+against the training RMS (ratio < 0.5, plus the noise-relative `gap_is_noise` arm). For a narrowband
+chirp the gap is measured over the 3 kHz band while the signal sits in 500 Hz, so the gap carries ~7.8
+dB more noise than the narrowband signal's own band: at AWGN 5 dB the ratios read 0.488-0.56 and two
+of four PINGs were decoded as frames instead (GUI gate, forced narrowband; connect took 91 s). Measure
+the gap in the waveform's own band (or compare it with the receiver's noise floor in that band).
+
+### BUG-TX-LEVEL-HANDSET (open, 2026-11-10) — P3 cleanup: the OFDM data level is a hand-set number
+
+`ModemConfig::output_scale = 40` sets OFDM data loudness relative to the chirp ("to match chirp /
+preamble levels"); since 2026-11-10 the modulator keeps the per-symbol power across geometries from
+that reference (Parseval, N/sqrt(Ncar)), but the reference itself is arbitrary. Every transmission is
+then peak-normalized to 0.8 (`ModemEngine::postProcessTx`, a headroom convention). Constant-free form:
+set the data RMS so the expected per-frame maximum of the ~Gaussian OFDM signal, sqrt(2 ln n) x sigma
+for n samples, equals the chirp amplitude, so data and chirp share the peak budget by construction.
+Worth: wideband 0 dB (its data peaks already set the 0.8 peak), narrowband ~1 dB (data peak 0.71
+under the chirp's 0.8). The receiver reads no level (SNR from ratios), and the simulator's 0.3048
+in-band reference is a noise convention of the simulator only.
 
 ### BUG-NARROW-NO-ADAPT (open, 2026-11-10) — P2: a narrowband session keeps its connect-time rate
 
@@ -2498,6 +2508,18 @@ sender's chirp-less descriptors (structure acquisition) would have stranded it t
 gates take any OFDM mode (`isOFDMMode`); structure acquisition stays wideband-only on both ends (its
 detector is built on the wideband grid: the receiver keeps the chirp search, the sender never omits a
 narrowband chirp); `detectDataSync` needs the LTS pair plus one candidate offset.
+
+### BUG-NARROW-TX-LEVEL (FIXED 2026-11-10) — narrowband data left the transmitter 6.7 dB under its budget
+
+One OFDM output scale (40) served every geometry, so with the 1/N inverse FFT a narrowband symbol
+(2048 FFT, 21 carriers) left the modulator 10.5 dB below a wideband one. The 0.8 peak normalization of
+each transmission (`ModemEngine::postProcessTx`) then let the constant-envelope chirp set the peak, and
+the narrowband data rode far under it (RMS 0.101 vs wideband 0.175): the 7.5 dB per-carrier advantage
+of putting the power in 500 Hz was spent at the transmitter, and narrowband needed the same in-band SNR
+as wideband per rung. Now the modulator keeps the per-symbol power for every geometry (scale x N/1024 x
+sqrt(59/Ncar); wideband byte-identical): narrowband data RMS 0.194, and every narrowband rung's AWGN 10 %
+FER point fell by ~9 dB in `measure_ack_fer` (QPSK R1/2 8.0 -> -0.3 dB, 16QAM R3/4 17.9 -> 8.9). The
+receiver's SNR meter converts per carrier from the geometry (2 Ncar/N) and does not read the level.
 
 ### BUG-NARROW-TIMING (FIXED 2026-11-10) — the narrowband ACK window was shorter than a QPSK R1/4 burst
 
