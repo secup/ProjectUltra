@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(mcdpsk): a compact MC-DPSK burst holds every ACK until it ends
+
+**What was broken.** The GUI never keys an ACK while the burst it answers is still arriving: the
+decoder publishes the burst's air end (F176) and the ACK waits for it. Only OFDM published one (from
+its descriptor; F227 patched around it for ACK repeats only). In an MC-DPSK session an ACK the
+protocol raises mid-burst - a re-ACK for a frame below the window, a hole - waited at most 2.5 s
+("no 0 ms of burst still arriving") and then keyed over the sender's remaining frames: on a rig it
+is unheard and blanks the receiver's own reception of the next frame.
+
+**Fix.** Compact frames have a fixed length and a burst holds at most the sender's window, so
+`publishMcDpskCompactAirEnd` publishes the burst's latest possible end before each frame reaches the
+protocol (`frame_end + frames_left x frame_length`), and clears it on the end-of-turn frame, at the
+window's last frame and when the burst ends. Held ACKs are dropped at their deadline while the burst
+is still arriving; the end-of-turn frame's synchronous ACK carries the cumulative state.
+The window bound matters: the first frame's look-ahead covers a whole frame at the slowest
+constellation, so a DQPSK burst's second frame is already buffered when its first decodes.
+
+**Tests.** `StreamingMCDPSK`: in a compact DBPSK burst and in a DQPSK burst at a DBPSK receiver, the
+air time still to come is positive when frames 1 and 2 reach the protocol and zero at frame 3 (the
+window's last). GUI gate (half-duplex, the runs in the entry above): a mid-burst ACK now waits for
+the burst's remaining air time - "deferring up to 10826 ms (decoder RX evidence; 10326 ms of burst
+still arriving)" - where before it keyed after 2.5 s ("no 0 ms of burst still arriving"). Both arms
+of that comparison carry the gate, so its own share of the time is not separated.
+
+---
+
 ## 2026-11-11 — FIX(sim): every simulated station is a half-duplex radio again
 
 **What was broken.** OTASim's server is the medium and carries every signal at once; half-duplex is a

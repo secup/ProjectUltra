@@ -341,7 +341,23 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
     decoder.setMcDpskSessionAddresses(bravo, alpha);
     int lost = 0;
     decoder.setMcDpskFrameLostCallback([&](int) { ++lost; });
+    // Listen-before-ACK geometry: when each frame reaches the protocol, the decoder publishes
+    // the burst's remaining air time (the next frame's end) until the window's last frame.
+    std::vector<uint64_t> air_remaining_at_frame;
+    decoder.setFrameCallback([&](const DecodeResult& r) {
+        if (r.success && v2::isDataFrame(r.frame_type)) {
+            air_remaining_at_frame.push_back(decoder.burstAirSamplesRemaining());
+        }
+    });
     feedInChunks(decoder, withSilence(samples));
+    if (!corrupt_middle &&
+        (air_remaining_at_frame.size() != 3 || air_remaining_at_frame[0] == 0 ||
+         air_remaining_at_frame[1] == 0 || air_remaining_at_frame[2] != 0)) {
+        std::cout << "FAIL: " << name << ": burst air end not published per frame (";
+        for (auto v : air_remaining_at_frame) std::cout << v << " ";
+        std::cout << ")\n";
+        return false;
+    }
     std::vector<uint16_t> seqs;
     while (decoder.hasFrame()) {
         auto result = decoder.getFrame();

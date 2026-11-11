@@ -4069,6 +4069,19 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
     if (result.physical_turn_complete) {
         clearProvisionalBurstAirGate();
     }
+    const int codewords = mcDpskCompactCodewords();
+    const size_t consumed =
+        mc ? static_cast<size_t>(mc->getMinSamplesForCWCount(codewords)) : 0;
+    const int window = mc ? static_cast<int>(protocol::connection_policy::mcDpskWindowSizeForTiming(
+                                protocol::connection_policy::mcDpskFrameTiming(
+                                    mc->getModulation(), mc_dpsk_config_.num_carriers,
+                                    mc_dpsk_config_.samples_per_symbol, codewords)))
+                          : 0;
+    // Before the frame reaches the protocol (whose ACK may follow at once): the burst's air end.
+    publishMcDpskCompactAirEnd(
+        mc != nullptr && !result.physical_turn_complete && decodedFrameHasMoreFrag(result),
+        frame_sync_abs + consumed,
+        mc ? static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords)) : 0, window - 1);
     {
         std::lock_guard<std::mutex> qlock(queue_mutex_);
         frame_queue_.push(result);
@@ -4079,8 +4092,6 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
     if (reset_generation_.load(std::memory_order_acquire) != gen_at_start || !mc) {
         return;
     }
-    const int codewords = mcDpskCompactCodewords();
-    const size_t consumed = static_cast<size_t>(mc->getMinSamplesForCWCount(codewords));
     size_t next_pos = 0;
     {
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
@@ -4095,11 +4106,7 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
         startMCDPSKBurstContinuation(next_pos, next_abs, sync_snr_, sync_cfo_);
         mc_burst_compact_ = true;
         mc_burst_compact_fail_pos_ = SIZE_MAX;
-        mc_burst_compact_window_ = static_cast<int>(
-            protocol::connection_policy::mcDpskWindowSizeForTiming(
-                protocol::connection_policy::mcDpskFrameTiming(
-                    mc->getModulation(), mc_dpsk_config_.num_carriers,
-                    mc_dpsk_config_.samples_per_symbol, codewords)));
+        mc_burst_compact_window_ = window;
         return;
     }
     {
@@ -4111,7 +4118,24 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
     state_ = DecoderState::SEARCHING;
 }
 
+void StreamingDecoder::publishMcDpskCompactAirEnd(bool burst_continues, uint64_t frame_end_abs,
+                                                  size_t frame_samples, int frames_left) {
+    // Listen-before-ACK geometry for compact MC-DPSK bursts (the counterpart of an OFDM
+    // descriptor's declared air end, app.cpp F176 gates): frames have a fixed length and a burst
+    // holds at most the sender's window, so while a burst continues its latest possible end is
+    // known (the receiver may already hold the next frame: the first frame's look-ahead covers a
+    // whole frame at the slowest constellation). An ACK the protocol raises mid-burst (a
+    // re-ACK for a duplicate, a hole) then waits instead of keying over the sender's remaining
+    // frames - on a half-duplex rig it would be unheard and blank this receiver's own reception.
+    // The end-of-turn frame's synchronous ACK replaces any held one.
+    const uint64_t left = static_cast<uint64_t>(std::max(0, frames_left));
+    burst_air_end_abs_.store(
+        (burst_continues && left > 0) ? frame_end_abs + left * frame_samples : 0,
+        std::memory_order_relaxed);
+}
+
 void StreamingDecoder::finishMCDPSKCompactBurst() {
+    burst_air_end_abs_.store(0, std::memory_order_relaxed);
     if (mc_burst_compact_fail_pos_ != SIZE_MAX) {
         // Trailing frames failed: hand the search back their first position, where the next
         // burst's chirp may already sit (bursts are queued back to back).
@@ -4212,6 +4236,11 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
             stats_.frames_decoded++;
         }
         stampRxSubstantive();
+        const bool burst_continues = !result.physical_turn_complete &&
+                                     decodedFrameHasMoreFrag(result) &&
+                                     mc_burst_frames_decoded_ < std::max(1, mc_burst_compact_window_);
+        publishMcDpskCompactAirEnd(burst_continues, frame_abs + frame_samples, frame_samples,
+                                   std::max(1, mc_burst_compact_window_) - mc_burst_frames_decoded_);
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);
@@ -4233,6 +4262,10 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
             stats_.frames_failed++;
         }
         noteMcDpskFrameLost(static_cast<int>(mc->getModulation()));
+        publishMcDpskCompactAirEnd(
+            mc_burst_frames_decoded_ < std::max(1, mc_burst_compact_window_),
+            frame_abs + frame_samples, frame_samples,
+            std::max(1, mc_burst_compact_window_) - mc_burst_frames_decoded_);
         if (mc_burst_compact_fail_pos_ == SIZE_MAX) {
             mc_burst_compact_fail_pos_ = frame_pos;
             mc_burst_compact_fail_abs_ = frame_abs;

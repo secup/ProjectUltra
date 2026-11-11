@@ -1013,6 +1013,10 @@ private:
                                         uint32_t gen_at_start);
     void continueMCDPSKCompactBurst();
     void finishMCDPSKCompactBurst();
+    // Compact bursts publish their air end (the burst's latest possible end - frames left in the
+    // sender's window - while it continues, 0 at its end) for the GUI's listen-before-ACK gates.
+    void publishMcDpskCompactAirEnd(bool burst_continues, uint64_t frame_end_abs,
+                                    size_t frame_samples, int frames_left);
 
     // CFO pre-correction: remove CFO from real passband samples before demodulation.
     // Uses Hilbert transform → analytic signal → complex rotation → real part.
