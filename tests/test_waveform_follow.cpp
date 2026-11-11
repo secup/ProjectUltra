@@ -185,6 +185,7 @@ struct ConnectionAdaptiveTestAccess {
         c.pending_ladder_rung_id_ = LadderRungId::OFDM_CHIRP;
     }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
+    static void agePool(Connection& c, uint32_t ms) { c.connect_snr_pool_.tick(ms); }
     static void applyDataMode(Connection& c, Modulation mod, CodeRate rate, LadderRungId rung) {
         c.applyDataMode(mod, rate, 0, rung);
     }
@@ -720,6 +721,33 @@ void test_waveform_follow_crossing_supersedes_mode_change() {
           "a waveform change outside a crossing still reaches the modem");
 }
 
+// The way back up reads the burst being acknowledged, not the fade. An MC-DPSK spell's fade
+// readings (-5..-1 dB) dragged the returned channel's (14 dB on Good, dial 20) down: every return
+// landed on QPSK R1/4..R2/3, below the pre-fade rung (GUI, dual-listen, 6 seeds).
+void test_waveform_follow_return_reads_the_latest_burst() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    c.setPhysicalChannelStats(20.0f, 1.5f, 16);
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+              c, connection_policy::encodeMcDpskRungCommand(0)),
+          "the fade crosses down");
+    for (float fade : {-3.0f, -5.0f, -1.0f, -4.0f}) {  // the fade, a frame apart
+        ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, fade, 0.6f);
+        ConnectionAdaptiveTestAccess::agePool(c, 6000);
+    }
+    ConnectionAdaptiveTestAccess::agePool(c, 30000);  // the channel is back
+    c.setPhysicalChannelStats(18.0f, 2.0f, 6);
+    for (int frame = 0; frame < 3; ++frame) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 14.0f, 0.6f);
+    const uint8_t rung = connection_policy::decodeOfdmRungCommand(
+        ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
+    CHECK(rung >= kRungIdxQam8R23,
+          "the return lands where the returned channel says (8PSK R2/3), not on the fade's floor");
+}
+
 }  // namespace
 
 int main() {
@@ -744,6 +772,7 @@ int main() {
     test_dual_listen_receiver_commands_down_and_follows_the_peer();
     test_dual_listen_missed_up_crossing_backs_off();
     test_waveform_follow_crossing_supersedes_mode_change();
+    test_waveform_follow_return_reads_the_latest_burst();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

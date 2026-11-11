@@ -8909,18 +8909,22 @@ bool Connection::waveformFollowActive() const {
 }
 
 Connection::SessionPick Connection::sessionLadderPick() const {
-    // The connect-time chain (handleConnect) on the readings the session has pooled since: the
-    // same thresholds, more samples.
-    const float snr_db = rateSelectionSnrDb();
-    const float entry_fading_raw = rateSelectionFadingIndex();
+    // The connect-time chain (handleConnect) on the readings of the burst this ACK closes: the
+    // question is what the channel carries NOW. The whole spell's pool kept a dip's own readings
+    // (-5..+1 dB) and dragged the fresh ones (~14 dB, channel back at 20) down: every return from a
+    // fade landed on QPSK R1/4..R2/3 below the pre-fade rung (GUI, dual-listen, 6 seeds). The
+    // one-burst gate and its backoff guard against a burst caught at a fade crest.
+    const uint64_t burst_ms = mcDpskBurstSpanMs();
+    const float snr_db = rateSelectionSnrDb(burst_ms);
+    const float entry_fading_raw = rateSelectionFadingIndex(burst_ms);
     const float entry_fading =
         connection_policy::connectSnrPoolEnabled()
             ? connection_policy::entryClassificationFadingIndex(
                   entry_fading_raw,
                   connect_snr_pool_.effectiveCount(connectSnrPoolTcMs(), /*handshake_only=*/true,
-                                                   /*max_age_ms=*/UINT64_MAX))
+                                                   burst_ms))
             : entry_fading_raw;
-    const bool data_aided = rateSelectionSnrDataAided();
+    const bool data_aided = rateSelectionSnrDataAided(burst_ms);
     SessionPick pick;
     pick.selection_snr_db = connection_policy::connectSelectionSnrDb(
         snr_db, entry_fading, data_aided, physical_channel_mean_db_, physical_channel_n_);
@@ -8977,6 +8981,17 @@ void Connection::noteRxWaveform(WaveformMode mode) {
         up_crossing_gate_.crossingFailed();
         up_crossing_held_groups_ = -1;
     }
+}
+
+// The span of one MC-DPSK burst at the session's geometry (its window of frames) and a decode/ACK
+// margin: the readings a burst's closing ACK can speak for.
+uint64_t Connection::mcDpskBurstSpanMs() const {
+    const auto timing = connection_policy::mcDpskFrameTiming(
+        data_modulation_, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
+        data_frame_cw_count_);
+    const size_t window = std::max<size_t>(1, arq_.getWindowSize());
+    return static_cast<uint64_t>(window) * timing.data_ms + timing.ack_ms +
+           connection_policy::mcDpskPartialSackHoldMs(timing);
 }
 
 bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason) {

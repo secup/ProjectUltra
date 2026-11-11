@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(follow): the way back up reads the burst being acknowledged, not the fade
+
+**What was broken.** Dual-listen, ITU Good 20 -> 0 -> 20 dB dip, 6 seeds: 233-263 s against 207-224 s
+without follow. Every return from the fade landed below the rung OFDM had before it - QPSK R1/4..R2/3
+at selection SNRs of 6.9-13.6 dB with the channel back at 20 dB (before the fade: 8PSK R2/3 or QPSK
+R3/4) - and the ladder then climbed for about three groups. `sessionLadderPick` averaged the whole
+MC-DPSK spell's readings: the fade's own (-5..+1 dB) dragged the returned channel's (~14 dB data-aided
+on Good) down.
+
+**Fix.** The up-crossing pick reads only the burst its ACK closes (the pool's readings younger than one
+MC-DPSK burst at the session's geometry: window x frame + ACK + hold, `mcDpskBurstSpanMs`). The
+question is what the channel carries now; the one-burst gate and its backoff guard against a burst
+caught at a fade crest.
+
+**Tests.** `WaveformFollow` 85/85: `test_waveform_follow_return_reads_the_latest_burst` - a spell with
+fade readings, then the returned channel's burst - lands on 8PSK R2/3; without the fix it lands on
+QPSK R1/2 ("the return lands where the returned channel says"). Dev tree ctest 111/111. GUI dip
+cells re-measured in the next entry.
+
+---
+
 ## 2026-11-11 — GUI check: the mid-burst ACK fix with follow off, and dual-listen's plumbing with the knob off
 
 The GUI check BUG-MCDPSK-MID-BURST-ACK-SCORED's entry left queued: HEAD (709970c), follow off, one

@@ -770,12 +770,12 @@ private:
     // boundaries, so its horizon IS the handshake scope). Falls back to the scalar
     // when the knob is off or the pool has no qualifying reading (e.g. training-only
     // decodes) — knob-OFF is byte-identical by construction.
-    float rateSelectionSnrDb() const {
+    float rateSelectionSnrDb(uint64_t max_age_ms = UINT64_MAX) const {
         if (!connection_policy::connectSnrPoolEnabled()) {
             return measured_snr_db_;
         }
         const float agg = connect_snr_pool_.clusteredDbMeanDb(
-            connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
+            connectSnrPoolTcMs(), /*handshake_only=*/true, max_age_ms);
         return std::isfinite(agg) ? agg : measured_snr_db_;
     }
     // Entry-pick FADING, parallel to rateSelectionSnrDb() (#58 increment 4,
@@ -789,23 +789,23 @@ private:
     // — knob-OFF is byte-identical by construction. Entry-pick consumers ONLY;
     // non-entry uses of fading_index_ (window sizing, file-block sizing, wire
     // freshness, Tc derivation) intentionally keep the live scalar.
-    float rateSelectionFadingIndex() const {
+    float rateSelectionFadingIndex(uint64_t max_age_ms = UINT64_MAX) const {
         if (!connection_policy::connectSnrPoolEnabled()) {
             return fading_index_;
         }
         const float agg = connect_snr_pool_.clusteredFadingIndex(
-            connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
+            connectSnrPoolTcMs(), /*handshake_only=*/true, max_age_ms);
         return std::isfinite(agg) ? agg : fading_index_;
     }
     // data_aided flag matching rateSelectionSnrDb()'s VALUE: the pool aggregate is
     // data-aided by construction (population contract); the scalar fallback keeps the
     // scalar's flag. Keeps the connectSelectionSnrDb saturation-bound semantics exact.
-    bool rateSelectionSnrDataAided() const {
+    bool rateSelectionSnrDataAided(uint64_t max_age_ms = UINT64_MAX) const {
         if (!connection_policy::connectSnrPoolEnabled()) {
             return measured_snr_data_aided_;
         }
         const float agg = connect_snr_pool_.clusteredDbMeanDb(
-            connectSnrPoolTcMs(), /*handshake_only=*/true, /*max_age_ms=*/UINT64_MAX);
+            connectSnrPoolTcMs(), /*handshake_only=*/true, max_age_ms);
         return std::isfinite(agg) ? true : measured_snr_data_aided_;
     }
     // MODE_CHANGE wire embed: pool mean over ALL qualifying readings younger than
@@ -1520,6 +1520,7 @@ private:
         float selection_snr_db = 0.0f;
     };
     SessionPick sessionLadderPick() const;
+    uint64_t mcDpskBurstSpanMs() const;
     bool waveformFollowActive() const;
     // Cross to the rung a session rung word names (an OFDM rung from MC-DPSK, an MC-DPSK rung
     // from OFDM): protocol geometry, per-waveform controllers, then the modem. False when the word
