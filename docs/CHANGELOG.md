@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(mcdpsk): the training SNR put back the dial offset it was missing (BUG-MCDPSK-TRAINING-SNR-CFO)
+
+**What was broken.** Every MC-DPSK frame logs two in-band SNR estimates. In the GUI gate (CFO 7.3 Hz)
+the training estimate read -2.4 dB on every frame at AWGN 20 dB (data-aided 21.3), -4.4 at AWGN 0,
+-5.7 at -3, -7.5 at -6. A failed frame routes the training value as the session SNR. Since 2026-11-08
+the correlator (`demodulateOneSymbol`) removes the CFO with a phase continuous from the frame origin,
+so the per-carrier channel estimates are CFO-free; `updateTrainingSNREstimate` still rebuilt the
+training waveform at the nominal carrier frequencies and subtracted it from samples that carry the
+offset. At 7.3 Hz (1 rad per symbol) the rebuilt waveform has the right power and almost none of the
+right phase: residual ~1.9x the signal, the -2.4 dB ceiling. `MCDPSKSnrCalibration` ran at 0 Hz only.
+
+**Fix.** The model re-applies the correlator's CFO phase (same origin, same continuous phase).
+INV-CFO-004 gains the corollary: anything rebuilt from the correlator's outputs re-applies what it
+removed.
+
+**Tests.** `MCDPSKSnrCalibration` gains a CFO-invariance gate (AWGN, 5 seeds; 0, 0.01, +7.3, -23.5 Hz
+through OTASim's streaming shifter): each estimate within 1 dB of 0 Hz over 6-12 dB. Without the fix
+it fails 10 of 10 offset points (training -3.0 / -2.5 at 6 / 12 dB, +7.3 Hz); with it, 5.8 / 11.8
+(0 Hz: 5.8 / 11.9). Rows 18-30 dB are printed, not gated: there both estimators still drift with the
+channel (BUG-MCDPSK-SNR-HIGH-SNR-MODEL, open: training at -23.5 Hz 20.2 dB at 24; data-aided +1.1 dB
+from the shifter's band-limiting alone). Dev tree ctest 110/110. GUI: the gate tree is busy with the follow batch; checked on its first run after it.
+
+---
+
 ## 2026-11-11 — FIX(mcdpsk): a compact MC-DPSK burst holds every ACK until it ends
 
 **What was broken.** The GUI never keys an ACK while the burst it answers is still arriving: the

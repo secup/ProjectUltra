@@ -8,6 +8,28 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
+
+The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample
+symbol), and both estimators model their mutual leakage approximately. Measured in
+`MCDPSKSnrCalibration` (AWGN, 5 seeds) after the BUG-MCDPSK-TRAINING-SNR-CFO fix:
+- **Training estimate, dial offset, high SNR.** Each carrier's channel is a separate correlation, so
+  leakage from the other carriers and their images biases it. With an offset the image part turns
+  with the absolute CFO phase and the bias swings: at 30 dB, -23.5 Hz reads 21.8 dB but -23.4375 Hz
+  reads 25.7 (+-7.3 Hz 27.3 / 26.0; +-11.72 Hz 22.4 / 22.2; +-40 Hz 23.8 / 24.1). At 18 dB, -1.1 dB at
+  -23.5 Hz. Within 0.3 dB of 0 Hz at 6-12 dB (gated).
+- **Data-aided estimate, band-limited channel.** It subtracts an inter-carrier leakage computed
+  analytically for unfiltered rectangular symbols. Any band-limiting (OTASim's shifter here, a radio's
+  SSB filter on air) leaves less leakage, so the subtraction overshoots: +1.1 dB at 24 dB with the
+  shifter engaged at 0.01 Hz, +1.6 dB at +7.3 Hz. +0.1-0.2 dB at 12 dB.
+
+**Impact.** The training value is routed only for a failed MC-DPSK frame (the scalar session SNR, not
+the connect pool), where the channel is below the OFDM entry floor. The data-aided over-read at 20+ dB
+names OFDM there either way. **Fix direction:** one joint least-squares fit of all carriers (their
+Gram matrix, image terms included) for the training channel, and the same leakage model for the
+data-aided estimate; or the RRC pulse shaping of BUG-TX-SPLATTER-SYMBOL-EDGES, which makes the carriers
+orthogonal enough to remove the problem.
+
 ### BUG-TX-SPLATTER-SYMBOL-EDGES (open, 2026-11-11) — P3: data symbols switch hard; their splatter shows on every waterfall
 
 **What.** Operator report: the waterfall "isn't smooth". Measured on the transmitted audio
@@ -2499,6 +2521,17 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-TRAINING-SNR-CFO (FIXED 2026-11-11) — the MC-DPSK training SNR read -2.4 dB at any SNR with a dial offset
+
+Since the 2026-11-08 move of the CFO removal into the per-carrier correlator, the channel estimates
+were CFO-free while the samples were not, and `updateTrainingSNREstimate` rebuilt the expected
+training waveform at the nominal carrier frequencies. At +7.3 Hz (1 rad per 1024-sample symbol) the
+rebuilt waveform kept the right power and lost the phase: residual ~2x the signal, a -2.4 dB ceiling
+(GUI gate: `training=-2.4 data_aided=21.5` at AWGN 20; -4.4 vs 0.0 at AWGN 0). It was routed as the
+session SNR for every failed MC-DPSK frame. The calibration CTest ran at 0 Hz only. Fix: the model
+re-applies the correlator's continuous CFO phase; `MCDPSKSnrCalibration` gates CFO invariance
+(+7.3 Hz: 11.8 dB at 12, was -2.5).
 
 ### BUG-MCDPSK-RTO-FULL-WINDOW (FIXED 2026-11-11, 07f41a1, `ULTRA_MCDPSK_INFLIGHT_RTO`) — an MC-DPSK resend of one frame waited a full-window timeout
 

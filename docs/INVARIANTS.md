@@ -87,6 +87,12 @@ every burst continuation) — never with a short FIR Hilbert pre-shift of a fini
 filter delay (32 / 63 samples) slides every symbol window, and the MC-DPSK version zeroed the CFO
 after use so burst continuations got no correction at all. Invisible at 0 Hz (the shift is skipped).
 
+**Corollary (2026-11-11):** the correlator's outputs are CFO-free but the samples are not, so any
+model of the received samples rebuilt from those outputs (the MC-DPSK training-SNR fit,
+`updateTrainingSNREstimate`) must re-apply the same continuous CFO phase. Without it the training
+estimate read -2.4 dB at any SNR on a +7.3 Hz link (BUG-MCDPSK-TRAINING-SNR-CFO). CTest
+`MCDPSKSnrCalibration` gates CFO invariance (0 / +7.3 / -23.5 Hz).
+
 ### INV-CFO-005: The chirp guard may only fall back to a MEASURED CFO (2026-11-08)
 
 **Rule:** `limitConnectedCFODrift` clamps a chirp to the tracked value only when

@@ -1151,6 +1151,14 @@ private:
                                                          config_.sample_rate);
         FIRFilter rx_filter = FIRFilter::bandpass(101, 50.0f, 2950.0f,
                                                    config_.sample_rate);
+        // The channel estimates come from demodulateOneSymbol, which removes the dial offset with a
+        // phase continuous from the frame origin; the samples still carry it. The model must put
+        // it back, or a 7 Hz offset (1 rad per 1024-sample symbol) leaves the fit with the right
+        // power and almost none of the right phase: the residual is then ~2x the signal, a -2.4 dB
+        // ceiling at any SNR (BUG-MCDPSK-TRAINING-SNR-CFO, since the 2026-11-08 correlator CFO).
+        const bool remove_cfo = corr_cfo_hz_ != 0.0f && corr_origin_ != nullptr;
+        const double cfo_step = 2.0 * M_PI * static_cast<double>(corr_cfo_hz_) /
+                                static_cast<double>(config_.sample_rate);
         for (int sym = 0; sym < config_.training_symbols; ++sym) {
             for (int i = 0; i < config_.samples_per_symbol; ++i) {
                 Complex fitted_complex(0.0f, 0.0f);
@@ -1164,6 +1172,15 @@ private:
                     const Complex carrier = std::polar(1.0f, carrier_phase);
                     fitted_complex += channel[static_cast<size_t>(c)] *
                                       training_symbol * carrier;
+                }
+                if (remove_cfo) {
+                    const float* at =
+                        training.data() + static_cast<size_t>(sym * config_.samples_per_symbol + i);
+                    const double cfo_phase =
+                        corr_origin_phase_ +
+                        cfo_step * static_cast<double>(at - corr_origin_);
+                    fitted_complex *= std::polar(1.0f, static_cast<float>(
+                                                           std::fmod(cfo_phase, 2.0 * M_PI)));
                 }
 
                 const float fitted = 2.0f * fitted_complex.real();

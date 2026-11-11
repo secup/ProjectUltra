@@ -24,6 +24,7 @@
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "ota_channel_core/channel.hpp"
+#include "ota_channel_core/models.hpp"
 #include "protocol/frame_v2.hpp"
 #include "ultra/types.hpp"
 
@@ -32,6 +33,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <span>
 #include <vector>
 
 using namespace ultra;
@@ -72,11 +74,13 @@ MultiCarrierDPSKConfig connectGeometry() {
 struct MeasuredSNR {
     float training = std::nanf("");
     float data_aided = std::nanf("");
+    float cfo_hz = std::nanf("");  // the decoder's CFO estimate for the frame
 };
 
 MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payload,
                                 ultra::ota_channel_core::ChannelType chan =
-                                    ultra::ota_channel_core::ChannelType::AWGN) {
+                                    ultra::ota_channel_core::ChannelType::AWGN,
+                                float cfo_hz = 0.0f) {
     MeasuredSNR out;
     auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, CodeRate::R1_4);
     const Bytes serialized = frame.serialize();
@@ -95,6 +99,15 @@ MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payloa
     channel.configure(snr_db, chan);
     channel.transmitFromA(audio);
     audio = channel.receiveForB(audio.size());
+    if (cfo_hz != 0.0f) {
+        // The receiver's dial offset, as OTASim applies it (streaming Hilbert shifter).
+        ultra::ota_channel_core::ChannelConfig shift;
+        shift.type = ultra::ota_channel_core::ChannelType::PASSTHROUGH;
+        shift.cfo_hz = cfo_hz;
+        ultra::ota_channel_core::RngRoot root(seed ^ 0xCF0u);
+        auto model = ultra::ota_channel_core::createChannelModel(shift, root, "cal-cfo");
+        audio = model->process(std::span<const float>(audio.data(), audio.size()));
+    }
 
     StreamingDecoder decoder;
     decoder.setLogPrefix("CAL");
@@ -113,6 +126,7 @@ MeasuredSNR measureEstimatedSNR(float snr_db, uint32_t seed, const Bytes& payloa
             std::isfinite(result.mcdpsk_data_aided_snr_db)) {
             out.data_aided = result.mcdpsk_data_aided_snr_db;
         }
+        out.cfo_hz = result.cfo_hz;
     }
     return out;
 }
@@ -231,7 +245,55 @@ int main() {
                   << " point(s) -- #58 estimator regression.\n";
         return 1;
     }
+
+    // REGRESSION GATE 3 (BUG-MCDPSK-TRAINING-SNR-CFO): both estimates are invariant to the dial
+    // offset. The correlator removes the CFO, so the training fit must put it back; until
+    // 2026-11-11 it did not, and at +7.3 Hz the training estimate read -2.4 dB at ANY SNR (the
+    // fitted model kept its power but lost its phase). Gate: the mean estimate at each offset
+    // within 1 dB of the same seeds at 0 Hz, over MC-DPSK's operating range (6, 12 dB: the
+    // training value is routed only for a failed MC-DPSK frame, below the OFDM entry floor plus
+    // the crossing margin). 18-30 dB are printed, not gated: there the training estimate under-
+    // reads at large offsets, non-monotonically (BUG-MCDPSK-TRAINING-SNR-HIGH-CFO, open).
+    // The 0.01 Hz column engages OTASim's shifter with no offset: it separates the shifter's band-
+    // limiting (which alone lifts the data-aided estimate ~1 dB at 24 dB) from the offset.
+    std::cout << "\n== CFO invariance (AWGN, mean of 5 seeds): training / data-aided ==\n";
+    std::cout << " true |  0 Hz         | 0.01 Hz       | +7.3 Hz       | -23.5 Hz\n";
+    int cfo_fail = 0;
+    for (float snr : {6.f, 12.f, 18.f, 24.f, 30.f}) {
+        const bool gated = snr <= 12.f;
+        std::cout << std::setw(5) << (int)snr << " |" << std::fixed << std::setprecision(1);
+        double ref_tr = 0.0, ref_da = 0.0;
+        for (float cfo : {0.0f, 0.01f, 7.3f, -23.5f}) {
+            double tr = 0.0, da = 0.0, cf = 0.0;
+            int ntr = 0, nda = 0, ncf = 0;
+            for (uint32_t s = 0; s < 5; ++s) {
+                const MeasuredSNR m =
+                    measureEstimatedSNR(snr, 0x3000u + s * 7919u, payload, CT::AWGN, cfo);
+                if (std::isfinite(m.training)) { tr += m.training; ++ntr; }
+                if (std::isfinite(m.data_aided)) { da += m.data_aided; ++nda; }
+                if (std::isfinite(m.cfo_hz)) { cf += m.cfo_hz; ++ncf; }
+            }
+            tr = ntr ? tr / ntr : std::nan("");
+            da = nda ? da / nda : std::nan("");
+            cf = ncf ? cf / ncf : std::nan("");
+            std::cout << " " << std::setw(5) << tr << " / " << std::setw(5) << da << " (cfo "
+                      << std::setprecision(2) << cf << std::setprecision(1) << ") |";
+            if (cfo == 0.0f) {
+                ref_tr = tr;
+                ref_da = da;
+            } else if (gated && (!std::isfinite(tr) || !std::isfinite(da) ||
+                                 std::abs(tr - ref_tr) > 1.0 || std::abs(da - ref_da) > 1.0)) {
+                ++cfo_fail;
+            }
+        }
+        std::cout << (gated ? "" : "   (not gated)") << "\n";
+    }
+    if (cfo_fail > 0) {
+        std::cout << "\nFAIL: an SNR estimate moved > 1 dB with the dial offset at " << cfo_fail
+                  << " point(s) -- BUG-MCDPSK-TRAINING-SNR-CFO regression.\n";
+        return 1;
+    }
     std::cout << "\nPASS: AWGN training estimate tracks true SNR (no saturation); "
-                 "data-aided estimate within 1 dB (0-25 dB AWGN).\n";
+                 "data-aided estimate within 1 dB (0-25 dB AWGN); both CFO-invariant over 6-12 dB.\n";
     return 0;
 }
