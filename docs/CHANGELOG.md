@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — GUI check: the mid-burst ACK fix with follow off, and dual-listen's plumbing with the knob off
+
+The GUI check BUG-MCDPSK-MID-BURST-ACK-SCORED's entry left queued: HEAD (709970c), follow off, one
+seed per cell, half-duplex radios, CFO 7.3 Hz, against the half-duplex baseline taken before the fix:
+
+| Cell (MC-DPSK, 1 KB) | Before | HEAD |
+|---|---|---|
+| ITU Good 0 dB, seed 43 | 201 s, ends DBPSK | 188 s, ends DQPSK |
+| ITU Good 0 dB, seed 44 | 289 s, DBPSK | 299 s, DQPSK |
+| AWGN -6 dB, seed 42 | 442 s | 382 s |
+| AWGN 0 dB, seed 42 | 131 s | 130 s |
+
+The constellation controller no longer scores duplicates' re-ACKs as losses, so it reaches DQPSK where
+it did not: -7 % over the three lossy cells (single seeds; seed 44's +3 % is inside that cell's spread,
+194-349 s over earlier runs). OFDM with the dual-listen plumbing and the knob off: AWGN 20 dB 59 s,
+ITU Good 20 dB 55 s (earlier runs 51-59 and 46-55): unchanged.
+
+---
+
 ## 2026-11-11 — FIX(follow): a crossing supersedes a pending MODE_CHANGE (BUG-FOLLOW-MODE-CHANGE-STRADDLE)
 
 **What was broken.** The first dual-listen matrix run (ITU Good 20 -> 0 -> 20 dB, seed 44) took 5+
