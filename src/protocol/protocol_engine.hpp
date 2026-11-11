@@ -279,6 +279,7 @@ public:
     using DataModeChangedCallback = Connection::DataModeChangedCallback;
     void setDataModeChangedCallback(DataModeChangedCallback cb);
     void setSessionAddressesCallback(Connection::SessionAddressesCallback cb);
+    void setWaveformCrossingCallback(Connection::WaveformCrossingCallback cb);
 
     // --- Ping/Pong (fast presence check) ---
 

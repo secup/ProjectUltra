@@ -156,6 +156,37 @@ void ModemEngine::joinConnectedSession(protocol::WaveformMode mode, Modulation m
     }
 }
 
+void ModemEngine::crossConnectedWaveform(protocol::WaveformMode mode, Modulation mod,
+                                         CodeRate rate, int cw_count, int mc_dpsk_num_carriers,
+                                         int mc_dpsk_samples_per_symbol) {
+    LOG_MODEM(INFO, "[%s] Waveform crossing: %s -> %s %s %s cw=%d", log_prefix_.c_str(),
+              protocol::waveformModeToString(waveform_mode_), protocol::waveformModeToString(mode),
+              modulationToString(mod), codeRateToString(rate), cw_count);
+    if (mode == protocol::WaveformMode::MC_DPSK && mc_dpsk_num_carriers > 0 &&
+        mc_dpsk_samples_per_symbol > 0) {
+        setMCDPSKProfile(mc_dpsk_num_carriers, mc_dpsk_samples_per_symbol,
+                         mod == Modulation::DBPSK ? 1 : mod == Modulation::D8PSK ? 3 : 2);
+    }
+    if (mode == protocol::WaveformMode::MC_DPSK) {
+        // A session crosses into MC-DPSK only when its channel collapsed: the physical-SNR
+        // distribution restarts, as at a new QSO (the connection drops its copy with the crossing).
+        streaming_decoder_->resetPhysicalSnrEvidence();
+    }
+    // The data mode the new waveform is built with (setWaveformMode reads these); the encoder and
+    // decoder are reconfigured once the waveform is the new one.
+    data_modulation_ = mod;
+    data_code_rate_ = rate;
+    config_.modulation = mod;
+    config_.code_rate = rate;
+    config_.use_pilots = true;
+    config_.pilot_spacing = ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
+    setWaveformMode(mode);
+    setDataMode(mod, rate);
+    if (cw_count > 0) {
+        setFixedFrameCodewords(cw_count);
+    }
+}
+
 void ModemEngine::setConnectWaveform(protocol::WaveformMode mode) {
     LOG_MODEM(INFO, "Switching connect waveform: %s -> %s",
               protocol::waveformModeToString(connect_waveform_),

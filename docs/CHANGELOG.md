@@ -10,6 +10,120 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FEAT(follow): a session crosses between MC-DPSK and OFDM as the channel moves (ULTRA_WAVEFORM_FOLLOW)
+
+**What was missing.** The waveform was chosen once, at connect. A session that connected weak stayed
+in MC-DPSK when the channel came up (GUI gate, AWGN -3 -> 20 dB at 70 s, 4 KB: 364 s at ~100 bps
+where OFDM carries 1.2-2.6 kbps). A session that connected strong stayed in OFDM when the channel
+went down: at 0 dB the sender sat at 16QAM, its fall-back MODE_CHANGE (an OFDM control frame) never
+got through, and nothing moved until the channel returned (ITU Good 20 -> 0 dB at 27 s, 8 KB, seed
+42: FAIL at the 600 s limit; with follow 620 s PASS).
+
+**What changed** (design: docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md, INV-FOLLOW-001; knob
+`ULTRA_WAVEFORM_FOLLOW`, default OFF, same on both stations, read once per Connection).
+- One session ladder in the tone ACK's 5-bit rung word: 1..10 the OFDM rungs, 11/12 MC-DPSK
+  DBPSK/DQPSK (MC-DPSK was 1/2: wire change). The receiver commands a crossing like it commands a
+  constellation; it crosses on the next tick, the sender when it reads the ACK. No exchange.
+- `Connection::applyWaveformCrossing`: `applyDataMode` with the target rung (unacked frames re-cut
+  under a new move-epoch), fresh OFDM controllers on the way up (`resetOfdmLadderState`, extracted
+  from `enterConnected`), then the modem through a new crossing callback that switches the waveform
+  BEFORE the data mode (`ModemEngine::crossConnectedWaveform`, wired in the shared GUI/TNC binding).
+  `StreamingDecoder::setMode` to a non-OFDM mode now cancels a queued connected-OFDM reconfiguration,
+  which would otherwise put the decoder back into OFDM after the switch.
+- Up: after each clean MC-DPSK burst the receiver runs the connect pick on the readings of the
+  current MC-DPSK spell (`sessionLadderPick`); OFDM named on one clean burst -> command that rung
+  (`UpCrossingGate`: a late crossing forgoes ~2 KB per MC-DPSK cycle, a failed one costs ~70-190
+  bytes; a failed crossing doubles the run, cap 8x; two delivering OFDM groups hold it).
+  Probation until the first OFDM burst: the receiver reverts if none shows within
+  `upCrossingRevertMs` (~11 s: its slowest ACK + lead-in + anchor/descriptor/first frame + two
+  search windows) or commands MC-DPSK if the first group delivers nothing; the sender returns on its
+  first timeout. A crossing that never held (two delivering groups) doubles the run (cap 8x).
+- Down, when: a link that was delivering waits min(T*, 60 s) of silence first. MC-DPSK carries a few
+  percent of OFDM and returning costs ~27 s at 8PSK R2/3, so ski rental's T* = tau x r_o / r_m runs to
+  minutes; 60 s is the operator's patience (OFDM-killing fades last ~1 s on ITU Good, slow QSB troughs
+  tens of seconds; a band silent for a minute has changed). A link whose OFDM delivered nothing crosses
+  on the evidence alone. Measured before (crossing after 25-40 s): 40 s QSB dips +17..+30 %, a
+  two-minute fade +6..+17 %.
+- Down, how: the receiver commands MC-DPSK after two empty groups when the ladder is at the floor or did
+  not step down; the sender crosses after two timeouts without progress at one rung (the collapse
+  escape's evidence, polled before the escapes, which it replaces); a receiver that decodes nothing
+  of an incoming object (a file, or a payload partly reassembled - the TNC path) for 1.5 rounds
+  (~25 s) crosses by itself, ahead of the sender; an idle peer's silence moves nothing. Target: DBPSK at
+  the standard geometry; the constellation change lifts it to DQPSK.
+- Fixed on the way (all found by GUI runs): the initiator never learns the responder's capabilities
+  (not in CONNECT_ACK), so a remote-capability check made it refuse every crossing - each end now
+  checks only its own; the revert window was the OFDM ACK timeout (45 s), missing the sender's
+  MC-DPSK resend; and the up-crossing decided on stale evidence (BUG-FOLLOW-STALE-EVIDENCE): in a
+  20 -> 0 -> 20 dB fade (ITU Good, seed 44) the receiver read the fade at -5..+1 dB, but the pool
+  still held the 20 dB handshake reading and the physical cap was made of pre-fade frames, so the
+  fading basis (+11 dB at low readings) selected 9.5-13 dB and commanded OFDM into the fade: a failed
+  probation, a doubled run, OFDM > MC-DPSK > OFDM > MC-DPSK > OFDM for one fade. A down-crossing now
+  clears the pool and the physical measurement on both ends and restarts the decoder's ring.
+
+- Follow requires the receiver authority (`ULTRA_RX_RATE_AUTHORITY`, default on): its commands are
+  the authority's rung bits, and the sender ends its probation in the authority's ACK branch. Its
+  tests moved to their own binary, `WaveformFollow`, at the production defaults (ConnectionAdaptive
+  pins the authority off, so they had been running a configuration follow cannot work in).
+
+**Tests.** `WaveformFollow` 67/67 (production defaults and `ULTRA_FAST=0`): crossings switch the modem
+first and land on the commanded rung (up: 8PSK R2/3; down: DBPSK 3 cw, 8 carriers, 1024 sps); knob off
+is inert; one clean burst at 22 dB commands up, the receiver crosses on the next tick, reverts after
+the window and needs two bursts the next time; the first OFDM group settles probation; two delivering
+groups reset the backoff; empty groups command down only when the ladder is stuck or at the floor;
+after a down-crossing a -1 dB fade never commands OFDM whatever the pre-fade measurement, and the
+returned channel does; receiver silence moves the session only with an incoming object; duplicates'
+re-ACKs between clean bursts leave the run intact, a hole restarts it; a link that was delivering
+rides out silence and empty groups past the 25 s evidence floor and crosses at min(T*, 60 s); the
+sender waits the same way, at once on a link that never delivered. Each of the four fixes above has a
+check that fails without it. `ConnectionPolicy` 536/536 (word codec, gate, revert window, return cost,
+T*). Dev tree ctest 110/110.
+
+GUI gate (ITU Good unless noted, CFO 7.3 Hz, half-duplex radios; follow on vs off, same build):
+
+| Scenario (follow on / off, s) | seed 42 | 43 | 44 | 45 | 46 |
+|---|---|---|---|---|---|
+| Step up, AWGN -3 -> 20 dB at 70 s, 4 KB (2-burst run) | 115 / 364 | | | | |
+| Step up, ITU Good -3 -> 20 dB at 70 s, 4 KB (2-burst run) | | | 145 / 416 | | |
+| Step up, ITU Good 0 -> 20 dB at 70 s, 4 KB (1-burst run) | | 169 / pending | | | |
+| Dip 20 -> 0 -> 20 dB (32-150 s), 20 KB (1-burst run, 25-40 s fallback) | 231 / 218 | | 244 / 219 | 216 / 224 | 243 / 207 |
+| QSB, 40 s dips to 2 dB every 90 s, 30 KB (60 s patience) | | | 410 / 312 | 308 / pending | |
+| Drop 20 -> 0 dB at 27 s and stay, 8 KB | 620 PASS / FAIL | | | | |
+| Steady AWGN 20 / Good 20 / Good 0 (no crossing fires) | 51 / 46 / 131 | | 59 / 54 / 174 | | |
+
+What the dips and QSB show is the design's limit, not a tuning problem. A switch needs both stations
+to agree over the link that is failing: the receiver crossed after 37.6 s of silence in a 40 s QSB
+dip (its wait sized from the configured 45 s window timeout; rounds time out at 15-23 s) while the
+sender waited 113 s - 78 s with each station on a waveform the other was not listening for. MC-DPSK
+carries a few percent of OFDM, so every such loss shows. Hence default OFF and the next step below.
+
+**Next (2026-11-11, decided with the operator):** dual-listen - the receiver decodes either waveform at
+any time, so the sender picks the waveform per burst from the last ACK. No agreement over a failing
+link, no probation, no slow climb back; this entry's coordination machinery is the stepping stone.
+
+---
+
+## 2026-11-11 — FIX(mcdpsk): an ACK in the middle of a burst is no burst verdict (BUG-MCDPSK-MID-BURST-ACK-SCORED)
+
+**What was broken.** The MC-DPSK receiver's burst controllers (the DBPSK/DQPSK constellation command,
+and with waveform follow the up-crossing gate) score each burst clean or lossy. They were fed from every
+tone ACK the receiver raised, and every ACK that did not close the physical turn counted as a loss -
+including the re-ACKs of duplicates and the out-of-order SACKs a burst raises in its middle. After a
+fade (GUI, ITU Good 20 -> 0 -> 20 dB, seed 44) the sender had not heard the fade's ACKs, resent its
+window whole, and the receiver re-ACKed each duplicate: frames decoded at 12-14 dB were scored as
+losses, restarting the constellation controller's clean run and the up-crossing run. A frame that is
+actually lost already reaches the controllers on its own path (`noteRxMcDpskFrameLost`).
+
+**Fix.** `mcDpskRungCommandForAck` observes a burst only from the ACK that closes the turn (clean
+when no hole is left) or from an ACK that reports a hole; a mid-burst ACK with no hole carries the
+standing command and scores nothing.
+
+**Tests.** `WaveformFollow` `test_waveform_follow_mid_burst_acks_are_no_verdict`: two duplicate re-ACKs
+between two clean bursts leave a run of 2 intact (fails without the fix: "mid-burst re-ACKs did not
+reset the run"); a hole-bearing ACK still restarts it. GUI check with follow off (lossy MC-DPSK
+cells against the half-duplex baseline): queued with this commit, recorded in the next entry.
+
+---
+
 ## 2026-11-11 — FIX(mcdpsk): the training SNR put back the dial offset it was missing (BUG-MCDPSK-TRAINING-SNR-CFO)
 
 **What was broken.** Every MC-DPSK frame logs two in-band SNR estimates. In the GUI gate (CFO 7.3 Hz)

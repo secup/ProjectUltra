@@ -779,16 +779,90 @@ inline int mcDpskRungIndexFor(Modulation mod) {
     return -1;
 }
 
-// The command rides the tone ACK's 5-bit rung word [rate_hint(3) | rung_cmd(2)], the field the
-// wideband OFDM authority uses for its canonical rung; both ends know the session is MC-DPSK, so
-// the meaning is unambiguous. 0 = no command, 1 + rung index otherwise.
+// The command rides the tone ACK's 5-bit rung word [rate_hint(3) | rung_cmd(2)], which names one
+// rung of the SESSION ladder whatever the waveform (waveform follow, 2026-11-11):
+//   0        no command
+//   1..10    the canonical wideband OFDM rungs (kRungIdx*, waveform_selection.hpp), bit 4 being
+//            the OFDM startup-probe flag
+//   11, 12   MC-DPSK DBPSK, DQPSK at the session's MC-DPSK geometry
+// So an MC-DPSK session reads an OFDM value as an up-crossing and an OFDM session reads an MC-DPSK
+// value as a down-crossing (ULTRA_WAVEFORM_FOLLOW); a constellation change stays 11 <-> 12.
+inline constexpr uint8_t kSessionRungWordMcDpskBase = 11;
+static_assert(kSessionRungWordMcDpskBase >= kRungIdxCount &&
+                  kSessionRungWordMcDpskBase + kMcDpskRungCount - 1 <= kRungAuthorityIndexMask,
+              "MC-DPSK rung words sit above the OFDM rungs, inside the 4-bit index");
 inline uint8_t encodeMcDpskRungCommand(int rung) {
-    return (rung >= 0 && rung < kMcDpskRungCount) ? static_cast<uint8_t>(rung + 1) : 0;
+    return (rung >= 0 && rung < kMcDpskRungCount)
+               ? static_cast<uint8_t>(kSessionRungWordMcDpskBase + rung)
+               : 0;
 }
 inline int decodeMcDpskRungCommand(uint8_t word) {
     const int value = word & 0x1F;
-    return (value >= 1 && value <= kMcDpskRungCount) ? value - 1 : -1;
+    const int base = kSessionRungWordMcDpskBase;
+    return (value >= base && value < base + kMcDpskRungCount) ? value - base : -1;
 }
+// The OFDM rung (kRungIdx*) a session rung word names, or kRungIdxNone. The startup-probe flag
+// (bit 4) is not part of the rung.
+inline uint8_t decodeOfdmRungCommand(uint8_t word) {
+    const uint8_t index = word & kRungAuthorityIndexMask;
+    return (index > kRungIdxNone && index < kRungIdxCount) ? index : kRungIdxNone;
+}
+
+// ULTRA_WAVEFORM_FOLLOW (same setting on both stations): a session crosses between MC-DPSK and
+// wideband OFDM as the channel changes (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md). "1" turns it
+// on; default off until the GUI gate proves it. Read once per Connection, at construction.
+inline bool waveformFollowEnabled() {
+    const char* e = std::getenv("ULTRA_WAVEFORM_FOLLOW");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+}
+
+// The receiver's evidence for an UP-crossing (MC-DPSK -> OFDM): after each clean MC-DPSK burst the
+// connect-time pick runs on the readings of the current MC-DPSK spell; when it names an OFDM rung
+// on `run` consecutive clean bursts, the receiver commands that rung. The run starts at ONE burst:
+// the two errors cost very differently. Crossing one burst late forgoes (OFDM - MC-DPSK) x one
+// MC-DPSK cycle, ~(1000 - 50) bps x 18 s ~ 2 KB; a crossing that fails costs its probation at
+// MC-DPSK's rate, ~11-30 s x 50 bps ~ 70-190 bytes. And one burst is no snapshot: its three
+// frames span ~15 s, four coherence times of ITU Good. The run doubles after each failed crossing,
+// up to 8x (the marginal channel), and resets when a crossing holds (kHeldGroups).
+class UpCrossingGate {
+public:
+    static constexpr int kMinRun = 1;
+    static constexpr int kMaxBackoffFactor = 8;
+    // A crossing holds once OFDM has delivered this many groups: one delivering group followed by
+    // a collapse is a failed crossing, or a marginal channel would cycle at the first run.
+    static constexpr int kHeldGroups = 2;
+
+    void reset(int first_run = kMinRun) {
+        first_run_ = std::max(kMinRun, first_run);
+        run_ = first_run_;
+        streak_ = 0;
+    }
+    int run() const { return run_; }
+
+    // ofdm_rung: the pick's OFDM rung (kRungIdx*) for this burst, kRungIdxNone when it names an
+    // MC-DPSK rung. Returns the rung to command, or kRungIdxNone.
+    uint8_t observe(bool clean, uint8_t ofdm_rung) {
+        if (!clean || ofdm_rung == kRungIdxNone) {
+            streak_ = 0;
+            return kRungIdxNone;
+        }
+        if (++streak_ < run_) {
+            return kRungIdxNone;
+        }
+        streak_ = 0;
+        return ofdm_rung;
+    }
+    void crossingFailed() {
+        streak_ = 0;
+        run_ = std::min(run_ * 2, first_run_ * kMaxBackoffFactor);
+    }
+    void crossingHeld() { run_ = first_run_; }
+
+private:
+    int first_run_ = kMinRun;
+    int run_ = kMinRun;
+    int streak_ = 0;
+};
 
 // ULTRA_MCDPSK_RATE_ADAPT (default ON; "0" turns it off, same setting on both stations): the
 // receiver's commands, the sender's obedience and its timeout fallback. The receiver's
@@ -1779,6 +1853,94 @@ inline uint64_t wideOFDMWireBurstSamples(
         }
     }
     return samples;
+}
+
+// The receiver's full-anchor chirp search window (StreamingDecoder CHIRP_MAX_SEARCH, 120000
+// samples at 48 kHz): an anchor that straddles one window is found in the next.
+inline constexpr uint32_t kFullAnchorSearchWindowMs = 2500;
+
+// Waveform follow: how long a receiver that commanded an up-crossing waits for the sender's first
+// OFDM burst before concluding the command was lost - every part at its slowest: the tone ACK that
+// carried the command (ack_ms), the sender's TX lead-in, the burst head (full chirp anchor, the
+// descriptor, the first data frame at the target rung) and two search windows. A sender that missed
+// the command resends on MC-DPSK only when its retransmission timeout expires, later than this, so
+// the receiver is back on MC-DPSK in time to hear it.
+inline uint32_t upCrossingRevertMs(Modulation mod, CodeRate rate, int cw_count, uint32_t ack_ms) {
+    const uint64_t head =
+        static_cast<uint64_t>(kWideOFDMFullAnchorExtraSamples) +
+        wideOFDMWireFrameSamplesForCodewords(Modulation::QPSK, CodeRate::R1_4, 1, 27) +
+        wideOFDMWireFrameSamplesForCodewords(mod, rate, cw_count, 27);
+    const uint32_t head_ms =
+        static_cast<uint32_t>((head * 1000 + kOFDMSampleRate - 1) / kOFDMSampleRate);
+    return ack_ms + static_cast<uint32_t>(kDefaultTxLeadInMs) + head_ms +
+           2 * kFullAnchorSearchWindowMs;
+}
+
+// Waveform follow, OFDM receiver that hears nothing: one sender round at its longest (the key-down
+// ceiling, the slowest tone ACK, a full anchor). The receiver goes back to MC-DPSK after 1.5 rounds
+// of silence: past one whole missed resend (no fade lasts that long) and before the sender's own
+// rule (two silent rounds) moves it, so the sender's first MC-DPSK burst finds the receiver there.
+inline uint32_t followSilentRoundMs(uint32_t ack_ms) {
+    return kMaxBurstAirtimeCeilingMs + ack_ms + kWideOFDMFullAnchorExtraMs;
+}
+inline uint32_t followReceiverSilenceMs(uint32_t ack_ms) {
+    const uint32_t round = followSilentRoundMs(ack_ms);
+    return round + round / 2;
+}
+// The sender's rule: this many rounds in a row without progress at one rung (the collapse
+// escape's own evidence, Connection::zero_progress_rounds_: timeouts and empty ACKs alike, reset by
+// any progress and by any rung change, so a ladder that is still moving keeps its chance).
+inline constexpr int kFollowRoundsWithoutProgressToCross = 2;
+
+// Waveform follow, down on an OFDM link that stopped delivering: when crossing pays. It is the
+// ski-rental decision. While OFDM delivers nothing, staying forgoes what MC-DPSK would carry, r_m
+// (bytes/s). Crossing costs, once the channel is back, the extra wait to return through MC-DPSK: the
+// up-crossing command rides the ACK that ends the first MC-DPSK round after the return, while OFDM
+// would have resumed at its own next resend; at a uniform phase the expected difference is
+//   tau = (rto_m / 2 + burst_m + ack_m) - rto_o / 2,
+// worth tau * r_o, r_o = what OFDM delivered while it worked (measured: Connection's spell meter).
+// The deterministic online optimum crosses when the rent paid equals that price,
+//   T* = tau * r_o / r_m,
+// never worse than twice the hindsight optimum whatever the outage lasts. MC-DPSK carries a few
+// percent of OFDM (DBPSK R1/4, 3 codewords: 3.6 B/s against 43-278 B/s from QPSK R1/4 to 16QAM R2/3),
+// so T* runs to minutes for a link that was delivering - past what the air and an operator allow:
+// Connection waits min(T*, kFollowPatienceMs) (GUI: crossing after 25-40 s cost 15-30 % on 40 s
+// QSB dips and 2 min fades). A link where OFDM delivered nothing has r_o = 0 and crosses on the
+// evidence alone; one that barely beat MC-DPSK crosses soon after.
+struct FollowReturnCost {
+    double mcdpsk_bytes_per_s = 0.0;  // r_m, a round per retransmission timeout
+    uint32_t tau_ms = 0;
+};
+inline FollowReturnCost followReturnCost(uint32_t ofdm_rto_ms, size_t mcdpsk_window,
+                                         size_t mcdpsk_payload_bytes, uint32_t mcdpsk_rto_ms,
+                                         uint32_t mcdpsk_frame_ms, uint32_t mcdpsk_ack_ms) {
+    FollowReturnCost c;
+    if (mcdpsk_rto_ms == 0 || mcdpsk_window == 0 || mcdpsk_payload_bytes == 0) {
+        return c;
+    }
+    c.mcdpsk_bytes_per_s = static_cast<double>(mcdpsk_window * mcdpsk_payload_bytes) * 1000.0 /
+                           static_cast<double>(mcdpsk_rto_ms);
+    const double via_mcdpsk_ms = mcdpsk_rto_ms / 2.0 +
+                                 static_cast<double>(mcdpsk_window) * mcdpsk_frame_ms +
+                                 mcdpsk_ack_ms;
+    c.tau_ms = static_cast<uint32_t>(std::max(0.0, via_mcdpsk_ms - ofdm_rto_ms / 2.0));
+    return c;
+}
+// The operator's patience with a silent link that was delivering, the one policy choice here (the
+// ski-rental T* above runs to minutes, unrealistic on the air). Fading deep enough to take OFDM out
+// lasts about a second on an ITU Good channel (Rayleigh average fade duration at -14 dB, 0.1 Hz) and
+// slow QSB troughs come back within tens of seconds; a band silent for a minute has usually changed
+// (absorption, MUF) and is not coming back soon, and a minute of nothing already reads as a dead
+// link. A link that was delivering waits min(T*, this); one that barely beat MC-DPSK waits T*.
+inline constexpr uint64_t kFollowPatienceMs = 60000;
+
+// T* (ms) for a link that delivered ofdm_bytes_per_s; 0 = cross on the evidence alone.
+inline uint64_t followSkiRentalMs(double ofdm_bytes_per_s, const FollowReturnCost& c) {
+    if (!(ofdm_bytes_per_s > 0.0) || !(c.mcdpsk_bytes_per_s > 0.0)) {
+        return 0;
+    }
+    const double t = static_cast<double>(c.tau_ms) * ofdm_bytes_per_s / c.mcdpsk_bytes_per_s;
+    return static_cast<uint64_t>(std::min(t, 3.6e6));  // an hour bounds the arithmetic
 }
 
 inline uint32_t wideOFDMShortReanchorChirpDurationMs() {

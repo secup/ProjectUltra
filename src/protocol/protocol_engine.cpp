@@ -869,6 +869,11 @@ void ProtocolEngine::setMeasuredSNR(float snr_db, SNRSource source, bool data_ai
     connection_.setMeasuredSNR(snr_db, source, data_aided);
 }
 
+void ProtocolEngine::setWaveformCrossingCallback(Connection::WaveformCrossingCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setWaveformCrossingCallback(std::move(cb));
+}
+
 void ProtocolEngine::setSessionAddressesCallback(Connection::SessionAddressesCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setSessionAddressesCallback(std::move(cb));

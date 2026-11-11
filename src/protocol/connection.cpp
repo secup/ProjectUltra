@@ -569,6 +569,13 @@ Connection::Connection(const ConnectionConfig& config)
                     tba.rate_hint = static_cast<uint8_t>(word & 0x7);
                     tba.rung_cmd = static_cast<uint8_t>((word >> 3) & 0x3);
                 }
+                // Waveform follow: a down-crossing this receiver decided in an OFDM session rides
+                // this ACK in place of the authority's rung (it does not apply to a waveform
+                // being left). The MC-DPSK path above already returns its up-crossing word.
+                if (rx_crossing_apply_pending_ && negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+                    tba.rate_hint = static_cast<uint8_t>(rx_crossing_word_ & 0x7);
+                    tba.rung_cmd = static_cast<uint8_t>((rx_crossing_word_ >> 3) & 0x3);
+                }
                 // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): stamp the drive advisory
                 // from the per-burst RX level verdict fed via setRxLevelVerdict just
                 // before this group's delivery. Down IMMEDIATELY on a clip signature
@@ -2727,7 +2734,14 @@ bool Connection::onToneBurstAck(
             const uint8_t cmd_word = static_cast<uint8_t>(
                 (detection.payload.rate_hint & 0x7) |
                 ((detection.payload.rung_cmd & 0x3) << 3));
-            if (acceptAuthorityCommandRevision(
+            if (negotiated_mode_ == WaveformMode::OFDM_CHIRP && crossing_probe_active_ &&
+                !crossing_probe_rx_side_ && arq_.lastAckProgressFrames() > 0) {
+                endCrossingProbe(/*held=*/true);  // OFDM data got through after an up-crossing
+            }
+            if (maybeObeyCrossingCommand(cmd_word, "receiver command")) {
+                // Down-crossing (an MC-DPSK rung in an OFDM session): the ladder's own
+                // authority command does not apply to the waveform this ACK just left.
+            } else if (acceptAuthorityCommandRevision(
                     cmd_word, detection.payload.group_seq,
                     detection.payload.frame_mask, detection.payload.move_epoch)) {
                 // The receiver updates its clean-group streak before pricing this
@@ -5098,6 +5112,7 @@ void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
 
 void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     if (progress_frames > 0) {
+        noteFollowOfdmDelivery(progress_frames);  // what OFDM delivers, for the down-crossing
         if (retx_pace_hold_ms_ > 0) {
             LOG_MODEM(INFO,
                       "Connection: TROUGH-PACING early release (%d frames progressed, %s)",
@@ -5694,6 +5709,12 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         if (quality >= 0.0f) {
             last_group_quality_ = quality;
         }
+        // Waveform follow: the first OFDM group after an up-crossing settles it, before this
+        // group's ACK is stamped (a group that delivered nothing calls the crossing off in it).
+        noteRxOfdmBurstAfterCrossing(all_ok || frame_mask != 0);
+        noteFollowOfdmDelivery(all_ok ? static_cast<int>(group_size)
+                                      : std::popcount(static_cast<uint32_t>(frame_mask)));
+        noteRxOfdmGroupForFollow(all_ok || frame_mask != 0);
         // RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD): refresh the receiver's standing rung
         // command BEFORE the ARQ emits this group's tone-burst ACK (endGroupReceiveAndAck
         // below) so the verdict rides THIS ACK — the crater is visible to the sender one
@@ -6028,6 +6049,11 @@ void Connection::onFrameReceived(const Bytes& frame_data,
             "first CRC-valid classic frame from established initiator");
     }
 
+    // Waveform follow: any CRC-valid frame from the peer ends this receiver's silence.
+    if (!remote_call_.empty() && v2::hashCallsign(remote_call_) == header.src_hash) {
+        rx_follow_silence_ms_ = 0;
+    }
+
     // Resolve source callsign from hash if possible
     std::string src_call;
     if (!remote_call_.empty() && v2::hashCallsign(remote_call_) == header.src_hash) {
@@ -6199,6 +6225,10 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     // probe command before every ACK variant, including payload_seen=true where the
     // selector observation itself is intentionally withheld.
     failClosedLatentStartupProbeUnknown("anchored no-group backstop");
+    // Waveform follow: an anchored OFDM burst after an up-crossing proves the sender crossed.
+    noteRxOfdmBurstAfterCrossing(payload_seen);
+    noteFollowOfdmDelivery(payload_seen ? 1 : 0);
+    noteRxOfdmGroupForFollow(payload_seen);
     // Crater verdict BEFORE the ack so the command rides it (same ordering as
     // onBurstGroupReceived). A decoded fallback payload makes k=0 false, while
     // the lost descriptor leaves M unknowable; skip the selector observation
@@ -6857,6 +6887,10 @@ void Connection::tick(uint32_t elapsed_ms) {
             }
 
             maybeFallBackMcDpskRungOnTimeout(elapsed_ms);
+            // Waveform follow: a crossing this end commanded, the receiver's revert deadline, and
+            // the sender's first-burst timeout - all before the ARQ tick resends anything.
+            tickWaveformFollow(elapsed_ms);
+            maybeAbandonCrossingOnTimeout(elapsed_ms);
             arq_tick_in_progress_ = true;
             arq_.tick(elapsed_ms);
             arq_tick_in_progress_ = false;
@@ -6927,6 +6961,9 @@ void Connection::tick(uint32_t elapsed_ms) {
                     rx_auth_obs_age_ms_[i] += elapsed_ms;
                 }
             }
+            // Waveform follow first: with a waveform below OFDM available, rounds without
+            // progress cross to it instead of escaping to another OFDM rung.
+            maybeCrossDownOnCollapse();
             maybeEscapeStuckFrame();
             // §RETX-PACING §2: the collapse-conditioned escape is POLLED here (proven-safe
             // context, same as maybeEscapeStuckFrame) — rounds counted inside the ARQ
@@ -8736,10 +8773,19 @@ void Connection::maybeFallBackMcDpskRungOnTimeout(uint32_t elapsed_ms) {
 }
 
 uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
-    if (rx_mcdpsk_frames_since_command_ > 0) {
+    // A burst verdict comes from the ACK that closes the physical turn (clean when no hole is
+    // left) or from an ACK that reports a hole (a frame of the window is missing). The other ACKs
+    // a burst raises - re-ACKs of duplicates, out-of-order SACKs - are ARQ bookkeeping in the
+    // middle of a burst and carry no verdict. Scored as losses, they reset both burst controllers
+    // after every fade: the fade eats the ACKs, the sender resends its window whole, and each
+    // duplicate's re-ACK was a "loss" although the frames decoded at 12-14 dB (GUI, ITU Good
+    // 20 -> 0 -> 20 dB, seed 44: the up-crossing waited a whole extra MC-DPSK cycle).
+    const bool closes_turn = tone_ack_group_complete_context_;
+    const bool reports_hole = sack_bitmap != 0;
+    if (rx_mcdpsk_frames_since_command_ > 0 && (closes_turn || reports_hole)) {
         const int rung = connection_policy::mcDpskRungIndexFor(rx_mcdpsk_last_modulation_);
         // Clean: the synchronous end-of-turn ACK (the burst's last frame decoded) with no hole.
-        const bool clean = tone_ack_group_complete_context_ && sack_bitmap == 0;
+        const bool clean = closes_turn && !reports_hole;
         // -1: no margin test ran (v2 frames): the up-step falls back to the clean run alone.
         const bool upper_margin = rx_mcdpsk_margin_ != 0;
         const bool changed = mcdpsk_rate_ctl_.observe(rung, clean, upper_margin);
@@ -8753,6 +8799,12 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
                   modulationToString(
                       connection_policy::kMcDpskRungModulations[mcdpsk_rate_ctl_.command()]),
                   changed ? " (changed)" : "", mcdpsk_rate_ctl_.probeAfterCleanBursts());
+        // Waveform follow: the same burst may say the channel now carries OFDM.
+        if (const uint8_t up = upCrossingWordForAck(clean); up != 0) {
+            return up;
+        }
+    } else if (rx_crossing_apply_pending_) {
+        return rx_crossing_word_;  // a repeat of the ACK that carries an up-crossing
     }
     return connection_policy::encodeMcDpskRungCommand(mcdpsk_rate_ctl_.command());
 }
@@ -8775,6 +8827,16 @@ void Connection::noteRxMcDpskFrameLost(int modulation) {
 }
 
 void Connection::maybeObeyMcDpskRungCommand(uint8_t command_word, uint8_t group_seq) {
+    if (connection_policy::decodeOfdmRungCommand(command_word) != kRungIdxNone) {
+        // An up-crossing: older ACKs (by group_seq) cannot carry it back.
+        if (mcdpsk_last_command_group_seq_ >= 0 &&
+            ((static_cast<int>(group_seq) - mcdpsk_last_command_group_seq_) & 0x3F) >= 32) {
+            return;
+        }
+        mcdpsk_last_command_group_seq_ = group_seq;
+        maybeObeyCrossingCommand(command_word, "receiver command");
+        return;
+    }
     const int rung = connection_policy::decodeMcDpskRungCommand(command_word);
     if (rung < 0) {
         return;  // no command (an older peer, or an ACK with nothing to say)
@@ -8787,6 +8849,502 @@ void Connection::maybeObeyMcDpskRungCommand(uint8_t command_word, uint8_t group_
     }
     mcdpsk_last_command_group_seq_ = group_seq;
     applyMcDpskTxModulation(connection_policy::kMcDpskRungModulations[rung], "receiver command");
+}
+
+// ─────────────── Waveform follow (ULTRA_WAVEFORM_FOLLOW) ───────────────
+// One session crosses between MC-DPSK and wideband OFDM as the channel changes, the way the
+// MC-DPSK constellation changes: the receiver decides (it measures the forward channel) and puts
+// the target rung in its tone ACK, then switches itself; the sender switches when it reads the
+// command. No exchange, no extra airtime. A crossing that does not take is caught by probation:
+// see the state block in connection.hpp. docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
+
+bool Connection::waveformFollowActive() const {
+    const uint8_t mc = connection_policy::modeToCapabilityBit(WaveformMode::MC_DPSK);
+    const uint8_t ofdm = connection_policy::modeToCapabilityBit(WaveformMode::OFDM_CHIRP);
+    const char* lock = std::getenv("ULTRA_LOCK_RATE");
+    // The crossing commands are the receiver authority's rung word: without the authority the
+    // sender neither reads them nor ends its probation (an ACK with progress, read in the
+    // authority branch), so follow would cross one way and never settle.
+    return waveform_follow_enabled_ && waveform_follow_allowed_ &&
+           rxRateAuthorityEnabled() &&
+           state_ == ConnectionState::CONNECTED && !disconnect_teardown_active_ &&
+           (negotiated_mode_ == WaveformMode::MC_DPSK ||
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP) &&
+           // This end's own capabilities only: the initiator never learns the responder's (they
+           // are not in CONNECT_ACK), and a peer that cannot follow does not obey - the probation
+           // then returns the end that commanded.
+           (config_.mode_capabilities & mc) != 0 && (config_.mode_capabilities & ofdm) != 0 &&
+           !environmentForcesDataProfile() && !(lock != nullptr && std::atoi(lock) != 0);
+}
+
+Connection::SessionPick Connection::sessionLadderPick() const {
+    // The connect-time chain (handleConnect) on the readings the session has pooled since: the
+    // same thresholds, more samples.
+    const float snr_db = rateSelectionSnrDb();
+    const float entry_fading_raw = rateSelectionFadingIndex();
+    const float entry_fading =
+        connection_policy::connectSnrPoolEnabled()
+            ? connection_policy::entryClassificationFadingIndex(
+                  entry_fading_raw,
+                  connect_snr_pool_.effectiveCount(connectSnrPoolTcMs(), /*handshake_only=*/true,
+                                                   /*max_age_ms=*/UINT64_MAX))
+            : entry_fading_raw;
+    const bool data_aided = rateSelectionSnrDataAided();
+    SessionPick pick;
+    pick.selection_snr_db = connection_policy::connectSelectionSnrDb(
+        snr_db, entry_fading, data_aided, physical_channel_mean_db_, physical_channel_n_);
+    const float rate_fading = connection_policy::coherenceAdjustedFadingIndex(
+        entry_fading, coherence_score_, coherence_valid_);
+    const float papr_offset_db = txPaprOffsetDb();
+    pick.rung = connection_policy::selectLadderRungPaprCorrected(pick.selection_snr_db,
+                                                                 rate_fading, papr_offset_db);
+    pick.mod = pick.rung.modulation;
+    pick.rate = pick.rung.code_rate;
+    if (pick.rung.waveform == WaveformMode::OFDM_CHIRP) {
+        const float ofdm_snr_db = pick.selection_snr_db - papr_offset_db;
+        recommendDataMode(ofdm_snr_db, WaveformMode::OFDM_CHIRP, pick.mod, pick.rate, rate_fading);
+        pick.rate = capInitialOFDMRate(ofdm_snr_db, rate_fading, pick.rate, pick.mod, data_aided);
+    }
+    return pick;
+}
+
+bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason) {
+    if (!waveformFollowActive()) {
+        return false;
+    }
+    const int mc_rung = connection_policy::decodeMcDpskRungCommand(session_word);
+    const uint8_t ofdm_rung = connection_policy::decodeOfdmRungCommand(session_word);
+    const WaveformMode from = negotiated_mode_;
+    const Modulation from_mod = data_modulation_;
+    const CodeRate from_rate = data_code_rate_;
+    WaveformMode target = from;
+    Modulation mod = from_mod;
+    CodeRate rate = from_rate;
+    int cw = 0;
+    LadderRungId rung_id = LadderRungId::UNKNOWN;
+    if (from == WaveformMode::OFDM_CHIRP && mc_rung >= 0) {
+        // Down: the standard DBPSK geometry (8 carriers, 1024 samples/symbol, 3 codewords); the
+        // in-session constellation change lifts it to DQPSK when the channel allows.
+        const auto rung = connection_policy::ladderRungForId(LadderRungId::ROBUST_MID);
+        target = WaveformMode::MC_DPSK;
+        mod = rung.modulation;
+        rate = rung.code_rate;
+        cw = rung.cw_count;
+        rung_id = rung.id;
+    } else if (from == WaveformMode::MC_DPSK && ofdm_rung != kRungIdxNone) {
+        const CoherentPick pick = coherentRungFromIndex(ofdm_rung);
+        target = WaveformMode::OFDM_CHIRP;
+        mod = pick.mod;
+        rate = pick.rate;
+        rung_id = LadderRungId::OFDM_CHIRP;
+        cw = (config_.forced_cw_count != 0)
+                 ? v2::sanitizeFixedFrameCodewords(config_.forced_cw_count)
+                 : connection_policy::recommendCWCountForChannel(
+                       mod, rate, WaveformMode::OFDM_CHIRP,
+                       connection_policy::coherenceAdjustedFadingIndex(
+                           fading_index_, coherence_score_, coherence_valid_),
+                       decisionSnrDb());
+    } else {
+        return false;
+    }
+    rx_follow_crater_streak_ = 0;
+    rx_follow_silence_ms_ = 0;
+    resetFollowOfdmSpell();
+    LOG_MODEM(INFO, "Connection: WAVEFORM FOLLOW %s %s -> %s %s %s cw=%d (%s)",
+              waveformModeToString(from), modulationToString(from_mod),
+              waveformModeToString(target), modulationToString(mod), codeRateToString(rate), cw,
+              reason);
+    // A crossing is a fresh start for the target waveform's controllers (as at connect) and a
+    // geometry change for the ARQ: unacked frames are re-cut at the new capacity under a new
+    // move-epoch (applyDataMode), the peer's receive window follows the epoch.
+    if (target == WaveformMode::OFDM_CHIRP) {
+        resetAdaptiveDecisionState();
+        resetOfdmLadderState();
+    } else {
+        // Down: what the session measured describes the channel that just collapsed. The way
+        // back up is decided on what this MC-DPSK spell measures (BUG-FOLLOW-STALE-EVIDENCE): the
+        // pool's 20 dB handshake reading and a physical cap still made of pre-fade frames lifted a
+        // fade read at -5..+1 dB to a 9.5-13 dB selection and crossed up into it. With no fresh
+        // physical measurement the reading stands unboosted (boundByPhysicalEvidenceDb). The
+        // modem resets the decoder's physical ring with the crossing (crossConnectedWaveform).
+        connect_snr_pool_.clear();
+        physical_channel_mean_db_ = 0.0f;
+        physical_channel_spread_db_ = 0.0f;
+        physical_channel_n_ = 0;
+    }
+    applyDataMode(mod, rate, cw, rung_id);
+    if (target == WaveformMode::OFDM_CHIRP) {
+        // This end's ACKs keep commanding the rung the crossing landed on until the ladder
+        // measures otherwise.
+        rx_authority_cmd_ = ofdm_rung;
+    }
+    // The modem switches waveform first, then takes the data mode (the callback order matters:
+    // a queued OFDM reconfiguration must not outlive a switch to MC-DPSK).
+    const bool mc_target = target == WaveformMode::MC_DPSK;
+    if (on_waveform_crossing_) {
+        on_waveform_crossing_(target, mod, rate, data_frame_cw_count_,
+                              mc_target ? config_.mc_dpsk_num_carriers : 0,
+                              mc_target ? config_.mc_dpsk_samples_per_symbol : 0);
+    }
+    notifyDataModeChanged(measured_snr_db_, wireFadingIndex(), /*snr_is_wire=*/false);
+    if (arq_callback_defer_refill_) {
+        deferred_file_refill_ = true;
+    } else {
+        runDeferredArqRefill();
+    }
+    return true;
+}
+
+uint8_t Connection::upCrossingWordForAck(bool clean) {
+    if (!waveformFollowActive() || negotiated_mode_ != WaveformMode::MC_DPSK) {
+        return 0;
+    }
+    if (rx_crossing_apply_pending_) {
+        return rx_crossing_word_;  // a repeat of the ACK that carries the command
+    }
+    const SessionPick pick = sessionLadderPick();
+    const uint8_t ofdm_rung = (pick.rung.waveform == WaveformMode::OFDM_CHIRP)
+                                  ? coherentRungIndexFor(pick.mod, pick.rate)
+                                  : kRungIdxNone;
+    const uint8_t command = up_crossing_gate_.observe(clean, ofdm_rung);
+    LOG_MODEM(INFO,
+              "Connection: WAVEFORM FOLLOW rx: burst %s, pick %s %s %s (sel %.1f dB) -> %s "
+              "(run %d)",
+              clean ? "clean" : "loss", pick.rung.name, modulationToString(pick.mod),
+              codeRateToString(pick.rate), pick.selection_snr_db,
+              command != kRungIdxNone ? "COMMAND OFDM" : "stay", up_crossing_gate_.run());
+    if (command == kRungIdxNone) {
+        return 0;
+    }
+    rx_crossing_word_ = command;
+    rx_crossing_apply_pending_ = true;
+    return command;
+}
+
+bool Connection::maybeObeyCrossingCommand(uint8_t command_word, const char* reason) {
+    if (!waveformFollowActive()) {
+        return false;
+    }
+    const bool crosses =
+        (negotiated_mode_ == WaveformMode::MC_DPSK &&
+         connection_policy::decodeOfdmRungCommand(command_word) != kRungIdxNone) ||
+        (negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+         connection_policy::decodeMcDpskRungCommand(command_word) >= 0);
+    if (!crosses) {
+        return false;
+    }
+    const WaveformMode from = negotiated_mode_;
+    const Modulation from_mod = data_modulation_;
+    if (!applyWaveformCrossing(command_word, reason)) {
+        return false;
+    }
+    if (from == WaveformMode::MC_DPSK) {
+        // Sender side of an up-crossing: on probation until an ACK comes back for OFDM data.
+        crossing_probe_active_ = true;
+        crossing_probe_rx_side_ = false;
+        crossing_probe_revert_ms_ = 0;
+        crossing_return_mod_ = from_mod;
+    } else if (crossing_probe_active_) {
+        endCrossingProbe(/*held=*/false);  // the receiver called the up-crossing off
+    }
+    return true;
+}
+
+void Connection::noteRxOfdmBurstAfterCrossing(bool decoded_any) {
+    if (!crossing_probe_active_ || !crossing_probe_rx_side_ ||
+        negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
+        return;
+    }
+    if (decoded_any) {
+        LOG_MODEM(INFO, "Connection: WAVEFORM FOLLOW rx: first OFDM burst decoded, crossing holds");
+        endCrossingProbe(/*held=*/true);
+        return;
+    }
+    // The sender crossed (its burst arrived) but OFDM carries nothing here: call the crossing off
+    // in this burst's ACK and return to MC-DPSK.
+    LOG_MODEM(INFO,
+              "Connection: WAVEFORM FOLLOW rx: first OFDM burst delivered nothing, commanding "
+              "MC-DPSK");
+    rx_crossing_word_ = connection_policy::encodeMcDpskRungCommand(
+        std::max(0, connection_policy::mcDpskRungIndexFor(crossing_return_mod_)));
+    rx_crossing_apply_pending_ = true;
+    endCrossingProbe(/*held=*/false);
+}
+
+void Connection::maybeAbandonCrossingOnTimeout(uint32_t elapsed_ms) {
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || !arq_.timeoutRetransmitDue(elapsed_ms)) {
+        return;
+    }
+    if (!crossing_probe_active_ || crossing_probe_rx_side_) {
+        return;  // outside the sender's probation: maybeCrossDownOnCollapse owns timeouts
+    }
+    // No ACK at all for the first OFDM burst: the receiver either never saw it or could not decode
+    // it, and it returns to MC-DPSK by itself either way (revert deadline / its own command).
+    const uint8_t word = connection_policy::encodeMcDpskRungCommand(
+        std::max(0, connection_policy::mcDpskRungIndexFor(crossing_return_mod_)));
+    endCrossingProbe(/*held=*/false);
+    applyWaveformCrossing(word, "no ACK for the first OFDM burst");
+}
+
+void Connection::endCrossingProbe(bool held) {
+    if (!crossing_probe_active_) {
+        return;
+    }
+    crossing_probe_active_ = false;
+    crossing_probe_revert_ms_ = 0;
+    if (crossing_probe_rx_side_) {
+        if (held) {
+            // The backoff resets only once OFDM has delivered UpCrossingGate::kHeldGroups groups
+            // (noteRxOfdmGroupForFollow): a crossing that holds one group and fails the next is a
+            // failed crossing, or a marginal session would cycle at the first run.
+            up_crossing_held_groups_ = 0;
+        } else {
+            up_crossing_gate_.crossingFailed();
+            up_crossing_held_groups_ = -1;
+        }
+        LOG_MODEM(INFO, "Connection: WAVEFORM FOLLOW up-crossing %s (run %d)",
+                  held ? "decoded its first OFDM burst" : "failed", up_crossing_gate_.run());
+    }
+    crossing_probe_rx_side_ = false;
+}
+
+void Connection::noteRxOfdmGroupForFollow(bool delivered_any) {
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
+        return;
+    }
+    if (delivered_any) {
+        rx_follow_crater_streak_ = 0;
+        rx_follow_silence_ms_ = 0;
+        rx_follow_empty_since_ms_ = 0;
+        if (up_crossing_held_groups_ >= 0 &&
+            ++up_crossing_held_groups_ >= connection_policy::UpCrossingGate::kHeldGroups) {
+            up_crossing_gate_.crossingHeld();
+            up_crossing_held_groups_ = -1;
+            LOG_MODEM(INFO, "Connection: WAVEFORM FOLLOW up-crossing held (run reset to %d)",
+                      up_crossing_gate_.run());
+        }
+        return;
+    }
+    const uint8_t rung = coherentRungIndexFor(data_modulation_, data_code_rate_);
+    const uint8_t previous_rung = rx_follow_crater_rung_;
+    rx_follow_crater_rung_ = rung;
+    ++rx_follow_crater_streak_;
+    if (rx_follow_empty_since_ms_ == 0) {
+        rx_follow_empty_since_ms_ = std::max<uint64_t>(1, follow_clock_ms_);
+    }
+    if (!waveformFollowActive() || rx_crossing_apply_pending_ || crossing_probe_active_) {
+        return;
+    }
+    // The economics as for silence: a link that was delivering waits for the empty streak to
+    // outlast what returning costs (a fade the receiver still syncs to is still a fade).
+    const uint64_t empty_ms = follow_clock_ms_ - rx_follow_empty_since_ms_;
+    if (empty_ms < followDownCrossingMs(/*receiver_side=*/true)) {
+        return;
+    }
+    // Two groups in a row delivered nothing, and the ladder has nowhere left to go: the second
+    // is at the OFDM floor, or at the same rung or higher than the first (the sender did not step
+    // down). While the ladder is still stepping down it keeps its chance. The floor delivering even
+    // one frame in eight roughly matches MC-DPSK's best, so only empty groups count.
+    if (rx_follow_crater_streak_ >= 2 &&
+        (rung == kRungIdxQpskR14 || rung >= previous_rung)) {
+        LOG_MODEM(INFO,
+                  "Connection: WAVEFORM FOLLOW rx: %d empty groups, the last at %s %s (%s) -> "
+                  "commanding MC-DPSK",
+                  rx_follow_crater_streak_, modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_),
+                  rung == kRungIdxQpskR14 ? "the floor" : "the ladder did not step down");
+        rx_crossing_word_ = connection_policy::encodeMcDpskRungCommand(0);
+        rx_crossing_apply_pending_ = true;
+        if (up_crossing_held_groups_ >= 0) {
+            // An up-crossing that never held (two delivering groups): the pick was too hopeful
+            // for this channel, so the next one waits longer. Losing an OFDM link that held is
+            // the channel moving, not a wrong pick: no backoff, so the session comes back up as
+            // soon as the readings say so.
+            up_crossing_gate_.crossingFailed();
+        }
+        up_crossing_held_groups_ = -1;
+        rx_follow_crater_streak_ = 0;
+    }
+}
+
+void Connection::crossDownLocally(const char* reason) {
+    // An up-crossing that never held - still on probation, or past its first OFDM burst without
+    // two delivering groups - failed, and the next one waits longer. Losing an OFDM link that held
+    // is the channel moving, not a wrong pick: no backoff.
+    if (crossing_probe_active_) {
+        endCrossingProbe(/*held=*/false);  // backs off on the receiver side
+    } else if (up_crossing_held_groups_ >= 0) {
+        up_crossing_gate_.crossingFailed();
+    }
+    up_crossing_held_groups_ = -1;
+    applyWaveformCrossing(connection_policy::encodeMcDpskRungCommand(0), reason);
+    rx_follow_crater_streak_ = 0;
+    rx_follow_silence_ms_ = 0;
+}
+
+void Connection::resetFollowOfdmSpell() {
+    follow_ofdm_busy_ms_ = 0;
+    follow_ofdm_busy_at_delivery_ms_ = 0;
+    follow_ofdm_bytes_ = 0.0;
+    rx_follow_empty_since_ms_ = 0;
+}
+
+void Connection::noteFollowOfdmDelivery(int frames) {
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || frames <= 0) {
+        return;
+    }
+    follow_ofdm_bytes_ += static_cast<double>(frames) *
+                          static_cast<double>(currentDataPayloadCapacity());
+    follow_ofdm_busy_at_delivery_ms_ = follow_ofdm_busy_ms_;
+    rx_follow_empty_since_ms_ = 0;
+}
+
+double Connection::followOfdmBytesPerSecond() const {
+    if (follow_ofdm_bytes_ <= 0.0) {
+        return 0.0;
+    }
+    // Busy time up to the last delivery, at least one round (the round that produced it).
+    const uint64_t span = std::max<uint64_t>(follow_ofdm_busy_at_delivery_ms_,
+                                             std::max<uint32_t>(1, arq_.getAckTimeout()));
+    return follow_ofdm_bytes_ * 1000.0 / static_cast<double>(span);
+}
+
+uint64_t Connection::followOfdmSilentMs() const {
+    return follow_ofdm_busy_ms_ - follow_ofdm_busy_at_delivery_ms_;
+}
+
+uint64_t Connection::followDownCrossingMs(bool receiver_side) const {
+    const uint32_t rto_o = std::max<uint32_t>(1, arq_.getAckTimeout());
+    // The MC-DPSK spell a down-crossing would start (applyWaveformCrossing's target).
+    const auto target = connection_policy::ladderRungForId(LadderRungId::ROBUST_MID);
+    const auto timing = connection_policy::mcDpskFrameTiming(
+        target.modulation, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
+        target.cw_count);
+    const size_t window = connection_policy::mcDpskWindowSizeForTiming(timing);
+    const uint32_t rto_m = connection_policy::computeMCDPSKAckTimeoutMs(
+        timing, window, connection_policy::mcDpskPartialSackHoldMs(timing),
+        connection_policy::kCarrierSenseAckRepeatCount);
+    const size_t payload = connection_policy::mcDpskCompactFrameEnabled()
+                               ? mcdpsk_frame::payloadCapacity(target.cw_count, target.code_rate)
+                               : v2::getVariableFramePayloadCapacity(target.code_rate,
+                                                                     target.cw_count);
+    const auto cost = connection_policy::followReturnCost(rto_o, window, payload, rto_m,
+                                                          timing.data_ms, timing.ack_ms);
+    uint64_t wait = std::min(connection_policy::followSkiRentalMs(followOfdmBytesPerSecond(), cost),
+                             connection_policy::kFollowPatienceMs);
+    // Never past the point where the ARQ abandons a frame (max_retries timeouts), with two rounds
+    // to spare: a crossing re-cuts the window, so the transfer survives the outage.
+    const int retries = arq_.getMaxRetries();
+    const uint64_t horizon = (retries > 2) ? static_cast<uint64_t>(retries - 2) * rto_o : rto_o;
+    wait = std::min(wait, horizon);
+    if (receiver_side) {
+        wait = (wait > rto_o / 2) ? wait - rto_o / 2 : 0;
+    }
+    return wait;
+}
+
+void Connection::maybeCrossDownOnCollapse() {
+    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || crossing_probe_active_ ||
+        zero_progress_rounds_ < connection_policy::kFollowRoundsWithoutProgressToCross ||
+        arq_.getTxInFlightBytes() == 0 || !waveformFollowActive()) {
+        return;
+    }
+    // The evidence says OFDM stopped; the economics say whether to leave it (ski rental): a link
+    // that was delivering waits for the outage to outlast what returning costs, never past the
+    // point where the ARQ would abandon a frame.
+    const uint64_t wait_ms = followDownCrossingMs(/*receiver_side=*/false);
+    const bool abandon_close = arq_.maxInFlightRetryCount() >= arq_.getMaxRetries() - 2;
+    if (followOfdmSilentMs() < wait_ms && !abandon_close) {
+        return;
+    }
+    // The collapse escape's evidence (rounds without progress at this rung) with the waveform
+    // that still works below OFDM: the escape's MODE_CHANGE rides OFDM control frames and does not
+    // get through a link this dead (measured: four retries, 40 s, at 0 dB). The staged timeout
+    // batch is dropped by the geometry change; the refill sends MC-DPSK.
+    LOG_MODEM(INFO,
+              "Connection: WAVEFORM FOLLOW tx: %d rounds without progress at %s %s, silent %llu ms "
+              "(crossing pays after %llu ms: OFDM delivered %.1f B/s%s) -> MC-DPSK",
+              zero_progress_rounds_, modulationToString(data_modulation_),
+              codeRateToString(data_code_rate_),
+              static_cast<unsigned long long>(followOfdmSilentMs()),
+              static_cast<unsigned long long>(wait_ms), followOfdmBytesPerSecond(),
+              abandon_close ? "; a frame is about to be abandoned" : "");
+    zero_progress_rounds_ = 0;
+    crossDownLocally("rounds without progress");
+}
+
+void Connection::tickWaveformFollow(uint32_t elapsed_ms) {
+    follow_clock_ms_ += elapsed_ms;
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+        (arq_.getTxInFlightBytes() > 0 ||
+         file_transfer_.getState() == FileTransferState::RECEIVING ||
+         !rx_reassembly_buffer_.empty())) {
+        follow_ofdm_busy_ms_ += elapsed_ms;  // the down-crossing's clock: busy time only
+    }
+    if (rx_crossing_apply_pending_) {
+        // The ACK carrying the command is out: this end crosses now.
+        const uint8_t word = rx_crossing_word_;
+        rx_crossing_apply_pending_ = false;
+        rx_crossing_word_ = 0;
+        const WaveformMode from = negotiated_mode_;
+        const Modulation from_mod = data_modulation_;
+        if (applyWaveformCrossing(word, "receiver decision") && from == WaveformMode::MC_DPSK) {
+            crossing_probe_active_ = true;
+            crossing_probe_rx_side_ = true;
+            crossing_return_mod_ = from_mod;
+            // The sender's first OFDM burst has had every chance to show by then
+            // (connection_policy::upCrossingRevertMs; the ACK at the slowest staircase rung).
+            namespace tba = ultra::waveform::tone_burst_ack;
+            crossing_probe_revert_ms_ = connection_policy::upCrossingRevertMs(
+                data_modulation_, data_code_rate_, data_frame_cw_count_,
+                tba::kTotalSymbols * tba::kStaircaseSymbolMs.back());
+            LOG_MODEM(INFO, "Connection: WAVEFORM FOLLOW rx: waiting %u ms for the first OFDM burst",
+                      crossing_probe_revert_ms_);
+        }
+        return;
+    }
+    if (crossing_probe_active_ && crossing_probe_rx_side_ && crossing_probe_revert_ms_ > 0) {
+        if (crossing_probe_revert_ms_ > elapsed_ms) {
+            crossing_probe_revert_ms_ -= elapsed_ms;
+            return;
+        }
+        // No OFDM burst: the sender most likely missed the command and is still on MC-DPSK.
+        const uint8_t word = connection_policy::encodeMcDpskRungCommand(
+            std::max(0, connection_policy::mcDpskRungIndexFor(crossing_return_mod_)));
+        endCrossingProbe(/*held=*/false);
+        applyWaveformCrossing(word, "no OFDM burst after the crossing");
+        return;
+    }
+    // OFDM receiver in the middle of an incoming object that hears nothing decodable: the sender
+    // is either unheard on OFDM or already on MC-DPSK (its own rule); go first so its MC-DPSK burst
+    // finds this end listening. Incoming = the peer committed to sending more: a file in progress,
+    // or a payload partly reassembled (the TNC's messages travel as payloads, not files). An idle
+    // peer holding the turn leaves both empty, and its silence means nothing.
+    const bool incoming_object = file_transfer_.getState() == FileTransferState::RECEIVING ||
+                                 !rx_reassembly_buffer_.empty();
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP && incoming_object &&
+        waveformFollowActive() && !crossing_probe_active_ && !rx_crossing_apply_pending_) {
+        rx_follow_silence_ms_ = (rx_follow_silence_ms_ > UINT32_MAX - elapsed_ms)
+                                    ? UINT32_MAX
+                                    : rx_follow_silence_ms_ + elapsed_ms;
+        namespace tba = ultra::waveform::tone_burst_ack;
+        const uint64_t limit = std::max<uint64_t>(
+            connection_policy::followReceiverSilenceMs(
+                tba::kTotalSymbols * tba::kStaircaseSymbolMs.back()),
+            followDownCrossingMs(/*receiver_side=*/true));
+        if (rx_follow_silence_ms_ >= limit) {
+            LOG_MODEM(INFO,
+                      "Connection: WAVEFORM FOLLOW rx: nothing decoded for %u ms of an incoming "
+                      "%s (limit %llu, OFDM delivered %.1f B/s) -> MC-DPSK",
+                      rx_follow_silence_ms_,
+                      file_transfer_.getState() == FileTransferState::RECEIVING ? "file"
+                                                                                 : "payload",
+                      static_cast<unsigned long long>(limit), followOfdmBytesPerSecond());
+            crossDownLocally("receiver heard nothing");
+        }
+    } else {
+        rx_follow_silence_ms_ = 0;
+    }
 }
 
 void Connection::commitPendingModeChange(const char* outcome) {
@@ -9009,6 +9567,50 @@ void Connection::onDescriptorModeChange(Modulation mod, CodeRate rate, int cw_pe
     runDeferredArqRefill();
 }
 
+void Connection::resetOfdmLadderState() {
+    // The OFDM ladder's per-session state: what a fresh connection starts from, and what an
+    // MC-DPSK -> OFDM crossing starts from (waveform follow) - none of it is evidence about a
+    // channel the ladder has not yet carried data on.
+    // QAM16 climb state (the re-climb cooldown/backoff resets here).
+    qam16_clean_streak_ = 0;
+    qam16_bad_streak_ = 0;
+    qam16_r34_clean_streak_ = 0;
+    qam16_reclimb_cooldown_ = 0;
+    qam16_demote_count_ = 0;
+    // §RETX-PACING: trough-pacing / collapse-escape round state.
+    zero_progress_rounds_ = 0;
+    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
+    retx_pace_hold_ms_ = 0;
+    last_data_burst_end_valid_ = false;
+    partial_sack_last_round_ = {};
+    partial_sack_descriptor_repair_scope_ = false;
+    // RX-RATE-CMD Phase 2 state (the seq dedup space restarts with the ARQ; a stale standing
+    // command must never leak across sessions or eras).
+    rx_rate_cmd_pending_ = 0;
+    rx_rate_cmd_seq_seen_ = -1;
+    rebase_voice_event_seq_ = 0;
+    rx_rebase_voice_seq_seen_ = -1;
+    rx_authority_cmd_ = 0;
+    tx_authority_last_obeyed_ = 0;
+    rx_auth_obs_count_ = 0;
+    rx_auth_obs_next_ = 0;
+    rx_auth_crater_streak_ = 0;
+    rx_auth_clean_streak_ = 0;
+    rx_auth_class_sticky_ = 1;
+    rx_auth_class_streak_ = 0;
+    rx_auth_fading_passed_ = 0.3f;
+    rx_auth_climb_dwell_ = 0;
+    rx_auth_gamma_count_ = 0;
+    rx_auth_gamma_next_ = 0;
+    for (auto& v : rx_auth_gamma_ring_) v.clear();
+    for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
+    burst_obs_snr_db_ = -1.0f;
+    burst_obs_fading_ = -1.0f;
+    burst_obs_evm_snr_db_ = -1.0f;
+    burst_obs_coh_valid_ = false;
+    qam16_rx_bad_streak_ = 0;
+}
+
 void Connection::resetAdaptiveDecisionState() {
     // All outcome estimators and burst-policy evidence are scoped to one QSO. A persistent
     // GUI/TNC process must not seed the next peer/channel from the preceding transfer, nor
@@ -9079,56 +9681,32 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     yielded_data_turn_waiting_for_peer_data_ = false;
     data_turn_yield_pending_ = false;
     resetDataTurnFairness();
-    // QAM16 climb state is per-connection (the re-climb cooldown/backoff resets here).
-    qam16_clean_streak_ = 0;
-    qam16_bad_streak_ = 0;
-    qam16_r34_clean_streak_ = 0;
-    qam16_reclimb_cooldown_ = 0;
-    qam16_demote_count_ = 0;
+    resetOfdmLadderState();  // per-connection rung, pacing and receiver-authority state
+    // Waveform follow is per QSO, and only for a QSO the ladder picked (an operator pin holds the
+    // waveform as it holds the rate).
+    waveform_follow_allowed_ = automatic_rate_allowed;
+    up_crossing_gate_.reset();
+    rx_crossing_word_ = 0;
+    rx_crossing_apply_pending_ = false;
+    crossing_probe_active_ = false;
+    crossing_probe_rx_side_ = false;
+    crossing_probe_revert_ms_ = 0;
+    up_crossing_held_groups_ = -1;
+    rx_follow_crater_streak_ = 0;
+    rx_follow_silence_ms_ = 0;
+    resetFollowOfdmSpell();
     // Doppler-coherence verdict is per-connection: setChannelCoherence holds the last VALID
     // verdict while CONNECTED (BUG-DOPPLER-COHERENCE-MODECHANGE-WIPE), so it must start
     // invalid here or a previous connection's channel class would leak into this one.
     coherence_score_ = 0.0f;
     coherence_doppler_hz_ = 0.0f;
     coherence_valid_ = false;
-    // §RETX-PACING: trough-pacing / collapse-escape round state is per-connection.
-    zero_progress_rounds_ = 0;
-    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
-    retx_pace_hold_ms_ = 0;
-    last_data_burst_end_valid_ = false;
-    partial_sack_last_round_ = {};
-    partial_sack_descriptor_repair_scope_ = false;
     // Software-ALC receiver-side state is per-connection.
     rx_level_low_streak_ = 0;
     rx_level_clipped_ = false;
     rx_level_verdict_pending_for_group_ = false;
     tone_ack_alc_group_context_ = false;
     tone_ack_group_has_decoded_data_context_ = false;
-    // RX-RATE-CMD Phase 2 state is per-connection (the seq dedup space restarts with
-    // the ARQ reset below; a stale standing command must never leak across sessions).
-    rx_rate_cmd_pending_ = 0;
-    rx_rate_cmd_seq_seen_ = -1;
-    rebase_voice_event_seq_ = 0;
-    rx_rebase_voice_seq_seen_ = -1;
-    rx_authority_cmd_ = 0;
-    tx_authority_last_obeyed_ = 0;
-    rx_auth_obs_count_ = 0;
-    rx_auth_obs_next_ = 0;
-    rx_auth_crater_streak_ = 0;
-    rx_auth_clean_streak_ = 0;
-    rx_auth_class_sticky_ = 1;
-    rx_auth_class_streak_ = 0;
-    rx_auth_fading_passed_ = 0.3f;
-    rx_auth_climb_dwell_ = 0;
-    rx_auth_gamma_count_ = 0;
-    rx_auth_gamma_next_ = 0;
-    for (auto& v : rx_auth_gamma_ring_) v.clear();
-    for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
-    burst_obs_snr_db_ = -1.0f;
-    burst_obs_fading_ = -1.0f;
-    burst_obs_evm_snr_db_ = -1.0f;
-    burst_obs_coh_valid_ = false;
-    qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;

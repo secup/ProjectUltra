@@ -1074,22 +1074,92 @@ void test_connect_affine_basis() {
 
 // MC-DPSK rate change (2026-11-11): the command codec and the receiver's controller.
 void test_mcdpsk_rate_controller() {
-    // Codec: 0 = no command, 1 + rung otherwise; out-of-range words carry no command.
+    // Codec: the session ladder word. 0 = no command, 11 + rung for MC-DPSK (above the OFDM rungs
+    // 1..10); words outside a waveform's range carry no command for it.
     CHECK(kMcDpskRungCount == 2 && kMcDpskRungModulations[0] == Modulation::DBPSK &&
               kMcDpskRungModulations[1] == Modulation::DQPSK,
           "MC-DPSK data rungs are DBPSK then DQPSK (slowest first)");
     CHECK(mcDpskRungIndexFor(Modulation::DBPSK) == 0 && mcDpskRungIndexFor(Modulation::DQPSK) == 1 &&
               mcDpskRungIndexFor(Modulation::QPSK) == -1,
           "rung index of each constellation");
-    CHECK(encodeMcDpskRungCommand(0) == 1 && encodeMcDpskRungCommand(1) == 2 &&
+    CHECK(encodeMcDpskRungCommand(0) == 11 && encodeMcDpskRungCommand(1) == 12 &&
               encodeMcDpskRungCommand(-1) == 0 && encodeMcDpskRungCommand(2) == 0,
           "command encoding");
-    CHECK(decodeMcDpskRungCommand(0) == -1 && decodeMcDpskRungCommand(1) == 0 &&
-              decodeMcDpskRungCommand(2) == 1 && decodeMcDpskRungCommand(3) == -1 &&
-              decodeMcDpskRungCommand(0x1F) == -1,
-          "command decoding (0 and unknown words carry no command)");
+    CHECK(decodeMcDpskRungCommand(0) == -1 && decodeMcDpskRungCommand(11) == 0 &&
+              decodeMcDpskRungCommand(12) == 1 && decodeMcDpskRungCommand(1) == -1 &&
+              decodeMcDpskRungCommand(13) == -1 && decodeMcDpskRungCommand(0x1F) == -1,
+          "command decoding (0, OFDM rungs and unknown words carry no MC-DPSK command)");
     for (int r = 0; r < kMcDpskRungCount; ++r) {
         CHECK(decodeMcDpskRungCommand(encodeMcDpskRungCommand(r)) == r, "codec round trip");
+        CHECK(decodeOfdmRungCommand(encodeMcDpskRungCommand(r)) == kRungIdxNone,
+              "an MC-DPSK word names no OFDM rung");
+    }
+    CHECK(decodeOfdmRungCommand(0) == kRungIdxNone &&
+              decodeOfdmRungCommand(kRungIdxQpskR14) == kRungIdxQpskR14 &&
+              decodeOfdmRungCommand(kRungIdxQam32R23) == kRungIdxQam32R23 &&
+              decodeOfdmRungCommand(kRungIdxQpskR23 | kRungAuthorityStartupProbeFlag) ==
+                  kRungIdxQpskR23,
+          "OFDM rung words (the startup-probe flag is not part of the rung)");
+
+    // Up-crossing gate: the pick must name OFDM on `run` consecutive clean bursts; any loss or an
+    // MC-DPSK pick restarts the count; a failed crossing doubles the run (cap 8x), a held one
+    // resets it.
+    {
+        UpCrossingGate gate;
+        gate.reset();
+        CHECK(gate.run() == 1, "first run: one clean burst (a late crossing costs ~10x a failed one)");
+        CHECK(gate.observe(false, kRungIdxQpskR12) == kRungIdxNone &&
+                  gate.observe(true, kRungIdxNone) == kRungIdxNone &&
+                  gate.observe(true, kRungIdxQpskR12) == kRungIdxQpskR12,
+              "a loss or an MC-DPSK pick commands nothing; a clean burst naming OFDM commands it");
+        gate.crossingFailed();
+        CHECK(gate.run() == 2, "a failed crossing doubles the run");
+        CHECK(gate.observe(true, kRungIdxQpskR12) == kRungIdxNone &&
+                  gate.observe(false, kRungIdxQpskR12) == kRungIdxNone &&
+                  gate.observe(true, kRungIdxQpskR12) == kRungIdxNone &&
+                  gate.observe(true, kRungIdxNone) == kRungIdxNone &&
+                  gate.observe(true, kRungIdxQpskR14) == kRungIdxNone &&
+                  gate.observe(true, kRungIdxQpskR14) == kRungIdxQpskR14,
+              "a loss or an MC-DPSK pick restarts the run");
+        gate.crossingFailed();
+        gate.crossingFailed();
+        gate.crossingFailed();
+        CHECK(gate.run() == 8, "backoff capped at 8x the first run");
+        gate.crossingHeld();
+        CHECK(gate.run() == 1, "a crossing that holds resets the run");
+        CHECK(UpCrossingGate::kHeldGroups == 2, "a crossing holds after two delivering groups");
+    }
+    // Down-crossing time (ski rental): T* = tau * r_o / r_m, tau = the extra wait to return through
+    // MC-DPSK. DBPSK 3 x 52 bytes per 43.6 s round against an OFDM RTO of 24 s: a link that delivered
+    // 207 B/s (8PSK R2/3) waits ~26 min; a tenth of that, a tenth of the time; a link that delivered
+    // nothing crosses on the evidence; MC-DPSK returning no slower than OFDM resumes: cross at once.
+    {
+        const auto cost = followReturnCost(24350, 3, 52, 43552, 5376, 1920);
+        CHECK(cost.tau_ms == static_cast<uint32_t>(43552 / 2.0 + 3 * 5376 + 1920 - 24350 / 2.0),
+              "tau = the MC-DPSK return minus the OFDM resume");
+        const uint64_t good = followSkiRentalMs(207.0, cost);
+        CHECK(good > 20 * 60000 && good < 30 * 60000, "a link that delivered 8PSK R2/3 waits minutes");
+        const uint64_t weak = followSkiRentalMs(20.7, cost);
+        CHECK(weak * 9 < good && weak * 11 > good, "T* scales with what OFDM delivered");
+        CHECK(followSkiRentalMs(0.0, cost) == 0, "a link that delivered nothing crosses on the evidence");
+        CHECK(kFollowPatienceMs < good, "the operator's patience binds a link that was delivering");
+        CHECK(followReturnCost(120000, 3, 52, 43552, 5376, 1920).tau_ms == 0,
+              "returning through MC-DPSK costs nothing: tau 0");
+        CHECK(followSkiRentalMs(207.0, followReturnCost(24350, 0, 52, 43552, 5376, 1920)) == 0,
+              "no MC-DPSK model: the evidence decides");
+    }
+    // Revert window after an up-crossing: ACK + lead-in + burst head + two search windows. At
+    // 8PSK R2/3 x 12 codewords with the slowest (3.4 s) ACK: longer than the head and the ACK,
+    // and well inside a DBPSK sender's one-frame retransmission timeout (22.0 s).
+    {
+        const uint32_t ack_ms = 34 * 100;
+        const uint32_t revert = upCrossingRevertMs(Modulation::QAM8, CodeRate::R2_3, 12, ack_ms);
+        const uint32_t floor_ms = ack_ms + static_cast<uint32_t>(kDefaultTxLeadInMs) +
+                                  kWideOFDMFullAnchorExtraMs + 2 * kFullAnchorSearchWindowMs;
+        CHECK(revert > floor_ms && revert < 15000,
+              "up-crossing revert window covers the burst head and stays short");
+        CHECK(upCrossingRevertMs(Modulation::QPSK, CodeRate::R1_4, 8, ack_ms) > floor_ms,
+              "revert window at the OFDM floor rung");
     }
 
     // The first probe follows as many clean bursts as a failed probe costs. Production geometry

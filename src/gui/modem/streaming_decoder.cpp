@@ -1107,6 +1107,11 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     }
     deferred_future_sync_ = {};
     pending_handshake_mcdpsk_connect_ = {};
+    if (waveform_mode_changed && !protocol::isOFDMMode(mode)) {
+        // A connected-OFDM reconfiguration queued before this switch (applied at the top of
+        // processBuffer) would otherwise put the decoder back into OFDM after it.
+        pending_connected_ofdm_change_ = false;
+    }
 
     // Any mode/connection transition terminates the old physical group. Keep
     // the descriptor latch and the waveform's live block geometry in lockstep;

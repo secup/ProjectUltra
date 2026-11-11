@@ -461,6 +461,18 @@ public:
     using ModeNegotiatedCallback = std::function<void(WaveformMode mode)>;
     void setModeNegotiatedCallback(ModeNegotiatedCallback cb) { on_mode_negotiated_ = cb; }
 
+    // Waveform follow (ULTRA_WAVEFORM_FOLLOW): the connected session crossed between MC-DPSK and
+    // wideband OFDM. The modem must switch its waveform FIRST and then take the data mode (a
+    // queued OFDM reconfiguration must not outlive a switch to MC-DPSK); mc_dpsk_num_carriers /
+    // mc_dpsk_samples_per_symbol are the MC-DPSK geometry (0 for OFDM). Fired before the
+    // data-mode callback of the same change; protocol mutex held (no re-entry).
+    using WaveformCrossingCallback =
+        std::function<void(WaveformMode mode, Modulation mod, CodeRate rate, int cw_count,
+                           int mc_dpsk_num_carriers, int mc_dpsk_samples_per_symbol)>;
+    void setWaveformCrossingCallback(WaveformCrossingCallback cb) {
+        on_waveform_crossing_ = std::move(cb);
+    }
+
     // Callback when handshake is confirmed (safe to switch to negotiated waveform)
     // For initiator: called immediately after CONNECT_ACK received
     // For responder: called when first frame received after sending CONNECT_ACK
@@ -1364,6 +1376,35 @@ private:
     // SENDER: the newest ACK group_seq whose command was applied (stale ACKs are ignored) and
     // the arq time of the last timeout fallback (one step per timeout event).
     connection_policy::McDpskRateController mcdpsk_rate_ctl_;
+    // Waveform follow state. The receiver commands a crossing in the ACK it sends from inside the
+    // ARQ and applies it on the next tick (a crossing reconfigures the ARQ). An up-crossing is on
+    // probation until its first OFDM burst: the receiver reverts if none shows by the deadline
+    // (the sender likely missed the command) and commands MC-DPSK if the first burst delivers
+    // nothing; the sender returns on its first timeout. A failed probation backs the gate off.
+    connection_policy::UpCrossingGate up_crossing_gate_;
+    uint8_t rx_crossing_word_ = 0;
+    bool rx_crossing_apply_pending_ = false;
+    bool crossing_probe_active_ = false;
+    bool crossing_probe_rx_side_ = false;     // this station commanded it (the receiver)
+    uint32_t crossing_probe_revert_ms_ = 0;   // receiver: countdown while no OFDM burst arrived
+    Modulation crossing_return_mod_ = Modulation::DBPSK;
+    bool waveform_follow_enabled_ = connection_policy::waveformFollowEnabled();  // the knob
+    bool waveform_follow_allowed_ = false;    // this QSO lets the ladder cross (no operator pin)
+    int rx_follow_crater_streak_ = 0;        // OFDM receiver: groups in a row that delivered nothing
+    int up_crossing_held_groups_ = -1;      // delivering OFDM groups since the last up-crossing's
+                                            // probation (-1 = not counting); 2 reset the backoff
+    uint32_t rx_follow_silence_ms_ = 0;       // OFDM receiver: time since the peer's last decoded frame
+    uint8_t rx_follow_crater_rung_ = 0;       // OFDM receiver: the rung of the last empty group
+    // Down-crossing economics (connection_policy::followSkiRentalMs): what the current OFDM spell
+    // delivered, on this end's clock. A delivery = an ACK with progress (sender) or a delivering
+    // group (receiver); the trailing silence is not part of the rate, it is what is being decided.
+    // Busy time only (OFDM with data in flight or an object incoming): idle is neither rate nor
+    // silence.
+    uint64_t follow_clock_ms_ = 0;
+    uint64_t follow_ofdm_busy_ms_ = 0;            // busy time in this OFDM spell
+    uint64_t follow_ofdm_busy_at_delivery_ms_ = 0;  // ... at its last delivery
+    double follow_ofdm_bytes_ = 0.0;              // delivered in this OFDM spell
+    uint64_t rx_follow_empty_since_ms_ = 0;      // receiver: when the current empty-group streak began
     Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
     uint32_t rx_mcdpsk_frames_since_command_ = 0;
     int mcdpsk_last_command_group_seq_ = -1;
@@ -1458,6 +1499,48 @@ private:
                                   bool geometry_proven = false);
     void failClosedLatentStartupProbeUnknown(const char* origin);
     void resetAdaptiveDecisionState();
+    void resetOfdmLadderState();
+
+    // ── Waveform follow (ULTRA_WAVEFORM_FOLLOW, docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md) ──
+    // The connect-time pick on the session's pooled readings: the rung, and for wideband OFDM the
+    // entry modulation/rate derived exactly as handleConnect derives them.
+    struct SessionPick {
+        connection_policy::LadderRung rung;
+        Modulation mod = Modulation::DBPSK;
+        CodeRate rate = CodeRate::R1_4;
+        float selection_snr_db = 0.0f;
+    };
+    SessionPick sessionLadderPick() const;
+    bool waveformFollowActive() const;
+    // Cross to the rung a session rung word names (an OFDM rung from MC-DPSK, an MC-DPSK rung
+    // from OFDM): protocol geometry, per-waveform controllers, then the modem. False when the word
+    // names no crossing from the current waveform.
+    bool applyWaveformCrossing(uint8_t session_word, const char* reason);
+    // Receiver, MC-DPSK session: after the burst's controller update, the up-crossing word to put
+    // in this ACK (0 = none). Arms the deferred local crossing.
+    uint8_t upCrossingWordForAck(bool clean);
+    // Sender: a command word that crosses waveforms; true when it was obeyed.
+    bool maybeObeyCrossingCommand(uint8_t command_word, const char* reason);
+    // Receiver, OFDM session: a burst arrived after an up-crossing (true = something decoded).
+    void noteRxOfdmBurstAfterCrossing(bool decoded_any);
+    // Sender, OFDM session: an RTO while the up-crossing is on probation returns to MC-DPSK.
+    void maybeAbandonCrossingOnTimeout(uint32_t elapsed_ms);
+    void tickWaveformFollow(uint32_t elapsed_ms);
+    void endCrossingProbe(bool held);
+    // OFDM receiver: a group (or anchored burst) and what it delivered - the floor-crater rule.
+    void noteRxOfdmGroupForFollow(bool delivered_any);
+    // Down-crossing economics: feed and read the OFDM spell meter, and the silent time after which a
+    // down-crossing pays (ski rental, capped where the ARQ would abandon a frame; the receiver's is
+    // half a round earlier so it listens when the sender's first MC-DPSK burst comes).
+    void noteFollowOfdmDelivery(int frames);
+    void resetFollowOfdmSpell();
+    double followOfdmBytesPerSecond() const;
+    uint64_t followDownCrossingMs(bool receiver_side) const;
+    uint64_t followOfdmSilentMs() const;
+    // Down-crossing a station decides alone (no ACK to carry it): applies now, backs off the gate.
+    void crossDownLocally(const char* reason);
+    // OFDM sender: rounds without progress at one rung -> MC-DPSK (polled before the escapes).
+    void maybeCrossDownOnCollapse();
 
     // GOODPUT-MAXIMIZING RATE CONTROL (ULTRA_GOODPUT_RATE, default OFF). Replaces the
     // SNR-anchor pick + corrective stack in updateRxAuthorityCommand when enabled; inert
@@ -1789,6 +1872,7 @@ private:
     DataReceivedCallback on_data_received_;
     FileSentCallback on_file_sent_;
     ModeNegotiatedCallback on_mode_negotiated_;
+    WaveformCrossingCallback on_waveform_crossing_;
     DataModeChangedCallback on_data_mode_changed_;
     SessionAddressesCallback on_session_addresses_;
     ConnectWaveformChangedCallback on_connect_waveform_changed_;

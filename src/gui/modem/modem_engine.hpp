@@ -412,6 +412,13 @@ public:
     // data always rides the engine's MC-DPSK preset modulation. The GUI's --monitor mode and
     // `ultra ptx`/`ultra prx` use it, so they send and decode what a connected station does.
     void joinConnectedSession(protocol::WaveformMode mode, Modulation mod, CodeRate rate);
+    // Waveform follow: a connected session crosses between MC-DPSK and wideband OFDM. The
+    // waveform switches first (a switch to MC-DPSK must not be overtaken by a queued OFDM
+    // reconfiguration), then the data mode and frame geometry follow on the new waveform.
+    // mc_dpsk_num_carriers/samples_per_symbol: the MC-DPSK profile (0 for OFDM).
+    void crossConnectedWaveform(protocol::WaveformMode mode, Modulation mod, CodeRate rate,
+                                int cw_count, int mc_dpsk_num_carriers,
+                                int mc_dpsk_samples_per_symbol);
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 

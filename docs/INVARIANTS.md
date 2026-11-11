@@ -792,6 +792,26 @@ instead of waiting out its timeout. The window cap and the search hand-back keep
 eating the next burst, which the sender queues back to back.
 **Test:** `StreamingMCDPSK` (`compact burst, middle frame lost`), `MCDPSKFrame`.
 
+### INV-FOLLOW-001: a waveform crossing switches the modem's waveform before its data mode
+**Rule:** with `ULTRA_WAVEFORM_FOLLOW`, a session crosses between MC-DPSK and wideband OFDM only
+through `Connection::applyWaveformCrossing`, which fires the crossing callback (modem: waveform first,
+then data mode and frame geometry, `ModemEngine::crossConnectedWaveform`) BEFORE the data-mode
+callback; `StreamingDecoder::setMode` to a non-OFDM mode cancels a queued connected-OFDM
+reconfiguration. The command is a session rung word in the tone ACK (1..10 OFDM, 11/12 MC-DPSK); the
+receiver crosses on the tick after that ACK leaves, the sender when it reads it. An up-crossing is on
+probation until the first OFDM burst (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md).
+**Why:** the decoder applies a connected-OFDM reconfiguration later (top of `processBuffer`) while a
+switch to MC-DPSK takes effect at once: a data-mode call made while the modem was still OFDM would put
+the decoder back into OFDM after the switch. And a crossing applied inside the ARQ's ACK callback
+would reconfigure the ARQ in the middle of its own operation.
+**Corollaries:** follow needs the receiver authority (`ULTRA_RX_RATE_AUTHORITY`, default on): the
+commands are its rung bits, and only an authority sender reads them and ends its probation, so
+`waveformFollowActive()` requires it. A down-crossing restarts the channel evidence (SNR pool, the
+connection's physical measurement and the decoder's physical ring): the way back up is decided on
+what the MC-DPSK spell measures, never on the channel that collapsed (BUG-FOLLOW-STALE-EVIDENCE).
+**Test:** `WaveformFollow` (`test_waveform_follow_*`, own binary at the production defaults:
+ConnectionAdaptive pins the authority off), `ConnectionPolicy` (word codec, gate, revert window).
+
 ---
 
 ## Modulation Invariants

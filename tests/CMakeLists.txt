@@ -324,6 +324,12 @@ add_test(NAME ConnectionAdaptive COMMAND test_connection_adaptive)
 # RTO, and the measured set seeds the prior differently. Pinned to the ULTRA_FAST=0 baseline arm.
 set_tests_properties(ConnectionAdaptive PROPERTIES ENVIRONMENT "ULTRA_FAST=0")
 
+# Waveform follow rides the receiver-authority ACK word, which ConnectionAdaptive pins off: its own
+# binary, production defaults (no environment pins).
+add_executable(test_waveform_follow test_waveform_follow.cpp)
+target_link_libraries(test_waveform_follow PRIVATE ultra_core)
+add_test(NAME WaveformFollow COMMAND test_waveform_follow)
+
 add_executable(test_connection_call_collision test_connection_call_collision.cpp)
 target_link_libraries(test_connection_call_collision PRIVATE ultra_core)
 add_test(NAME ConnectionCallCollision COMMAND test_connection_call_collision)

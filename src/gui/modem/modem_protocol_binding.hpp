@@ -191,6 +191,13 @@ inline void wireModemToProtocol(ModemEngine& modem,
         [&modem](uint32_t local_hash, uint32_t remote_hash) {
             modem.setMcDpskSessionAddresses(local_hash, remote_hash);
         });
+    // Waveform follow: the session crossed between MC-DPSK and wideband OFDM (GUI and TNC alike).
+    protocol.setWaveformCrossingCallback(
+        [&modem](protocol::WaveformMode mode, Modulation mod, CodeRate rate, int cw_count,
+                 int mc_dpsk_num_carriers, int mc_dpsk_samples_per_symbol) {
+            modem.crossConnectedWaveform(mode, mod, rate, cw_count, mc_dpsk_num_carriers,
+                                         mc_dpsk_samples_per_symbol);
+        });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);

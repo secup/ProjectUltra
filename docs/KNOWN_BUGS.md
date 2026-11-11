@@ -2522,6 +2522,26 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-FOLLOW-STALE-EVIDENCE (FIXED 2026-11-11, before waveform follow shipped) — the up-crossing was decided on the channel that had collapsed
+
+With `ULTRA_WAVEFORM_FOLLOW=1`, ITU Good 20 -> 0 -> 20 dB (GUI gate, seed 44): one fade gave OFDM >
+MC-DPSK > OFDM > MC-DPSK > OFDM. In the fade the receiver read -5..+1 dB (data-aided), but the SNR pool
+still held the 20 dB handshake reading and the physical cap was made of pre-fade frames, so the fading
+basis (+11 dB at low readings, bounded only by that cap) selected 9.5-13 dB and commanded OFDM into the
+fade: a failed probation and a doubled run. Fix: a down-crossing clears the pool and the physical
+measurement on both ends, and the modem restarts the decoder's physical ring; until the MC-DPSK spell
+measures the channel physically, the reading stands unboosted. `WaveformFollow`
+`test_waveform_follow_down_crossing_forgets_stale_evidence` (fails without the fix).
+
+### BUG-MCDPSK-MID-BURST-ACK-SCORED (FIXED 2026-11-11) — re-ACKs raised in the middle of a burst were scored as losses
+
+Every MC-DPSK tone ACK that did not close the physical turn counted as a lossy burst for the receiver's
+burst controllers (the DBPSK/DQPSK command and the follow up-crossing gate) - including the re-ACKs of
+duplicates after a fade, when the sender resends its window because the fade ate the ACKs. Frames
+decoded at 12-14 dB restarted both clean runs. Fix: only the ACK that closes the turn, or one that
+reports a hole, gives a verdict (`mcDpskRungCommandForAck`); real losses keep their own path
+(`noteRxMcDpskFrameLost`). `WaveformFollow` `test_waveform_follow_mid_burst_acks_are_no_verdict`.
+
 ### BUG-MCDPSK-TRAINING-SNR-CFO (FIXED 2026-11-11) — the MC-DPSK training SNR read -2.4 dB at any SNR with a dial offset
 
 Since the 2026-11-08 move of the CFO removal into the per-carrier correlator, the channel estimates

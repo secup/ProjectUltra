@@ -549,6 +549,7 @@ struct ConnectionAdaptiveTestAccess {
         return c.rx_reassembly_buffer_.size();
     }
 
+
     static bool sendFixedData(Connection& c, const Bytes& payload, uint8_t flags) {
         return c.arq_.sendFixedDataWithFlags(payload, flags);
     }

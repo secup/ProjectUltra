@@ -670,6 +670,14 @@ public:
         spread_db = static_cast<float>(std::sqrt(var / n));
         return n;
     }
+    // A declared channel change (a waveform-follow crossing into MC-DPSK): the distribution
+    // restarts, as reset() does for a new QSO.
+    void resetPhysicalSnrEvidence() {
+        last_physical_snr_valid_.store(false);
+        last_physical_snr_db_.store(0.0f);
+        std::lock_guard<std::mutex> lk(physical_ring_mutex_);
+        physical_ring_count_ = 0;
+    }
     void notePhysicalSnrSample(float db) const {
         std::lock_guard<std::mutex> lk(physical_ring_mutex_);
         physical_ring_db_[physical_ring_count_ % kPhysicalSnrRing] = db;
