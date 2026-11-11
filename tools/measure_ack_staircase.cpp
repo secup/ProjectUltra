@@ -118,11 +118,8 @@ double runCell(const WattersonChannel::Config& cfg, uint32_t symbol_ms, int tria
         std::vector<float> noisy;
         ch.process(std::span<const float>(in), noisy);
 
-        // Production monitor search: 32-sample coarse step and its absolute candidate floor.
-        const auto dr = det.detectAndDecode(
-            noisy.data(), noisy.size(), symbol_ms, 32, {},
-            ToneBurstAckMonitor::idealCostasPeak(symbol_ms) *
-                ToneBurstAckMonitor::Config{}.min_peak_fraction);
+        // Production monitor search: 32-sample coarse step, noise-relative candidate floor.
+        const auto dr = det.detectAndDecode(noisy.data(), noisy.size(), symbol_ms, 32, {});
         if (dr.decode.payload.has_value() && payloadsEqual(*dr.decode.payload, orig)) ++ok;
     }
     return static_cast<double>(ok) / static_cast<double>(trials);
@@ -156,9 +153,7 @@ int runBench(bool diversity, float halfwidth_hz) {
         const int reps = (ms >= 50) ? 10 : 40;
         const auto t0 = std::chrono::steady_clock::now();
         for (int r = 0; r < reps; ++r) {
-            (void)det.detectAndDecode(x.data(), x.size(), ms, 32, {},
-                                      ToneBurstAckMonitor::idealCostasPeak(ms) *
-                                          ToneBurstAckMonitor::Config{}.min_peak_fraction);
+            (void)det.detectAndDecode(x.data(), x.size(), ms, 32, {});
         }
         const double per =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
@@ -205,13 +200,13 @@ int runAnalyze(int argc, char** argv) {
     x.resize(got);
     ToneBurstDetector det;
     det.setFrequencyPrior(prior, halfw);
-    const auto r = det.detectAndDecode(x.data(), x.size(), ms, 32, {},
-                                       ToneBurstAckMonitor::idealCostasPeak(ms) *
-                                           ToneBurstAckMonitor::Config{}.min_peak_fraction);
-    std::printf("detectAndDecode: sync=%d crc=%d offset=%zu (abs %ld) peak=%.1f hyps=%d cfo=%.2f\n",
+    const auto r = det.detectAndDecode(x.data(), x.size(), ms, 32, {});
+    std::printf("detectAndDecode: sync=%d crc=%d offset=%zu (abs %ld) peak=%.1f noise_ratio=%.2f "
+                "hyps=%d cfo=%.2f\n",
                 r.sync_acquired ? 1 : 0, r.decode.stats.crc_ok ? 1 : 0, r.detected_offset_samples,
                 start - lead + static_cast<long>(r.detected_offset_samples),
-                r.costas_correlation_peak, r.frequency_hypotheses, r.detected_frequency_offset_hz);
+                r.costas_correlation_peak, r.costas_noise_ratio, r.frequency_hypotheses,
+                r.detected_frequency_offset_hz);
     if (r.decode.payload) {
         std::printf("decoded: group_seq=%u mask=0x%04X rate_hint=%u\n",
                     static_cast<unsigned>(r.decode.payload->group_seq),

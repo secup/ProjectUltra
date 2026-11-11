@@ -334,6 +334,13 @@ unvalidated on hardware" caveat.
    physics to model, not idealize away.
 5. **A test that passes in simulator but fails on hardware = simulator bug.** Fix the
    simulator, not the test. Document any fidelity gap the simulator can't yet model.
+6. **The receiver reads no absolute level (INV-RX-LEVEL-001).** A station hears its peer at
+   whatever level its operator set (AF gain, USB audio level, sound-card gain); until
+   2026-11-10 every simulated station heard its peer at exactly the peer's TX level, which hid
+   fixed-level receive gates in nine places (a -30 dB input connected and moved no data; -40 dB never
+   connected, BUG-RX-ABSOLUTE-LEVEL). Every receive decision is a ratio or relative to measured
+   noise; the only absolute test is digital silence. Any receive-path change passes
+   `gui_qso_scenario.sh --rx-gain-db G` at -40, 0 and +10 dB.
 
 ---
 

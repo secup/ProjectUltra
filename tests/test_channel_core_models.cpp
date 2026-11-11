@@ -478,9 +478,37 @@ void checkRxBandpassFilter() {
     assert(dynamic_cast<RxBandpassChannelModel*>(none.get()) == nullptr);
 }
 
+// The receiving station's audio level: an exact scale with the sound card's full-scale clip, and
+// no wrapper (byte-identical models) at 0 dB.
+void checkRxGain() {
+    using ultra::ota_channel_core::RxGainChannelModel;
+    RngRoot root(0x78u);
+    ChannelConfig cfg;
+    cfg.type = ChannelType::PASSTHROUGH;
+    cfg.rx_gain_db = -20.0f;
+    auto quiet = createChannelModel(cfg, root, "gain");
+    assert(dynamic_cast<RxGainChannelModel*>(quiet.get()) != nullptr);
+    const std::vector<float> in{0.5f, -0.25f, 0.8f, -0.8f, 0.0f};
+    std::vector<float> out;
+    quiet->process(in, 0, out);
+    for (size_t i = 0; i < in.size(); ++i) assert(std::abs(out[i] - 0.1f * in[i]) < 1e-6f);
+
+    cfg.rx_gain_db = 12.0f;  // x3.98: 0.5 and 0.8 clip at full scale
+    auto loud = createChannelModel(cfg, root, "gain");
+    loud->process(in, 0, out);
+    assert(out[0] == 1.0f && out[2] == 1.0f && out[3] == -1.0f);
+    assert(std::abs(out[1] + 0.25f * 3.98107f) < 1e-4f);
+
+    cfg.rx_gain_db = 0.0f;
+    auto none = createChannelModel(cfg, root, "gain");
+    assert(dynamic_cast<RxGainChannelModel*>(none.get()) == nullptr);
+    std::cout << "rx_gain -20 dB x0.1, +12 dB clips at 1.0, 0 dB no wrapper\n";
+}
+
 int main() {
     checkStreamingCfoAcrossChunks();
     checkRxBandpassFilter();
+    checkRxGain();
     {
         PassthroughChannelModel model;
         const std::vector<float> input{0.0f, 1.0f, -0.5f, 0.25f};

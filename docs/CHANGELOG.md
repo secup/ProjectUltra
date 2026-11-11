@@ -10,6 +10,83 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-10 — FIX(rx): the receiver reads no absolute level; simulator receive-level control (BUG-RX-ABSOLUTE-LEVEL)
+
+**What was broken.** A station hears its peer at whatever level its operator set (AF gain, USB
+audio level, sound-card gain), tens of dB apart between setups. The simulator delivered every
+station's audio at exactly its peer's transmit level, so receive gates written against that level
+never failed a test. A new receive-level control (`gui_qso_scenario.sh --rx-gain-db G`, AWGN 20 dB,
+4 KB) measured them: **-40 dB never connected** (the PING was skipped as silence), **-30 dB connected
+and moved zero data frames** (every data frame after the burst header skipped; every tone ACK under
+its floor, so the sender retransmitted on timeout), -20 dB passed. Narrowband failed the same way.
+
+**What changed (every receive decision a ratio or relative to measured noise, INV-RX-LEVEL-001).**
+- Sync search (`sync_controller.cpp::acquireSearchWindow`): the level clamps (0.015-0.040 RMS
+  connected, 0.006-0.025 idle, 0.025 otherwise) are gone; only digital silence is skipped
+  (`signal_policy::kDigitalSilenceRms` = 1e-7, under a 24-bit converter step). A noise-relative
+  gate would have skipped low-SNR signals instead (the RMS rises only by sqrt(1 + SNR)); the
+  correlators are the detectors. The dead `audio_active` parameter is removed.
+- Tone-ACK detector: the candidate and accept floor was 5 % of the ideal Costas peak at the
+  TRANSMIT amplitude; it is now `kCostasNoiseRatioFloor` = 2.2 x the noise-only expectation of the
+  Costas statistic, measured at the tones of each frequency hypothesis in the window (four tones
+  pooled, censored quartile). Measured on 1260 noise-only windows: the strongest candidate of a
+  pass reaches p99.9 1.97, max 2.03. The old floor also sat at the noise mean at low SNR (handing
+  noise to a 12-bit CRC); the new one never does. Monitor logs carry the ratio.
+- MC-DPSK burst tail: was 0.012 RMS; now the next frame's in-band power against this burst's
+  inter-chirp gap noise, within 3 combined chi-square spreads (`inBandPowerReadsAsNoise`).
+- PING classifier: the 0.16 RMS "payload absent" arm (OR'd in always, contrary to its comment) is
+  removed; the gap's noise reference is the larger of the inter-chirp gap and the idle floor (the
+  F231 bench's noise breathes, as the physical-SNR code already handles); the unwritten-memory and
+  noise-validity floors (0.001 and 1e-4 RMS) are digital silence.
+- Idle in-band SNR: referenced to the peer's measured chirp power (chirp minus gap noise, same
+  50-2950 Hz filter) instead of the simulator's 0.3048, and invalid until a peer is measured; a
+  -30 dB input used to read +30 dB (it feeds the tone-ACK symbol choice and the operator meter).
+- Carrier sense: the 0.005 RMS quiet floor is gone from the production config (below -52 dBFS of
+  noise it made a peer under 0.005 read as idle).
+- Burst erasure gate (`streaming_burst_interleave.cpp`): its relative rule (0.055 x this group's
+  anchor RMS) kept a 0.005 RMS "essentially-silence" backstop, found by the sweep AFTER the first
+  fixes: at -40 dB every member after the anchor (0.003 RMS) was erased and retransmitted (40
+  erasures, 360 bps instead of 1230), and at -30 dB on ITU Good two faded frames were (1310 bps
+  instead of 1510). The backstop is digital silence; without a captured anchor nothing is erased
+  (was a fixed 0.015).
+- Light-LTS data sync (`OFDMChirpWaveform::detectDataSync`): its leading-quiet pre-gate (first
+  100 ms under 0.05 RMS, start above 3x that + 0.01) made every buffer below ~-13 dB "quiet-led"
+  with no start ever found, so it searched only the buffer's first 4 symbols; now the leading
+  100 ms is quiet when > 3x (RMS) under the buffer's loudest 100 ms, start above 3x that floor.
+- Legacy fixed-offset burst continuation (only with burst interleaving on): "burst over" under a
+  fixed 0.04 RMS -> under 0.15 x this frame's RMS (the old value at the simulator's frame level).
+- Simulator: `RxGainChannelModel` / `ota_simulator --lobby-rx-gain-db` / `gui_qso_scenario.sh
+  --rx-gain-db` (scale after the IF filter, full-scale clip; 0 = byte-identical).
+- `ULTRA_RX_AGC` is superseded (REMOVAL_BACKLOG R20).
+
+**Tests.** `ToneBurstAckRoundTrip` (noise never reaches the floor; the same ACK at 0, -40, +20 dB
+decodes with the identical ratio 7.957), `ChannelIdleNoiseSNRCalibration` (level invariance),
+`ChannelBusyDetector` (-70 .. -10 dBFS), `StreamingFramePolicy` (a PING 60 dB quieter),
+`ChannelCoreModels` (`checkRxGain`), `PingDetector` (all four recordings), `ToneBurstAckWatterson`
+(passes; at 0 / -5 dB fading with 100-200 ms symbols 73/80 ACKs vs 79/80 with no floor at all: a
+preamble faded deep can score under any noise-safe floor). Full ctest 115/115.
+
+**GUI gate** (4 KB, seed 42, 7.3 Hz, AWGN 20 dB unless noted; the receive level is
+`--rx-gain-db`, signal and noise scaled together):
+
+| Receive level | before | after |
+|---|---|---|
+| -50 dB | — | PASS, 1230 bps |
+| -40 dB | never connected | PASS, 1230 bps, 0 retransmissions |
+| -30 dB | connected, 0 data frames | PASS, 1230 bps |
+| -20 dB / 0 dB | PASS, 1230 bps | PASS, 1230 bps |
+| +10 dB (clips at full scale) | PASS, 1820 bps | PASS, 1820 bps |
+| narrowband, -30 dB | connected, 0 data frames | PASS, 430 bps (as at 0 dB) |
+| ITU Good 20, -30 dB | — | PASS, 1510 bps (as at 0 dB) |
+| MC-DPSK (AWGN 4, 1 KB), 0 / -30 dB | — | PASS, 40 / 40 bps |
+
+No regression at the normal level, pre-change build (39783cd) vs this change, interleaved: AWGN /
+Good / Moderate 20 dB x 3 seeds identical (1230/1230 bps; 1510-1520 both arms), and on the final
+code AWGN 12 / Good 15 / Moderate 15 x 2 seeds identical within 10 bps (1820/1810, 770/770,
+1510/1510, 1080/1080) with the same retransmissions. (AWGN 20 at 1230 bps vs AWGN 12 at 1820 is
+the sender's tail hold on a 4 KB file, identical in both arms: the receiver commands 32QAM R2/3
+and the switch would not fill a group before the file ends.)
+
 ## 2026-11-10 — FIX(narrow): the low-SNR PING path accepts narrowband chirps (BUG-NARROW-PING-GAP)
 
 **What was broken.** Forced narrowband at AWGN 5 dB needed 4 PINGs and 91 s to connect. Below ~5 dB a

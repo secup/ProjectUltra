@@ -72,6 +72,11 @@ struct ChannelConfig {
     // the station hears, signal and noise alike (RxBandpassChannelModel).
     float rx_filter_low_hz = 0.0f;
     float rx_filter_high_hz = 0.0f;
+    // The RECEIVING station's audio level (dB): AF gain / line-out level / sound-card input gain,
+    // which an operator sets anywhere over tens of dB. Scales signal and noise alike (SNR
+    // unchanged) and clips at the sound card's full scale (+/-1.0). 0 = none (byte-identical
+    // models). Applied after the IF filter (RxGainChannelModel).
+    float rx_gain_db = 0.0f;
 };
 
 float modemReferenceNoiseStddev(float snr_db);
@@ -219,6 +224,32 @@ private:
 // transition, more than 70 dB stopband), group delay (kTaps - 1) / 2 samples, chunk-invariant.
 // Real radios add passband ripple and group-delay variation near the edges; this models only
 // the band limit, which is what decides whether a signal outside the passband reaches the modem.
+class RxBandpassChannelModel;
+
+// The receiving station's audio level: AF gain, line-out level and sound-card input gain, which
+// the modem never controls and an operator sets anywhere over tens of dB. A pure scale of what the
+// station hears (signal and noise alike, so the SNR is unchanged) with the sound card's full-scale
+// clip at +/-1.0. It exists to prove the receiver reads no absolute level: before it, every
+// simulated station heard its peer at exactly the peer's transmit level.
+class RxGainChannelModel final : public IChannelModel {
+public:
+    using IChannelModel::process;
+
+    RxGainChannelModel(std::unique_ptr<IChannelModel> inner, float gain_db);
+
+    void reset() override { inner_->reset(); }
+    void process(std::span<const float> input,
+                 uint64_t start_sample,
+                 std::vector<float>& output) override;
+
+    float gainDb() const { return gain_db_; }
+
+private:
+    std::unique_ptr<IChannelModel> inner_;
+    float gain_db_ = 0.0f;
+    float gain_ = 1.0f;
+};
+
 class RxBandpassChannelModel final : public IChannelModel {
 public:
     using IChannelModel::process;

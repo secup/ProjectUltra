@@ -1109,7 +1109,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     // PROMOTED default-ON 2026-07-01. A first flip regressed the good@20 sim gate — the
     // ratio-based data_bearing test fired the robust emit on strong high-SNR false-syncs
     // (data_rms ~0.3) as well as genuine flooded PINGs -> PING/PONG churn. Fixed by the
-    // high-SNR-safe emit gate below (data_rms <= kPingChirpLockMaxDataRMS separates the two;
+    // high-SNR-safe emit gate below (then an absolute data_rms <= 0.16, now noise-relative; it separates the two;
     // measured good@20 0.28-0.33 vs rig low-SNR 0.04-0.09). Now: good@20 PASS with the emit
     // active; rig low-SNR connect (MPG@9/MPM@8) preserved. Both starvation directions gated
     // (initiator #27 + responder STAGE2). Opt OUT via ULTRA_ROBUST_IDLE_PING=0.
@@ -1157,11 +1157,18 @@ void StreamingDecoder::decodeCurrentFrame() {
             // burst-time, same channel-noise state and fade state as the frame
             // (S:N-holding channel sims scale idle noise differently from
             // burst noise — F224); (2) fallback: idle min-statistics floor.
-            if (sync_noise_ref_rms_ > frame_policy::kMinIdleNoiseRMSForPingGap) {
-                idle_noise_rms = sync_noise_ref_rms_;
-            } else {
+            // A noise estimate can only read falsely LOW (the F231 bench's noise "breathes": its
+            // inter-chirp gap read up to 6 dB under the steady floor), so with both available the
+            // reference is the larger, as for the physical SNR at sync. The absolute 0.16 RMS arm
+            // that used to catch such PINGs read the level, not the noise (BUG-RX-ABSOLUTE-LEVEL).
+            {
                 const auto ns = idle_noise_snr_estimator_.snapshot();
-                if (ns.valid) idle_noise_rms = ns.floor_noise_rms;
+                const float floor_rms = ns.valid ? ns.floor_noise_rms : 0.0f;
+                if (sync_noise_ref_rms_ > frame_policy::kMinIdleNoiseRMSForPingGap) {
+                    idle_noise_rms = std::max(sync_noise_ref_rms_, floor_rms);
+                } else {
+                    idle_noise_rms = floor_rms;
+                }
             }
             if (idle_noise_rms > 0.0f && !frame_buffer.empty()) {
                 // Same design as IdleNoiseSNREstimator's reference filter.
@@ -2169,7 +2176,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // separate them is the ABSOLUTE data-region power: a noise-flooded PING is
                 // quiet (rig data_rms 0.04-0.09) while a false lock on a real high-SNR data
                 // frame is loud (good@20 data_rms 0.28-0.33). So require the data region to be
-                // quiet enough to be a PING — kPingChirpLockMaxDataRMS (0.16), its documented
+                // quiet enough to be a PING — then an absolute 0.16 RMS (removed 2026-11-10), its documented
                 // purpose. This is what let default-ON regress the good@20 handshake (spurious
                 // emits -> PING/PONG churn). NOTE: an absolute level is fragile per #74's
                 // lesson (RX level varies on a real radio); a noise-floor-RELATIVE gate is the
@@ -3326,6 +3333,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         size_t min_block = static_cast<size_t>(
             waveform_->getMinSamplesForCWCount(fixed_frame_codewords_));
 
+        const float burst_frame_rms = sampleRMS(frame_buffer);
         // Loop to decode multiple burst continuation blocks
         while (burst_blocks_decoded_ < MAX_BURST_BLOCKS) {
             // Check if there are enough samples for another block
@@ -3361,8 +3369,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                 next_rms = std::sqrt(next_rms / burst_check_len);
             }
 
-            constexpr float BURST_ENERGY_THRESHOLD = 0.04f;
-            if (next_rms < BURST_ENERGY_THRESHOLD) break;  // No energy, burst over
+            // Burst over when the next block carries no energy RELATIVE TO THIS FRAME: 0.15 x its
+            // RMS is the old fixed 0.04 at the simulator's frame level (~0.27), so the simulator
+            // behaves as before while a quieter receive level no longer cuts bursts short
+            // (it did below ~-13 dB, BUG-RX-ABSOLUTE-LEVEL, INV-RX-LEVEL-001).
+            constexpr float kBurstContinuationFrameFrac = 0.15f;
+            if (next_rms < kBurstContinuationFrameFrac * burst_frame_rms) break;  // burst over
 
             // Energy present - try to decode as continuation block
             burst_blocks_decoded_++;
@@ -3539,7 +3551,6 @@ void StreamingDecoder::continueMCDPSKBurst() {
     }
 
     constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
-    constexpr float kContinuationRmsFloor = 0.012f;
     constexpr int kSampleRateHz = 48000;
 
     const int one_cw_samples_i = mc_waveform->getDataOnlySamplesForCWCount(1);
@@ -3617,12 +3628,34 @@ void StreamingDecoder::continueMCDPSKBurst() {
         }
 
         std::vector<float> cw0_samples = copyFrom(mc_burst_next_pos_, one_cw_samples);
-        const float rms = sampleRMS(cw0_samples);
-        if (rms < kContinuationRmsFloor) {
-            LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst tail: RMS=%.4f, frames=%d",
-                      log_prefix_.c_str(), rms, mc_burst_frames_decoded_);
-            finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
-            return;
+        // BURST TAIL = the next frame's window reads as THIS burst's own noise, measured in the
+        // inter-chirp gap through the same in-band filter (BUG-RX-ABSOLUTE-LEVEL). It was an
+        // absolute 0.012 RMS: about 17 dB under the simulator's MC-DPSK level, so a station
+        // hearing its peer 17 dB quieter ended every burst after its first frame. Without a gap
+        // reference the decode attempt decides (a failure ends the burst).
+        if (sync_noise_ref_rms_ > 0.0f && sync_noise_ref_samples_ > 0) {
+            FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+            const size_t prime = std::min<size_t>(100, cw0_samples.size());
+            for (size_t i = 0; i < prime; ++i) band.process(cw0_samples[i]);
+            double sum_sq = 0.0;
+            for (size_t i = prime; i < cw0_samples.size(); ++i) {
+                const float y = band.process(cw0_samples[i]);
+                sum_sq += static_cast<double>(y) * static_cast<double>(y);
+            }
+            const size_t measured = cw0_samples.size() - prime;
+            const double window_power = measured > 0 ? sum_sq / static_cast<double>(measured) : 0.0;
+            const double noise_power =
+                static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
+            if (frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
+                                                      sync_noise_ref_samples_, 2900.0,
+                                                      static_cast<double>(kSampleRateHz))) {
+                LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst tail: in-band RMS=%.4g vs gap "
+                          "noise %.4g, frames=%d",
+                          log_prefix_.c_str(), std::sqrt(window_power), sync_noise_ref_rms_,
+                          mc_burst_frames_decoded_);
+                finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+                return;
+            }
         }
 
         if (!mc_waveform->processDataOnly(SampleSpan(cw0_samples.data(), cw0_samples.size()))) {

@@ -221,8 +221,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
         const size_t tail_base = buffer_.size() - window;
         const auto r = detector_.detectAndDecode(
             buffer_.data() + tail_base, window, symbol_ms,
-            cfg_.sweep_step_samples, acceptance_predicate_,
-            idealCostasPeak(symbol_ms, detector_.diversity()) * cfg_.min_peak_fraction);
+            cfg_.sweep_step_samples, acceptance_predicate_);
         if (r.semantic_rejections > 0) {
             semantic_candidates_rejected_ += r.semantic_rejections;
             if (r.strongest_rejected_payload.has_value()) {
@@ -284,13 +283,11 @@ void ToneBurstAckMonitor::runDetectionPass() {
         }
         if (!r.decode.payload.has_value()) continue;
         if (!r.decode.stats.crc_ok) continue;
-        // Peak-magnitude gate: rejects rare cases where Costas+Hamming+CRC
-        // all happen to pass on a spurious low-energy match (e.g. trying
-        // 12 ms duration on a 25 ms burst that aliases into a noise-floor
-        // peak). Real bursts have peaks at ~30%+ of ideal even at SNR=-10.
-        const float min_peak =
-            idealCostasPeak(symbol_ms, detector_.diversity()) * cfg_.min_peak_fraction;
-        if (r.costas_correlation_peak < min_peak) continue;
+        // Peak gate: rejects rare cases where Costas+Hamming+CRC all happen to pass on a spurious
+        // low-energy match (e.g. trying 12 ms duration on a 25 ms burst that aliases into a
+        // noise-floor peak). Relative to the noise measured at the tones in this window, never to
+        // the transmit level (BUG-RX-ABSOLUTE-LEVEL): the receive level is the operator's setting.
+        if (r.costas_noise_ratio < kCostasNoiseRatioFloor) continue;
 
         const uint64_t detected_stream_offset =
             buffer_start_stream_offset_ + static_cast<uint64_t>(tail_base) +
@@ -337,6 +334,7 @@ void ToneBurstAckMonitor::runDetectionPass() {
             d.payload = *r.decode.payload;
             d.detected_stream_offset = detected_stream_offset;
             d.correlation_peak = r.costas_correlation_peak;
+            d.noise_ratio = r.costas_noise_ratio;
             d.min_symbol_confidence = r.decode.min_confidence;
             d.hamming_corrected_blocks = r.decode.stats.hamming_corrected_blocks;
             d.symbol_ms_used = symbol_ms;

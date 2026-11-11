@@ -15,9 +15,12 @@ namespace streaming_frame_policy {
 
 inline constexpr size_t kPingTrainingSkipSamples = 4608;
 inline constexpr size_t kPingRMSCheckSamples = 5000;
-inline constexpr float kMinTrainingRMSForPingRatio = 0.001f;
+// Digital silence: unwritten ring memory reads exactly 0. Was 0.001 RMS ("a live receiver's floor is
+// 0.009-0.011", true of one rig at one AF setting): a PING heard ~48 dB under the transmit level read
+// as unwritten memory. Now one 24-bit converter step, like signal_policy::kDigitalSilenceRms
+// (INV-RX-LEVEL-001).
+inline constexpr float kMinTrainingRMSForPingRatio = 1.0e-7f;
 inline constexpr float kPingMaxDataToTrainingRMSRatio = 0.5f;
-inline constexpr float kPingChirpLockMaxDataRMS = 0.16f;
 // Noise-relative payload-absence gate (#70 stage 1.5): a bare PING's gap is
 // ambient noise, so gap_rms/idle_noise_rms ≈ 1 at every RX level and SNR. The
 // 1.5x margin admits fade/estimator slop while a real 4-CW payload rides
@@ -26,11 +29,13 @@ inline constexpr float kPingChirpLockMaxDataRMS = 0.16f;
 // domain, out-of-band ambient noise adds equally to both measurements and
 // compresses the discriminant to sqrt(1 + SNR_lin*B_band/B_total) — measured
 // 1.49x at sim good@10, straddling this factor, which misclassified a real
-// CONNECT as a PING. Level-invariant, unlike the absolute
-// kPingChirpLockMaxDataRMS floor (#74 lesson) — the absolute floor is kept as
-// the fallback when the caller has no valid idle-noise estimate.
+// CONNECT as a PING. Level-invariant. (The absolute 0.16 RMS "quiet enough to be a PING" arm
+// that preceded it was removed 2026-11-10, BUG-RX-ABSOLUTE-LEVEL: it was OR'd in always, so on a
+// quiet input, or at the simulator's own ~0.09 MC-DPSK level, any chirp-locked frame whose decode
+// failed read as payload-free. Without a noise reference the silence ratio alone decides.)
 inline constexpr float kPingNoiseGapFactor = 1.5f;
-inline constexpr float kMinIdleNoiseRMSForPingGap = 1e-4f;
+// A noise estimate exists (any measured floor above digital silence); was 1e-4 RMS, a level.
+inline constexpr float kMinIdleNoiseRMSForPingGap = 1.0e-7f;
 inline constexpr float kPingCorrFloor = 0.30f;
 // A real dual chirp's up/down spacing implies a CFO inside the modem's acquisition range, +/-50 Hz.
 // The bound is in HERTZ because the same offset moves the pair by 2·CFO·fs/chirp_rate samples: 10
@@ -41,6 +46,23 @@ inline constexpr float kPingMaxChirpCfoHz = 50.0f;
 inline constexpr size_t kDefaultFalseLockAdvanceSamples = 1024;
 inline constexpr size_t kMinFalseLockAdvanceSamples = 512;
 inline constexpr float kMinSyncRecoveryCorrelation = 0.80f;
+
+// Does a window's in-band power read as NOISE against a measured noise reference? Both are
+// chi-square power estimates with 2·B·T degrees of freedom (B = the in-band filter's width), so the
+// window is noise when it sits within kNoiseSpreads combined spreads of the reference. A signal
+// the modem can decode is far outside (0 dB in-band SNR doubles the power). Level-free: only the
+// ratio of two powers measured through the same filter on the same receiver enters
+// (BUG-RX-ABSOLUTE-LEVEL, INV-RX-LEVEL-001).
+inline constexpr double kNoiseSpreads = 3.0;
+inline bool inBandPowerReadsAsNoise(double window_power, size_t window_samples,
+                                    double noise_power, size_t noise_samples,
+                                    double band_hz, double sample_rate_hz) {
+    if (!(noise_power > 0.0) || window_samples == 0 || noise_samples == 0) return false;
+    const double dof_w = 2.0 * band_hz * static_cast<double>(window_samples) / sample_rate_hz;
+    const double dof_n = 2.0 * band_hz * static_cast<double>(noise_samples) / sample_rate_hz;
+    const double spread = std::sqrt(2.0 / dof_w + 2.0 / dof_n);
+    return window_power <= noise_power * (1.0 + kNoiseSpreads * spread);
+}
 
 inline float rms(const float* samples, size_t count) {
     if (!samples || count == 0) {
@@ -70,8 +92,8 @@ struct PingFrameDecision {
     float data_inband_rms = 0.0f;  // gap RMS through the in-band FIR (0 = not measured)
     bool gap_is_noise = false;     // noise-relative payload-absence verdict
     // BUG-SYNC-CURSOR-AHEAD: the training window read digital silence, which a live RX
-    // path cannot produce (measured floor 0.009-0.011). Means the slice covered unwritten
-    // ring memory — the decode is invalid, not a PING.
+    // path cannot produce at any level. Means the slice covered unwritten ring memory — the
+    // decode is invalid, not a PING.
     bool buffer_invalid = false;
 };
 
@@ -99,11 +121,10 @@ inline PingFrameDecision evaluatePingFrame(
 
     // BUG-SYNC-CURSOR-AHEAD (2026-07-30): DIGITAL SILENCE IS UNWRITTEN MEMORY, NOT A PING.
     //
-    // A training window whose RMS is at or below kMinTrainingRMSForPingRatio (0.001) cannot
-    // come from a live receiver. The measured noise floor on real hardware is 0.009-0.011
-    // (Pi 5 rig, CCA and RMS-skip lines), an order of magnitude above it; even a disconnected
-    // input carries dither. The only way to read ~0.0 is to slice ring memory that was never
-    // written — reset() zero-fills the whole 50 s buffer (streaming_decoder.cpp:1393).
+    // A training window whose RMS is at or below kMinTrainingRMSForPingRatio (one 24-bit
+    // converter step since 2026-11-10; it was 0.001, a LEVEL) cannot come from a live receiver:
+    // even a disconnected input carries dither. The only way to read ~0.0 is to slice ring
+    // memory that was never written — reset() zero-fills the whole 50 s buffer.
     //
     // Before this change that condition forced ratio = 0.0, which is the STRONGEST POSSIBLE
     // PING EVIDENCE (ping_by_silence = ratio < threshold). So the one observation that proves
@@ -148,29 +169,25 @@ inline PingFrameDecision evaluatePingFrame(
     // *pre*-decode WAIT decision must NOT use this absolute floor (it would skip
     // the fixed CONNECT decode for a low-level-but-real CONNECT) — it gates on
     // ping_by_silence (ratiometric) only. See streaming_ofdm_decode.cpp ~1290.
-    // Payload absence, most-principled test first: (a) ratiometric silence,
-    // (b) noise-relative — the gap reads as the receiver's own idle noise
-    // floor (level-invariant; the discriminator that works when broadband
-    // noise floods the gap at low SNR, where (a) and (c) both fail),
-    // (c) absolute-floor fallback for callers without a noise estimate.
+    // Payload absence, both level-free: (a) ratiometric silence, (b) noise-relative — the gap
+    // reads as the receiver's own noise (the discriminator that works when broadband noise floods
+    // the gap at low SNR, where (a) fails). No absolute level (INV-RX-LEVEL-001).
     decision.idle_noise_rms = idle_noise_rms;
     decision.data_inband_rms = data_inband_rms;
     decision.gap_is_noise =
         idle_noise_rms > kMinIdleNoiseRMSForPingGap &&
         data_inband_rms > 0.0f &&
         data_inband_rms <= idle_noise_rms * kPingNoiseGapFactor;
-    const bool payload_energy_absent =
-        decision.ping_by_silence || decision.gap_is_noise ||
-        decision.data_rms <= kPingChirpLockMaxDataRMS;
+    const bool payload_energy_absent = decision.ping_by_silence || decision.gap_is_noise;
     decision.ping_by_chirp_lock =
         chirp_signature_real && no_valid_frame &&
         (!ldpc_decode_attempted || payload_energy_absent);
     // BUG-SYNC-CURSOR-AHEAD: suppressing ping_by_silence alone is NOT enough. The chirp-lock
     // path reaches the same verdict by a different route: on the rig the chirp signature was
     // genuinely real (corr=0.837 >= kPingCorrFloor), no LDPC frame validated, and
-    // payload_energy_absent is satisfied by data_rms <= kPingChirpLockMaxDataRMS (0.16) —
-    // which zero-filled memory trivially meets. So an unwritten slice would still have been
-    // classified as a PING through ping_by_chirp_lock.
+    // payload_energy_absent was satisfied by the (since removed) absolute data-RMS arm, which
+    // zero-filled memory trivially met, as it does the silence ratio. So an unwritten slice would
+    // still have been classified as a PING through ping_by_chirp_lock.
     //
     // An invalid slice must yield NO verdict in either direction. The chirp detection itself
     // remains real information (it is what put us here), but nothing can be concluded about a

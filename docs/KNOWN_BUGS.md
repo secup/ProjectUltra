@@ -2472,6 +2472,29 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-RX-ABSOLUTE-LEVEL (FIXED 2026-11-10) — receive gates read the audio level, not the noise
+
+**Symptom.** Hidden by the simulator, which delivered every station's audio at its peer's transmit
+level. With a receive-level control (`gui_qso_scenario.sh --rx-gain-db`, AWGN 20 dB): -40 dB never
+connected, -30 dB connected and moved zero data frames (wideband and narrowband), -20 dB passed.
+A real station's input level is the operator's AF / USB-audio / sound-card setting.
+**Causes.** Receive gates against fixed levels in nine places: the sync search skipped windows under
+0.015-0.040 RMS (connected) or 0.006-0.025 (idle); the tone-ACK floor was 5 % of the TRANSMIT
+amplitude's ideal Costas peak; the MC-DPSK burst ended under 0.012 RMS; the PING classifier took
+any frame under 0.16 RMS as payload-free (and 0.001 / 1e-4 RMS as unwritten memory / no noise
+estimate); the idle SNR divided the simulator's reference power by the noise; carrier sense had a
+0.005 RMS quiet floor; the burst erasure gate's backstop was 0.005 RMS (found after the first
+fixes: at -40 dB it erased every burst member after the anchor); the light-LTS sync's leading-quiet
+pre-gate (0.05 / +0.01 RMS) searched only a quiet buffer's first 4 symbols; and the legacy
+interleaved-burst continuation ended bursts under 0.04 RMS. **Fix.** INV-RX-LEVEL-001: digital silence is the only absolute test; every
+other decision is a ratio or relative to measured noise (details in CHANGELOG). **Verified.**
+GUI gate AWGN 20 dB: -50, -40, -30, -20, 0 dB all 1230 bps (was: -40 no connect, -30 no data),
++10 dB 1820; narrowband -30 dB 430 bps and ITU Good -30 dB 1510 bps, as at 0 dB; old vs new at the
+normal level identical on 15 interleaved pairs (AWGN/Good/Moderate, 12-20 dB). Tests:
+`ToneBurstAckRoundTrip`, `ChannelIdleNoiseSNRCalibration`, `ChannelBusyDetector`,
+`StreamingFramePolicy`, `ChannelCoreModels`, `PingDetector`; full ctest 115/115.
+
+
 ### BUG-NARROW-PING-GAP (FIXED 2026-11-10) — narrowband PING detection failed near 5 dB
 
 **Symptom.** Forced narrowband at AWGN 5 dB (7.3 Hz offset): 4 PINGs and 91 s to connect, after

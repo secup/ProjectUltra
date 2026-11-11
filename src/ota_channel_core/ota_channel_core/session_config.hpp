@@ -34,6 +34,8 @@ struct SessionConfig {
     // Every receiving radio's IF filter passband (Hz); high <= low = none.
     float rx_filter_low_hz = 0.0f;
     float rx_filter_high_hz = 0.0f;
+    // Every receiving station's audio level (dB, 0 = the sender's transmit level).
+    float rx_gain_db = 0.0f;
 
     ChannelConfig channelConfig() const {
         return {.type = default_channel_model,
@@ -52,6 +54,7 @@ struct SessionConfig {
         c.tx_pa = tx_pa;
         c.rx_filter_low_hz = rx_filter_low_hz;
         c.rx_filter_high_hz = rx_filter_high_hz;
+        c.rx_gain_db = rx_gain_db;
         return c;
     }
 };

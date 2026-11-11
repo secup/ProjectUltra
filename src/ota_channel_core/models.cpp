@@ -1279,6 +1279,17 @@ void RxBandpassChannelModel::process(std::span<const float> input, uint64_t star
     std::copy(x.end() - static_cast<std::ptrdiff_t>(h), x.end(), history_.begin());
 }
 
+RxGainChannelModel::RxGainChannelModel(std::unique_ptr<IChannelModel> inner, float gain_db)
+    : inner_(std::move(inner)),
+      gain_db_(gain_db),
+      gain_(static_cast<float>(std::pow(10.0, static_cast<double>(gain_db) / 20.0))) {}
+
+void RxGainChannelModel::process(std::span<const float> input, uint64_t start_sample,
+                                 std::vector<float>& output) {
+    inner_->process(input, start_sample, output);
+    for (float& s : output) s = std::clamp(s * gain_, -1.0f, 1.0f);
+}
+
 namespace {
 std::unique_ptr<IChannelModel> createChannelModelUnshifted(const ChannelConfig& config,
                                                            const RngRoot& rng_root,
@@ -1307,6 +1318,10 @@ std::unique_ptr<IChannelModel> createChannelModel(const ChannelConfig& config,
         model = std::make_unique<RxBandpassChannelModel>(std::move(model), config.rx_filter_low_hz,
                                                          config.rx_filter_high_hz,
                                                          config.sample_rate);
+    }
+    if (std::abs(config.rx_gain_db) > 0.001f) {
+        // After the IF filter: the AF / line-out / sound-card level the modem actually reads.
+        model = std::make_unique<RxGainChannelModel>(std::move(model), config.rx_gain_db);
     }
     return model;
 }

@@ -6,7 +6,9 @@
 #include <array>
 #include <cmath>
 #include <complex>
+#include <limits>
 #include <numeric>
+#include <vector>
 
 namespace ultra {
 namespace waveform {
@@ -92,6 +94,66 @@ float costasStatistic(const Cd* X, int bands) {
         sum += std::sqrt(p);
     }
     return static_cast<float>(sum);
+}
+
+// NOISE-ONLY EXPECTATION of the Costas statistic, measured at the Costas tones of THIS window
+// (BUG-RX-ABSOLUTE-LEVEL, 2026-11-10). The candidate floor used to be 5 % of the ideal peak at the
+// TRANSMIT amplitude, i.e. an assumption that the receiver hears its peer at the peer's TX level:
+// true in the simulator, arbitrary on a radio (AF gain, USB audio level, sound-card gain). With the
+// receivers 30 dB quieter every ACK fell under it; and at low SNR it sat at the noise mean, admitting
+// noise candidates to a 12-bit CRC. The level-free test compares a candidate with what NOISE gives
+// at the same tones over the same window:
+//   - per subband, the DFT power of the four tones over consecutive symbol-length windows of the
+//     whole search span, pooled (four times the samples of one tone: a steadier estimate, which
+//     matters most for 100 ms symbols, ~45 windows a tone); each tone carries the ACK in under
+//     half of them even when the burst fills the window (every symbol occupies one tone of four),
+//     so the 25th percentile is noise, at most ~2x high when the window is mostly burst;
+//   - noise power is exponential per window: mu0 = q25 / -ln(0.75), then CENSORED: the windows
+//     above kLitCutoff x mu (a noise window exceeds -ln(1e-3) = 6.9 x its mean once in a thousand)
+//     hold the ACK, and the mean of the rest (corrected for the truncation) is the noise, two
+//     passes. A lit tone sits 17-23 dB over its bin's noise at the ACK's design floor, so it is
+//     always censored; without this a 200 ms ACK filling 97 % of its window read its noise ~1.4x
+//     high and lost faded ACKs at -5 dB;
+//   - E[sqrt(sum_b |X_b|^2)] for complex Gaussian X: sqrt(pi/4 mu) for one band, Gamma(5/2)/Gamma(2)
+//     sqrt(mu) = 0.9400 sqrt(2 mu) for two (diversity), summed over the four Costas symbols.
+// Measured at the tones themselves, it follows coloured noise and an IF filter's skirt; a general
+// in-band floor would misjudge the tone band behind a 500 Hz filter by 7.6 dB.
+double costasNoiseStatistic(const std::vector<Cd>* prefix, int bands, size_t sym_grid,
+                            size_t count_grid) {
+    if (sym_grid == 0 || count_grid < sym_grid) return 0.0;
+    const size_t windows = count_grid / sym_grid;
+    std::vector<double> power;
+    power.reserve(static_cast<size_t>(kCostasSymbols) * windows);
+    double m = 0.0;  // summed over subbands: the expected sum_b |X_b|^2 of one Costas symbol
+    for (int b = 0; b < bands; ++b) {
+        power.clear();
+        for (uint32_t i = 0; i < kCostasSymbols; ++i) {  // the four tones (Costas is a permutation)
+            const auto& P = prefix[i * bands + b];
+            for (size_t w = 0; w < windows; ++w) {
+                power.push_back(std::norm(P[(w + 1) * sym_grid] - P[w * sym_grid]));
+            }
+        }
+        const size_t q = power.size() / 4;
+        std::nth_element(power.begin(), power.begin() + static_cast<std::ptrdiff_t>(q), power.end());
+        double mu = power[q] / 0.28768207245178093;  // -ln(0.75)
+        constexpr double kLitCutoff = 6.907755278982137;  // -ln(1e-3)
+        // Mean of an exponential truncated at r x mu is mu (1 - r e^-r / (1 - e^-r)).
+        constexpr double kTruncationBias = 1.0 - kLitCutoff * 1e-3 / (1.0 - 1e-3);
+        for (int pass = 0; pass < 2 && mu > 0.0; ++pass) {
+            const double cutoff = kLitCutoff * mu;
+            double sum = 0.0;
+            size_t kept = 0;
+            for (double x : power) {
+                if (x <= cutoff) { sum += x; ++kept; }
+            }
+            if (kept == 0) break;
+            mu = sum / static_cast<double>(kept) / kTruncationBias;
+        }
+        m += mu;
+    }
+    const double kappa = (bands == 1) ? 0.88622692545275801   // sqrt(pi)/2
+                                      : 0.94000000000000000;  // Gamma(5/2)/Gamma(2)/sqrt(2)
+    return static_cast<double>(kCostasSymbols) * kappa * std::sqrt(m);
 }
 
 // FINE timing sweep at one carrier-offset hypothesis: every offset o in [lo, hi] at 1-sample
@@ -303,6 +365,10 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     const size_t sym_grid = samples_per_symbol / g;
     std::vector<Candidate> candidates(n_offsets);
     std::vector<Cd> prefix[kMaxBatch];
+    // Per hypothesis: at the hypothesis matching the ACK the bins sit on its tones and each is lit
+    // in under half the windows; at a hypothesis half a bin off EVERY bin catches the ACK, so one
+    // centre-hypothesis reference read a wide-offset ACK's own energy as noise.
+    std::vector<double> noise_by_hyp(hyps.size(), 0.0);
     for (size_t h = 0; h < hyps.size(); ++h) {
         double om[kMaxBatch];
         for (uint32_t i = 0; i < kCostasSymbols; ++i) {
@@ -312,6 +378,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
         }
         gridPrefixSums(samples, 0, span / g, g, om, static_cast<int>(kCostasSymbols) * bands,
                        prefix);
+        noise_by_hyp[h] = costasNoiseStatistic(prefix, bands, sym_grid, span / g);
         for (size_t k = 0; k < n_offsets; ++k) {
             const size_t t_grid = k * step_grid;
             Cd X[kMaxBatch];
@@ -337,7 +404,19 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     // strongest first while above the caller's absolute floor, bounded by the distinct-
     // candidate budget below; on noise the monitor's floor (5 % of the ideal peak, noise sits
     // near 1 %) admits none, so the CRC/false-alarm exposure per pass does not grow.
+    // Since 2026-11-10 that floor is relative to the noise measured at these tones in this window
+    // (kCostasNoiseRatioFloor x its expectation; see costasNoiseStatistic): level-free, and on
+    // noise it admits none. A caller's absolute floor still applies on top (tests, tools).
     const float candidate_threshold = std::max(min_candidate_peak, 1e-6f);
+    for (const Candidate& cand : candidates) {
+        const double nz = noise_by_hyp[static_cast<size_t>(cand.hyp)];
+        const float z = nz > 0.0 ? static_cast<float>(cand.corr / nz)
+                                 : (cand.corr > 0.0f ? std::numeric_limits<float>::infinity() : 0.0f);
+        result.strongest_candidate_noise_ratio = std::max(result.strongest_candidate_noise_ratio, z);
+    }
+    auto noiseFloorFor = [&](int hyp) {
+        return kCostasNoiseRatioFloor * static_cast<float>(noise_by_hyp[static_cast<size_t>(hyp)]);
+    };
 
     // Timing hypotheses = the LOCAL MAXIMA of the coarse Costas statistic, one per correlation
     // lobe. The lobe is +-1 symbol wide; a payload alias of the Costas sequence is >= 4 symbols
@@ -372,6 +451,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     std::vector<size_t> refined_offsets_tried;
     refined_offsets_tried.reserve(kAfterSemanticRejectBudget);
     float global_peak = 0.0f;
+    double global_noise = 0.0;
     size_t global_offset = 0;
     float global_hyp_hz = hyps[static_cast<size_t>(per_side)];
     DecodeAlignedResult best_decode;  // empty by default
@@ -383,10 +463,14 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
         const float corr_coarse = candidates[k].corr;
         const float hyp_hz = hyps[static_cast<size_t>(candidates[k].hyp)];
         if (!(corr_coarse > candidate_threshold)) break;
+        // Level-free floor at this candidate's own hypothesis (sorted by peak, not by ratio, so a
+        // candidate under its floor is skipped rather than ending the search).
+        if (!(corr_coarse > noiseFloorFor(candidates[k].hyp))) continue;
         if (corr_coarse > global_peak) {
             global_peak = corr_coarse;
             global_offset = offset;
             global_hyp_hz = hyp_hz;
+            global_noise = noise_by_hyp[static_cast<size_t>(candidates[k].hyp)];
         }
 
         // Fine sweep around this candidate (at its winning offset hypothesis).
@@ -445,6 +529,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
             best_decode = std::move(decode);
             best_decode_offset = best_offset;
             best_decode_hyp_hz = hyp_hz;
+            global_noise = noise_by_hyp[static_cast<size_t>(candidates[k].hyp)];
             // Report the accepted candidate's own peak. A stronger rejected
             // candidate is diagnostic evidence, not signal energy belonging to this
             // ACK and must not inflate the monitor's peak gate/readout.
@@ -458,6 +543,12 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
     result.detected_frequency_offset_hz =
         (best_decode.stats.crc_ok ? best_decode_hyp_hz : global_hyp_hz) - shift_hz_;
     result.costas_correlation_peak = global_peak;
+    // No measurable noise (a noiseless buffer) puts any peak infinitely above it.
+    result.costas_noise_statistic = static_cast<float>(global_noise);
+    result.costas_noise_ratio =
+        (global_noise > 0.0) ? global_peak / static_cast<float>(global_noise)
+                             : (global_peak > 0.0f ? std::numeric_limits<float>::infinity()
+                                                   : 0.0f);
     result.decode = std::move(best_decode);
     result.sync_acquired = result.decode.stats.crc_ok;
     return result;

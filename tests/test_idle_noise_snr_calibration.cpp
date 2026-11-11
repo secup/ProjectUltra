@@ -163,6 +163,9 @@ EstimateResult measureIdleSNR(
     const InBandReference reference = computeInBandReference(rx, config);
 
     ultra::gui::IdleNoiseSNREstimator estimator(config);
+    // The peer measured at the reference level (what the decoder measures from the chirp when
+    // the station hears it at the simulator's level).
+    estimator.setSignalReferencePower(ultra::sim::kModemReferencePower);
     estimator.observeIdleAudio(rx.data(), rx.size());
     const auto snapshot = estimator.snapshot();
 
@@ -245,6 +248,31 @@ void checkChannel(
 
 }  // namespace
 
+// INV-RX-LEVEL-001: the idle SNR reads the same at any receive level. The same noise 40 dB
+// quieter, with the peer measured 40 dB quieter too (the decoder measures its chirp through the
+// same chain), must give the same SNR; and no SNR exists before a peer is measured.
+void checkLevelInvariance() {
+    ultra::gui::IdleNoiseSNREstimator::Config config;
+    const std::vector<float> rx = synthesizeIdleNoise(MatrixChannel::AWGN, 12.0f, 7u, nullptr,
+                                                      48000 * 4);
+    std::vector<float> quiet(rx);
+    for (float& v : quiet) v *= 0.01f;  // -40 dB
+    ultra::gui::IdleNoiseSNREstimator loud_est(config), quiet_est(config);
+    loud_est.observeIdleAudio(rx.data(), rx.size());
+    quiet_est.observeIdleAudio(quiet.data(), quiet.size());
+    CHECK(loud_est.snapshot().valid && !loud_est.snapshot().snr_valid,
+          "noise floor measured but no SNR before a peer's signal power is known");
+    loud_est.setSignalReferencePower(ultra::sim::kModemReferencePower);
+    quiet_est.setSignalReferencePower(ultra::sim::kModemReferencePower * 1e-4);
+    const auto a = loud_est.snapshot();
+    const auto b = quiet_est.snapshot();
+    std::cout << "level invariance: 0 dB " << a.idle_in_band_snr_db << " dB, -40 dB "
+              << b.idle_in_band_snr_db << " dB\n";
+    CHECK(a.snr_valid && b.snr_valid, "SNR valid once the peer is measured");
+    CHECK(std::abs(a.idle_in_band_snr_db - b.idle_in_band_snr_db) < 0.01f,
+          "idle SNR is independent of the receive level");
+}
+
 int main() {
     ultra::setLogLevel(ultra::LogLevel::ERROR);
 
@@ -253,6 +281,7 @@ int main() {
 
     checkChannel(MatrixChannel::AWGN, real_hf_loop);
     checkChannel(MatrixChannel::RealHfLoop, real_hf_loop);
+    checkLevelInvariance();
 
     if (tests_failed == 0) {
         std::cout << "PASS: Idle-noise in-band SNR calibration ("

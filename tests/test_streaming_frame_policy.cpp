@@ -349,10 +349,10 @@ void test_physical_burst_end_wire_policy() {
 // That fabricated frame then set a search floor that walled off the genuine CONNECT_ACK
 // for 2.5 s, and the connection deadlocked for 420 s.
 //
-// A live receiver cannot produce ~0.0 RMS: the measured floor on that radio was
-// 0.009-0.011, an order of magnitude above kMinTrainingRMSForPingRatio (0.001), and even a
-// disconnected input carries dither. Digital silence in the TRAINING window can only mean
-// unwritten memory.
+// A live receiver cannot produce ~0.0 RMS (even a disconnected input carries dither): digital
+// silence in the TRAINING window can only mean unwritten memory. kMinTrainingRMSForPingRatio is
+// one 24-bit converter step, not a level (INV-RX-LEVEL-001): a PING heard 60 dB under the
+// transmit level is still a PING.
 void test_unwritten_slice_is_not_a_ping() {
     const size_t n = kPingTrainingSkipSamples + kPingRMSCheckSamples;
     std::vector<float> zeros(n, 0.0f);
@@ -367,7 +367,7 @@ void test_unwritten_slice_is_not_a_ping() {
     CHECK(!d.ping_by_silence, "an invalid buffer must not satisfy ping-by-silence");
     CHECK(!d.ping_by_chirp_lock,
           "an invalid buffer must not satisfy ping-by-chirp-lock either — the chirp was "
-          "real (0.837) and zero data_rms trivially clears kPingChirpLockMaxDataRMS, so "
+          "real (0.837) and zero data_rms trivially clears the silence ratio, so "
           "suppressing only the silence path would leave this route open");
     CHECK(!d.is_ping, "an unwritten slice must yield NO ping verdict");
 
@@ -387,6 +387,16 @@ void test_unwritten_slice_is_not_a_ping() {
                                false, false, false);
     CHECK(!g.buffer_invalid, "a real training window is not flagged invalid");
     CHECK(g.is_ping, "a genuine low-level PING must still be detected");
+
+    // The same PING 60 dB quieter (a quiet sound-card input): not unwritten memory, still a PING.
+    std::vector<float> quiet(real);
+    for (float& v : quiet) v *= 1e-3f;
+    auto q = evaluatePingFrame(quiet.data(), quiet.size(),
+                               kPingTrainingSkipSamples, kPingRMSCheckSamples,
+                               /*chirp_corr=*/0.837f, /*chirp_cfo_hz=*/-2.7f,
+                               false, false, false);
+    CHECK(!q.buffer_invalid, "a PING 60 dB under the transmit level is a live signal");
+    CHECK(q.is_ping, "and is still detected");
 
     // Boundary: exactly at the threshold counts as invalid (<=), just above does not.
     std::vector<float> at(n, kMinTrainingRMSForPingRatio);

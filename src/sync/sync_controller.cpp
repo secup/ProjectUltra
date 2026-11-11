@@ -353,7 +353,7 @@ frame_arrival_policy::WarmSearchWindowPlan SyncController::planWarmSearch(
 // semantics -> byte-identical; the decoder still runs the detector dispatch on the returned window.
 SearchWindowResult SyncController::acquireSearchWindow(
     bool use_light_search, bool connected_data_preamble, bool disconnected_mc_dpsk,
-    size_t min_search, size_t data_symbol_samples, bool audio_active,
+    size_t min_search, size_t data_symbol_samples,
     size_t correlation_step, float corr_noise_threshold) {
     SearchWindowResult result;
     std::vector<float> search_buffer;
@@ -567,23 +567,13 @@ SearchWindowResult SyncController::acquireSearchWindow(
             rms = max_slice_rms;
         }
 
-        // OTA-connected mode can run at lower absolute amplitudes than simulator
-        // defaults. Use an adaptive gate so valid low-level frames are not skipped.
-        float rms_gate = corr_noise_threshold;
+        // Audio floor EMA: a diagnostic only (ULTRA_BURST_RMS_DIAG); it no longer gates.
         if (disconnected_mc_dpsk) {
             float noise_floor = std::max(0.0005f, ring_.noise_floor_);
             if (rms < corr_noise_threshold) {
                 ring_.noise_floor_ = 0.98f * noise_floor + 0.02f * rms;
             } else {
                 ring_.noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
-            }
-
-            // Before sync there is no SNR estimate. Use the measured audio
-            // floor, but never raise the historical 0.025 gate; this only
-            // relaxes acquisition when high-SNR fading leaves low absolute RMS.
-            rms_gate = std::clamp(ring_.noise_floor_ * 3.0f, 0.006f, corr_noise_threshold);
-            if (audio_active) {
-                rms_gate = std::min(rms_gate, 0.012f);
             }
         } else if (connected_data_preamble) {
             float noise_floor = std::max(0.001f, ring_.noise_floor_);
@@ -592,23 +582,25 @@ SearchWindowResult SyncController::acquireSearchWindow(
             } else {
                 ring_.noise_floor_ = 0.995f * noise_floor + 0.005f * rms;
             }
-
-            // Typical OTA values observed around 0.02-0.04 RMS; keep floor low enough
-            // to avoid starving detectDataSync() while still skipping true silence.
-            rms_gate = std::clamp(ring_.noise_floor_ * 2.2f, 0.015f, 0.040f);
-            if (sync_reject_streak_ >= 8) {
-                float relax = std::min(0.010f,
-                                       0.001f * static_cast<float>(sync_reject_streak_ - 7));
-                rms_gate = std::max(0.012f, rms_gate - relax);
-            }
         }
 
-        if (rms < rms_gate) {
-            // No signal - advance by small step (100ms = 4800 samples)
+        // DIGITAL-SILENCE GATE ONLY (BUG-RX-ABSOLUTE-LEVEL, 2026-11-10). The correlator is the
+        // detector; this test only spares the CPU a dead input, and it must not read the audio
+        // LEVEL: a station hears its peer at whatever level the operator set (AF gain, USB audio
+        // level, sound-card gain), tens of dB apart between stations. The clamps it replaces
+        // (0.015-0.040 RMS connected, 0.006-0.025 idle, 0.025 otherwise) sat at the simulator's
+        // operating level, where they never skipped a signal; with both receivers 30 dB quieter
+        // (`gui_qso_scenario.sh --rx-gain-db -30`) every data frame after the burst descriptor
+        // was skipped, and at -40 dB every PING. A noise-relative gate would not do either: a
+        // signal raises the RMS only by sqrt(1 + SNR), so 2.2x the floor skipped everything
+        // below ~6 dB SNR, while the chirp's processing gain detects far below any energy test.
+        // Only digital silence is skipped: no converter delivers a live input below its LSB.
+        if (rms < signal_policy::kDigitalSilenceRms) {
+            // No input at all - advance by one search step (100 ms = 4800 samples)
             static int rms_skip_count = 0;
             if (++rms_skip_count % 10 == 1)
-                LOG_MODEM(INFO, "[%s] searchForSync: RMS skip, rms=%.4f < %.3f, corr_pos=%zu, total=%.2fs",
-                          log_prefix_.c_str(), rms, rms_gate, ring_.correlation_pos_, audio_sec);
+                LOG_MODEM(INFO, "[%s] searchForSync: silence skip, rms=%.2g, corr_pos=%zu, total=%.2fs",
+                          log_prefix_.c_str(), rms, ring_.correlation_pos_, audio_sec);
             ring_.correlation_pos_ = ring_.wrapRingIndexLocked(ring_.correlation_pos_ + correlation_step);
             return result;
         }

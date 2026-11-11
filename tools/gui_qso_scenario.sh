@@ -39,6 +39,7 @@ CFO_HZ="0"
 CLOCK_PPM="0"
 TX_PA=""
 RX_FILTER=""
+RX_GAIN_DB=""
 TX_MODEL="sim"
 RECORD=0
 SEED="42"
@@ -80,6 +81,9 @@ usage() {
   printf '                                 attack_ms=2,release_ms=300 (default: none)\n'
   printf '  --rx-filter LOW-HIGH           Both receivers'"'"' IF filter passband in Hz, e.g. 1250-1750 for a\n'
   printf '                                 500 Hz filter (default: none = the whole audio band)\n'
+  printf '  --rx-gain-db G                 Both receivers'"'"' audio level in dB (AF / line-out / sound-card\n'
+  printf '                                 gain): -30 = a quiet input, +6 = a hot one that clips at full\n'
+  printf '                                 scale; SNR unchanged (default: 0 = the sender'"'"'s TX level)\n'
   printf '  --seed N                       Deterministic channel seed (default: 42)\n'
   printf '  --record                       Record each station''s RX/TX audio (-rec) to OUT/{alpha,bravo}_{rx,tx}.f32\n'
   printf '  --expect-rate RATE             Expected/locked rate diagnostic (default: R1/4)\n'
@@ -197,6 +201,7 @@ while [[ $# -gt 0 ]]; do
     --tx-model) TX_MODEL="${2:?}"; shift 2 ;;
     --tx-pa) TX_PA="${2:?}"; shift 2 ;;
     --rx-filter) RX_FILTER="${2:?}"; shift 2 ;;
+    --rx-gain-db) RX_GAIN_DB="${2:?}"; shift 2 ;;
     --record) RECORD=1; shift ;;
     --seed) SEED="${2:?}"; shift 2 ;;
     --expect-rate) EXPECT_RATE="${2:?}"; shift 2 ;;
@@ -709,6 +714,7 @@ write_summary() {
     echo "TX_MODEL=$TX_MODEL"
     echo "TX_PA=$TX_PA"
     echo "RX_FILTER=$RX_FILTER"
+    echo "RX_GAIN_DB=$RX_GAIN_DB"
     echo "SEED=$SEED"
     echo "EXPECT_MOD=$EXPECT_MOD"
     echo "EXPECT_RATE=$EXPECT_RATE"
@@ -862,6 +868,7 @@ ULTRA_E2E_DEBUG_LOG="$E2E_SERVER_LOG" "$ROOT/build/ota_simulator" serve \
   --lobby-rx-clock-ppm "ALPHA:${CLOCK_PPM},BRAVO:$(awk -v c="$CLOCK_PPM" 'BEGIN{printf "%g", -c}')" \
   ${TX_PA:+--lobby-tx-pa "$TX_PA"} \
   ${RX_FILTER:+--lobby-rx-filter "$RX_FILTER"} \
+  ${RX_GAIN_DB:+--lobby-rx-gain-db "$RX_GAIN_DB"} \
   --shutdown-deadline-sec "$((EXIT_AFTER + 120))" >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 

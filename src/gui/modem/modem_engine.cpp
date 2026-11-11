@@ -1082,7 +1082,7 @@ LoopbackStats ModemEngine::getStats() const {
             }
         }
         const auto idle = streaming_decoder_->getIdleNoiseSNRSnapshot();
-        if (idle.valid && std::isfinite(idle.idle_in_band_snr_db)) {
+        if (idle.snr_valid && std::isfinite(idle.idle_in_band_snr_db)) {
             out.has_idle_in_band_snr_db = true;
             out.idle_in_band_snr_db = idle.idle_in_band_snr_db;
         }

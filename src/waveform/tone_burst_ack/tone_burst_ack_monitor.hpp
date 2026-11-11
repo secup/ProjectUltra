@@ -37,6 +37,8 @@ struct ToneBurstAckDetection {
     ToneBurstAckPayload payload;
     uint64_t detected_stream_offset = 0;
     float correlation_peak = 0.0f;
+    // The peak over what noise alone gives at these tones (>= kCostasNoiseRatioFloor to decode).
+    float noise_ratio = 0.0f;
     // Strongest/second-strongest tone ratio of the weakest payload symbol.
     // Kept as telemetry only: no production cliff has been calibrated for it.
     float min_symbol_confidence = 0.0f;
@@ -101,15 +103,6 @@ public:
         // when the next cadence tick lands inside it.
         size_t suppress_window_samples = static_cast<size_t>(kSampleRate) * 1000u / 1000u;  // 1 s
 
-        // Minimum Costas correlation peak as a FRACTION of the ideal
-        // clean-channel value, below which we reject the decode as a
-        // false positive. Costas+Hamming+CRC alone can occasionally pass
-        // on random noise; pairing them with a peak floor closes that
-        // gap. Real bursts at SNR ≥ -10 dB sit at ~30%+ of ideal; 5% is
-        // a generous cliff that no real burst dips below. See
-        // computeMinPeakForSymbolMs() for the per-duration absolute floor.
-        float min_peak_fraction = 0.05f;
-
         // GAPLESS armed sweep (BUG-POSTTX-ACK-MISS, 2026-07-05). The tail-window
         // sweep's invariant ("a pass only needs bursts whose TAIL arrived since
         // the previous pass") breaks when ONE feedAudio() append exceeds a
@@ -130,8 +123,9 @@ public:
         bool gapless_armed_sweep = false;
     };
 
-    // Ideal-clean-channel Costas peak magnitude at the given symbol
-    // duration. Used both internally as a gate and exposed for tests.
+    // Ideal-clean-channel Costas peak magnitude at the given symbol duration, at the TRANSMIT
+    // amplitude: a level reference for logs and tests only. Detection is relative to the noise
+    // measured at the tones (kCostasNoiseRatioFloor), never to this.
     //   sum over kCostasSymbols of (samples_per_symbol/2) × kToneAmplitude
     // (Goertzel magnitude for a matched tone of amplitude A over N
     // samples is N·A/2.)

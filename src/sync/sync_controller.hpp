@@ -190,11 +190,11 @@ public:
     // decoder runs detectors over. Returns SearchWindowResult{ready=false} for the wait/skip ticks
     // (the ring side effects already applied). The decoder passes the inputs it derives from the
     // waveform/connection: use_light_search / connected_data_preamble / disconnected_mc_dpsk, the
-    // initial min_search, data_symbol_samples, an audio-activity snapshot, and the step/threshold
-    // constants. This LOCKS ring_.buffer_mutex_ internally (unlike the *Locked helpers).
+    // initial min_search, data_symbol_samples, and the step/threshold constants. This LOCKS
+    // ring_.buffer_mutex_ internally (unlike the *Locked helpers).
     SearchWindowResult acquireSearchWindow(
         bool use_light_search, bool connected_data_preamble, bool disconnected_mc_dpsk,
-        size_t min_search, size_t data_symbol_samples, bool audio_active,
+        size_t min_search, size_t data_symbol_samples,
         size_t correlation_step, float corr_noise_threshold);
 
     // The connected-data light-LTS DETECTION + acceptance + §16.4 re-anchor escalation (§7 C3

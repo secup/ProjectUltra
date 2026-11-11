@@ -724,6 +724,21 @@ tones and reports the carrier offset without the shift.
 (BUG-NARROW-ACK-OUT-OF-BAND).
 **Test:** `ToneBurstAckRoundTrip` (`test_narrowband_band_plan`); GUI gate `--rx-filter 1250-1750`.
 
+### INV-RX-LEVEL-001: the receiver reads no absolute level
+**Rule:** every receive-side presence, noise or SNR decision is a ratio of two measured quantities
+or relative to a measured noise reference, never a fixed RMS/power/amplitude: a station hears its
+peer at whatever level its operator set (AF gain, USB audio level, sound-card gain), tens of dB
+apart between stations. The one absolute test allowed is digital silence
+(`signal_policy::kDigitalSilenceRms` = 1e-7, under a 24-bit converter step).
+**Why:** the simulator delivered every station's audio at its peer's transmit level, so gates
+calibrated there (sync search 0.015-0.040 RMS, tone-ACK floor at 5 % of the transmit amplitude,
+MC-DPSK burst tail 0.012, PING ceiling 0.16, carrier-sense floor 0.005, burst-erasure backstop
+0.005, an idle SNR referenced to 0.3048) never failed a test and failed a real station: with both receivers 30 dB quieter a link
+connected and moved no data, at -40 dB it never connected (BUG-RX-ABSOLUTE-LEVEL).
+**Test:** `gui_qso_scenario.sh --rx-gain-db G` (-40 .. +10 dB must all pass);
+`ToneBurstAckRoundTrip` (`test_detection_is_level_invariant`, `test_noise_only_never_reaches_the_floor`),
+`ChannelIdleNoiseSNRCalibration` (`checkLevelInvariance`), `ChannelBusyDetector` (-70 .. -10 dBFS).
+
 ### INV-TX-LEVEL-001: every OFDM geometry leaves the modulator at the same per-symbol power
 **Rule:** the modulator scales by `output_scale` x N/1024 x sqrt(59/Ncar) (Parseval with the 1/N
 inverse FFT), so a symbol's average power does not depend on FFT size or carrier count; the wideband

@@ -367,8 +367,6 @@ void test_costas_alias_in_payload_does_not_hide_the_preamble() {
     EXPECT(aliased.size() >= 2);
     const uint32_t ms = kSymbolMsHighSNR;
     const uint32_t spp = (kSampleRate * ms) / 1000u;
-    const float floor_peak = ToneBurstAckMonitor::idealCostasPeak(ms) *
-                             ToneBurstAckMonitor::Config{}.min_peak_fraction;
     std::mt19937 rng(0xA11A5);
     int ok = 0;
     for (size_t n = 0; n < aliased.size(); ++n) {
@@ -382,7 +380,7 @@ void test_costas_alias_in_payload_does_not_hide_the_preamble() {
         win.insert(win.end(), 4800, 0.0f);
         addAWGN(win, sigmaForInBandSNR(20.0f, kToneAmplitude), rng);
         ToneBurstDetector det;
-        const auto r = det.detectAndDecode(win.data(), win.size(), ms, 32, {}, floor_peak);
+        const auto r = det.detectAndDecode(win.data(), win.size(), ms, 32, {});  // production
         const bool good = r.decode.payload && payloadsEqual(*r.decode.payload, p);
         const size_t err = (r.detected_offset_samples > spp) ? r.detected_offset_samples - spp
                                                              : spp - r.detected_offset_samples;
@@ -472,7 +470,74 @@ void test_narrowband_band_plan() {
     EXPECT(!n2.sync_acquired);
 }
 
+// H0 bound behind kCostasNoiseRatioFloor (BUG-RX-ABSOLUTE-LEVEL): on noise alone no timing x
+// frequency candidate reaches the floor, at any symbol duration or offset-search width, so noise
+// is never handed to the CRC-12 through the floor.
+void test_noise_only_never_reaches_the_floor() {
+    std::printf("[test] noise_only_never_reaches_the_floor\n");
+    std::mt19937 rng(0x40F0);
+    std::normal_distribution<float> n01(0.0f, 1.0f);
+    float worst = 0.0f;
+    int crc = 0;
+    for (uint32_t ms : {12u, 25u, 50u, 100u}) {
+        for (float halfwidth : {0.0f, 50.0f}) {
+            const uint32_t spp = (kSampleRate * ms) / 1000u;
+            const size_t n = static_cast<size_t>(kTotalSymbols) * spp * 5 / 4 + 9600;
+            for (int r = 0; r < 12; ++r) {
+                std::vector<float> x(n);
+                for (float& v : x) v = 0.05f * n01(rng);
+                ToneBurstDetector det;
+                det.setFrequencyPrior(0.0f, halfwidth);
+                const auto res = det.detectAndDecode(x.data(), x.size(), ms, 32, {});
+                worst = std::max(worst, res.strongest_candidate_noise_ratio);
+                if (res.decode.stats.crc_ok) ++crc;
+            }
+        }
+    }
+    std::printf("  strongest noise candidate %.2f x its noise (floor %.2f), CRC passes %d\n", worst,
+                kCostasNoiseRatioFloor, crc);
+    EXPECT(worst > 1.0f);                      // the statistic is live
+    EXPECT(worst < kCostasNoiseRatioFloor);    // and noise never reaches the floor
+    EXPECT_EQ(crc, 0);
+}
+
+// INV-RX-LEVEL-001: the detector reads no absolute level. The same ACK in the same noise, 40 dB
+// quieter or 20 dB louder (the receive level is the operator's AF / USB-audio / sound-card
+// setting), decodes identically with the same noise ratio. The old floor (5 % of the TRANSMIT
+// amplitude's ideal peak) dropped every ACK more than 26 dB under the transmit level.
+void test_detection_is_level_invariant() {
+    std::printf("[test] detection_is_level_invariant\n");
+    ToneBurstAckPayload p;
+    p.group_seq = 17;
+    p.frame_mask = 0x0B;
+    p.type = AckType::Ack;
+    const uint32_t ms = kBaselineSymbolMs;
+    ToneBurstEncoder enc;
+    const auto burst = enc.encode(p, ms);
+    std::vector<float> base(4800, 0.0f);
+    base.insert(base.end(), burst.begin(), burst.end());
+    base.insert(base.end(), 4800, 0.0f);
+    std::mt19937 rng(0x1E7E1);
+    addAWGN(base, sigmaForInBandSNR(6.0f, kToneAmplitude), rng);
+    float ratio0 = 0.0f;
+    for (float gain_db : {0.0f, -40.0f, 20.0f}) {
+        const float g = std::pow(10.0f, gain_db / 20.0f);
+        std::vector<float> x(base);
+        for (float& v : x) v *= g;
+        ToneBurstDetector det;
+        const auto r = det.detectAndDecode(x.data(), x.size(), ms, 32, {});
+        const bool ok = r.decode.payload && payloadsEqual(*r.decode.payload, p);
+        std::printf("  gain %+5.1f dB: decoded=%d noise_ratio=%.3f\n", gain_db, ok ? 1 : 0,
+                    r.costas_noise_ratio);
+        EXPECT(ok);
+        if (gain_db == 0.0f) ratio0 = r.costas_noise_ratio;
+        else EXPECT(std::abs(r.costas_noise_ratio - ratio0) < 1e-3f * ratio0);
+    }
+}
+
 int main() {
+    test_noise_only_never_reaches_the_floor();
+    test_detection_is_level_invariant();
     test_narrowband_band_plan();
     test_costas_alias_in_payload_does_not_hide_the_preamble();
     test_encode_output_size_and_amplitude();

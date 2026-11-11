@@ -128,7 +128,7 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
     result.sync_quality_db = result.snr_db;
     const auto idle_snr = idle_noise_snr_estimator_.snapshot();
     result.has_idle_in_band_snr_db =
-        idle_snr.valid && std::isfinite(idle_snr.idle_in_band_snr_db);
+        idle_snr.snr_valid && std::isfinite(idle_snr.idle_in_band_snr_db);
     result.idle_in_band_snr_db = idle_snr.idle_in_band_snr_db;
 
     if (is_ofdm && waveform_) {
@@ -566,7 +566,6 @@ void StreamingDecoder::searchForSync() {
         auto win = sync_controller_.acquireSearchWindow(
             use_light_search, connected_data_preamble, disconnected_mc_dpsk,
             min_search, data_symbol_samples,
-            audio_activity_.load(std::memory_order_relaxed),
             CORRELATION_STEP, CORR_NOISE_THRESHOLD);
         if (!win.ready) return;
         search_buffer = std::move(win.search_buffer);
@@ -852,6 +851,7 @@ void StreamingDecoder::searchForSync() {
         // the skipped leading edge doubles as FIR-transient priming and dodges
         // chirp ringing + multipath tails; the trailing edge dodges timing error.
         sync_noise_ref_rms_ = 0.0f;
+        sync_noise_ref_samples_ = 0;
         if (sync_result.interchirp_gap_len > 0 &&
             sync_result.interchirp_gap_start_sample >= 0) {
             const size_t gs = std::min(
@@ -875,6 +875,7 @@ void StreamingDecoder::searchForSync() {
                 }
                 sync_noise_ref_rms_ = static_cast<float>(
                     std::sqrt(sum_sq / static_cast<double>(meas_end - gs - skip)));
+                sync_noise_ref_samples_ = meas_end - gs - skip;
                 // Handoff §6 second half (F233 trough gap): the CHIRP span is
                 // a channel power sample that survives fade nulls — the
                 // data-span physical correctly abstains in a trough (its
@@ -919,6 +920,9 @@ void StreamingDecoder::searchForSync() {
                         if (p_n > 0.0 && p_c > 2.0 * p_n) {
                             notePhysicalSnrSample(static_cast<float>(
                                 10.0 * std::log10((p_c - p_n) / p_n)));
+                            // The peer's measured received power: the idle SNR's signal
+                            // reference (no assumed transmit level, INV-RX-LEVEL-001).
+                            idle_noise_snr_estimator_.setSignalReferencePower(p_c - p_n);
                         }
                     }
                 }

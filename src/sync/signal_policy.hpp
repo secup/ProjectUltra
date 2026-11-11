@@ -27,6 +27,11 @@ inline constexpr float kMaxErasureLikeFraction = 0.30f;
 // (the first-group-after-adopt crater class; three consecutive RTOs per incident).
 inline constexpr float kNoiseZeroDominatedFraction = 0.50f;
 inline constexpr float kMinLTSSignalPower = 1.0e-3f;
+// Below one step of a 24-bit converter (2^-23 of full scale = 1.2e-7): no live input, only a muted
+// or disconnected stream (or unwritten memory), reads this low. The ONE absolute level the
+// receiver may test; every other presence decision is a ratio or relative to measured noise
+// (INV-RX-LEVEL-001).
+inline constexpr float kDigitalSilenceRms = 1.0e-7f;
 inline constexpr float kMinLTSChannelMagnitude = 5.0e-2f;
 inline constexpr float kMaxSyncCFODriftHz = 1.0f;
 inline constexpr float kMaxPilotCFODriftHz = 2.0f;

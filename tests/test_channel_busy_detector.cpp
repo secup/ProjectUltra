@@ -225,7 +225,9 @@ void testNoisyIdleCanSeedBelowSignalSampleCeiling() {
 // idle once the signal stops — using the SAME shared config the GUI uses, so the
 // calibration and its proof cannot drift apart.
 void testRatiometricCarrierSenseAcrossLevelsAndSignal() {
-    const float levels[] = {0.02f, 0.10f, 0.30f};  // ~16x absolute range
+    // ~60 dB of absolute range: a quiet sound-card input (-70 / -60 dBFS) must sense the peer
+    // like a loud one (BUG-RX-ABSOLUTE-LEVEL: a 0.005 floor made 0.0003-0.001 read idle).
+    const float levels[] = {0.0003f, 0.001f, 0.02f, 0.10f, 0.30f};
     for (float L : levels) {
         ChannelBusyDetectorConfig cfg = ultra::audio::ratiometricHfCarrierSenseConfig();
         cfg.quiet_hold_ms = 30;

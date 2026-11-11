@@ -1093,10 +1093,23 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         noise_floor += samples[i] * samples[i];
     }
     noise_floor = std::sqrt(noise_floor / noise_samples);
-    float energy_threshold = noise_floor * 3.0f + 0.01f;  // 3x noise or minimum
+    // Level-free (BUG-RX-ABSOLUTE-LEVEL, INV-RX-LEVEL-001): the buffer "starts with silence" when
+    // its first 100 ms sit more than 3x (RMS) under its loudest 100 ms, not under a fixed 0.05 RMS,
+    // and the start is the first 64-sample window above 3x that leading floor (the +0.01 RMS
+    // minimum is gone). Some window of a block louder than 3x the floor must exceed it, so a
+    // quiet-led buffer always finds its start; a signal-led one searches the whole buffer.
+    float loudest_block = 0.0f;
+    if (noise_samples > 0) {
+        for (size_t b = 0; b + noise_samples <= samples.size(); b += noise_samples) {
+            float sum_sq = 0.0f;
+            for (size_t i = b; i < b + noise_samples; ++i) sum_sq += samples[i] * samples[i];
+            loudest_block = std::max(loudest_block, std::sqrt(sum_sq / noise_samples));
+        }
+    }
+    float energy_threshold = noise_floor * 3.0f;
 
     size_t signal_start = 0;
-    bool signal_in_noise = (noise_floor < 0.05f);  // Buffer starts with silence
+    bool signal_in_noise = energy_threshold < loudest_block;  // Buffer starts with (relative) quiet
 
     if (signal_in_noise) {
         // Find first sample above energy threshold (skip silence region)

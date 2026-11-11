@@ -64,6 +64,10 @@ struct ChannelBusyDetectorConfig {
 // calibration cannot drift between the production path and its test.
 inline ChannelBusyDetectorConfig ratiometricHfCarrierSenseConfig() {
     ChannelBusyDetectorConfig config;
+    // No absolute quiet floor (BUG-RX-ABSOLUTE-LEVEL, INV-RX-LEVEL-001): the 0.005 RMS default
+    // took over below -52 dBFS of noise, so a peer heard under 0.005 read as QUIET and we keyed
+    // over it. Before the floor seeds (~0.3 s) only digital silence reads quiet.
+    config.quiet_rms_threshold = 0.0f;
     config.noise_floor_percentile = 0.50f;
     config.quiet_noise_multiplier = 2.0f;
     config.noise_floor_bootstrap_rms_ceiling = 2.0f;

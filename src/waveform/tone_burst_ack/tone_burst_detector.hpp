@@ -60,6 +60,13 @@ struct DetectAndDecodeResult {
     // Costas-pattern matched-filter peak energy. Higher = stronger
     // pattern lock. Detection threshold is symbol_ms-dependent.
     float costas_correlation_peak = 0.0f;
+    // What NOISE alone gives that statistic at these tones over this window, and the peak's ratio
+    // to it: the level-free detection measure (candidates need >= kCostasNoiseRatioFloor).
+    float costas_noise_statistic = 0.0f;
+    float costas_noise_ratio = 0.0f;
+    // The highest such ratio among ALL timing x frequency candidates of the pass, floor or not:
+    // what the window held at best (telemetry; on noise it measures the floor's margin).
+    float strongest_candidate_noise_ratio = 0.0f;
     bool sync_acquired = false;
 
     // A CRC-valid payload is not necessarily meaningful in the current protocol
@@ -78,6 +85,18 @@ struct DetectAndDecodeResult {
 
 using ToneBurstAckAcceptancePredicate =
     std::function<bool(const ToneBurstAckPayload&)>;
+
+// A candidate must reach 2.2x the noise-only expectation of the Costas statistic. Under noise the
+// statistic (a sum of four Rayleigh magnitudes, relative spread 0.26; 0.18 with diversity) is
+// searched over many correlated timing x frequency cells a pass. MEASURED on 1260 noise-only
+// windows (12-100 ms symbols, searches +-0 to +-50 Hz): the strongest candidate of a pass has p99
+// 1.87, p99.9 1.97, max 2.03, about +0.1 per decade, so 2.2 is ~1e-5 a pass: about one noise
+// candidate per armed hour, and that one still faces the CRC-12 and the protocol predicate. Real
+// ACKs at the test cells' design floor score 2.3-3.6 (12 ms at +2 dB, 25 ms at -2 dB, wide
+// search); a preamble faded deep at 0 to -5 dB can score under any noise-safe floor (its payload
+// may still decode), the price of not handing noise to a 12-bit CRC. The H0 bound is pinned by
+// ToneBurstAckRoundTrip (noise-only windows never reach the floor).
+inline constexpr float kCostasNoiseRatioFloor = 2.2f;
 
 class ToneBurstDetector {
 public:
@@ -130,10 +149,10 @@ public:
     // Used when timing is uncertain (sender's "expected window" + guard).
     // `sweep_step_samples` controls the timing-search granularity (smaller
     // = finer + slower).
-    // min_candidate_peak: absolute Costas-statistic floor a timing candidate must exceed to be
-    // worth a CRC check (the monitor passes min_peak_fraction x idealCostasPeak, the same gate
-    // it applies to an accepted decode). Candidates are tried strongest first, up to the
-    // distinct-candidate budget, while above the floor.
+    // Candidates must reach kCostasNoiseRatioFloor x the noise-only expectation of the Costas
+    // statistic measured at the tones in this window (level-free). min_candidate_peak is an
+    // optional ABSOLUTE floor on top, for tests and tools; production passes none. Candidates are
+    // tried strongest first, up to the distinct-candidate budget, while above the floor.
     DetectAndDecodeResult detectAndDecode(SampleSpan samples,
                                           size_t num_samples,
                                           uint32_t symbol_ms = kBaselineSymbolMs,

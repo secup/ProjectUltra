@@ -1000,13 +1000,15 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // ~0.10-0.30. Scaling the gate off THIS group's anchor RMS (chirp-dominated, ~constant-
     // envelope, the most stable per-group RX-level reference) tracks the operating point.
     // k = 0.055 reproduces the historical 0.015 at the sim anchor 0.27 (=> zero sim regression,
-    // verified) and scales down with the RX level; a small absolute floor still erases an
-    // essentially-dead/missing frame in the degenerate (uncaptured/near-zero) anchor case
-    // without re-imposing the absolute-level bug. This is the per-group-adaptive form of the
+    // verified) and scales down with the RX level. The "essentially-silence" backstop that went
+    // with it (0.005 RMS) re-imposed the absolute-level bug one floor lower: with both receivers
+    // 40 dB quieter every data frame (0.003 RMS) after the anchor was erased and retransmitted
+    // (360 bps instead of 1230), and at -30 dB on ITU Good faded frames were (BUG-RX-ABSOLUTE-LEVEL).
+    // The backstop is digital silence now, and without a captured anchor nothing is erased (the
+    // decode decides) instead of falling back to a fixed 0.015 (INV-RX-LEVEL-001). This is the per-group-adaptive form of the
     // gate; the cheap-card per-carrier decodability of the now-KEPT weak frames is a separate
     // lever (see docs/KNOWN_BUGS.md BUG-IONOS-PI5-CHEAP-DAC / per-carrier LLR work).
     constexpr float kBurstErasureAnchorFrac = 0.055f;  // ~25 dB below the group anchor
-    constexpr float kBurstErasureAbsFloor = 0.005f;    // essentially-silence backstop
     // ULTRA_BURST_ERASURE_ABSOLUTE=1 forces the legacy fixed 0.015 gate (A/B harness for the
     // relative-gate benefit; default uses the operating-level-relative gate).
     static const bool kBurstErasureAbsolute = [] {
@@ -1017,8 +1019,8 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         kBurstErasureAbsolute
             ? 0.015f
         : (std::isfinite(burst_anchor_rms_) && burst_anchor_rms_ > 0.0f)
-            ? std::max(kBurstErasureAnchorFrac * burst_anchor_rms_, kBurstErasureAbsFloor)
-            : 0.015f;  // no anchor captured (should not happen mid-group) -> legacy absolute
+            ? std::max(kBurstErasureAnchorFrac * burst_anchor_rms_, signal_policy::kDigitalSilenceRms)
+            : signal_policy::kDigitalSilenceRms;  // no anchor captured: only a dead input is erased
     if (next_rms < erase_thresh) {
         LOG_MODEM(WARN, "[%s] Burst frame %zu/%d: energy lost (RMS=%.4f < %.4f "
                   "[%.3f*anchor %.4f]), inserting erasure",

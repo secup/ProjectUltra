@@ -113,17 +113,34 @@ bool IdleNoiseSNREstimator::hasEstimate() const {
     return valid_;
 }
 
+void IdleNoiseSNREstimator::setSignalReferencePower(double in_band_power) {
+    if (!(in_band_power > 0.0) || !std::isfinite(in_band_power)) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    signal_reference_power_ = in_band_power;
+}
+
+// The windows are scored against the simulator's reference power (a fixed convention, so the
+// smoothing runs on a stable scale); the measured peer power then shifts the whole SNR by a
+// constant, which commutes with the EMA.
+static float referenceOffsetDb(double signal_reference_power) {
+    return static_cast<float>(10.0 * std::log10(signal_reference_power / sim::kModemReferencePower));
+}
+
 float IdleNoiseSNREstimator::snrDb() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return smoothed_snr_db_;
+    if (!(signal_reference_power_ > 0.0)) return std::numeric_limits<float>::quiet_NaN();
+    return smoothed_snr_db_ + referenceOffsetDb(signal_reference_power_);
 }
 
 IdleNoiseSNREstimator::Snapshot IdleNoiseSNREstimator::snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     Snapshot out;
     out.valid = valid_;
-    out.idle_in_band_snr_db = smoothed_snr_db_;
-    out.latest_instant_idle_in_band_snr_db = latest_instant_snr_db_;
+    out.snr_valid = valid_ && signal_reference_power_ > 0.0;
+    const float offset_db =
+        signal_reference_power_ > 0.0 ? referenceOffsetDb(signal_reference_power_) : 0.0f;
+    out.idle_in_band_snr_db = smoothed_snr_db_ + offset_db;
+    out.latest_instant_idle_in_band_snr_db = latest_instant_snr_db_ + offset_db;
     out.filtered_noise_rms = filtered_noise_rms_;
     {
         // Min over the populated part of the ring (ignore empty slots).

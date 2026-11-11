@@ -1116,6 +1116,7 @@ private:
     // 0 = unavailable (LTS/warm sync, single chirp). Set at sync-found,
     // consumed by the same frame's decode on the same thread.
     float sync_noise_ref_rms_ = 0.0f;
+    size_t sync_noise_ref_samples_ = 0;  // samples behind sync_noise_ref_rms_ (its chi-square dof)
     // PHYSICAL in-band channel SNR from the last chirp-synced MC-DPSK frame:
     // 10log10((P_train - P_noise)/P_noise), training-span power vs the
     // burst-time inter-chirp noise ref. A pure POWER ratio — no phase model —

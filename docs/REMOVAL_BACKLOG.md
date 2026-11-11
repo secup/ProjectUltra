@@ -455,6 +455,22 @@ the new defaults first (BUG-TEST-GAP-FAST-DEFAULT); then proceed with R15 and R1
 `ULTRA_RATE_EVM=1` FULL mode while BUG-EVM-FULL-CHASES-WINDOW is open (an experiment, not a
 default), `measure_ack_fer --frame-log`.
 
+### R20. The receive operating-level AGC (`ULTRA_RX_AGC`) — `QUEUED 2026-11-10`
+
+**Why.** A default-off, amplify-only AGC in `StreamingDecoder::feedAudio` that raised a quiet input
+toward the simulator's operating level (0.176 RMS) "so the absolute gates work". Since
+BUG-RX-ABSOLUTE-LEVEL (2026-11-10) no receive gate reads the level (INV-RX-LEVEL-001), proven by the
+`--rx-gain-db` sweep, so there is nothing left for it to compensate, and its own constants (target
+0.176, engage ratio 3, activity 0.030, max gain 6) are exactly the kind of hand-set levels the fix
+removed.
+**Scope.** The `kRxAgc` block in `streaming_decoder.cpp::feedAudio` (`agc_level_est_`, `agc_gain_`,
+`agc_log_counter_` members), the map row and any `ULTRA_RX_AGC` docs; and the
+`ULTRA_BURST_ERASURE_ABSOLUTE` A/B knob (forces the old fixed 0.015 erasure gate, `kBurstErasureAbsolute`
+in `streaming_burst_interleave.cpp`). Delete after one rig session
+at the station's normal level and one deliberately ~25 dB quieter, both completing.
+**KEEP.** The receive path itself and the activity log (`audio_activity_`); `RxGainChannelModel`
+(the simulator's level control is how the invariant is tested).
+
 ## Dead code — audit-confirmed (verify no test-tool dependency, then cut)
 
 Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
