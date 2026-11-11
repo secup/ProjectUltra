@@ -2522,6 +2522,19 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-FOLLOW-MODE-CHANGE-STRADDLE (FIXED 2026-11-11, before follow shipped) — a MODE_CHANGE outlived the crossing and split connection from modem
+
+With follow on (dual-listen dip, ITU Good, seed 44): while the sender sat out its 60 s of patience on a
+dead OFDM link, the collapse escape requested a lower OFDM rung by MODE_CHANGE, which could not get
+through and kept retrying. The crossing to MC-DPSK left it pending; its next retry went out on
+MC-DPSK, the receiver's MC-DPSK listener decoded and acknowledged it, and the sender committed it -
+its connection back on OFDM QPSK while its modem stayed on MC-DPSK ("Waveform crossing: MC-DPSK ->
+MC-DPSK" in the engine against "OFDM-CHIRP QPSK -> MC-DPSK" in the connection at the next crossing),
+and the receiver followed only 158 s later. Fix: a crossing supersedes a pending MODE_CHANGE (its
+suspended timeout intents released, as when one is given up); and any data-mode change that still
+moves the session across waveforms outside a crossing logs an error and takes the modem with it.
+`WaveformFollow` `test_waveform_follow_crossing_supersedes_mode_change`.
+
 ### BUG-FOLLOW-STALE-EVIDENCE (FIXED 2026-11-11, before waveform follow shipped) — the up-crossing was decided on the channel that had collapsed
 
 With `ULTRA_WAVEFORM_FOLLOW=1`, ITU Good 20 -> 0 -> 20 dB (GUI gate, seed 44): one fade gave OFDM >

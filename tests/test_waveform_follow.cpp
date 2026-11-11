@@ -178,6 +178,16 @@ struct ConnectionAdaptiveTestAccess {
     }
     // The collapse escape consumed the shared counter: follow keeps its own.
     static void escapeConsumesEvidence(Connection& c) { c.zero_progress_rounds_ = 0; }
+    static void setPendingModeChange(Connection& c, Modulation mod, CodeRate rate) {
+        c.mode_change_pending_ = true;
+        c.pending_modulation_ = mod;
+        c.pending_code_rate_ = rate;
+        c.pending_ladder_rung_id_ = LadderRungId::OFDM_CHIRP;
+    }
+    static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
+    static void applyDataMode(Connection& c, Modulation mod, CodeRate rate, LadderRungId rung) {
+        c.applyDataMode(mod, rate, 0, rung);
+    }
 };
 
 }  // namespace protocol
@@ -678,6 +688,38 @@ void test_dual_listen_missed_up_crossing_backs_off() {
           "the second clean burst of the longer run commands again");
 }
 
+// A crossing supersedes a pending MODE_CHANGE (a data mode of the waveform being left): kept, its
+// next retry went out on MC-DPSK, the peer acknowledged it and the sender committed it - its
+// connection back on OFDM while its modem stayed on MC-DPSK (GUI, dual-listen dip, seed 44).
+void test_waveform_follow_crossing_supersedes_mode_change() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::setPendingModeChange(c, Modulation::QPSK, CodeRate::R1_2);
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+              c, connection_policy::encodeMcDpskRungCommand(0)),
+          "the down-crossing applies");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
+          "the pending MODE_CHANGE is gone with the waveform it described");
+
+    // Belt and braces: a data-mode change that still moves the session across waveforms outside a
+    // crossing takes the modem with it.
+    int crossings = 0;
+    WaveformMode modem_mode = WaveformMode::MC_DPSK;
+    c.setWaveformCrossingCallback([&](WaveformMode mode, Modulation, CodeRate, int, int, int) {
+        ++crossings;
+        modem_mode = mode;
+    });
+    ConnectionAdaptiveTestAccess::applyDataMode(c, Modulation::QPSK, CodeRate::R1_2,
+                                                LadderRungId::OFDM_CHIRP);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::OFDM_CHIRP &&
+              crossings == 1 && modem_mode == WaveformMode::OFDM_CHIRP,
+          "a waveform change outside a crossing still reaches the modem");
+}
+
 }  // namespace
 
 int main() {
@@ -701,6 +743,7 @@ int main() {
     test_dual_listen_receiver_commands_up_and_follows_the_peer();
     test_dual_listen_receiver_commands_down_and_follows_the_peer();
     test_dual_listen_missed_up_crossing_backs_off();
+    test_waveform_follow_crossing_supersedes_mode_change();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

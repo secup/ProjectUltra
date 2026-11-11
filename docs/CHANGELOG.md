@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FIX(follow): a crossing supersedes a pending MODE_CHANGE (BUG-FOLLOW-MODE-CHANGE-STRADDLE)
+
+**What was broken.** The first dual-listen matrix run (ITU Good 20 -> 0 -> 20 dB, seed 44) took 5+
+minutes where the smoke run took 224 s. While the sender waited out its 60 s of patience on the dead
+OFDM link, the collapse escape asked for a lower OFDM rung by MODE_CHANGE; it could not get through and
+kept retrying. The crossing to MC-DPSK did not cancel it, so its next retry went out on MC-DPSK; the
+receiver's listener decoded it (a control frame: delivered, rightly no waveform switch) and
+acknowledged; the sender committed it and its connection was back on OFDM QPSK while its modem stayed
+on MC-DPSK. The receiver followed 158 s later.
+
+**Fix.** `applyWaveformCrossing` drops a pending MODE_CHANGE (it describes a data mode of the waveform
+being left), releasing its suspended timeout intents as a given-up MODE_CHANGE does; the crossing then
+re-cuts the window. Fail-safe: `applyDataMode` notices a change that moves a follow session across
+waveforms outside a crossing, logs it as an error and fires the modem's crossing callback, so
+connection and modem cannot split silently.
+
+**Tests.** `WaveformFollow` 83/83 (`test_waveform_follow_crossing_supersedes_mode_change`: the crossing
+clears the pending MODE_CHANGE; an out-of-crossing waveform change reaches the modem). The dual-listen
+matrix was restarted on this build.
+
+---
+
 ## 2026-11-11 — FEAT(follow): dual-listen - the receiver hears both waveforms (ULTRA_WAVEFORM_FOLLOW=2)
 
 **What was wrong with following by agreement.** Waveform follow (previous entry) switches a session

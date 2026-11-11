@@ -1413,6 +1413,7 @@ private:
     // count: the collapse escapes consume zero_progress_rounds_, which made the crossing time
     // depend on when they last fired (GUI: 113 s of silence instead of the 60 s patience).
     int follow_silent_rounds_ = 0;
+    bool in_waveform_crossing_ = false;  // applyWaveformCrossing is applying the data mode
     Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
     uint32_t rx_mcdpsk_frames_since_command_ = 0;
     int mcdpsk_last_command_group_seq_ = -1;

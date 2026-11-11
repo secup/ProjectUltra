@@ -8441,9 +8441,17 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // the same tuple; a stale exact-group ACK must never bridge a control transaction.
     partial_sack_last_round_ = {};
     partial_sack_descriptor_repair_scope_ = false;
+    bool family_changed_outside_crossing = false;
     if (rung_id != LadderRungId::UNKNOWN) {
         const auto rung = connection_policy::ladderRungForId(rung_id);
         if (rung.id != LadderRungId::UNKNOWN) {
+            const auto wideband = [](WaveformMode m) {
+                return m == WaveformMode::MC_DPSK || m == WaveformMode::OFDM_CHIRP;
+            };
+            family_changed_outside_crossing =
+                !in_waveform_crossing_ && waveformFollowActive() &&
+                wideband(rung.waveform) && wideband(negotiated_mode_) &&
+                rung.waveform != negotiated_mode_;
             negotiated_mode_ = rung.waveform;
             if (rung.waveform == WaveformMode::MC_DPSK) {
                 config_.mc_dpsk_num_carriers = rung.num_carriers;
@@ -8736,6 +8744,23 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     if (reportable_terminal_failure && on_message_sent_) {
         on_message_sent_(false);
     }
+    if (family_changed_outside_crossing) {
+        // A data-mode change moved this session across waveforms without the crossing path, so
+        // the modem would stay on the old waveform. Route it through the modem's crossing (and
+        // say so: the caller is the bug).
+        LOG_MODEM(ERROR,
+                  "Connection: WAVEFORM FOLLOW: a data-mode change moved the session to %s %s %s "
+                  "outside a crossing; switching the modem with it",
+                  waveformModeToString(negotiated_mode_), modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_));
+        if (on_waveform_crossing_) {
+            const bool mc_target = negotiated_mode_ == WaveformMode::MC_DPSK;
+            on_waveform_crossing_(negotiated_mode_, data_modulation_, data_code_rate_,
+                                  data_frame_cw_count_,
+                                  mc_target ? config_.mc_dpsk_num_carriers : 0,
+                                  mc_target ? config_.mc_dpsk_samples_per_symbol : 0);
+        }
+    }
 }
 
 // ─────────────── MC-DPSK rate change (connection_policy::McDpskRateController) ───────────────
@@ -8958,6 +8983,11 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
     if (!waveformFollowActive()) {
         return false;
     }
+    struct CrossingScope {
+        bool& flag;
+        explicit CrossingScope(bool& f) : flag(f) { flag = true; }
+        ~CrossingScope() { flag = false; }
+    } crossing_scope(in_waveform_crossing_);
     const int mc_rung = connection_policy::decodeMcDpskRungCommand(session_word);
     const uint8_t ofdm_rung = connection_policy::decodeOfdmRungCommand(session_word);
     const WaveformMode from = negotiated_mode_;
@@ -8996,6 +9026,22 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
     rx_follow_crater_streak_ = 0;
     rx_follow_silence_ms_ = 0;
     resetFollowOfdmSpell();
+    if (mode_change_pending_) {
+        // A MODE_CHANGE describes a data mode of the waveform being left: the crossing supersedes
+        // it. Kept, its next retry went out on the new waveform, the peer acknowledged it and this
+        // end committed it - back on OFDM while the modem stayed on MC-DPSK (GUI, dual-listen dip,
+        // seed 44: the collapse escape's MODE_CHANGE from the patience wait). Its suspended timeout
+        // intents are released as when a MODE_CHANGE is given up; the crossing re-cuts the window.
+        LOG_MODEM(INFO,
+                  "Connection: WAVEFORM FOLLOW: the crossing supersedes the pending MODE_CHANGE "
+                  "to %s %s",
+                  modulationToString(pending_modulation_), codeRateToString(pending_code_rate_));
+        mode_change_pending_ = false;
+        mode_change_timeout_ms_ = 0;
+        mode_change_retry_count_ = 0;
+        pending_ladder_rung_id_ = LadderRungId::UNKNOWN;
+        arq_.resumeDeferredTimeoutRetransmits(/*timeout_ms=*/1);
+    }
     LOG_MODEM(INFO, "Connection: WAVEFORM FOLLOW %s %s -> %s %s %s cw=%d (%s)",
               waveformModeToString(from), modulationToString(from_mod),
               waveformModeToString(target), modulationToString(mod), codeRateToString(rate), cw,
