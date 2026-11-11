@@ -2,6 +2,7 @@
 
 #include "mc_dpsk_waveform.hpp"
 #include "ultra/logging.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace ultra {
@@ -68,8 +69,14 @@ void MCDPSKWaveform::configure(Modulation mod, CodeRate rate) {
         config_.bits_per_symbol = 2;  // DQPSK default
     }
 
-    // Reinitialize with new config
+    // Reinitialize with new config. The decoder's noise reference for the frame in hand (the
+    // burst's inter-chirp gap) survives: a receiver re-demodulating the same frame at another
+    // constellation (StreamingDecoder MC-DPSK first-frame retry) must measure the same physical SNR.
+    const float noise_ref_rms = demodulator_ ? demodulator_->noiseReferenceRMS() : 0.0f;
     initComponents();
+    if (noise_ref_rms > 0.0f) {
+        demodulator_->setNoiseReferenceRMS(noise_ref_rms);
+    }
 }
 
 void MCDPSKWaveform::setFrequencyOffset(float cfo_hz) {
@@ -320,6 +327,19 @@ void MCDPSKWaveform::setCarrierCount(int carriers) {
 }
 
 int MCDPSKWaveform::getMinSamplesForFrame() const {
+    // The first-frame look-ahead covers one codeword at the SLOWEST data constellation (DBPSK,
+    // one bit per carrier symbol), whatever is configured: the sender changes constellation
+    // between bursts and the receiver re-demodulates a burst's first frame at the other one when
+    // its first codeword fails (StreamingDecoder), which needs the longer span. A DQPSK data frame
+    // has at least two codewords, the same span, so it waits no longer.
+    if (config_.bits_per_symbol > 1) {
+        const int training_samples = config_.training_symbols * config_.samples_per_symbol;
+        const int ref_samples = config_.samples_per_symbol;
+        constexpr int LDPC_BLOCK_SIZE = 648;
+        const int carriers = std::max(1, config_.num_carriers);
+        const int data_symbols = (LDPC_BLOCK_SIZE + carriers - 1) / carriers;
+        return training_samples + ref_samples + data_symbols * config_.samples_per_symbol;
+    }
     int training_samples = config_.training_symbols * config_.samples_per_symbol;
     int ref_samples = config_.samples_per_symbol;
     return training_samples + ref_samples + getDataOnlySamplesForCWCount(1);

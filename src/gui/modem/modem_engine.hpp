@@ -163,6 +163,8 @@ public:
     bool hasLastPhysicalSnr() const;
     float lastPhysicalSnrDb() const;
     size_t physicalSnrStats(float& mean_db, float& spread_db) const;
+    // MC-DPSK rate change: the constellation the last decoded MC-DPSK frame used.
+    Modulation lastMcDpskRxModulation() const;
     ChannelQuality getChannelQuality() const;
     // Live OFDM in-band (broadband) SNR from the decoder's lock-free last-estimate
     // atomics — updated per logical frame on BOTH delivery paths (incl. burst-as-unit,
@@ -230,6 +232,11 @@ public:
         std::function<void(bool payload_seen)> callback) {
         if (streaming_decoder_) {
             streaming_decoder_->setAnchoredBurstNoGroupCallback(std::move(callback));
+        }
+    }
+    void setMcDpskFrameLostCallback(std::function<void(int modulation)> callback) {
+        if (streaming_decoder_) {
+            streaming_decoder_->setMcDpskFrameLostCallback(std::move(callback));
         }
     }
     void setBurstOutcomeUnknownCallback(std::function<void()> callback) {

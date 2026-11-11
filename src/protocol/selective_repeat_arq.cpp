@@ -1442,6 +1442,20 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
     }
 }
 
+bool SelectiveRepeatARQ::timeoutRetransmitDue(uint32_t elapsed_ms) const {
+    for (size_t i = 0; i < config_.window_size; i++) {
+        const size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
+        const TXSlot& s = tx_window_[slot];
+        if (!s.active || s.acked || s.timeout_suspended) {
+            continue;
+        }
+        if (elapsed_ms >= s.timeout_ms && !(s.repair_in_flight && s.repair_guard_ms > 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
     arq_time_ms_ += elapsed_ms;
     keepalive_silent_ms_ += elapsed_ms;  // reset on each sendSack() emit
@@ -1777,7 +1791,10 @@ void SelectiveRepeatARQ::performRetransmitFrame(
         case RetransmitCause::HOLE_PROBE: stats_.retransmissions_hole_probe++; break;
         case RetransmitCause::NACK: stats_.retransmissions_nack++; break;
     }
-    s.timeout_ms = currentAckTimeoutMs();
+    // A resend waits for the burst it is part of, not for a full window: with one frame left
+    // outstanding that is one frame's round trip (BUG-MCDPSK-RTO-FULL-WINDOW; the same flaw
+    // kept ULTRA_INFLIGHT_RTO from fixing the OFDM tail). Without a table this is the scalar.
+    s.timeout_ms = ackTimeoutForFrames(tx_in_flight_);
     s.timeout_suspended = false;
     s.timeout_transition_suspended = false;
     if (cause == RetransmitCause::TIMEOUT && deferred_timeout_batch != nullptr) {
@@ -2585,12 +2602,12 @@ size_t SelectiveRepeatARQ::rearmTransmittedDataFrames(
     return rearmed;
 }
 
-// ULTRA_INFLIGHT_RTO: the timeout for the burst CURRENTLY outstanding. See
-// selective_repeat_arq_policy.hpp::inflightRtoEnabled for why a scalar is wrong at the
-// tail of a transfer. Falls through to the scalar when the knob is off, when no table has
-// been supplied (MC-DPSK / narrow / control paths), or for counts outside the table.
+// The timeout for the burst CURRENTLY outstanding (see
+// selective_repeat_arq_policy.hpp::inflightRtoEnabled for why a scalar is wrong at the tail of
+// a transfer). Used whenever the Connection supplied a table — MC-DPSK by default
+// (ULTRA_MCDPSK_INFLIGHT_RTO), wideband OFDM only under ULTRA_INFLIGHT_RTO — else the scalar.
 uint32_t SelectiveRepeatARQ::ackTimeoutForFrames(size_t frames) const {
-    if (!arq_policy::inflightRtoEnabled() || ack_timeout_table_n_ == 0) {
+    if (ack_timeout_table_n_ == 0) {
         return currentAckTimeoutMs();
     }
     const size_t idx = std::clamp<size_t>(frames, 1, ack_timeout_table_n_ - 1);
@@ -2607,7 +2624,7 @@ uint32_t SelectiveRepeatARQ::ackTimeoutForFrames(size_t frames) const {
 // grows. Without this, early frames in a full burst would time out mid-burst — the
 // spurious-retransmission failure this knob must not introduce.
 void SelectiveRepeatARQ::rearmOutstandingTimeouts() {
-    if (!arq_policy::inflightRtoEnabled() || ack_timeout_table_n_ == 0) return;
+    if (ack_timeout_table_n_ == 0) return;
     const uint32_t t = ackTimeoutForFrames(tx_in_flight_);
     for (auto& s : tx_window_) {
         if (s.active && !s.acked && s.timeout_ms > 0 && s.timeout_ms < t) {

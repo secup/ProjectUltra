@@ -2,6 +2,7 @@
 
 #include "ofdm/genie_tx_capture.hpp"
 #include "streaming_decoder.hpp"
+#include "protocol/connection_policy.hpp"  // MC-DPSK data constellations
 #include "streaming_buffer_policy.hpp"
 #include "streaming_control_profile.hpp"
 #include "streaming_decode_policy.hpp"
@@ -2130,6 +2131,15 @@ void StreamingDecoder::decodeCurrentFrame() {
     captureConstellationSnapshot();
 
     auto soft_bits = waveform_->getSoftBits();
+    // MC-DPSK rate change: the sender changes constellation between bursts (on the receiver's
+    // command, or by itself after a timeout) and a lost command leaves either one on the air. A
+    // first frame whose first codeword fails here is re-demodulated at the other constellation
+    // BEFORE the false-lock and PING verdicts: a DBPSK frame read as DQPSK has near-zero soft
+    // bits and would be thrown away as a false lock.
+    if (!is_ofdm && connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
+        !soft_bits.empty()) {
+        retryMcDpskFirstFrameConstellation(frame_buffer, decode_cfo, soft_bits);
+    }
     if (soft_bits.empty()) {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
         {
@@ -3679,6 +3689,8 @@ void StreamingDecoder::continueMCDPSKBurst() {
             peek_data[0] != 0x55 || peek_data[1] != 0x4C) {
             LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst stop: no continuation header at pos=%zu",
                       log_prefix_.c_str(), mc_burst_next_pos_);
+            // A frame was due (the previous one said more follow) and carried energy: lost.
+            noteMcDpskFrameLost(static_cast<int>(mc_waveform->getModulation()));
             finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
             return;
         }
@@ -3724,6 +3736,9 @@ void StreamingDecoder::continueMCDPSKBurst() {
                     mc_burst_pending_soft_bits_, code_rate_,
                     v2::getBytesPerCodeword(code_rate_), mc_burst_snr_, mc_burst_cfo_);
                 deliverContinuationResult(partial);
+                if (!partial.success) {
+                    noteMcDpskFrameLost(static_cast<int>(mc_waveform->getModulation()));
+                }
                 LOG_MODEM(WARN, "[%s] MC-DPSK continuous burst partial timeout: %s cw=%d",
                           log_prefix_.c_str(), v2::frameTypeToString(mc_burst_pending_type_),
                           mc_burst_pending_total_cw_);
@@ -3751,6 +3766,9 @@ void StreamingDecoder::continueMCDPSKBurst() {
     // callback, so the ACK it triggers carries completed-turn provenance.
     result.physical_turn_complete = frame_policy::hasMcDpskTurnEndMarker(
         result.success, connected_, /*is_mc_dpsk=*/true, result.frame_data);
+    if (!result.success) {
+        noteMcDpskFrameLost(static_cast<int>(mc_waveform->getModulation()));
+    }
     deliverContinuationResult(result);
 
     const bool more_frag = decodedFrameHasMoreFrag(result);
@@ -3792,6 +3810,92 @@ float StreamingDecoder::chirpSyncQualityDb(float corr, float /*noise*/) {
 DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_bits,
                                                    CodeRate rate, size_t bytes_per_cw,
                                                    float snr, float cfo) {
+    DecodeResult result = decodeMCDPSKFrameImpl(soft_bits, rate, bytes_per_cw, snr, cfo);
+    if (result.success && waveform_) {
+        last_mc_dpsk_rx_modulation_.store(static_cast<int>(waveform_->getModulation()),
+                                          std::memory_order_relaxed);
+    }
+    return result;
+}
+
+bool StreamingDecoder::mcDpskCw0IsFrameHeader(const std::vector<float>& soft_bits,
+                                              CodeRate rate) {
+    constexpr size_t LDPC_BLOCK = v2::LDPC_CODEWORD_BITS;
+    if (soft_bits.size() < LDPC_BLOCK) {
+        return false;
+    }
+    std::vector<float> cw0(soft_bits.begin(), soft_bits.begin() + LDPC_BLOCK);
+    frame_decoder_.codec_->setRate(rate);
+    auto [ok, data] = frame_decoder_.codec_->decode(cw0);
+    return ok && data.size() >= 2 &&
+           ((data[0] == 0x55 && data[1] == 0x4C) ||
+            (data[0] == v2::kWhitenedMagic0 && data[1] == v2::kWhitenedMagic1));
+}
+
+void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<float>& frame_buffer,
+                                                          float decode_cfo,
+                                                          std::vector<float>& soft_bits) {
+    auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+    if (!mc || frame_buffer.empty() || mcDpskCw0IsFrameHeader(soft_bits, code_rate_)) {
+        return;
+    }
+    const Modulation configured = mc->getModulation();
+    const SampleSpan frame(frame_buffer.data(), frame_buffer.size());
+    for (const Modulation alt : protocol::connection_policy::kMcDpskRungModulations) {
+        if (alt == configured) {
+            continue;
+        }
+        mc->configure(alt, code_rate_);
+        mc->setFrequencyOffset(decode_cfo);
+        if (!processWaveformForCodewords(frame, 1)) {
+            continue;
+        }
+        std::vector<float> alt_bits = mc->getSoftBits();
+        if (mcDpskCw0IsFrameHeader(alt_bits, code_rate_)) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK first frame decodes at %s (configured %s): "
+                      "the sender changed constellation",
+                      log_prefix_.c_str(), modulationToString(alt),
+                      modulationToString(configured));
+            soft_bits = std::move(alt_bits);
+            return;
+        }
+    }
+    // Nothing decodes: restore the configured constellation and its demodulation, so the
+    // false-lock test, the PING decision and the metrics downstream see what they saw before.
+    mc->configure(configured, code_rate_);
+    mc->setFrequencyOffset(decode_cfo);
+    processWaveformForCodewords(frame, 1);
+    soft_bits = mc->getSoftBits();
+
+    // Loss evidence for the rate controller, but only for a burst that carried data: the data
+    // section must read above this burst's own inter-chirp noise (a bare PING chirp, or a sync on
+    // noise, reads as noise there). Same test as the continuation's burst-tail check.
+    const size_t data_start = static_cast<size_t>(
+        std::max(0, mc->getMinSamplesForCWCount(1) - mc->getDataOnlySamplesForCWCount(1)));
+    if (sync_noise_ref_rms_ > 0.0f && sync_noise_ref_samples_ > 0 &&
+        frame_buffer.size() > data_start + 200) {
+        FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+        const size_t prime = 100;
+        for (size_t i = data_start; i < data_start + prime; ++i) band.process(frame_buffer[i]);
+        double sum_sq = 0.0;
+        size_t measured = 0;
+        for (size_t i = data_start + prime; i < frame_buffer.size(); ++i, ++measured) {
+            const float y = band.process(frame_buffer[i]);
+            sum_sq += static_cast<double>(y) * static_cast<double>(y);
+        }
+        const double window_power = sum_sq / static_cast<double>(measured);
+        const double noise_power =
+            static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
+        if (!frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
+                                                   sync_noise_ref_samples_, 2900.0, 48000.0)) {
+            noteMcDpskFrameLost(-1);
+        }
+    }
+}
+
+DecodeResult StreamingDecoder::decodeMCDPSKFrameImpl(const std::vector<float>& soft_bits,
+                                                     CodeRate rate, size_t bytes_per_cw,
+                                                     float snr, float cfo) {
     DecodeResult result;
     result.snr_db = snr;
     result.snr_source = SNRSource::SYNC_QUALITY;
@@ -4083,6 +4187,10 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                         return plain;
                     }
                 }
+            }
+            // The header codeword decoded (a real frame), the rest did not: lost.
+            if (tracked.codewords_ok > 0 && waveform_) {
+                noteMcDpskFrameLost(static_cast<int>(waveform_->getModulation()));
             }
         }
         return tracked;

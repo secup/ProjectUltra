@@ -560,6 +560,14 @@ Connection::Connection(const ConnectionConfig& config)
                     tba.rate_hint = static_cast<uint8_t>(wire_authority_cmd & 0x7);
                     tba.rung_cmd = static_cast<uint8_t>((wire_authority_cmd >> 3) & 0x3);
                 }
+                // MC-DPSK rate change: in an MC-DPSK session the same five bits carry this
+                // receiver's constellation command (connection_policy::McDpskRateController).
+                if (negotiated_mode_ == WaveformMode::MC_DPSK &&
+                    connection_policy::mcDpskRateAdaptEnabled()) {
+                    const uint8_t word = mcDpskRungCommandForAck(bitmap & kFrameMaskWire);
+                    tba.rate_hint = static_cast<uint8_t>(word & 0x7);
+                    tba.rung_cmd = static_cast<uint8_t>((word >> 3) & 0x3);
+                }
                 // Software-ALC (BUG-QAM16-RIG-LEVEL-BUDGET): stamp the drive advisory
                 // from the per-burst RX level verdict fed via setRxLevelVerdict just
                 // before this group's delivery. Down IMMEDIATELY on a clip signature
@@ -2707,7 +2715,14 @@ bool Connection::onToneBurstAck(
         // actually measured. Ack-SILENCE safety rails (collapse escape, stuck-frame
         // escape, RTO machinery) stay live — no command crosses a blackout.
         const bool rx_authority = rxRateAuthorityEnabled();
-        if (rx_authority) {
+        if (negotiated_mode_ == WaveformMode::MC_DPSK &&
+            connection_policy::mcDpskRateAdaptEnabled()) {
+            // MC-DPSK rate change: the five bits are the receiver's constellation command.
+            maybeObeyMcDpskRungCommand(
+                static_cast<uint8_t>((detection.payload.rate_hint & 0x7) |
+                                     ((detection.payload.rung_cmd & 0x3) << 3)),
+                detection.payload.group_seq);
+        } else if (rx_authority) {
             const uint8_t cmd_word = static_cast<uint8_t>(
                 (detection.payload.rate_hint & 0x7) |
                 ((detection.payload.rung_cmd & 0x3) << 3));
@@ -6840,6 +6855,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                 }
             }
 
+            maybeFallBackMcDpskRungOnTimeout(elapsed_ms);
             arq_tick_in_progress_ = true;
             arq_.tick(elapsed_ms);
             arq_tick_in_progress_ = false;
@@ -7499,6 +7515,8 @@ void Connection::tickModeChangeAckRepeats(uint32_t elapsed_ms) {
 }
 
 void Connection::configureArqForCurrentDataMode() {
+    // Each mode supplies its own in-flight timeout table below, or none (the scalar applies).
+    arq_.setAckTimeoutTable(nullptr, 0);
     arq_.setCodeRate(data_code_rate_);
     const int physical_data_cw = physicalDataFrameCodewords();
     const int physical_data_z = selectBurstLiftingZ();
@@ -7545,8 +7563,7 @@ void Connection::configureArqForCurrentDataMode() {
         // airtime means the FINAL file chunk is never reached in-session -> never finalizes).
         // Previously the RTO was passed arq_.getSackDelay() = 30 ms carrier-sense coalesce,
         // NOT this ~6.4 s hold.
-        const uint32_t sack_hold_ms =
-            std::max<uint32_t>(1500u, timing.data_ms + 1000u);
+        const uint32_t sack_hold_ms = connection_policy::mcDpskPartialSackHoldMs(timing);
         arq_.setToneBurstPartialSackDelayMs(sack_hold_ms);
         uint32_t ack_timeout_ms = connection_policy::computeMCDPSKAckTimeoutMs(
             timing, window_size, sack_hold_ms,
@@ -7557,6 +7574,27 @@ void Connection::configureArqForCurrentDataMode() {
                 ack_timeout_ms, connection_policy::kMCDPSKRobustLowAckTimeoutFloorMs);
         }
         arq_.setAckTimeout(ack_timeout_ms);
+        // BUG-MCDPSK-RTO-FULL-WINDOW: the same timeout at every outstanding-frame count, so a
+        // resend of one frame waits for one frame's round trip, not a full window's (43.6 s at
+        // DBPSK). Entry [window] is the scalar above.
+        if (connection_policy::mcDpskInflightRtoEnabled()) {
+            uint32_t table[selective_repeat_arq_policy::kMaxWindow + 1] = {};
+            const size_t win = std::min<size_t>(window_size, selective_repeat_arq_policy::kMaxWindow);
+            for (size_t n = 1; n <= win; ++n) {
+                uint32_t t = connection_policy::computeMCDPSKAckTimeoutMs(
+                    timing, n, sack_hold_ms, connection_policy::kCarrierSenseAckRepeatCount);
+                if (data_modulation_ == Modulation::DBPSK &&
+                    config_.mc_dpsk_samples_per_symbol >= 2048) {
+                    t = std::max<uint32_t>(t, connection_policy::kMCDPSKRobustLowAckTimeoutFloorMs);
+                }
+                table[n] = t;
+            }
+            arq_.setAckTimeoutTable(table, win + 1);
+            LOG_MODEM(INFO, "Connection: MC-DPSK in-flight timeout n=1..%zu -> %ums..%ums "
+                      "(scalar=%ums; identity at n=window %s)",
+                      win, table[1], table[win], ack_timeout_ms,
+                      table[win] == ack_timeout_ms ? "OK" : "MISMATCH");
+        }
         LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), carrier_sense_sack_coalesce=%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
                   window_size,
                   ack_timeout_ms / 1000.0f,
@@ -7741,7 +7779,9 @@ void Connection::configureArqForCurrentDataMode() {
                 }
                 table[n] = t;
             }
-            arq_.setAckTimeoutTable(table, win + 1);
+            if (selective_repeat_arq_policy::inflightRtoEnabled()) {
+                arq_.setAckTimeoutTable(table, win + 1);
+            }
             LOG_MODEM(INFO,
                       "Connection: INFLIGHT-RTO table n=1..%zu -> %ums..%ums "
                       "(scalar=%ums; identity at n=window %s)",
@@ -8535,6 +8575,17 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         ? rung_id
         : currentLadderRungId();
     configureArqForCurrentDataMode();
+    // MC-DPSK rate change: a negotiated data mode is a fresh start for the receiver's controller
+    // (the peer begins at this constellation) and for the sender's command ordering.
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        mcdpsk_rate_ctl_.reset(
+            std::max(0, connection_policy::mcDpskRungIndexFor(data_modulation_)),
+            connection_policy::mcDpskFirstProbeAfterCleanBursts(
+                0, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
+                data_frame_cw_count_));
+        rx_mcdpsk_frames_since_command_ = 0;
+        mcdpsk_last_command_group_seq_ = -1;
+    }
     // §RETX-PACING: a mode/rate change starts a NEW era — the zero-round evidence and any
     // armed hold belong to the rung we just left (§7 checklist: reset on applyDataMode).
     zero_progress_rounds_ = 0;
@@ -8640,6 +8691,94 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     if (reportable_terminal_failure && on_message_sent_) {
         on_message_sent_(false);
     }
+}
+
+// ─────────────── MC-DPSK rate change (connection_policy::McDpskRateController) ───────────────
+
+bool Connection::applyMcDpskTxModulation(Modulation mod, const char* reason) {
+    if (negotiated_mode_ != WaveformMode::MC_DPSK || state_ != ConnectionState::CONNECTED ||
+        mod == data_modulation_ || connection_policy::mcDpskRungIndexFor(mod) < 0) {
+        return false;
+    }
+    LOG_MODEM(INFO, "Connection: MC-DPSK RATE tx: %s -> %s (%s)",
+              modulationToString(data_modulation_), modulationToString(mod), reason);
+    // Constellation only. The code rate and codewords per frame are shared by every MC-DPSK
+    // rung, so the ARQ geometry is unchanged and frames already cut resend as they are (their
+    // codeword count rides in each frame's header); configureArqForCurrentDataMode only
+    // re-derives the window and timeouts from the new frame airtime.
+    data_modulation_ = mod;
+    configureArqForCurrentDataMode();
+    notifyDataModeChanged(measured_snr_db_, wireFadingIndex(), /*snr_is_wire=*/false);
+    return true;
+}
+
+void Connection::maybeFallBackMcDpskRungOnTimeout(uint32_t elapsed_ms) {
+    if (negotiated_mode_ != WaveformMode::MC_DPSK || state_ != ConnectionState::CONNECTED ||
+        !connection_policy::mcDpskRateAdaptEnabled()) {
+        return;
+    }
+    const int rung = connection_policy::mcDpskRungIndexFor(data_modulation_);
+    if (rung <= 0 || !arq_.timeoutRetransmitDue(elapsed_ms)) {
+        return;
+    }
+    // Nothing came back for the burst, so no receiver command can either: the resend goes one
+    // rung down (the receiver's first-frame retry decodes either constellation). An older copy of
+    // the ACK that would have carried the previous command must not lift it back.
+    if (applyMcDpskTxModulation(connection_policy::kMcDpskRungModulations[rung - 1],
+                                "retransmit timeout, no ACK") &&
+        mcdpsk_last_command_group_seq_ >= 0) {
+        mcdpsk_last_command_group_seq_ = (mcdpsk_last_command_group_seq_ + 1) & 0x3F;
+    }
+}
+
+uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
+    if (rx_mcdpsk_frames_since_command_ > 0) {
+        const int rung = connection_policy::mcDpskRungIndexFor(rx_mcdpsk_last_modulation_);
+        // Clean: the synchronous end-of-turn ACK (the burst's last frame decoded) with no hole.
+        const bool clean = tone_ack_group_complete_context_ && sack_bitmap == 0;
+        const bool changed = mcdpsk_rate_ctl_.observe(rung, clean);
+        rx_mcdpsk_frames_since_command_ = 0;
+        LOG_MODEM(INFO,
+                  "Connection: MC-DPSK RATE rx: burst at %s %s -> command %s%s "
+                  "(probe after %d clean bursts)",
+                  modulationToString(rx_mcdpsk_last_modulation_), clean ? "clean" : "loss",
+                  modulationToString(
+                      connection_policy::kMcDpskRungModulations[mcdpsk_rate_ctl_.command()]),
+                  changed ? " (changed)" : "", mcdpsk_rate_ctl_.probeAfterCleanBursts());
+    }
+    return connection_policy::encodeMcDpskRungCommand(mcdpsk_rate_ctl_.command());
+}
+
+void Connection::noteRxMcDpskFrameLost(int modulation) {
+    if (negotiated_mode_ != WaveformMode::MC_DPSK || state_ != ConnectionState::CONNECTED ||
+        !connection_policy::mcDpskRateAdaptEnabled()) {
+        return;
+    }
+    const int rung = (modulation >= 0)
+        ? connection_policy::mcDpskRungIndexFor(static_cast<Modulation>(modulation))
+        : -1;
+    const bool changed = mcdpsk_rate_ctl_.observe(rung, /*clean=*/false);
+    LOG_MODEM(INFO, "Connection: MC-DPSK RATE rx: frame lost at %s -> command %s%s "
+              "(probe after %d clean bursts)",
+              rung >= 0 ? modulationToString(static_cast<Modulation>(modulation)) : "unknown",
+              modulationToString(
+                  connection_policy::kMcDpskRungModulations[mcdpsk_rate_ctl_.command()]),
+              changed ? " (changed)" : "", mcdpsk_rate_ctl_.probeAfterCleanBursts());
+}
+
+void Connection::maybeObeyMcDpskRungCommand(uint8_t command_word, uint8_t group_seq) {
+    const int rung = connection_policy::decodeMcDpskRungCommand(command_word);
+    if (rung < 0) {
+        return;  // no command (an older peer, or an ACK with nothing to say)
+    }
+    // A late copy of an older ACK must not undo a newer command: accept group_seq values at or
+    // after the last applied one (6-bit sequence, half-space comparison).
+    if (mcdpsk_last_command_group_seq_ >= 0 &&
+        ((static_cast<int>(group_seq) - mcdpsk_last_command_group_seq_) & 0x3F) >= 32) {
+        return;
+    }
+    mcdpsk_last_command_group_seq_ = group_seq;
+    applyMcDpskTxModulation(connection_policy::kMcDpskRungModulations[rung], "receiver command");
 }
 
 void Connection::commitPendingModeChange(const char* outcome) {

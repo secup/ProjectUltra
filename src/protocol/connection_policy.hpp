@@ -759,6 +759,125 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
     return {};
 }
 
+// ═══════════ MC-DPSK rate change during a session (2026-11-11) ═══════════
+// Until 2026-11-11 an MC-DPSK session kept its connect-time constellation for good: a wrong pick
+// never recovered (ITU Good -3 dB: DQPSK picked, 27 retransmissions, FAIL), and a link that could
+// carry DQPSK stayed at DBPSK (40 bps from +3 down to -3 dB AWGN). Now the RECEIVER commands the
+// constellation in each tone ACK and the sender changes it between bursts.
+//
+// The rungs share sps, code rate (R1/4) and codewords per frame, so a change is a pure
+// constellation change: frames already cut stay valid (MC-DPSK frames are variable-length, the
+// codeword count rides in each frame's header) and the ARQ geometry is untouched. Slowest first.
+inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::DBPSK, Modulation::DQPSK};
+inline constexpr int kMcDpskRungCount =
+    static_cast<int>(sizeof(kMcDpskRungModulations) / sizeof(kMcDpskRungModulations[0]));
+
+inline int mcDpskRungIndexFor(Modulation mod) {
+    for (int i = 0; i < kMcDpskRungCount; ++i) {
+        if (kMcDpskRungModulations[i] == mod) return i;
+    }
+    return -1;
+}
+
+// The command rides the tone ACK's 5-bit rung word [rate_hint(3) | rung_cmd(2)], the field the
+// wideband OFDM authority uses for its canonical rung; both ends know the session is MC-DPSK, so
+// the meaning is unambiguous. 0 = no command, 1 + rung index otherwise.
+inline uint8_t encodeMcDpskRungCommand(int rung) {
+    return (rung >= 0 && rung < kMcDpskRungCount) ? static_cast<uint8_t>(rung + 1) : 0;
+}
+inline int decodeMcDpskRungCommand(uint8_t word) {
+    const int value = word & 0x1F;
+    return (value >= 1 && value <= kMcDpskRungCount) ? value - 1 : -1;
+}
+
+// ULTRA_MCDPSK_RATE_ADAPT (default ON; "0" turns it off, same setting on both stations): the
+// receiver's commands, the sender's obedience and its timeout fallback. The receiver's
+// first-frame retry at the other constellation (StreamingDecoder) stays on either way.
+inline bool mcDpskRateAdaptEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_MCDPSK_RATE_ADAPT");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return on;
+}
+
+// The receiver's decision. Evidence is what the receiver itself saw, when it sees it:
+//   a LOSS  reported by the decoder for a frame it could not decode, with the constellation the
+//           burst was at (-1 when even the first frame failed at every constellation), or an
+//           ACK that is not a clean end of turn;
+//   a CLEAN burst: its last frame arrived (the synchronous end-of-turn ACK) and the receive
+//           window has no hole; rung = the constellation its frames decoded at.
+// The receiver decodes several seconds behind the air and the sender queues bursts back to back,
+// so a burst often predates the command it is judged against. Evidence only moves the command when
+// it is AT the commanded rung: a burst at another rung is neutral.
+// DOWN on any loss above the bottom rung. Break-even: a constellation step doubles the rate, so
+// the upper rung pays only while it loses under ~half of each burst; and in MC-DPSK a failed
+// frame also loses every frame after it in the burst (the next frame's start is only known from
+// the failed frame's header), so one failure costs 62 % of a 4-frame burst on average.
+// UP by probing: after a run of clean bursts at the commanded rung, command the next one. The
+// first run is as long as a failed probe costs (mcDpskFirstProbeAfterCleanBursts: the upper rung's
+// window burst plus its retransmission timeout, in units of the lower rung's clean cycle), so the
+// time spent probing never exceeds the time spent gathering evidence. A probe that fails doubles
+// the run (capped at 8x the first); a probe whose first burst arrives clean resets it. A probe that
+// never decodes at all is caught twice over: the decoder reports the lost first frame, and the
+// sender's own timeout fallback returns it to DBPSK.
+class McDpskRateController {
+public:
+    static constexpr int kMinFirstProbeAfterCleanBursts = 2;  // one clean burst is no trend
+    static constexpr int kMaxBackoffFactor = 8;
+
+    void reset(int rung, int first_probe_after = kMinFirstProbeAfterCleanBursts) {
+        command_ = std::clamp(rung, 0, kMcDpskRungCount - 1);
+        clean_streak_ = 0;
+        first_probe_after_ = std::max(kMinFirstProbeAfterCleanBursts, first_probe_after);
+        probe_after_ = first_probe_after_;
+        probe_target_ = -1;
+    }
+    int firstProbeAfterCleanBursts() const { return first_probe_after_; }
+    int command() const { return command_; }
+    int probeAfterCleanBursts() const { return probe_after_; }
+
+    // Returns true when the command changed.
+    bool observe(int rung, bool clean) {
+        const int before = command_;
+        const int at = (rung >= 0) ? rung : command_;
+        if (!clean) {
+            clean_streak_ = 0;
+            if (at > 0 && at == command_) {
+                command_ = at - 1;
+                backOff();
+            }
+            return command_ != before;
+        }
+        if (at != command_) {
+            return command_ != before;  // the sender has not followed yet: no streak
+        }
+        if (at == probe_target_) {
+            probe_target_ = -1;
+            probe_after_ = first_probe_after_;
+        }
+        if (++clean_streak_ >= probe_after_ && command_ + 1 < kMcDpskRungCount) {
+            command_ += 1;
+            probe_target_ = command_;
+            clean_streak_ = 0;
+        }
+        return command_ != before;
+    }
+
+private:
+    void backOff() {
+        clean_streak_ = 0;
+        probe_target_ = -1;
+        probe_after_ = std::min(probe_after_ * 2, first_probe_after_ * kMaxBackoffFactor);
+    }
+
+    int command_ = 0;
+    int clean_streak_ = 0;
+    int first_probe_after_ = kMinFirstProbeAfterCleanBursts;
+    int probe_after_ = kMinFirstProbeAfterCleanBursts;
+    int probe_target_ = -1;
+};
+
 // ═══════════ #58 increment 3 — connect-SNR pool (BUG-CONNECT-SNR-VARIANCE) ═══════════
 // The entry pick and the MODE_CHANGE wire byte were fed by the last-write-wins scalar
 // measured_snr_db_ — a SINGLE fade realization (rig MPG@20: per-connect readings
@@ -2370,6 +2489,50 @@ inline uint32_t computeMCDPSKAckTimeoutMs(const MCDPSKFrameTiming& timing,
     return std::clamp(timeout_ms,
                       std::max<uint32_t>(18000u, physical_rtt_ms),
                       std::max<uint32_t>(72000u, physical_rtt_ms));
+}
+
+// ULTRA_MCDPSK_INFLIGHT_RTO (default ON; "0" restores the full-window scalar): MC-DPSK sizes each
+// retransmission timeout on the frames actually outstanding (BUG-MCDPSK-RTO-FULL-WINDOW).
+inline bool mcDpskInflightRtoEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_MCDPSK_INFLIGHT_RTO");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
+    return on;
+}
+
+// The receiver's hold before a hole-bearing MC-DPSK SACK: one frame airtime plus a T/R/decode margin
+// so it lands after a trailing failed frame of the same window burst (BUG-MCDPSK-ACK-COLLISION),
+// floored at the 1500 ms OFDM default. Fed to the receiver and to the sender's timeout alike.
+inline uint32_t mcDpskPartialSackHoldMs(const MCDPSKFrameTiming& timing) {
+    return std::max<uint32_t>(1500u, timing.data_ms + 1000u);
+}
+
+// MC-DPSK rate change: the clean run a probe from `lower_rung` must follow. A failed probe costs
+// the upper rung's window burst plus its retransmission timeout (the sender hears nothing back and
+// falls back only then); a clean cycle at the lower rung is its window burst plus the ACK. The run
+// is the first divided by the second, so probing never spends more airtime than the evidence took.
+inline int mcDpskFirstProbeAfterCleanBursts(int lower_rung, int num_carriers,
+                                            int samples_per_symbol, int cw_count) {
+    if (lower_rung < 0 || lower_rung + 1 >= kMcDpskRungCount) {
+        return McDpskRateController::kMinFirstProbeAfterCleanBursts;
+    }
+    const auto lo = mcDpskFrameTiming(kMcDpskRungModulations[lower_rung], num_carriers,
+                                      samples_per_symbol, cw_count);
+    const auto hi = mcDpskFrameTiming(kMcDpskRungModulations[lower_rung + 1], num_carriers,
+                                      samples_per_symbol, cw_count);
+    const uint64_t w_lo = mcDpskWindowSizeForTiming(lo);
+    const uint64_t w_hi = mcDpskWindowSizeForTiming(hi);
+    const uint64_t failed_probe_ms =
+        w_hi * hi.data_ms +
+        computeMCDPSKAckTimeoutMs(hi, static_cast<size_t>(w_hi), mcDpskPartialSackHoldMs(hi),
+                                  kCarrierSenseAckRepeatCount);
+    const uint64_t clean_cycle_ms = w_lo * lo.data_ms + lo.ack_ms;
+    if (clean_cycle_ms == 0) {
+        return McDpskRateController::kMinFirstProbeAfterCleanBursts;
+    }
+    const int run = static_cast<int>((failed_probe_ms + clean_cycle_ms - 1) / clean_cycle_ms);
+    return std::max(McDpskRateController::kMinFirstProbeAfterCleanBursts, run);
 }
 
 // Airtime of a narrowband OFDM frame at this rung: the rung's own pilot spacing on the 21

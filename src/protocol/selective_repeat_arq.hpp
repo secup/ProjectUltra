@@ -60,6 +60,10 @@ public:
     bool isReadyToSend() const override;
     size_t getAvailableSlots() const override;
     size_t getTxInFlightBytes() const;
+    // True when tick(elapsed_ms) will retransmit at least one frame on TIMEOUT (same conditions as
+    // tick: an active unacked slot whose timer expires, not suspended, no DATA_REPAIR guard). Lets
+    // the caller change the PHY profile BEFORE the resend is rendered (MC-DPSK timeout fallback).
+    bool timeoutRetransmitDue(uint32_t elapsed_ms) const;
     // Highest retransmit count among active un-acked TX slots (0 if nothing in flight). The
     // rate controller polls this to detect a frame STUCK at a too-aggressive rate (the fade
     // troughs keep killing it) so it can escape-drop to a more robust rung before max_retries.
@@ -282,9 +286,9 @@ public:
     uint32_t getAckBatchSize() const { return config_.ack_batch_size; }
 
     // Set ACK timeout (adaptive based on waveform frame duration)
-    // In-flight-aware timeout table (ULTRA_INFLIGHT_RTO). Index = frames outstanding,
-    // 1..kMaxWindow; entry [window] must equal the legacy scalar. Supplied by the
-    // Connection from the same policy function, so the ARQ holds no timing knowledge.
+    // In-flight-aware timeout table. Index = frames outstanding, 1..kMaxWindow; entry [window]
+    // must equal the scalar. Supplied by the Connection from the same policy function, so the
+    // ARQ holds no timing knowledge; (nullptr, 0) clears it and the scalar applies again.
     void setAckTimeoutTable(const uint32_t* table, size_t count) {
         ack_timeout_table_n_ = std::min(count, sizeof(ack_timeout_table_) / sizeof(uint32_t));
         for (size_t i = 0; i < ack_timeout_table_n_; ++i) ack_timeout_table_[i] = table[i];

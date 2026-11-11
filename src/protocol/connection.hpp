@@ -507,6 +507,17 @@ public:
     Modulation getDataModulation() const { return data_modulation_; }
     CodeRate getDataCodeRate() const { return data_code_rate_; }
 
+    // MC-DPSK rate change (receiver side): the constellation the frame about to be delivered
+    // through onRxData decoded at. The modem binding calls this just before onRxData, so the
+    // end-of-turn ACK that frame triggers can carry a command built from it.
+    void noteRxMcDpskModulation(Modulation mod) {
+        rx_mcdpsk_last_modulation_ = mod;
+        ++rx_mcdpsk_frames_since_command_;
+    }
+    // MC-DPSK rate change (receiver side): a frame the modem could not decode, with its burst's
+    // constellation (static_cast<int>(Modulation), -1 = unknown). Loss evidence, applied at once.
+    void noteRxMcDpskFrameLost(int modulation);
+
     // Set measured SNR from modem layer (call this when decoding frames).
     // data_aided: snr_db is the MC-DPSK data-aided (fade-averaged) estimate — the
     // only source the connectSelectionSnrDb saturation bound may act on.
@@ -1338,6 +1349,15 @@ private:
     // RECEIVER: canonical rung this end commands (0 = none); re-stamped on every
     // ACK emit until superseded by the next group's verdict.
     uint8_t rx_authority_cmd_ = 0;
+    // MC-DPSK rate change (connection_policy::McDpskRateController). RECEIVER: the controller,
+    // the constellation of the last delivered MC-DPSK frame and the frames delivered since the
+    // controller last observed (0 = no new evidence, so an ACK repeat changes nothing).
+    // SENDER: the newest ACK group_seq whose command was applied (stale ACKs are ignored) and
+    // the arq time of the last timeout fallback (one step per timeout event).
+    connection_policy::McDpskRateController mcdpsk_rate_ctl_;
+    Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
+    uint32_t rx_mcdpsk_frames_since_command_ = 0;
+    int mcdpsk_last_command_group_seq_ = -1;
     // RECEIVER: fade-averaging ring for the verdict SNR. The per-frame broadband
     // EMA is a fade SNAPSHOT (measured ±5 dB swing on a dial-20 Good channel) —
     // rate anchors are calibrated on dial-equivalent SNR, so the verdict input is
@@ -1719,6 +1739,15 @@ private:
                                  uint8_t reason);
     void commitLocalModeSwitch(Modulation mod, CodeRate rate, int cw_count,
                                float measured_snr, uint8_t reason);
+    // MC-DPSK rate change. Sender: switch this end's data constellation for the next burst
+    // (constellation only: code rate, codewords and ARQ geometry stay); returns true on a change.
+    bool applyMcDpskTxModulation(Modulation mod, const char* reason);
+    // Sender: before an ARQ tick that will resend on timeout, step one rung down.
+    void maybeFallBackMcDpskRungOnTimeout(uint32_t elapsed_ms);
+    // Receiver: fold the evidence since the last ACK into the controller; returns the 5-bit word.
+    uint8_t mcDpskRungCommandForAck(uint32_t sack_bitmap);
+    // Sender: obey a receiver command carried by a tone ACK.
+    void maybeObeyMcDpskRungCommand(uint8_t command_word, uint8_t group_seq);
 
     // Callbacks
     TransmitCallback on_transmit_;

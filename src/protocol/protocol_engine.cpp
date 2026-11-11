@@ -869,6 +869,16 @@ void ProtocolEngine::setMeasuredSNR(float snr_db, SNRSource source, bool data_ai
     connection_.setMeasuredSNR(snr_db, source, data_aided);
 }
 
+void ProtocolEngine::noteRxMcDpskModulation(Modulation mod) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteRxMcDpskModulation(mod);
+}
+
+void ProtocolEngine::noteRxMcDpskFrameLost(int modulation) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteRxMcDpskFrameLost(modulation);
+}
+
 void ProtocolEngine::setPhysicalChannelStats(float mean_db, float spread_db,
                                              uint32_t n) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);

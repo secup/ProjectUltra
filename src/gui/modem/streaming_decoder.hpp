@@ -643,6 +643,10 @@ public:
                 .count());
     }
     bool hasLastPhysicalSnr() const { return last_physical_snr_valid_.load(); }
+    // MC-DPSK rate change: the constellation the last decoded MC-DPSK frame used.
+    Modulation lastMcDpskRxModulation() const {
+        return static_cast<Modulation>(last_mc_dpsk_rx_modulation_.load(std::memory_order_relaxed));
+    }
     float lastPhysicalSnrDb() const { return last_physical_snr_db_.load(); }
     // Handoff §5: distribution over the recent physical readings.
     // Returns readings-count; mean is linear-domain (fade-averaged), spread
@@ -687,6 +691,12 @@ public:
     void setRealTimeAudio(bool v) { sync_controller_.real_time_audio_ = v; }
     void setAnchoredBurstNoGroupCallback(std::function<void(bool payload_seen)> cb) {
         anchored_burst_no_group_callback_ = std::move(cb);
+    }
+    // MC-DPSK rate change: a connected MC-DPSK data frame this decoder could not decode, with the
+    // constellation its burst was at (static_cast<int>(Modulation)), or -1 when the burst's first
+    // frame failed at every constellation. Decode thread; same class as the frame callback.
+    void setMcDpskFrameLostCallback(std::function<void(int modulation)> cb) {
+        mc_dpsk_frame_lost_callback_ = std::move(cb);
     }
     // A marker-armed candidate was abandoned without trustworthy group geometry.
     // This is state-only provenance: consumers may cancel a pending experiment,
@@ -951,10 +961,22 @@ private:
     // even when control-path profile switching temporarily clears waveform state.
     void captureConstellationSnapshot();
 
-    // MC-DPSK specific decode (simple sequential, no frame interleaving)
+    // MC-DPSK specific decode (simple sequential, no frame interleaving). The wrapper records
+    // the constellation of every frame that decodes (lastMcDpskRxModulation).
     DecodeResult decodeMCDPSKFrame(const std::vector<float>& soft_bits,
                                     CodeRate rate, size_t bytes_per_cw,
                                     float snr, float cfo);
+    DecodeResult decodeMCDPSKFrameImpl(const std::vector<float>& soft_bits,
+                                        CodeRate rate, size_t bytes_per_cw,
+                                        float snr, float cfo);
+    // MC-DPSK rate change: true when the first codeword LDPC-decodes to a frame header (plain
+    // magic, or a whitened control frame's).
+    bool mcDpskCw0IsFrameHeader(const std::vector<float>& soft_bits, CodeRate rate);
+    // MC-DPSK rate change: a connected burst's first frame whose first codeword fails at the
+    // configured constellation is re-demodulated at the other data constellations; on success the
+    // waveform stays there (the rest of the burst shares it) and soft_bits are replaced.
+    void retryMcDpskFirstFrameConstellation(const std::vector<float>& frame_buffer,
+                                            float decode_cfo, std::vector<float>& soft_bits);
 
     // CFO pre-correction: remove CFO from real passband samples before demodulation.
     // Uses Hilbert transform → analytic signal → complex rotation → real part.
@@ -1175,6 +1197,7 @@ private:
     // Audio-activity instrumentation: independent of chirp-search, observes
     // RMS transitions in the incoming sample stream. Each high-RMS arrival is
     // logged so post-run analysis can compare audio events to sync events.
+    std::atomic<int> last_mc_dpsk_rx_modulation_{static_cast<int>(Modulation::DBPSK)};
     std::atomic<bool> audio_activity_{false};
     std::atomic<uint64_t> audio_activity_events_{0};
 
@@ -1306,6 +1329,12 @@ private:
     // physical tail is lost, but this evidence forbids fabricating a 0/N crater.
     bool anchored_burst_payload_seen_ = false;
     std::function<void(bool payload_seen)> anchored_burst_no_group_callback_;
+    std::function<void(int modulation)> mc_dpsk_frame_lost_callback_;
+    void noteMcDpskFrameLost(int modulation) {
+        if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK && mc_dpsk_frame_lost_callback_) {
+            mc_dpsk_frame_lost_callback_(modulation);
+        }
+    }
     std::function<void()> burst_outcome_unknown_callback_;
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;

@@ -72,6 +72,11 @@ inline void wireModemToProtocol(ModemEngine& modem,
                                              modem.getDopplerCoherenceDopplerHz(),
                                              modem.getDopplerCoherenceValid());
             }
+            // MC-DPSK rate change: the receiver's controller needs the constellation of the
+            // frame BEFORE onRxData, which may emit the end-of-turn ACK carrying its command.
+            if (modem.getWaveformMode() == protocol::WaveformMode::MC_DPSK) {
+                protocol.noteRxMcDpskModulation(modem.lastMcDpskRxModulation());
+            }
             protocol.onRxData(data, physical_turn_complete);
             if (hooks.after_rx_data) {
                 hooks.after_rx_data(data, snr_db, fading, snr_source, use_quality);
@@ -173,6 +178,10 @@ inline void wireModemToProtocol(ModemEngine& modem,
         });
     modem.setBurstOutcomeUnknownCallback(
         [&protocol]() { protocol.onBurstOutcomeUnknown(); });
+    // MC-DPSK rate change: frames the decoder could not decode are the receiver controller's
+    // loss evidence (-1 = the burst's first frame failed at every constellation).
+    modem.setMcDpskFrameLostCallback(
+        [&protocol](int modulation) { protocol.noteRxMcDpskFrameLost(modulation); });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);

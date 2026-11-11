@@ -365,6 +365,7 @@ public:
     // RMS): S:N-holding channel simulators scale idle noise differently from
     // burst noise, and real-radio fade state matches only within the frame.
     void setNoiseReferenceRMS(float rms) { noise_ref_rms_ = rms; }
+    float noiseReferenceRMS() const { return noise_ref_rms_; }
     bool hasPhysicalSNR() const { return last_physical_snr_valid_; }
     float getPhysicalSNRdB() const { return last_physical_snr_db_; }
 

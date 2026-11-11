@@ -91,6 +91,9 @@ results; see docs/CHANGELOG.md):
 The modem has distinct operating modes selected by SNR/channel. **Never mix their machinery.**
 
 ### Mode 1: MC-DPSK (below wide-OFDM floor, or heavy fading)
+- Constellation changes during the session (2026-11-11, `ULTRA_MCDPSK_RATE_ADAPT`, INV-MCDPSK-RATE-001):
+  the receiver commands DBPSK/DQPSK in each tone ACK, the sender switches between bursts (and drops a
+  rung on a retransmission timeout), the receiver re-demodulates a failed first frame at the other one.
 - Multi-Carrier DPSK + chirp sync. ARQ selective-repeat with a **timing-derived window (1–5)** via `mcDpskWindowSizeForTiming` (not fixed window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
 
 ### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)

@@ -757,6 +757,21 @@ the narrowband preset (3.0, exact).
 decoded (BUG-NARROW-MCDPSK-CONNECT).
 **Test:** `CliLoopback` (`narrow_connect`); reported SNR of a noiseless narrowband frame is ~48 dB.
 
+### INV-MCDPSK-RATE-001: an MC-DPSK constellation change happens between bursts and only there
+**Rule:** the sender changes its MC-DPSK data constellation (DBPSK <-> DQPSK) only between bursts:
+on the receiver's command in a tone ACK, or one rung down before an ARQ tick that resends on timeout
+(`Connection::maybeFallBackMcDpskRungOnTimeout`). Only the constellation changes; every MC-DPSK rung
+shares sps, code rate and codewords per frame (`kMcDpskRungModulations`), so the ARQ geometry and
+the frames already cut stay valid. The receiver never assumes the sender heard its command: a
+connected burst's first frame whose first codeword fails is re-demodulated at the other
+constellation before any false-lock or PING verdict (`retryMcDpskFirstFrameConstellation`), and the
+first-frame look-ahead covers one DBPSK codeword (`MCDPSKWaveform::getMinSamplesForFrame`).
+**Why:** a lost ACK would otherwise leave the two ends on different constellations with no way
+back. A mid-burst change would need per-codeword trial decoding (continuation frames carry no
+preamble), and changing the codeword count aborts in-flight frames (`setFixedFrameGeometry`).
+**Test:** `StreamingMCDPSK` (`DQPSK burst at a DBPSK receiver` and the reverse; disabling the retry
+fails it), `ConnectionPolicy` `test_mcdpsk_rate_controller`.
+
 ---
 
 ## Modulation Invariants

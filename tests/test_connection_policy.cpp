@@ -1072,6 +1072,106 @@ void test_connect_affine_basis() {
           "the 6.5 saturation-zone test stays keyed to the RAW reading");
 }
 
+// MC-DPSK rate change (2026-11-11): the command codec and the receiver's controller.
+void test_mcdpsk_rate_controller() {
+    // Codec: 0 = no command, 1 + rung otherwise; out-of-range words carry no command.
+    CHECK(kMcDpskRungCount == 2 && kMcDpskRungModulations[0] == Modulation::DBPSK &&
+              kMcDpskRungModulations[1] == Modulation::DQPSK,
+          "MC-DPSK data rungs are DBPSK then DQPSK (slowest first)");
+    CHECK(mcDpskRungIndexFor(Modulation::DBPSK) == 0 && mcDpskRungIndexFor(Modulation::DQPSK) == 1 &&
+              mcDpskRungIndexFor(Modulation::QPSK) == -1,
+          "rung index of each constellation");
+    CHECK(encodeMcDpskRungCommand(0) == 1 && encodeMcDpskRungCommand(1) == 2 &&
+              encodeMcDpskRungCommand(-1) == 0 && encodeMcDpskRungCommand(2) == 0,
+          "command encoding");
+    CHECK(decodeMcDpskRungCommand(0) == -1 && decodeMcDpskRungCommand(1) == 0 &&
+              decodeMcDpskRungCommand(2) == 1 && decodeMcDpskRungCommand(3) == -1 &&
+              decodeMcDpskRungCommand(0x1F) == -1,
+          "command decoding (0 and unknown words carry no command)");
+    for (int r = 0; r < kMcDpskRungCount; ++r) {
+        CHECK(decodeMcDpskRungCommand(encodeMcDpskRungCommand(r)) == r, "codec round trip");
+    }
+
+    // The first probe follows as many clean bursts as a failed probe costs. Production geometry
+    // (8 carriers, 1024 samples/symbol). A DBPSK session's frames have 3 codewords (kept across the
+    // constellation change): a failed DQPSK probe is a 3-frame burst (3 x 2.82 s) plus its 24.8 s
+    // timeout = 33.3 s, a clean DBPSK cycle 3 x 5.38 s + the 1.92 s ACK = 18.1 s -> 2 bursts. With
+    // 4 codewords: 3 x 3.69 s + 30.9 s = 42.0 s over 2 x 7.10 s + 1.92 s = 16.1 s -> 3.
+    CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 3) == 2,
+          "first probe after 2 clean DBPSK bursts at the production 3-codeword geometry");
+    CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 4) == 3,
+          "first probe after 3 clean DBPSK bursts with 4 codewords per frame");
+    CHECK(mcDpskFirstProbeAfterCleanBursts(1, 8, 1024, 3) ==
+              McDpskRateController::kMinFirstProbeAfterCleanBursts,
+          "no rung above DQPSK: the minimum");
+
+    McDpskRateController c;
+    c.reset(0, 2);
+    CHECK(c.firstProbeAfterCleanBursts() == 2, "the run is the caller's");
+    c.reset(0, 1);
+    CHECK(c.firstProbeAfterCleanBursts() == McDpskRateController::kMinFirstProbeAfterCleanBursts,
+          "never below the minimum (one clean burst is no trend)");
+    c.reset(0, 2);
+    const int k0 = c.firstProbeAfterCleanBursts();
+    // UP: k0 clean bursts at the commanded rung, then a probe.
+    for (int i = 0; i < k0 - 1; ++i) {
+        CHECK(!c.observe(0, true) && c.command() == 0, "clean bursts below the probe count hold");
+    }
+    CHECK(c.observe(0, true) && c.command() == 1, "the k0-th clean burst probes DQPSK");
+    // Bursts still at DBPSK were on the air before the sender heard the command (the receiver
+    // decodes seconds behind, the sender queues bursts back to back): neutral, clean or not.
+    CHECK(!c.observe(0, true) && c.command() == 1, "a clean burst at another rung is neutral");
+    CHECK(!c.observe(0, false) && c.command() == 1, "a lossy burst at another rung is neutral");
+    // The probe fails: a loss AT DQPSK steps down and doubles the clean run.
+    CHECK(c.observe(1, false) && c.command() == 0 && c.probeAfterCleanBursts() == 2 * k0,
+          "a failed probe steps down and doubles the clean run");
+    for (int i = 0; i < 2 * k0 - 1; ++i) {
+        CHECK(!c.observe(0, true) && c.command() == 0, "the doubled clean run must complete");
+    }
+    CHECK(c.observe(0, true) && c.command() == 1, "second probe after the doubled run");
+    // The probe's first burst arrives clean at DQPSK: held, backoff reset.
+    CHECK(!c.observe(1, true) && c.command() == 1 && c.probeAfterCleanBursts() == k0,
+          "a clean probe burst holds DQPSK and resets the backoff");
+    CHECK(!c.observe(1, true) && c.command() == 1, "top rung: clean bursts hold");
+    // DOWN on any loss above the bottom rung.
+    CHECK(c.observe(1, false) && c.command() == 0 && c.probeAfterCleanBursts() == 2 * k0,
+          "a loss at DQPSK steps down and doubles the backoff");
+    // A loss at the bottom rung changes nothing but the streak.
+    CHECK(!c.observe(0, false) && c.command() == 0, "a loss at DBPSK holds DBPSK");
+    // Unknown rung: the evidence is taken at the commanded rung.
+    c.reset(1, k0);
+    CHECK(c.observe(-1, false) && c.command() == 0, "a loss at an unknown rung counts at the command");
+    // The backoff is capped.
+    c.reset(0, k0);
+    for (int round = 0; round < 10; ++round) {
+        while (c.command() == 0) c.observe(0, true);
+        c.observe(1, false);
+    }
+    CHECK(c.probeAfterCleanBursts() == k0 * McDpskRateController::kMaxBackoffFactor,
+          "repeated failed probes cap the clean run");
+}
+
+// BUG-MCDPSK-RTO-FULL-WINDOW: the MC-DPSK timeout as a function of frames outstanding (the table
+// Connection hands the ARQ). DBPSK, production geometry, 3 codewords: a full 3-frame window waits
+// 43.55 s; one frame waits its own round trip, 5.4 s on air + 5.4 s decode + ACK 1.9 s + hold 6.4 s
+// + 3 s = 22.0 s.
+void test_mcdpsk_inflight_timeout_table() {
+    const auto timing = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 3);
+    const size_t window = mcDpskWindowSizeForTiming(timing);
+    const uint32_t hold = mcDpskPartialSackHoldMs(timing);
+    const uint32_t full = computeMCDPSKAckTimeoutMs(timing, window, hold, kCarrierSenseAckRepeatCount);
+    const uint32_t one = computeMCDPSKAckTimeoutMs(timing, 1, hold, kCarrierSenseAckRepeatCount);
+    CHECK(window == 3 && full == 43552, "DBPSK full-window timeout is the 43.6 s scalar");
+    CHECK(one == 22048, "a one-frame DBPSK resend waits 22.0 s");
+    uint32_t prev = 0;
+    for (size_t n = 1; n <= window; ++n) {
+        const uint32_t t = computeMCDPSKAckTimeoutMs(timing, n, hold, kCarrierSenseAckRepeatCount);
+        CHECK(t > prev, "the timeout grows with the frames outstanding");
+        prev = t;
+    }
+    CHECK(mcDpskInflightRtoEnabled(), "MC-DPSK in-flight timeout is on by default");
+}
+
 // BUG-CONNECT-BOOST-NO-EVIDENCE (2026-11-11): the fading basis is a bet calibrated on strong links.
 // With no physical measurement to bound it, the reading (a lower bound on the channel SNR) is the
 // selection; with one, the boost stands up to physical mean + margin, exactly as before.
@@ -1788,6 +1888,8 @@ int main() {
     test_connect_selection_saturation_bound();
     test_connect_affine_basis();
     test_connect_selection_needs_physical_evidence();
+    test_mcdpsk_rate_controller();
+    test_mcdpsk_inflight_timeout_table();
     test_coherent_window_override_disabled_keeps_default();
     test_qam16_r34_cap_knob_off_keeps_r23();
     test_retx_trough_defer();

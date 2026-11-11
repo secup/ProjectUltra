@@ -1150,6 +1150,10 @@ size_t ModemEngine::physicalSnrStats(float& mean_db, float& spread_db) const {
     return streaming_decoder_->physicalSnrStats(mean_db, spread_db);
 }
 
+Modulation ModemEngine::lastMcDpskRxModulation() const {
+    return streaming_decoder_ ? streaming_decoder_->lastMcDpskRxModulation() : Modulation::DBPSK;
+}
+
 int64_t ModemEngine::lastRxSubstantiveMs() const {
     return streaming_decoder_ ? streaming_decoder_->lastRxSubstantiveMs() : -1000000;
 }

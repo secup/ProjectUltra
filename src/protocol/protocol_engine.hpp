@@ -232,6 +232,10 @@ public:
                         bool data_aided = false);
     // §6: fade-averaged physical channel SNR stats (entry-pick physics cap).
     void setPhysicalChannelStats(float mean_db, float spread_db, uint32_t n);
+    // MC-DPSK rate change: the constellation of the frame about to be passed to onRxData, and a
+    // frame the modem could not decode (modulation as int, -1 when unknown).
+    void noteRxMcDpskModulation(Modulation mod);
+    void noteRxMcDpskFrameLost(int modulation);
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;
 

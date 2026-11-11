@@ -257,6 +257,60 @@ bool test_code_rate_change_aborts_in_flight_fixed_frames() {
     return true;
 }
 
+// BUG-MCDPSK-RTO-FULL-WINDOW: with an in-flight timeout table, a lone outstanding frame times out
+// after table[1] and its RESEND is armed with table[1] too (the resend used to inherit the full
+// scalar). Without a table, the scalar applies.
+bool test_retransmit_timeout_follows_inflight_table() {
+    TEST("Resend timeout follows the in-flight table");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 40000;
+    config.sack_delay_ms = 100;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    const uint32_t table[] = {0, 10000, 20000, 30000, 40000};
+    tx.setAckTimeoutTable(table, 5);
+
+    if (!tx.sendData(Bytes{0x01, 0x02}))
+        FAIL("Failed to send data");
+    if (channel.size() != 1)
+        FAIL("Frame not transmitted");
+    channel.clear();
+    tx.tick(9000);
+    if (channel.size() != 0)
+        FAIL("Resent before table[1]");
+    tx.tick(1001);
+    if (channel.size() != 1)
+        FAIL("Lone frame not resent at table[1]");
+    channel.clear();
+    tx.tick(10001);
+    if (channel.size() != 1)
+        FAIL("The resend waited longer than table[1]");
+
+    // No table: the scalar.
+    SelectiveRepeatARQ tx2(config);
+    tx2.setCallsigns("TX1", "RX1");
+    ByteChannel channel2;
+    tx2.setTransmitCallback([&](const Bytes& data) { channel2.send(data); });
+    tx2.setAckTimeoutTable(table, 5);
+    tx2.setAckTimeoutTable(nullptr, 0);
+    tx2.sendData(Bytes{0x03});
+    channel2.clear();
+    tx2.tick(20000);
+    if (channel2.size() != 0)
+        FAIL("A cleared table must fall back to the scalar");
+    tx2.tick(20001);
+    if (channel2.size() != 1)
+        FAIL("Scalar timeout not honoured");
+
+    PASS();
+    return true;
+}
+
 bool test_send_window_full() {
     TEST("Send until window full");
 
@@ -3114,6 +3168,9 @@ int main() {
     // Run new Phase 1b + stream-aware tests FIRST so they're observable even
     // if a later existing test hangs (test_full_exchange has a known hang
     // issue, unrelated to these changes).
+    std::cout << "In-flight timeout:\n";
+    test_retransmit_timeout_follows_inflight_table();
+
     std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
     test_ack_batch_threshold_independent();
     test_ack_batch_out_of_order_safety_valve();

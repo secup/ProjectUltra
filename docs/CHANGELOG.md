@@ -10,6 +10,66 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — FEAT(mcdpsk): the constellation changes during a session (ULTRA_MCDPSK_RATE_ADAPT)
+
+**What was missing.** An MC-DPSK session kept its connect-time constellation for good. A wrong pick
+never recovered (ITU Good -3 dB: DQPSK picked, 27 retransmissions, FAIL), and a link that could
+carry DQPSK stayed at DBPSK: 40 bps from +3 down to -3 dB AWGN (1 KB, GUI gate).
+
+**What changed.**
+- Receiver (`connection_policy::McDpskRateController`): DOWN on any loss above DBPSK; UP by probing
+  after a clean run as long as a failed probe costs (`mcDpskFirstProbeAfterCleanBursts`: the DQPSK
+  window burst plus its timeout over one clean DBPSK cycle = 2 bursts at the production 3-codeword
+  geometry), the run doubling (up to 8x) after each failed probe and resetting when a probe holds. Losses come from the decoder as they happen
+  (`setMcDpskFrameLostCallback`: a continuation frame that is due but does not decode, a frame whose
+  header decodes and the rest does not, a first frame that fails at every constellation while its
+  data section reads above the burst's noise); a clean burst is a synchronous end-of-turn ACK with no
+  hole. Evidence only moves the command when it is AT the commanded rung: the receiver decodes
+  seconds behind the air and the sender queues bursts back to back, so a burst at another rung
+  usually predates the command (the first version treated it as a failed probe and failed Good 0 dB).
+- The command rides the tone ACK's 5-bit rung word, read per waveform (0 none, 1 DBPSK, 2 DQPSK).
+- Sender: obeys between bursts, constellation only (`applyMcDpskTxModulation`: code rate,
+  codewords per frame and ARQ geometry are shared by both rungs, so frames already cut resend as
+  they are); ignores commands from ACKs older than the last applied one; drops one rung by itself
+  before an ARQ tick that resends on timeout (`maybeFallBackMcDpskRungOnTimeout`, using the new
+  `SelectiveRepeatARQ::timeoutRetransmitDue`).
+- Receiver decoder: a connected burst's first frame whose first codeword fails at the configured
+  constellation is re-demodulated at the other one before the false-lock and PING verdicts
+  (`retryMcDpskFirstFrameConstellation`); the first-frame look-ahead covers one DBPSK codeword
+  (`MCDPSKWaveform::getMinSamplesForFrame`); `MCDPSKWaveform::configure` keeps the frame's noise
+  reference so the re-demodulation measures the same physical SNR.
+- Binding: each delivered MC-DPSK frame's constellation reaches the Connection before `onRxData`.
+- BUG-MCDPSK-RTO-FULL-WINDOW (`ULTRA_MCDPSK_INFLIGHT_RTO`, default ON): the MC-DPSK timeout is a
+  table over the frames outstanding (`computeMCDPSKAckTimeoutMs` at n = 1..window, entry [window] =
+  the old scalar), and a RESEND is armed from that table too (`retransmitFrame` used the full scalar,
+  the same flaw that kept `ULTRA_INFLIGHT_RTO` from fixing the OFDM tail). The ARQ uses a table
+  whenever one is supplied; wideband OFDM still supplies one only under `ULTRA_INFLIGHT_RTO=1`. A
+  one-frame DBPSK resend now waits 22.0 s, not 43.6 s.
+- Docs: INV-MCDPSK-RATE-001, map rows (knob + decoder retry), CLAUDE.md Mode 1.
+
+**Tests.** ctest 115/115: `ConnectionPolicy` `test_mcdpsk_rate_controller` (codec, derived probe run,
+neutral bursts at another rung, step-down, backoff cap) and `test_mcdpsk_inflight_timeout_table`;
+`SelectiveRepeatARQ` `test_retransmit_timeout_follows_inflight_table` (a lone frame's resend waits
+table[1]; a cleared table falls back to the scalar); `StreamingMCDPSK` DQPSK burst at a DBPSK receiver
+and the reverse (all frames decode; fails with the retry removed), lost-frame report (a burst whose
+tail is noise reports one loss at DBPSK). GUI gate A/B, same build, `ULTRA_MCDPSK_RATE_ADAPT=0` vs
+default, interleaved, 1 KB, CFO 7.3 Hz:
+
+| Case | Off | On (probe after 2, full-window timeout) |
+|---|---|---|
+| AWGN 0 dB s42 / s43 | 40 / 40 bps | 60 / 60 bps (DQPSK after 2 bursts, no retransmission) |
+| AWGN +3 dB s42 | 40 bps | 60 bps |
+| ITU Good 0 dB s42 | 558 s | 461 s |
+| ITU Good 0 dB s43 | 532 s | FAIL at the 600 s limit (one failed probe cost ~70 s) |
+| AWGN -6 dB s42 | FAIL at 600 s | FAIL at 600 s |
+| AWGN 20 / Good 20 (OFDM, 4 KB) | 1230 / 1510 bps | 1230 / 1530 bps |
+
+A failed probe got no ACK (nothing in the burst decoded), so the sender learned of it only from its
+full-window timeout: the in-flight timeout above shortens that wait. A combined A/B (both features
+off vs on) on the three weak cases follows in the next entry.
+
+---
+
 ## 2026-11-11 — FIX(connect): the fading SNR boost needs a physical measurement (BUG-CONNECT-BOOST-NO-EVIDENCE)
 
 **What was broken.** On ITU Good at -3 dB (GUI gate, 1 KB, seed 42, 7.3 Hz) the responder read

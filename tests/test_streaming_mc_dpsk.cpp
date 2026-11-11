@@ -173,6 +173,122 @@ bool runLowAmplitudePing(const char* name,
     return true;
 }
 
+// MC-DPSK rate change (2026-11-11): the sender changes constellation between bursts and the
+// receiver may still be configured for the other one (a lost command, or its own data mode). The
+// burst's first frame is re-demodulated at the other constellation and the rest of the burst
+// follows it. Production geometry: 8 carriers, 1024 samples/symbol, R1/4.
+bool runConstellationChangeBurst(Modulation tx_mod, Modulation rx_configured) {
+    const char* name = (tx_mod == Modulation::DQPSK) ? "DQPSK burst at a DBPSK receiver"
+                                                     : "DBPSK burst at a DQPSK receiver";
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(tx_mod, CodeRate::R1_4);
+
+    std::vector<Bytes> serialized_frames;
+    for (uint16_t i = 0; i < 3; ++i) {
+        Bytes payload(50);
+        for (size_t j = 0; j < payload.size(); ++j) {
+            payload[j] = static_cast<uint8_t>(0x41 + i * 13 + j);
+        }
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(60 + i),
+                                             payload, CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(
+            v2::Flags::VERSION_V2 | (i + 1 < 3 ? v2::Flags::MORE_FRAG : v2::Flags::NONE));
+        serialized_frames.push_back(frame.serialize());
+    }
+    auto samples = encoder.encodeBurstLight(serialized_frames);
+    if (samples.empty()) {
+        std::cout << "FAIL: " << name << ": encoder produced no samples\n";
+        return false;
+    }
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    decoder.setDataMode(rx_configured, CodeRate::R1_4);
+
+    feedInChunks(decoder, withSilence(samples));
+    size_t decoded = 0;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && v2::isDataFrame(result.frame_type)) {
+            ++decoded;
+        }
+    }
+    if (decoded != serialized_frames.size()) {
+        std::cout << "FAIL: " << name << ": decoded " << decoded << " of "
+                  << serialized_frames.size() << " frames\n";
+        return false;
+    }
+    if (decoder.lastMcDpskRxModulation() != tx_mod) {
+        std::cout << "FAIL: " << name << ": recorded constellation "
+                  << modulationToString(decoder.lastMcDpskRxModulation()) << "\n";
+        return false;
+    }
+    std::cout << name << ": all " << decoded << " frames decoded\n";
+    return true;
+}
+
+// MC-DPSK rate change: a frame the receiver cannot decode is reported, with the burst's
+// constellation, so the receiver's rate controller sees the loss even when nothing is delivered.
+bool runLostFrameReport() {
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    std::vector<Bytes> serialized_frames;
+    for (uint16_t i = 0; i < 3; ++i) {
+        Bytes payload(50, static_cast<uint8_t>(0x20 + i));
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(80 + i),
+                                             payload, CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(
+            v2::Flags::VERSION_V2 | (i + 1 < 3 ? v2::Flags::MORE_FRAG : v2::Flags::NONE));
+        serialized_frames.push_back(frame.serialize());
+    }
+    auto samples = encoder.encodeBurstLight(serialized_frames);
+    // Replace the last 30 % of the burst (inside the third frame) with noise of the same power:
+    // energy where a frame is due, nothing decodable.
+    double power = 0.0;
+    for (float v : samples) power += static_cast<double>(v) * v;
+    const float rms = static_cast<float>(std::sqrt(power / static_cast<double>(samples.size())));
+    uint32_t lcg = 12345u;
+    for (size_t i = samples.size() * 7 / 10; i < samples.size(); ++i) {
+        lcg = lcg * 1664525u + 1013904223u;
+        const float u = static_cast<float>((lcg >> 8) & 0xFFFF) / 65535.0f - 0.5f;
+        samples[i] = u * rms * 3.46f;  // uniform, same RMS
+    }
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    decoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    std::vector<int> lost;
+    decoder.setMcDpskFrameLostCallback([&](int modulation) { lost.push_back(modulation); });
+    feedInChunks(decoder, withSilence(samples));
+    size_t decoded = 0;
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (result.success && v2::isDataFrame(result.frame_type)) ++decoded;
+    }
+    if (lost.empty() || decoded >= serialized_frames.size()) {
+        std::cout << "FAIL: lost-frame report: " << lost.size() << " report(s), " << decoded
+                  << " frame(s) decoded\n";
+        return false;
+    }
+    for (int m : lost) {
+        if (m != static_cast<int>(Modulation::DBPSK)) {
+            std::cout << "FAIL: lost-frame report carried constellation " << m << "\n";
+            return false;
+        }
+    }
+    std::cout << "lost-frame report: " << decoded << " decoded, " << lost.size()
+              << " loss report(s) at DBPSK\n";
+    return true;
+}
+
 bool runContinuousBurstLoopback() {
     StreamingEncoder encoder;
     encoder.setMode(protocol::WaveformMode::MC_DPSK);
@@ -408,6 +524,9 @@ int main() {
     if (!runLoopback("robust connect", mc_dpsk_presets::robust(), Modulation::DQPSK,
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
     if (!runContinuousBurstLoopback()) return 1;
+    if (!runConstellationChangeBurst(Modulation::DQPSK, Modulation::DBPSK)) return 1;
+    if (!runConstellationChangeBurst(Modulation::DBPSK, Modulation::DQPSK)) return 1;
+    if (!runLostFrameReport()) return 1;
     if (!runConnectedOFDMHalfOpenConnectFallback()) return 1;
     if (!runLowAmplitudePing("robust low-amplitude ping", mc_dpsk_presets::robust(),
                              0.030f)) return 1;
