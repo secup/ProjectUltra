@@ -8,6 +8,22 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED (open, 2026-11-12) — P2: an MC-DPSK decoder that listened through an OFDM spell can carry an idle-noise floor at signal level, and its physical SNR gate then fails for minutes
+
+GUI ITU Good 5 dB seed 49 (all of the day's fixes, before the spell-class fix): in the fallback spell
+after a down-crossing, 42 of 47 up-crossing picks had no physical reading ("x0"), so none could command
+OFDM; the session stayed on MC-DPSK ~800 s (PASS at 1102 s against 270-517 s). A frame got a physical
+reading only when its training SNR was >= 8.8 dB; at 5-7 dB (gap noise 0.16-0.18 = the true floor) the
+gate `rx_power > 2 x ref^2` failed - the reference must have read 6-8 dB high. The reference is
+max(inter-chirp gap, idle min-statistics floor) (F231, for a bench whose noise "breathes"); the idle
+estimator learns from any audio a SEARCHING decoder did not lock, and an MC-DPSK listener locks nothing
+during an OFDM spell, so it learns the peer's OFDM bursts as "idle". Once primary in the fallback spell
+it is mostly busy and rarely refreshes the 3 s min-statistics ring. Intermittent: the same seed rerun
+(diagnostic log: idle 0.16, gap 0.16-0.18) lost 1 reading in 12. Not caused by the listener flip fix
+(a new listener has the same exposure; drop runs show 10-20 % x0). Fix direction: a listener must not
+learn idle noise from the session's other waveform (decoder role flag), or the physical gate uses the
+burst-time gap alone (the definition), the idle floor only as a sanity bound.
+
 ### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
 
 `capRxAuthorityInitialRung` (waveform_selection.hpp) sends the first coherent group at QPSK R1/2
@@ -2742,6 +2758,14 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-FOLLOW-SPELL-CLASS-ONE-FRAME (FIXED 2026-11-12) — was P2: a fallback spell read AWGN from one OFDM frame's fading, and the way back up waited for luck
+
+The spell's class was the last OFDM frame's single fading reading (ITU Good: 0.13-0.54) shrunk by the
+entry classification (0.129 for one burst): 0.21 -> 0.08, AWGN. The AWGN rule then compares the
+data-aided reading (a lower bound on fading) with the AWGN floor: GUI drop to 5 dB seed 45 stayed on
+MC-DPSK 586 s, then failed. Now the fading pooled over the OFDM spell at the down-crossing.
+Test: `WaveformFollow` (`..._spell_class_is_pooled_over_the_ofdm_spell`). CHANGELOG 2026-11-12.
 
 ### BUG-LISTENER-KEEPS-SESSION-PROFILE (FIXED 2026-11-12) — was P1: after following the sender up to OFDM, the MC-DPSK listener kept the session's profile and never heard the sender's fallback - the session died
 

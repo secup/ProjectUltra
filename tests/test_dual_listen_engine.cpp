@@ -369,6 +369,15 @@ std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
     });
     std::vector<std::string> heard;
     rx.setRawDataCallback([&](const Bytes& data, bool) { heard.push_back(payloadText(data)); });
+    // The fallback frame's physical SNR (the follow pick's evidence for the way back up).
+    bool fallback_physical = false;
+    float fallback_physical_db = 0.0f;
+    rx.setDecodeObserver([&](const DecodeResult& r) {
+        if (r.success && payloadText(r.frame_data) == down_text) {
+            fallback_physical = r.has_physical_snr_db;
+            fallback_physical_db = r.physical_snr_db;
+        }
+    });
     std::vector<float> air(24000, 0.0f);
     air.insert(air.end(), up.begin(), up.end());
     air.insert(air.end(), 48000, 0.0f);
@@ -383,8 +392,15 @@ std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
         rx.processRxBuffer();
     }
     const bool ok = heard.size() == 2 && heard[0] == up_text && heard[1] == down_text;
-    std::printf("Robust session, OFDM then the ROBUST_MID fallback: %zu frame(s) heard%s\n",
-                heard.size(), ok ? "" : " (expected both)");
+    std::printf("Robust session, OFDM then the ROBUST_MID fallback: %zu frame(s) heard%s; "
+                "fallback physical SNR %s (%.1f dB)\n",
+                heard.size(), ok ? "" : " (expected both)",
+                fallback_physical ? "measured" : "MISSING", fallback_physical_db);
+    if (ok) {
+        check(fallback_physical,
+              "the flipped listener's fallback frame carries its physical SNR (the up-crossing's "
+              "evidence)");
+    }
     return heard;
 }
 

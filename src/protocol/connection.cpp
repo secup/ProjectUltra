@@ -9154,13 +9154,22 @@ Connection::SessionPick Connection::sessionLadderPick() const {
     // one-burst gate and its backoff guard against a burst caught at a fade crest.
     const uint64_t burst_ms = mcDpskBurstSpanMs();
     const float snr_db = rateSelectionSnrDb(burst_ms);
-    const float entry_fading_raw = rateSelectionFadingIndex(burst_ms);
+    // The class: the burst's own fading when its frames measured one; MC-DPSK frames measure none,
+    // so a fallback spell reads the class its OFDM spell measured, pooled at the down-crossing
+    // (follow_spell_fading_, shrunk by ITS cluster count) - the session scalar only without one.
+    float entry_fading_raw = rateSelectionFadingIndex(burst_ms);
+    int fading_clusters = connect_snr_pool_.effectiveCount(connectSnrPoolTcMs(),
+                                                          /*handshake_only=*/true, burst_ms);
+    if (connection_policy::connectSnrPoolEnabled() &&
+        !std::isfinite(connect_snr_pool_.clusteredFadingIndex(
+            connectSnrPoolTcMs(), /*handshake_only=*/true, burst_ms)) &&
+        std::isfinite(follow_spell_fading_)) {
+        entry_fading_raw = follow_spell_fading_;
+        fading_clusters = follow_spell_fading_clusters_;
+    }
     const float entry_fading =
         connection_policy::connectSnrPoolEnabled()
-            ? connection_policy::entryClassificationFadingIndex(
-                  entry_fading_raw,
-                  connect_snr_pool_.effectiveCount(connectSnrPoolTcMs(), /*handshake_only=*/true,
-                                                   burst_ms))
+            ? connection_policy::entryClassificationFadingIndex(entry_fading_raw, fading_clusters)
             : entry_fading_raw;
     const bool data_aided = rateSelectionSnrDataAided(burst_ms);
     // The physical evidence of the same frames: the decoder's ring spans the whole spell, so after
@@ -9326,6 +9335,8 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
     // move-epoch (applyDataMode), the peer's receive window follows the epoch.
     if (target == WaveformMode::OFDM_CHIRP) {
         follow_fallback_spell_ = false;
+        follow_spell_fading_ = NAN;  // the OFDM spell measures its own
+        follow_spell_fading_clusters_ = 0;
         resetAdaptiveDecisionState();
         resetOfdmLadderState();
     } else {
@@ -9355,6 +9366,20 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
         // fade read at -5..+1 dB to a 9.5-13 dB selection and crossed up into it. With no fresh
         // physical measurement the reading stands unboosted (boundByPhysicalEvidenceDb). The
         // modem resets the decoder's physical ring with the crossing (crossConnectedWaveform).
+        // The channel CLASS is the one thing the spell keeps (MC-DPSK frames measure no fading):
+        // the fading the OFDM spell measured over the readings still in the pool, before it
+        // clears - never the last frame's single value, which on ITU Good scatters 0.13-0.54
+        // (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME: a last reading of 0.21, shrunk by the entry
+        // classification, read AWGN, and the way back up waited 586 s for a lucky reading).
+        {
+            const uint64_t tc = connectSnrPoolTcMs();
+            follow_spell_fading_ =
+                connect_snr_pool_.clusteredFadingIndex(tc, /*handshake_only=*/false, UINT64_MAX);
+            follow_spell_fading_clusters_ =
+                std::isfinite(follow_spell_fading_)
+                    ? connect_snr_pool_.effectiveCount(tc, /*handshake_only=*/false, UINT64_MAX)
+                    : 0;
+        }
         connect_snr_pool_.clear();
         physical_channel_mean_db_ = 0.0f;
         physical_channel_spread_db_ = 0.0f;
@@ -10963,6 +10988,8 @@ void Connection::reset() {
     partial_sack_last_round_ = {};
     partial_sack_descriptor_repair_scope_ = false;
     last_rx_group_frames_ = 0;
+    follow_spell_fading_ = NAN;
+    follow_spell_fading_clusters_ = 0;
     mode_change_ack_repeat_jobs_.clear();
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;

@@ -908,7 +908,9 @@ literal: a compact burst continuation has no training span and measures its own 
 (`updateDataSpanPhysicalSNR`); a frame that cannot measure publishes nothing - never the burst's
 first-frame snapshot again (BUG-MCDPSK-PHYSICAL-REPUBLISHED: one fade state read as three). A frame whose
 decoder never measured a fading index carries none (NAN), never 0.0: the spell keeps the session's
-measured channel class (BUG-FOLLOW-SPELL-FADING-AWGN). A repeat of the ACK that
+measured channel class (BUG-FOLLOW-SPELL-FADING-AWGN) - the fading POOLED over the OFDM spell at the
+down-crossing (`follow_spell_fading_`, shrunk by its own cluster count), never the last frame's single
+reading (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME: 0.21 shrunk to AWGN stranded a 5 dB session on MC-DPSK). A repeat of the ACK that
 launched an up-crossing, heard while the first OFDM group is on air, is rejected in the monitor's
 acceptance predicate (`isCrossingLaunchAckCopy`): a detection delivered to `onToneBurstAck` has
 already disarmed the monitor, so consuming it there loses the group's real ACK.

@@ -1772,6 +1772,11 @@ private:
     // Size of the last group this end framed with proven geometry (0 = none yet): the
     // anchored-burst backstop's estimate of a group whose descriptor was lost.
     size_t last_rx_group_frames_ = 0;
+    // The fading the OFDM spell measured, pooled at the last down-crossing (NAN: none), and the
+    // fade-independent clusters it rests on: the class a fallback spell's follow pick reads, since
+    // MC-DPSK frames measure no fading (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME).
+    float follow_spell_fading_ = NAN;
+    int follow_spell_fading_clusters_ = 0;
 
     // Live "incoming burst" status for the GUI (see BurstActivity above).
     BurstActivity burst_activity_;

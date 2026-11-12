@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): a fallback spell keeps the class its OFDM spell measured, pooled (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME)
+
+**What broke.** MC-DPSK frames measure no fading, so a fallback spell's up-crossing pick classified
+the channel by the session scalar - the LAST OFDM frame's single fading reading, which on ITU Good
+scatters 0.13-0.54 - and then shrank it by the entry classification's standard error
+(`entryClassificationFadingIndex`, 0.129/sqrt(N), N = one burst). GUI drop to ITU Good 5 dB, seed 45:
+the last OFDM frame before the down-crossing read 0.21 (0.13 the second time), shrunk to 0.08 - AWGN.
+Under the AWGN rule the selection is the data-aided reading itself, a lower bound on a fading channel
+(-2..+5 dB there), against the AWGN OFDM floor (6 dB): the way back up waited for a lucky reading -
+586 s the first time, and the file never finished the second (FAIL at 1505 s; the same seed passed
+at 500 s on the baseline by luck: 17 AWGN-rule picks there too).
+
+**What changed.** `Connection::applyWaveformCrossing` (down): before the SNR pool clears, the fading
+pooled over its OFDM readings (`clusteredFadingIndex(handshake_only=false)`) and its cluster count are
+kept (`follow_spell_fading_`); an up-crossing clears it. `sessionLadderPick` reads the burst's own
+fading when its frames measured one, else that spell class, shrunk by ITS cluster count - the session
+scalar only when no OFDM spell preceded. The burst-noise log now prints the idle floor and the
+reference actually used (diagnostic).
+
+**Verification.** `WaveformFollow` `test_waveform_follow_spell_class_is_pooled_over_the_ofdm_spell`:
+OFDM readings around 0.35 with a last one of 0.21, a down-crossing, then a returned frame (data-aided
+5.7 dB, physical 9 dB) must command OFDM - fails without the change (AWGN rule). ctest 121/121. GUI,
+drop to 5 dB seed 45: FAIL (1505 s) -> PASS 428 s (back up at 199 s instead of 688 s, no AWGN-rule
+pick); Good 5 dB seed 49 PASS 517 s.
+
+---
+
 ## 2026-11-12 — FIX(follow): a flipped MC-DPSK listener listens for the fallback profile (BUG-LISTENER-KEEPS-SESSION-PROFILE)
 
 **What broke.** Found as the one FAIL of the ITU Good 5 dB batch (seed 48, follow on): the session

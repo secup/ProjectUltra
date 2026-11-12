@@ -944,18 +944,21 @@ void StreamingDecoder::searchForSync() {
                 // reference is the MAX of the two independent measurements.
                 // On constant-noise channels (real radios, OTASim) gap == floor
                 // and this is a no-op.
+                float used_ref = sync_noise_ref_rms_;
+                float idle_floor = 0.0f;
                 if (waveform_) {
-                    float ref = sync_noise_ref_rms_;
                     const auto ns = idle_noise_snr_estimator_.snapshot();
-                    if (ns.valid && ns.floor_noise_rms > ref) {
-                        ref = ns.floor_noise_rms;
+                    if (ns.valid) idle_floor = ns.floor_noise_rms;
+                    if (ns.valid && ns.floor_noise_rms > used_ref) {
+                        used_ref = ns.floor_noise_rms;
                     }
-                    waveform_->setNoiseReferenceRMS(ref);
+                    waveform_->setNoiseReferenceRMS(used_ref);
                 }
                 LOG_MODEM(INFO,
-                          "[%s] burst-noise ref: rms=%.4f gap=[%zu+%zu..%zu) of buf=%zu",
-                          log_prefix_.c_str(), sync_noise_ref_rms_, gs, skip,
-                          meas_end, search_buffer.size());
+                          "[%s] burst-noise ref: rms=%.4f idle_floor=%.4f used=%.4f "
+                          "gap=[%zu+%zu..%zu) of buf=%zu",
+                          log_prefix_.c_str(), sync_noise_ref_rms_, idle_floor, used_ref, gs,
+                          skip, meas_end, search_buffer.size());
             }
         }
 

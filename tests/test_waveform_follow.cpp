@@ -159,6 +159,10 @@ struct ConnectionAdaptiveTestAccess {
         c.setChannelQuality(snr_db, fading, SNRSource::MCDPSK_IN_BAND, /*data_aided=*/true,
                             physical_db);
     }
+    // A decoded OFDM frame's reading with the fading its LTS measured (the binding's feed).
+    static void feedOfdmFrame(Connection& c, float snr_db, float fading) {
+        c.setChannelQuality(snr_db, fading, SNRSource::OFDM_BROADBAND, /*data_aided=*/false);
+    }
     static void noteOfdmGroup(Connection& c, bool delivered_any) {
         c.noteRxOfdmBurstAfterCrossing(delivered_any);
         c.noteRxOfdmGroupForFollow(delivered_any);
@@ -1036,6 +1040,33 @@ void test_waveform_follow_spell_keeps_the_measured_channel_class() {
     }
 }
 
+// BUG-FOLLOW-SPELL-CLASS-ONE-FRAME: MC-DPSK frames measure no fading, so a fallback spell keeps a class
+// from its OFDM spell - the fading pooled over that spell's readings at the down-crossing, never the
+// last frame's single value. ITU Good single-frame fading scatters 0.13-0.54: a last reading of 0.21,
+// shrunk by the entry classification to 0.08, read AWGN, and the way back up waited for a lucky
+// data-aided reading (GUI drop to 5 dB, seed 45: 586 s, then 745 s to the end, on MC-DPSK).
+void test_waveform_follow_spell_class_is_pooled_over_the_ofdm_spell() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.4f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    for (float fade : {0.42f, 0.35f, 0.47f, 0.30f, 0.38f, 0.21f}) {
+        ConnectionAdaptiveTestAccess::feedOfdmFrame(c, 18.0f, fade);
+        ConnectionAdaptiveTestAccess::agePool(c, 3000);
+    }
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+              c, connection_policy::encodeMcDpskRungCommand(0)),
+          "the fade crosses down");
+    // A returned frame: data-aided 5.7 dB (a lower bound on fading), physical 9 dB.
+    ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 5.7f, NAN, 9.0f);
+    const uint8_t rung = connection_policy::decodeOfdmRungCommand(
+        ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
+    CHECK(rung != kRungIdxNone,
+          "on the OFDM spell's pooled class (Good) the returned frame commands OFDM");
+}
+
 // A fallback spell sends one frame per burst while a return is likely (the burst length is the return
 // latency: dips cost 8-27 s waiting for a clean 3-frame burst), the full window once it has lasted; a
 // link that delivered nothing in OFDM gets the full window at once.
@@ -1428,6 +1459,7 @@ int main() {
     test_waveform_follow_return_reads_a_one_frame_burst();
     test_waveform_follow_return_reads_the_burst_physical_evidence();
     test_waveform_follow_spell_keeps_the_measured_channel_class();
+    test_waveform_follow_spell_class_is_pooled_over_the_ofdm_spell();
     test_waveform_follow_fallback_spell_starts_with_single_frames();
     test_waveform_follow_crossing_ack_copy_is_not_a_candidate();
     test_mcdpsk_one_frame_resend_ends_its_turn();
