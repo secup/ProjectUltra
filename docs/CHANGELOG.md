@@ -137,7 +137,17 @@ above the incumbent. Demotions are unchanged; a window of two agreeing groups ju
 two: ready; the window keeps its last 20 frames' groups; a long single group is one realization;
 a reset empties it). `WaveformFollow` `test_first_ofdm_group_climbs_one_rung` at production
 defaults: crest frames from 8PSK R2/3 command at most the next rung, a second group goes further
-(fails without the cap). GUI: below.
+(fails without the cap).
+
+**GUI (2026-11-12, follow on, cap vs the same tree without it, 7.3 Hz, half-duplex):** ITU Good
+2-minute 0 dB dips 213/214/218/213/223/242 s vs 213/220/223/231/210/213 (means 220.5 vs 218.3;
+per-seed differences 0/-6/-5/-18/+13/+29, the two slow seeds lost their time in the MC-DPSK spell,
+which the cap does not touch); Good 20 dB 20 KB 97/76 vs 97/76; AWGN 20 dB 20 KB 66/66 vs 64/63 and
+AWGN 25 dB 30 KB 82/81 vs 79/79 - the cap's price on a clean channel, one group at 16QAM R2/3 before
+32QAM R2/3 (~2-3 s); QSB 294/205 vs 210/208, the 294 being the follow silence bug (fixed below),
+not the cap. Kept: it guards the one-group crest jump. A one-group stationarity exemption was
+measured and rejected: within-group EVM spread is 0.13-0.35 dB on AWGN and 0.77-3.3 dB on Good,
+but a slow Good crest reads 0.43 dB. All PASS, CRC OK.
 
 ---
 
@@ -162,7 +172,12 @@ pinned it to 0 believing it off).
 **Tests.** `WaveformFollow` `test_escape_needs_the_peer_heard`: a timeout round removes the
 evidence, a crater ACK restores it; two zero-progress rounds in silence hold the rung, the same
 count right after an ACK round drops it (the positive control); the silence check fails without
-the rule. ConnectionAdaptive 861/861, dev ctest 112/112. GUI: below.
+the rule. ConnectionAdaptive 861/861, dev ctest 112/112.
+
+**GUI (2026-11-12, follow off, with the climb cap, vs 94d0fa4 follow off):** ITU Good 2-minute 0 dB
+dips 215/200/211/207/219/219 s vs 227/229/222/235/235/233 (means 211.8 vs 230.2, -8.0 %); 40 s QSB
+230/200 vs 224/208. At 2c3be02 (follow off): dips 214/210/210/207/213/218 (212.0), dip-length sweep
+(seed 44, 70-145 s) 163/181/213/199/234/256. All PASS, CRC OK.
 
 ---
 

@@ -23,6 +23,17 @@ Direction: choose the first rung by the predicted first-group success at the con
 uncertainty for the measured class (the latent controller's seed posterior), not by a fixed rung;
 validate on a multi-seed GUI A/B at marginal SNR before changing it.
 
+### BUG-HARNESS-BURST-CHUNK-STALE (open, 2026-11-12) — P3, measurement tooling: `measure_ack_fer --config burst_chunk` recovers nothing
+
+`burst_chunk` builds a marked group of frames with no burst descriptor and no CRC physical tail.
+The decoder abandons such a group by design ("Unproven burst marker abandoned (declared span
+contained no CRC physical tail): 8 process-valid slice(s)"), so every chunk reads 0 frames
+recovered: 25 dB AWGN QPSK R1/2, 4 chunks x 8 frames, 0/32 with the default stack, with
+`ULTRA_FAST=0`, with `ULTRA_BURST_ACQ=chirp` and with `ULTRA_DATA_FEC=ldpc` alike. Burst-level
+FER cannot be measured offline until the tool sends bursts through the production path
+(descriptor + frames + tail as `ModemEngine::transmitBurst` makes them; the tools rule: run the
+modem as the GUI does).
+
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 
 The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample
