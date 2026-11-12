@@ -21,6 +21,18 @@ int tests_failed = 0;
         } \
     } while (0)
 
+// The frame wait times out only while samples are missing (BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK:
+// a fixed CONNECT re-armed after a 7.1 s first-frame slice, its 175104 samples already in the ring).
+void test_frame_wait_times_out_only_on_missing_audio() {
+    CHECK(!frameWaitTimedOut(340992, 175104, 7072, 5648),
+          "samples present: decode, whatever the clock says");
+    CHECK(frameWaitTimedOut(100000, 175104, 7072, 5648),
+          "samples missing past the budget: give up");
+    CHECK(!frameWaitTimedOut(100000, 175104, 3000, 5648),
+          "samples missing within the budget: keep waiting");
+    CHECK(!frameWaitTimedOut(175104, 175104, 60000, 5648), "exactly enough is enough");
+}
+
 void test_robust_ofdm_control_samples() {
     // OFDM is coherent-only (thread A): control frames always ride coherent
     // QPSK R1/4, regardless of the (coherent) data modulation.
@@ -340,6 +352,7 @@ void test_descriptor_current_anchor_controls_warm_handoff() {
 }  // namespace
 
 int main() {
+    test_frame_wait_times_out_only_on_missing_audio();
     test_robust_ofdm_control_samples();
     test_decode_sample_requirement_selection();
     test_qam16_control_peek_is_subfixed();

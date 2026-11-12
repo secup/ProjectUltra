@@ -1291,7 +1291,8 @@ void StreamingDecoder::checkIfReadyToDecode() {
     const int required_audio_ms = static_cast<int>(
         (requirement.samples * 1000 + kAudioSampleRateHz - 1) / kAudioSampleRateHz);
     const int frame_timeout_ms = std::max(FRAME_TIMEOUT_MS, required_audio_ms + 2000);
-    if (elapsed > frame_timeout_ms) {
+    if (decode_policy::frameWaitTimedOut(available, requirement.samples, elapsed,
+                                         frame_timeout_ms)) {
         LOG_MODEM(WARN, "[%s] Frame timeout after %lld ms (need=%zu samples, timeout=%d ms)",
                   log_prefix_.c_str(), (long long)elapsed, requirement.samples, frame_timeout_ms);
         pending_total_cw_ = 0;

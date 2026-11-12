@@ -201,6 +201,17 @@ struct DecodeSampleRequirement {
     DecodeSampleMode mode = DecodeSampleMode::ControlPeek;
 };
 
+// A frame wait gives up only on audio that is late: when the frame's samples are already in the
+// ring it is decoded, whatever the clock says. The clock runs from the sync, so a requirement that
+// shrinks after a long wait - a connected MC-DPSK receiver's first-frame slice (7.1 s at 4
+// codewords), then the 3.6 s fixed CONNECT it turned out to be - read as a timeout with every
+// sample present, and a responder whose CONNECT_ACK was lost never decoded the initiator's repeats
+// ("Frame timeout after 7072 ms (need=175104 samples, timeout=5648 ms)", GUI ITU Good 0 dB).
+inline constexpr bool frameWaitTimedOut(size_t available_samples, size_t required_samples,
+                                        long long elapsed_ms, int timeout_ms) {
+    return available_samples < required_samples && elapsed_ms > timeout_ms;
+}
+
 inline bool hasSubFixedFrameSoftBits(size_t soft_bits,
                                      int fixed_frame_codewords,
                                      size_t ldpc_block_bits) {
