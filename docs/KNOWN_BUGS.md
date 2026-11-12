@@ -2528,6 +2528,16 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-UPCROSS-STALE-SCALAR (FIXED 2026-11-12, SessionPick::burst_reading) — was P2: the first MC-DPSK ACK after following the peer down commanded OFDM on the pre-fade SNR
+
+`sessionLadderPick` fell back to the session scalar `measured_snr_db_` when the burst span held no
+pool reading; a down-crossing clears the pool (with the reading of the frame that triggered a
+dual-listen switch) but not the scalar. GUI 2-minute 0 dB dip, seed 42: the receiver commanded OFDM
+8PSK R2/3 in the dip on 18.6 dB from before the fade, the crossing failed, the run doubled, and the
+real return came one MC-DPSK round (8 s) late. Fixed: without a reading from the burst the pick names
+no OFDM rung. Test: `WaveformFollow` (`test_dual_listen_up_crossing_needs_a_reading_from_the_burst`).
+
+
 ### BUG-STRUCTURE-ACQ-DROPS-CFO (FIXED 2026-11-12, SyncResult::measured_cfo_hz) — was P2: structure acquisition measured the residual CFO and threw it away
 
 `OFDMChirpWaveform::detectFrameStructure` (the `ULTRA_BURST_ACQ=structure` group-start detector,

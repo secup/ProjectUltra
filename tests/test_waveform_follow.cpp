@@ -735,6 +735,30 @@ void test_dual_listen_receiver_commands_up_and_follows_the_peer() {
     CHECK(ConnectionAdaptiveTestAccess::upCrossingRun(c) == 1, "two delivering groups hold it");
 }
 
+// Dual-listen receiver that followed the peer down: the first MC-DPSK ACK has no reading from the
+// spell yet (the crossing cleared the pool), and the session's pre-fade scalar SNR must not command
+// OFDM (GUI 2-minute dip, seed 42: an 18.6 dB pre-fade reading commanded OFDM at 0 dB, the crossing
+// failed and doubled the run). A burst that reads well then does.
+void test_dual_listen_up_crossing_needs_a_reading_from_the_burst() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 18.6f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::noteRxWaveform(c, WaveformMode::MC_DPSK);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK,
+          "the peer's MC-DPSK frame arrived: the receiver followed it down");
+    const uint8_t first = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
+    CHECK(connection_policy::decodeOfdmRungCommand(first) == kRungIdxNone,
+          "no reading from this burst: the pre-fade 18.6 dB does not command OFDM");
+    CHECK(ConnectionAdaptiveTestAccess::upCrossingRun(c) == 1, "and nothing failed: the run stays 1");
+    for (int i = 0; i < 3; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    const uint8_t next = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
+    CHECK(connection_policy::decodeOfdmRungCommand(next) != kRungIdxNone,
+          "a clean burst reading 22 dB commands OFDM at once");
+}
+
 // Dual-listen receiver in OFDM: empty groups command MC-DPSK on its ACKs, it does not switch; a
 // delivering group withdraws the command; silence never moves it; MC-DPSK arriving does.
 void test_dual_listen_receiver_commands_down_and_follows_the_peer() {
@@ -1163,6 +1187,7 @@ int main() {
     test_waveform_follow_empty_groups_follow_the_economics();
     test_waveform_follow_sender_waits_out_a_fade();
     test_waveform_follow_sender_silence_ends_when_the_peer_is_heard();
+    test_dual_listen_up_crossing_needs_a_reading_from_the_burst();
     test_dual_listen_receiver_commands_up_and_follows_the_peer();
     test_dual_listen_receiver_commands_down_and_follows_the_peer();
     test_dual_listen_missed_up_crossing_backs_off();

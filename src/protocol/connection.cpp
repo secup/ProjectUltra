@@ -9023,6 +9023,12 @@ Connection::SessionPick Connection::sessionLadderPick() const {
     pick.physical_db = connect_snr_pool_.physicalMeanDb(/*handshake_only=*/true, burst_ms,
                                                         pick.physical_n);
     pick.reading_db = snr_db;
+    // With no reading from this burst, rateSelectionSnrDb returns the session's scalar, which a
+    // down-crossing does not clear: it still holds the last OFDM reading from before the fade.
+    pick.burst_reading =
+        !connection_policy::connectSnrPoolEnabled() ||
+        std::isfinite(connect_snr_pool_.clusteredDbMeanDb(connectSnrPoolTcMs(),
+                                                          /*handshake_only=*/true, burst_ms));
     pick.selection_snr_db = connection_policy::connectSelectionSnrDb(
         snr_db, entry_fading, data_aided, pick.physical_n > 0 ? pick.physical_db : 0.0f,
         pick.physical_n);
@@ -9244,15 +9250,22 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
         rx_dual_up_commanded_ = false;
     }
     const SessionPick pick = sessionLadderPick();
-    const uint8_t ofdm_rung = (pick.rung.waveform == WaveformMode::OFDM_CHIRP)
-                                  ? coherentRungIndexFor(pick.mod, pick.rate)
-                                  : kRungIdxNone;
+    // Only this burst's readings speak for the channel now. Without one the pick ran on the
+    // session's pre-fade scalar: GUI, ITU Good 2-minute 0 dB dip, seed 42 - the receiver followed
+    // the peer down, its first MC-DPSK ACK commanded OFDM 8PSK R2/3 on an 18.6 dB reading from
+    // before the fade, the crossing failed and doubled the run, and the real return waited one
+    // MC-DPSK round longer (8 s).
+    const uint8_t ofdm_rung =
+        (pick.burst_reading && pick.rung.waveform == WaveformMode::OFDM_CHIRP)
+            ? coherentRungIndexFor(pick.mod, pick.rate)
+            : kRungIdxNone;
     const uint8_t command = up_crossing_gate_.observe(clean, ofdm_rung);
     LOG_MODEM(INFO,
               "Connection: WAVEFORM FOLLOW rx: burst %s, pick %s %s %s (sel %.1f dB; reading "
-              "%.1f, physical %.1f dB x%u) -> %s (run %d)",
+              "%.1f%s, physical %.1f dB x%u) -> %s (run %d)",
               clean ? "clean" : "loss", pick.rung.name, modulationToString(pick.mod),
               codeRateToString(pick.rate), pick.selection_snr_db, pick.reading_db,
+              pick.burst_reading ? "" : " - none from this burst, no evidence",
               pick.physical_n > 0 ? pick.physical_db : 0.0f, pick.physical_n,
               command != kRungIdxNone ? "COMMAND OFDM" : "stay", up_crossing_gate_.run());
     if (command == kRungIdxNone) {

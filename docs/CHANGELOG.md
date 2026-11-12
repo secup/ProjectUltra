@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): an up-crossing needs a reading from the burst it acknowledges (BUG-UPCROSS-STALE-SCALAR)
+
+**What was broken.** The receiver commands an MC-DPSK -> OFDM crossing from `sessionLadderPick`
+on the readings of the burst its ACK closes. With no qualifying reading in that span,
+`rateSelectionSnrDb` falls back to the session's scalar `measured_snr_db_`, which a down-crossing
+does not clear: it still holds the last OFDM reading from before the fade. A dual-listen receiver
+that follows the peer down clears the pool with the crossing - the reading of the frame that
+triggered it included - so its first MC-DPSK ACK always ran on that scalar. GUI, ITU Good 2-minute
+0 dB dip, seed 42 (follow on, 228 s against 214 s off): at 106.5 s, in the dip, BRAVO followed the
+peer to MC-DPSK and 23 ms later commanded OFDM 8PSK R2/3 ("reading 18.6, physical 0.0 dB x0"). The
+crossing could not happen at 0 dB, its failure doubled the up-crossing run to 2, and when the
+channel came back at ~162 s the first clean 20 dB burst only counted one of two: OFDM resumed at
+177.7 s, one MC-DPSK round (8 s) late. Follow-off had resumed at 165.5 s.
+
+**What changed.** `SessionPick::burst_reading`: false when the pool (if on) holds no reading from
+the burst span; `upCrossingWordForAck` then names no OFDM rung (the gate's streak resets, nothing
+fails, the run stays). The log says "none from this burst, no evidence".
+
+**Verification.** `WaveformFollow` 137/137 (new: a receiver that followed the peer down does not
+command OFDM on the pre-fade 18.6 dB, its run stays 1, and a burst reading 22 dB then commands it;
+the check fails without the fix). Dev ctest 112/112. GUI: below.
+
+---
+
 ## 2026-11-12 — FIX(cfo): preamble-less acquisition uses the burst's own CFO when nothing is tracked (BUG-STRUCTURE-ACQ-DROPS-CFO)
 
 **What was broken.** Structure acquisition (`detectFrameStructure`, the default group-start

@@ -1538,6 +1538,9 @@ private:
         float reading_db = 0.0f;        // the burst's pooled reading
         float physical_db = 0.0f;       // the burst's physical evidence (linear mean)
         uint32_t physical_n = 0;        // readings that carried one
+        // The reading came from this burst's frames. False: none qualified, and the session's
+        // last scalar SNR stood in (with the pool on, that scalar predates the spell).
+        bool burst_reading = true;
     };
     SessionPick sessionLadderPick() const;
     uint64_t mcDpskBurstSpanMs() const;

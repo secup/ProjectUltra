@@ -63,7 +63,11 @@ channel measurement on both ends, and the modem restarts the decoder's physical 
 physical cap made of pre-fade frames, and the fading basis (+11 dB at low readings, bounded only by
 that cap) lifted a fade read at -5..+1 dB to a 9.5-13 dB selection - an up-crossing into the fade, a
 failed probation and a doubled run. Until the spell has a physical measurement the reading stands
-unboosted (`boundByPhysicalEvidenceDb`).
+unboosted (`boundByPhysicalEvidenceDb`). A burst with no qualifying reading names no OFDM rung
+(`SessionPick::burst_reading`, 2026-11-12): the pool's fallback is the session's scalar SNR, which
+the crossing does not clear - the first ACK of a dual-listen receiver that followed the peer down
+(its pool cleared with the triggering frame's reading) commanded OFDM at 0 dB on the pre-fade 18.6 dB
+and doubled the run (BUG-UPCROSS-STALE-SCALAR).
 
 Probation until the first OFDM burst:
 - receiver: no OFDM burst by `upCrossingRevertMs` (its ACK at the slowest staircase rung + TX lead-in
