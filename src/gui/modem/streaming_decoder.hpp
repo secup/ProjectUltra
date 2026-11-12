@@ -691,6 +691,26 @@ public:
         physical_ring_db_[physical_ring_count_ % kPhysicalSnrRing] = db;
         ++physical_ring_count_;
     }
+    // The latest group start on the sample clock, whichever path found it (an accepted full anchor,
+    // a descriptor-framed group start, a late join): the listen-before-ACK deadline's reference.
+    void noteGroupStartAbs(uint64_t abs) {
+        uint64_t prev = last_anchor_abs_.load(std::memory_order_relaxed);
+        while (abs > prev &&
+               !last_anchor_abs_.compare_exchange_weak(prev, abs, std::memory_order_relaxed)) {
+        }
+    }
+    // Audio time since the latest group start (noteGroupStartAbs), -1 when none since the last
+    // reset: the listen-before-ACK deadline (deferredToneAckCannotEndBeforeResend).
+    int64_t msSinceLastAnchor() {
+        const uint64_t anchor = last_anchor_abs_.load(std::memory_order_relaxed);
+        if (anchor == 0) return -1;
+        uint64_t fed;
+        {
+            std::lock_guard<std::mutex> lk(sync_controller_.ring_.buffer_mutex_);
+            fed = sync_controller_.ring_.total_fed_;
+        }
+        return fed > anchor ? static_cast<int64_t>((fed - anchor) / 48) : 0;
+    }
     uint64_t burstAirSamplesRemaining() {
         const uint64_t end = burst_air_end_abs_.load(std::memory_order_relaxed);
         if (end == 0) return 0;
@@ -1458,6 +1478,7 @@ private:
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
     std::atomic<bool> idle_noise_learning_{true};  // false while a dual-listen listener
+    std::atomic<uint64_t> last_anchor_abs_{0};     // last accepted full anchor (training start)
     // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as
     // int) + a monotonically increasing measurement sequence so consumers can tell a
     // FRESH per-burst measurement from a stale re-read (e.g. a timed-out group's

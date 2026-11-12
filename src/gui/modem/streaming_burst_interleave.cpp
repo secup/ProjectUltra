@@ -669,6 +669,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     // late-joined group leaves a stale cadence reference and the next missed
     // descriptor would be mis-classified as a post-RTO resend.
     last_group_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
+    noteGroupStartAbs(static_cast<uint64_t>(frame_sync_abs));
     state_ = DecoderState::BURST_ACCUMULATING;
     return true;
 }

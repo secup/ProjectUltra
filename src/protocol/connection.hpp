@@ -586,6 +586,17 @@ public:
         }
     }
     float getFadingIndex() const { return fading_index_; }
+    // When the peer, sending to this end, resends the group in flight (ms after its key-up): the
+    // INFLIGHT-RTO table both ends build, for the last group this end framed (the window before any).
+    // The listen-before-ACK deadline reads it; 0 outside a connected wideband OFDM session.
+    uint32_t expectedPeerResendMs() const {
+        if (state_ != ConnectionState::CONNECTED || negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
+            return 0;
+        }
+        const size_t frames = last_rx_group_frames_ > 0 ? last_rx_group_frames_
+                                                        : arq_.getWindowSize();
+        return arq_.ackTimeoutForFrameCount(frames);
+    }
     bool isFading() const { return fading_index_ > 0.65f; }
 
     // Doppler coherence (channel coherence-TIME) measured by the OFDM demodulator. Unlike

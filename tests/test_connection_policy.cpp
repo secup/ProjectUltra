@@ -1853,6 +1853,17 @@ void test_anchored_backstop_reconfirm_fit() {
     CHECK(!anchoredBackstopReconfirmFits(threshold - 1, 3400), "one ms short does not");
     CHECK(anchoredBackstopReconfirmFits(18590, 850) && !anchoredBackstopReconfirmFits(18590, 3400),
           "a shorter ACK fits where the 100 ms rung does not");
+    // BUG-DEFERRED-ACK-INTO-RESEND: a deferred ACK polled `since` ms after the group's anchor.
+    // Key-up -> anchor <= 1350 ms; a 3.4 s ACK with the 500 ms guard must end by RTO 15728.
+    CHECK(!deferredToneAckCannotEndBeforeResend(-1, 3400, 15728), "no anchor: other gates decide");
+    CHECK(!deferredToneAckCannotEndBeforeResend(9000, 3400, 0), "no RTO: other gates decide");
+    CHECK(!deferredToneAckCannotEndBeforeResend(10478, 3400, 15728),
+          "1350 + 10478 + 3400 + 500 = 15728: ends exactly at the guard");
+    CHECK(deferredToneAckCannotEndBeforeResend(10479, 3400, 15728), "one ms later it cannot");
+    CHECK(deferredToneAckCannotEndBeforeResend(12500, 3400, 15728),
+          "held to the 12 s provisional ceiling, a 3.4 s ACK lands on the resend (GUI seed 46)");
+    CHECK(!deferredToneAckCannotEndBeforeResend(12500, 408, 15728),
+          "a 0.4 s ACK still ends before it");
 }
 
 void test_deferred_tone_ack_policy() {

@@ -801,6 +801,7 @@ void StreamingDecoder::searchForSync() {
             // it (0.5-1.5 s of search latency later): the window and the
             // connection's fit test against the sender's RTO both assume it.
             anchored_burst_backstop_arm_abs_ = training_start.detected_abs;
+            noteGroupStartAbs(training_start.detected_abs);
         }
         if (connected_data_preamble && data_sync_accepted_callback_) {
             data_sync_accepted_callback_(sync_result.correlation);

@@ -365,7 +365,9 @@ the sender's RTO resend starts, before that resend has produced any evidence
 (BUG-BACKSTOP-RACES-RTO). For the same reason the connection withholds any re-confirm that could
 not END before the sender's resend of the last framed group (`anchoredBackstopReconfirmFits`; the
 window is timed from the anchor's training start), and drops its pending delayed SACK: no sensor here
-sees a resend's first ~1.5 s. `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
+sees a resend's first ~1.5 s. And a DEFERRED asynchronous ACK is dropped, at every poll, once keying it
+could not end before the sender's resend of the group whose anchor this end accepted
+(`deferredToneAckCannotEndBeforeResend`, GUI and TNC alike; BUG-DEFERRED-ACK-INTO-RESEND). `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
 TNC's immediate drop). **Test:** `ConnectionPolicy` (`test_deferred_tone_ack_policy`).
 
 ---

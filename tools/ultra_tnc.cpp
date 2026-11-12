@@ -316,11 +316,18 @@ public:
     // Listen-before-ACK poll for a deferred tone ACK (the GUI tick's policy). Sensors are read
     // before taking deferred_ack_mutex_ so this thread never nests it inside a modem lock.
     void maybeFireDeferredAck() {
+        {
+            std::lock_guard<std::mutex> lk(deferred_ack_mutex_);
+            if (!deferred_ack_pending_) return;
+        }
         const int64_t substantive_ms = modem_.lastRxSubstantiveMs();
         const bool evidence_within_hold = modem_.rxSignalActive(
             ultra::protocol::connection_policy::kDescriptorLostReverseTxHoldMs);
         const bool air_arriving = modem_.burstAirSamplesRemaining() > 0;
         const bool channel_busy = modem_.channelBusyForTx();
+        // The resend deadline's inputs (the GUI tick's policy), read with no TNC lock held.
+        const uint32_t peer_resend_ms = engine_.expectedPeerResendMs();
+        const int64_t since_anchor_ms = modem_.msSinceLastGroupAnchor();
         std::vector<float> send;
         {
             std::lock_guard<std::mutex> lk(deferred_ack_mutex_);
@@ -331,6 +338,20 @@ public:
                 return;
             }
             namespace cp = ultra::protocol::connection_policy;
+            // BUG-DEFERRED-ACK-INTO-RESEND: an ACK that would still be on the air at the sender's
+            // resend is heard by nobody and blanks our receive over the resend's head.
+            if (!deferred_ack_group_complete_ &&
+                cp::deferredToneAckCannotEndBeforeResend(
+                    since_anchor_ms, static_cast<uint32_t>(deferred_ack_samples_.size() / 48),
+                    peer_resend_ms)) {
+                deferred_ack_pending_ = false;
+                deferred_ack_samples_.clear();
+                deferred_ack_quiet_polls_ = 0;
+                LOG_WARN("AUDIO", "Dropped deferred tone ACK: it could no longer end before the "
+                                  "sender's resend (%lld ms after the group's anchor, resend %u ms)",
+                         static_cast<long long>(since_anchor_ms), peer_resend_ms);
+                return;
+            }
             const bool new_inbound = cp::deferredToneAckSeesNewInbound(
                 deferred_ack_group_complete_, deferred_ack_timer_reconfirm_, substantive_ms,
                 deferred_ack_armed_substantive_ms_, evidence_within_hold);

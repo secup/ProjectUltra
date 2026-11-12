@@ -3136,6 +3136,14 @@ void App::maybeFireDeferredAck() {
         clearPendingAckAudioForTeardown();
         return;
     }
+    {
+        std::lock_guard<std::mutex> lk(ack_repeat_mutex_);
+        if (!ack_defer_pending_) return;
+    }
+    // The resend deadline's inputs, read with no App lock held (the engine takes its own mutex; the
+    // ACK callback takes ack_repeat_mutex_ under it, so never the other way round).
+    const uint32_t peer_resend_ms = protocol_.expectedPeerResendMs();
+    const int64_t since_anchor_ms = modem_.msSinceLastGroupAnchor();
     std::vector<float> copy;
     std::vector<float> deadline_send;
     {
@@ -3146,6 +3154,21 @@ void App::maybeFireDeferredAck() {
             ack_defer_pending_ = false;  // session ended — moot
             ack_defer_samples_.clear();
             ack_defer_inbound_group_complete_ = false;
+            return;
+        }
+        // BUG-DEFERRED-ACK-INTO-RESEND: keyed now, would this ACK still be on the air when the
+        // sender resends the group? Nobody would hear it, and keying it blanks our receive over
+        // the resend's head. A physically-complete group ACK keeps its own timing.
+        if (!ack_defer_inbound_group_complete_ &&
+            protocol::connection_policy::deferredToneAckCannotEndBeforeResend(
+                since_anchor_ms, static_cast<uint32_t>(ack_defer_samples_.size() / 48),
+                peer_resend_ms)) {
+            ack_defer_pending_ = false;
+            ack_defer_samples_.clear();
+            ack_defer_quiet_ticks_ = 0;
+            guiLog("LISTEN-BEFORE-ACK: the ACK could no longer end before the sender's resend "
+                   "(%lld ms after the group's anchor, resend %u ms after key-up) — DROPPED",
+                   static_cast<long long>(since_anchor_ms), peer_resend_ms);
             return;
         }
         // Shared listen-before-ACK decision (connection_policy::decideDeferredToneAck):

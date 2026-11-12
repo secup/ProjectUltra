@@ -2515,6 +2515,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // defer its stamp until a second substantive member proves physical cadence.
         if (burst_arm_provenance_ != BurstArmProvenance::UNPROVEN_MARKER) {
             last_group_start_abs_ = static_cast<uint64_t>(frame_sync_abs);
+            noteGroupStartAbs(static_cast<uint64_t>(frame_sync_abs));
         }
 
         state_ = DecoderState::BURST_ACCUMULATING;

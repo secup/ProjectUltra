@@ -273,6 +273,8 @@ public:
     void clearBurstEvmObservation();
     bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
+    // Connection::expectedPeerResendMs (the listen-before-ACK deadline's sender RTO).
+    uint32_t expectedPeerResendMs() const;
 
     // Get current data mode
     Modulation getDataModulation() const;

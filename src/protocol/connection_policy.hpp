@@ -193,6 +193,24 @@ inline constexpr bool anchoredBackstopReconfirmFits(uint32_t sender_rto_ms,
                                 ack_airtime_ms + kBackstopReconfirmGuardMs;
     return ack_end_ms <= sender_rto_ms;
 }
+// The same arithmetic for a tone ACK listen-before-ACK has deferred, polled as it waits: keyed now,
+// would it still be on the air when the sender resends the group whose anchor this end accepted
+// `since_anchor_ms` ago (audio time)? Then nobody hears it, and keying it blanks this end's receive
+// over the resend's head (BUG-DEFERRED-ACK-INTO-RESEND: GUI ITU Good 5 dB, a delayed SACK the
+// provisional air gate held to its ceiling keyed 0.9 s into the resend). Unknown inputs (no anchor,
+// no RTO) leave the decision to the other gates.
+inline constexpr bool deferredToneAckCannotEndBeforeResend(int64_t since_anchor_ms,
+                                                           uint32_t ack_airtime_ms,
+                                                           uint32_t sender_rto_ms) {
+    if (since_anchor_ms < 0 || sender_rto_ms == 0) {
+        return false;
+    }
+    const uint64_t anchor_after_keyup_ms =
+        static_cast<uint64_t>(kDefaultTxLeadInMs) + kWideOFDMFullAnchorExtraMs;
+    return anchor_after_keyup_ms + static_cast<uint64_t>(since_anchor_ms) + ack_airtime_ms +
+               kBackstopReconfirmGuardMs >
+           sender_rto_ms;
+}
 
 inline int configuredTxLeadInMs() {
     static const int value = [] {

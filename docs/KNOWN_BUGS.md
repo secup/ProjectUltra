@@ -2748,6 +2748,14 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-DEFERRED-ACK-INTO-RESEND (FIXED 2026-11-12) — was P2: a deferred tone ACK held to the provisional air ceiling keyed into the sender's resend
+
+With the descriptor lost, listen-before-ACK holds an asynchronous ACK until the provisional air gate's
+sender-policy ceiling (~12 s after the anchor); a short group's resend comes 8-17.6 s after the sender's
+key-up, so the held ACK keyed on it, unheard, blanking this end's receive over the resend's head (GUI 5 dB
+drop seed 46: 0.9 s into the resend). Now dropped when it could not end before the resend
+(`deferredToneAckCannotEndBeforeResend`, GUI and TNC). Test: `ConnectionPolicy`. CHANGELOG 2026-11-12.
+
 ### BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED (FIXED 2026-11-12, setIdleNoiseLearning) — was P2: an MC-DPSK decoder that listened through an OFDM spell carried an idle-noise floor at signal level, and its physical SNR gate failed for minutes
 
 The physical reference is max(inter-chirp gap, idle min-statistics floor); the idle estimator learned

@@ -1874,6 +1874,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     std::fill(sync_controller_.ring_.buffer_.begin(), sync_controller_.ring_.buffer_.end(), 0.0f);
     if (waveform_) waveform_->reset();
     idle_noise_snr_estimator_.reset();
+    last_anchor_abs_.store(0, std::memory_order_relaxed);
     // §5: the physical-SNR distribution is per-session — a new QSO (or channel
     // change) must not average against the previous channel's samples. Gated
     // on reset_doppler_coherence (the session-vs-echo discriminator, see

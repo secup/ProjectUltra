@@ -976,6 +976,11 @@ float ProtocolEngine::getFadingIndex() const {
     return connection_.getFadingIndex();
 }
 
+uint32_t ProtocolEngine::expectedPeerResendMs() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.expectedPeerResendMs();
+}
+
 Modulation ProtocolEngine::getDataModulation() const {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     return connection_.getDataModulation();

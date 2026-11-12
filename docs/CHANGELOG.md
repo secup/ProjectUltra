@@ -10,6 +10,36 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(ack): a deferred tone ACK that cannot end before the sender's resend is dropped (BUG-DEFERRED-ACK-INTO-RESEND)
+
+**What broke.** Listen-before-ACK defers an asynchronous ACK while the decoder's provisional air gate
+says the burst may still be arriving. With the group's descriptor lost, that gate runs to the
+sender-policy ceiling (~12 s after the anchor), while the sender resends a short group 8-17.6 s after
+its key-up (INFLIGHT-RTO): the held ACK then keyed on the resend. GUI ITU Good 5 dB, drop seed 46 at
+17604c19: a delayed SACK held to the ceiling keyed 0.9 s into the resend ("channel clear (confirmed)" -
+the energy CCA does not see a 5 dB burst); in that run 8 receiver ACKs were lost (1 at the baseline).
+The anchored-backstop withhold (`anchoredBackstopReconfirmFits`) could not catch it: the ACK had left
+the ARQ and waited in the frontend's queue.
+
+**What changed.** `connection_policy::deferredToneAckCannotEndBeforeResend(since_anchor_ms, ack_ms,
+sender_rto_ms)` - the backstop's arithmetic for a waiting ACK. The GUI (`App::maybeFireDeferredAck`)
+and headless TNC (`maybeFireDeferredAck`) poll it before the other sensors and drop the ACK when it
+fails (a physically-complete group ACK keeps its own timing). Inputs: `ModemEngine::
+msSinceLastGroupAnchor` (audio time since the session decoder's last accepted anchor, OFDM sessions
+only; `StreamingDecoder::last_anchor_abs_`) and `ProtocolEngine::expectedPeerResendMs` (the INFLIGHT-RTO
+entry for the last framed group). The reference is the latest group start whichever path found it
+(`StreamingDecoder::noteGroupStartAbs`: accepted full anchor, descriptor-framed group start, late join).
+
+**Verification.** `ConnectionPolicy`: boundary arithmetic (ends exactly at the guard / one ms later
+not), the 12 s ceiling case drops a 3.4 s ACK and keeps a 0.4 s one, unknown inputs defer to the other
+gates. ctest 121/121. GUI, 8 paired ITU Good 5 dB runs (with and without, concurrently): 8/8 PASS both;
+the drop never fired here - when the resend IS detected, the novelty rule already drops the held ACK;
+the drop is the backstop for the undetected resend (the motivating seed-46 case). The arms' totals
+(2292 vs 2121 s, identical logic since nothing fired) measure the run-to-run scatter at 5 dB: one seed
+swung 406 -> 111 s, so a 20 % effect is not resolvable at n = 8.
+
+---
+
 ## 2026-11-12 — FIX(ack): the backstop withhold covers re-confirms with decoded payload (BUG-BACKSTOP-RACES-RTO)
 
 **What broke.** The morning's withhold applied only to pure re-confirms. GUI ITU Good 5 dB seed 46: an

@@ -229,6 +229,12 @@ public:
     // protocol layer — wired by wireModemToProtocol like the tone-burst ACK path.
     // Only fires when the knob is ON (decoder-gated); byte-identical OFF.
     // The listen-before-ACK gate: an incoming burst may be on either waveform (dual-listen).
+    // Audio time since the session decoder's last accepted group anchor; -1 when none or when the
+    // session does not run wideband OFDM (only OFDM groups record one).
+    int64_t msSinceLastGroupAnchor() const {
+        if (waveform_mode_ != protocol::WaveformMode::OFDM_CHIRP || !streaming_decoder_) return -1;
+        return streaming_decoder_->msSinceLastAnchor();
+    }
     uint64_t burstAirSamplesRemaining() const {
         uint64_t remaining = streaming_decoder_ ? streaming_decoder_->burstAirSamplesRemaining() : 0;
         if (StreamingDecoder* listener = streaming_decoder_.listener()) {
