@@ -8,6 +8,21 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
+
+`capRxAuthorityInitialRung` (waveform_selection.hpp) sends the first coherent group at QPSK R1/2
+when the receiver authority is on ("the CONNECT measurement is made on MC-DPSK and does not predict
+the first coherent-OFDM payload margin reliably on a fading channel"). Evidence from the 2026-11-12
+GUI matrices (245 sessions, all starting at 20-25 dB: ITU Good 20 and AWGN 20/25): the connect pick
+was 8PSK R2/3 every time; the QPSK R1/2 first group delivered 5/5 in 243/243 sessions with a verdict,
+and the next command was at or above the pick in all of them (8PSK R2/3 x172, 16QAM R2/3 x39 on Good;
+32QAM R2/3 x28, 16QAM R2/3 x4 on AWGN). At 20 dB the cap never saved a group; it costs one group at
+half the pick's bytes, ~3-5 s per session (5 % of a 20 KB transfer). Not measured where it matters:
+marginal SNR on fading (Good 12-16, Moderate 14-20), where the pick sits near its threshold.
+Direction: choose the first rung by the predicted first-group success at the connect reading's
+uncertainty for the measured class (the latent controller's seed posterior), not by a fixed rung;
+validate on a multi-seed GUI A/B at marginal SNR before changing it.
+
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 
 The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample
@@ -52,7 +67,7 @@ BUG-MCDPSK-RESEND-NO-TURN-END). After the fixes (GUI, CHANGELOG): dips -3.0 % (f
 length sweep -2.0 s, QSB even, 60 s outage +10 s (patience worst case). Remaining: the 60 s-outage
 case and BUG-POST-CROSSING-OVERCLIMB; downgraded to P3.
 
-### BUG-CHIRP-SEARCH-SEGV (open, 2026-11-11) — P1: decode-thread SIGSEGV in the chirp search
+### BUG-CHIRP-SEARCH-SEGV (open, 2026-11-11; P1 -> P2 2026-11-12 after a 132-run soak) — decode-thread SIGSEGV in the chirp search
 
 Two GUI crashes (ips 2026-11-11 08:49 and 10:57, a single-decoder build): the decode thread in
 `ChirpSync::detectChirpTemplateFFT` (MC-DPSK `detectSync`) faulted at address 0 while the main thread
@@ -64,6 +79,11 @@ engine (BUG-DECODER-THREAD-RACES) fixed the frame interleaver's lazily built sta
 threads resizing the same vectors corrupt the heap, which can fault anywhere later, the chirp search
 included - and five other cross-thread races; the stress test is now race-free. No recurrence in the
 follow matrix since; keep open until a soak shows none.
+
+**Soak 2026-11-12:** 132 GUI scenario runs (264 `ultra_gui` processes, ITU Good dips/QSB, AWGN 20/25,
+Good 20; follow on and off) since the last crash report (21:09, the constellation race, fixed in
+94d0fa4): no crash. Downgraded to P2 (likely one of the races fixed above: the `initFFT` flag or the interleaver tables); close after the
+rig soak (Pi 5, real audio: different thread timing and ARM memory ordering).
 
 ### BUG-TX-SPLATTER-SYMBOL-EDGES (open, 2026-11-11) — P3: data symbols switch hard; their splatter shows on every waterfall
 
