@@ -68,6 +68,17 @@ the other constellation with the same waveform), the listener's demodulator stat
 false MC-DPSK syncs on OFDM bursts. Mitigated: an up-crossing needs a physical reading in the burst
 (2026-11-12), and the crossing's pool clear usually drops the reading.
 
+### BUG-MCDPSK-DOWNSTEP-PER-BURST (open, 2026-11-12) — P3: the MC-DPSK rate controller's down rule depends on the burst size
+
+`McDpskRateController` steps DQPSK down on any frame lost in a burst. That is a decision on
+P(burst holds a loss) = 1 - (1 - FER)^n, not on the frame error rate: at FER 10 % a 3-frame burst
+steps down 27 % of the time, a 6-frame one 47 %. GUI 2026-11-12 (ULTRA_MCDPSK_WINDOW_MAX=8 vs 3, ITU
+Good +3 dB): rate changes 10/3/8 vs 7/2/0 (follow off), 17 vs 5 in one follow-on run, and the
+6-frame window's 13 % per-frame airtime gain (AWGN +3 dB: -8.5 %) did not carry to fading (mean
+305 vs 304 s follow off). Direction: decide the down-step on the frame error rate against the
+rung's break-even FER (the up-step already prices a failed probe), so the window and the rate
+decision stop interacting.
+
 ### BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY (open, 2026-11-12) — P3: a one-frame DQPSK burst is acknowledged 2.6 s late
 
 A receiver buffers a whole frame at the slowest MC-DPSK constellation (DBPSK) before decoding a

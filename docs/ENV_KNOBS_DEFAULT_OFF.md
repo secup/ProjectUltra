@@ -815,7 +815,12 @@ fixed 2026-11-09). Today the ACK arrives 1.43 s after the burst end (p99 1.54 s,
 First GUI A/B (2 KB, AWGN +3 dB, before the up-step probe cap): 210-211 s vs 208 s - a 6-frame DQPSK
 burst is 13 % faster per frame, but the probe schedule then waited 4 clean DBPSK bursts instead of
 2. An up-step now probes with the lower rung's window (`mcDpskProbeBurstFrames`): re-test (same
-cells, interleaved) 191/191/191 s vs 208/209/209 s, -8.5 %. Fading A/B (ITU Good +3 dB) next.
+cells, interleaved) 191/191/191 s vs 208/209/209 s, -8.5 %. ITU Good +3 dB, 2 KB, seeds 44/45/46:
+follow on 359/184/468 vs 256/208/316 s (the arms crossed up to OFDM at different times), follow off
+334/191/391 vs 341/241/330 s (mean 305 vs 304). On fading the bigger window churns the constellation
+(rate changes 10/3/8 vs 7/2/0 follow off; 17 vs 5 in one follow-on run): the receiver steps DQPSK
+down on any lost frame in a burst, and a 6-frame burst holds a loss about twice as often at the same
+frame error rate. Default stays 3 until that rule is a frame-error-rate decision.
 
 ## `ULTRA_MCDPSK_MEASURED_RTO` (added 2026-11-12)
 `1` on the sending station: an MC-DPSK burst's retransmission timeout is its airtime plus the
