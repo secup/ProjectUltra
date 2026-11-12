@@ -211,8 +211,9 @@ capped at 8PSK R2/3 (`kNarrowCoherentLadder`). Measured headroom it leaves: 16QA
 from 18 dB and wins goodput on Good from 21 dB (not on Moderate). `ULTRA_RATE_ADAPT=1` enables the
 wideband machinery on any OFDM mode; it is not validated on narrowband.
 
-**Measured 2026-11-12 (GUI, forced narrowband, 6 KB): `ULTRA_RATE_ADAPT=1` is no fix.** AWGN 22 dB,
-seed 44: 240 s / 240 bps against 143 s / 450 bps at the fixed 8PSK R2/3 (seed 45 fixed: 144 s). The
+**Measured 2026-11-12 (GUI, forced narrowband, 6 KB, seeds 44/45): `ULTRA_RATE_ADAPT=1` is no fix.**
+Fixed 8PSK R2/3 against the knob: AWGN 22 dB 143/144 s against 240/240 s; ITU Good 22 dB 144/143
+against 242/242; ITU Moderate 20 dB 143/152 against 263/240 (450 bps against 220-240). The
 knob makes `entryRateCapsApply` true, so the receiver authority's measured-entry probe sends the
 first group at QPSK R1/2 - and nothing climbs from there: the authority's commands reach the sender
 through the descriptor switch (`tryDescriptorModeSwitch`), which is wideband-only, and narrowband
