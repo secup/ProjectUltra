@@ -318,6 +318,20 @@ the monitor buffer from its slowest member). Never add a rung to one without the
 RTO; until 2026-11-08 the staircase floor was 200 ms, which the monitor could not even buffer.
 **Test:** `ToneBurstAckPayload` (`symbol_ms_staircase`: every return value is in the set).
 
+### INV-TONE-ACK-006: one staircase input rule for every frontend, fast to lengthen
+
+**Rule:** the GUI and the headless TNC size every tone ACK through `ToneAckStaircase`
+(`gui/modem/tone_ack_staircase.hpp`), fed by the shared binding's `after_rx_data` hook: the reading is
+min(median of the last 5 frame SNRs, the latest one); an OFDM/idle in-band source picks the rung (fading
+column when the frames measured fading); an MC-DPSK reading (the data-aided estimate, which already
+carries the fade loss) may only lengthen the ACK past the 25 ms baseline, read in the AWGN column; any
+other source gets the baseline. No frontend computes its own.
+**Why:** a lost ACK costs the sender's whole round (8-17 s), a needlessly long one at most ~3 s of air;
+the median alone held a pre-drop reading for three frames (12 ms ACKs lost at 0.3-6 dB), the TNC sent
+every ACK at 25 ms, and MC-DPSK sessions never left 25 ms (BUG-ACK-STAIRCASE-SLOW-ON-DROP,
+BUG-TNC-ACK-FIXED-25MS, BUG-MCDPSK-ACK-STAIRCASE-BYPASSED).
+**Test:** `ToneAckStaircase`.
+
 ### INV-TONE-ACK-002: Diversity is lockstep and power-combined
 
 **Rule:** the two-subband ACK (`kToneFreqHzDiversity`, `ULTRA_TONE_ACK_DIVERSITY`, default ON) is

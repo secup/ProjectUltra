@@ -2,6 +2,7 @@
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "gui/modem/modem_engine.hpp"
 #include "gui/modem/modem_protocol_binding.hpp"
+#include "gui/modem/tone_ack_staircase.hpp"
 #include "otasim_client/ota_audio_backend.hpp"
 #include "otasim_client/ota_rx_pump.hpp"
 #include "ptt/ptt_driver_factory.hpp"
@@ -417,6 +418,8 @@ private:
     // StreamingEncoder/StreamingDecoder the TNC used to own. ModemEngine owns the encoder +
     // decoder + its own decode thread; ultra_tnc feeds it audio and consumes its callbacks.
     ModemEngine modem_;
+    // The tone-burst ACK's symbol duration from the decoded frames' SNRs (shared with the GUI).
+    ultra::gui::ToneAckStaircase tone_ack_staircase_;
 
     ModemConfig base_ofdm_config_;
     ModemConfig ofdm_config_;
@@ -526,8 +529,10 @@ private:
         // success telemetry (frame.rx); decode-failure telemetry is dropped with the
         // DecodeResult path (observability only).
         ultra::gui::ModemProtocolFrontendHooks hooks;
-        hooks.after_rx_data = [](const Bytes& data, float snr_db, float fading,
-                                 ultra::SNRSource snr_source, bool used_for_quality) {
+        hooks.after_rx_data = [this](const Bytes& data, float snr_db, float fading,
+                                     ultra::SNRSource snr_source, bool used_for_quality) {
+            // The tone-ACK staircase's readings (same rule as the GUI, BUG-TNC-ACK-FIXED-25MS).
+            tone_ack_staircase_.noteFrame(snr_db, snr_source, fading);
             char fields[224];
             std::snprintf(fields, sizeof(fields),
                           "{\"bytes\":%zu,\"snr_db\":%.1f,\"snr_source\":\"%s\","
@@ -655,7 +660,14 @@ private:
                              static_cast<unsigned long long>(air_remaining));
                     return;
                 }
-                auto samples = modem_.transmitToneBurstAck(tba);
+                const auto staircase = tone_ack_staircase_.choose();
+                LOG_INFO("AUDIO",
+                         "ToneBurstAck staircase: symbol_ms=%u snr_used=%.1f snr_current=%.1f "
+                         "src=%s fading_index=%.2f fading_present=%d",
+                         staircase.symbol_ms, staircase.snr_used, staircase.snr_current,
+                         ultra::snrSourceToString(staircase.source), staircase.fading_index,
+                         staircase.fading_present ? 1 : 0);
+                auto samples = modem_.transmitToneBurstAck(tba, staircase.symbol_ms);
                 if (samples.empty()) return;
                 if (air_remaining > 0 || uncertain_inbound) {
                     const uint32_t budget_ms =

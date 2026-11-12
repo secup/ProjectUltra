@@ -10,6 +10,7 @@
 #include "image_util.hpp"
 #include "audio_engine.hpp"
 #include "otasim_client/ota_audio_backend.hpp"
+#include "modem/tone_ack_staircase.hpp"
 #include "modem/modem_engine.hpp"
 #include "ptt/ptt_driver.hpp"
 #include "protocol/protocol_engine.hpp"
@@ -316,27 +317,10 @@ private:
     std::atomic<uint64_t> operator_events_tx_delivered_{0};
     std::atomic<uint64_t> operator_events_tx_failed_{0};
 
-    // Latest in-band decode SNR, cached lock-free off the modem RX path
-    // (after_rx_data hook) so the tone-burst ACK callback can pick its §15.5
-    // staircase symbol duration WITHOUT calling protocol_ — the ACK callback is
-    // invoked while protocol_ holds ProtocolEngineMutex, and getMeasuredSNR()
-    // re-locks it, so a direct call self-deadlocks. Atomics → no lock either side.
-    std::atomic<float> cached_inband_snr_db_{12.0f};
-    std::atomic<SNRSource> cached_inband_snr_source_{SNRSource::NONE};
-    // Fading index cached alongside the SNR (same lock-free discipline): the
-    // §15.5 staircase fast edge is basis-dependent — fade-effective SNR uses the
-    // 16 dB edge, AWGN the 18 dB one (BUG-ACK-STAIRCASE-FADE-BIN, 2026-07-01).
-    std::atomic<float> cached_fading_index_{0.0f};
-    // BUG-STAIRCASE-SNAPSHOT-INPUT fix (ULTRA_ACK_SNR_MEDIAN, 2026-07-05): ring of
-    // the last 5 cached readings; the staircase reads the MEDIAN. A single
-    // erasure-slot/trough snapshot (F98: one 4/5 partial wrote 9.4 over a 22 dB
-    // channel → 50 ms ACK bin → phantom demote → 54 s epoch saga) cannot move a
-    // median-of-5, while a genuine SNR decline still tracks within ~3 groups.
-    // Lock-free per the same discipline (independent atomics; ordering slack
-    // between slots is harmless for a median).
-    std::array<std::atomic<float>, 5> cached_snr_ring_{
-        {12.0f, 12.0f, 12.0f, 12.0f, 12.0f}};
-    std::atomic<uint32_t> cached_snr_ring_idx_{0};
+    // The tone-burst ACK's symbol duration from the decoded frames' SNRs (§15.5 staircase), fed
+    // lock-free off the modem RX path (after_rx_data) and read on the protocol's ACK callback,
+    // which holds ProtocolEngineMutex (so it must not call protocol_). Shared with the TNC.
+    ToneAckStaircase tone_ack_staircase_;
     // ACK repeat-if-silent (ULTRA_ACK_REPEAT_SILENT_MS, 2026-07-05; handoff §7.6):
     // the stashed decorrelated tone-ACK copy + its fire time. Written on the
     // protocol callback (stash), consumed on the GUI tick (CCA-gated fire) —

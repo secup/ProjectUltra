@@ -509,14 +509,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         // self-deadlocks). The ACK callback gates on the source being trusted.
         // Fading rides along: the staircase fast edge is basis-dependent
         // (fade-effective SNR -> 16 dB edge; AWGN -> 18 dB).
-        cached_inband_snr_db_.store(snr_db, std::memory_order_relaxed);
-        cached_inband_snr_source_.store(snr_source, std::memory_order_relaxed);
-        cached_fading_index_.store(fading, std::memory_order_relaxed);
-        // BUG-STAIRCASE-SNAPSHOT-INPUT: feed the median ring alongside the
-        // last-value cache (the staircase reads the median under ULTRA_ACK_SNR_MEDIAN).
-        cached_snr_ring_[cached_snr_ring_idx_.fetch_add(1, std::memory_order_relaxed) %
-                         cached_snr_ring_.size()]
-            .store(snr_db, std::memory_order_relaxed);
+        tone_ack_staircase_.noteFrame(snr_db, snr_source, fading);
         // Monitor mode: surface every decoded frame's payload in the RX log regardless of
         // addressing (the protocol layer would otherwise drop frames whose dst hash doesn't
         // match local call, making the GUI silent on OTA captures from peers).
@@ -687,76 +680,23 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             if (disconnect_teardown_active_.load(std::memory_order_acquire)) {
                 return;
             }
-            // §15.5 staircase: scale the ACK symbol duration to the latest in-band
-            // SNR — a shorter ACK at high SNR cuts the per-turnaround airtime
-            // (850 ms -> 408 ms at >=18 dB); a longer ACK at low SNR adds
-            // matched-filter integration so it isn't missed (a missed ACK costs a
-            // full retransmit). Read the LOCK-FREE cached SNR (written off the
-            // modem RX path); NEVER call protocol_ here — this callback runs while
-            // protocol_ holds its mutex, so re-entry self-deadlocks. Only a
-            // trusted physical in-band source shortens; otherwise safe baseline.
-            // The data-sender's monitor scans every staircase rung
-            // (kStaircaseSymbolMs is its scan set), so any value symbolMsForSNR
-            // returns is decodable there.
-            uint32_t symbol_ms = ultra::waveform::tone_burst_ack::kBaselineSymbolMs;
-            const SNRSource src = cached_inband_snr_source_.load(std::memory_order_relaxed);
-            const float current_snr =
-                cached_inband_snr_db_.load(std::memory_order_relaxed);
-            float staircase_snr = current_snr;
-            bool fading_present = false;
-            if (src == SNRSource::IDLE_IN_BAND || src == SNRSource::OFDM_BROADBAND) {
-                // Fade-aware staircase column (BUG-ACK-STAIRCASE-FADE-BIN): the
-                // cached in-band SNR is fade-effective on a fading channel, and
-                // the fading column's edges are the worst of Good/Moderate
-                // (tone_burst_constants.hpp symbolMsForSNR). Uses the same
-                // AWGN-vs-fading split as capInitialOFDMRate (kFadingAwgnMax);
-                // the Good-vs-Moderate distinction is deliberately NOT consulted
-                // (the classifier can't make it). ULTRA_ACK_FADE_EDGE=0 opts out.
-                static const bool kFadeEdgeEnabled = [] {
-                    const char* e = std::getenv("ULTRA_ACK_FADE_EDGE");
-                    return !(e && *e == '0');
-                }();
-                fading_present =
-                    kFadeEdgeEnabled &&
-                    cached_fading_index_.load(std::memory_order_relaxed) >=
-                        ultra::protocol::kFadingAwgnMax;
-                // BUG-STAIRCASE-SNAPSHOT-INPUT fix (ULTRA_ACK_SNR_MEDIAN, default
-                // OFF): read the MEDIAN of the last 5 readings instead of the last
-                // value — one erasure-slot/trough snapshot (F98: 9.4 written over a
-                // 22 dB channel → 1.7 s ACK → phantom demote → 54 s saga) cannot
-                // move a median-of-5; genuine decline still tracks in ~3 groups.
-                static const bool kAckSnrMedian = [] {
-                    const char* e = std::getenv("ULTRA_ACK_SNR_MEDIAN");
-                    return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05 (campaign flip)
-                }();
-                if (kAckSnrMedian) {
-                    std::array<float, 5> v;
-                    for (size_t i = 0; i < v.size(); ++i) {
-                        v[i] = cached_snr_ring_[i].load(std::memory_order_relaxed);
-                    }
-                    std::sort(v.begin(), v.end());
-                    staircase_snr = v[v.size() / 2];
-                }
-                // NO SCALE COMPENSATION. The staircase edges were RE-MEASURED on the
-                // honest in-band scale (tools/measure_ack_staircase, 2026-08-01), so every
-                // source — OFDM_BROADBAND and IDLE alike — is now consumed in the units it
-                // is actually reported in. The former
-                // `+= kOfdmLegacyAnchorScaleOffsetDb` existed only because the old edges
-                // were tuned against the pre-2026-07-07 estimator; it also could not be
-                // right for both columns at once (13 dB too conservative on AWGN, 2.7 dB
-                // too aggressive on fading). Deleted with the table it patched.
-                symbol_ms = ultra::waveform::tone_burst_ack::symbolMsForSNR(
-                    staircase_snr, fading_present);
-            }
+            // §15.5 staircase (gui/modem/tone_ack_staircase.hpp, shared with the TNC): a
+            // shorter ACK at high SNR cuts the per-turnaround airtime, a longer one at low SNR
+            // adds matched-filter integration so it isn't missed (a missed ACK costs a full
+            // retransmit). Reads the LOCK-FREE readings the modem RX path wrote; NEVER call
+            // protocol_ here - this callback runs while protocol_ holds its mutex. The sender's
+            // monitor scans every staircase rung (kStaircaseSymbolMs), so any value is decodable.
+            const auto staircase = tone_ack_staircase_.choose();
+            const uint32_t symbol_ms = staircase.symbol_ms;
             // Staircase decision trace (BUG-ACK-STAIRCASE-FADE-BIN validation): the
             // inputs behind every ACK duration — greppable on sim and rig.
             LOG_MODEM(INFO,
                       "ToneBurstAck staircase: symbol_ms=%u snr_used=%.1f "
                       "snr_current=%.1f src=%s fading_index=%.2f "
                       "fading_present=%d",
-                      symbol_ms, staircase_snr, current_snr, snrSourceToString(src),
-                      cached_fading_index_.load(std::memory_order_relaxed),
-                      fading_present ? 1 : 0);
+                      symbol_ms, staircase.snr_used, staircase.snr_current,
+                      snrSourceToString(staircase.source), staircase.fading_index,
+                      staircase.fading_present ? 1 : 0);
             auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
             if (!samples.empty()) {
                 // LISTEN-BEFORE-ACK (2026-07-05, F124: 4 ACKs keyed over the

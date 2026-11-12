@@ -8,6 +8,24 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
+
+GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
+decision-directed EVM of 6.5 dB, and the latent controller's posterior moved only to mean 15.6 dB
+(x_p25 14.0), commanding QPSK R2/3 - still far above the channel. A 0/M crater says "x below this
+rung's theta" but the likelihood is flat far below it, so x walks down one rung per crater; after that
+the sender's rounds were single frames at QPSK R2/3 that never decoded, a single frame carries no
+descriptor (no DESC-SWITCH), RTO resends keep the rung by design ("timeouts are no evidence against
+the rung"), and the receiver had no frame to answer - six silent rounds until the follow's 60 s
+patience fell back to MC-DPSK. Directions (rate control - needs the rig A/B, not the seeded sim): feed
+the failed group's EVM reading into the latent posterior as a likelihood (the EVM decode thresholds
+are per-rung and class-independent, docs/EVM_RATE_SELECTION_2026_11_08.md), and/or let a singleton
+carry a descriptor so its rung can change. A related gap on the receiver: a failed single frame is
+answered only by the anchored-burst backstop, 14.6 s after its anchor (the longest physical turn,
+because a failed chirp-anchored codeword may be a group resend's descriptor), which is always later
+than a singleton's resend (~8.7 s) and so is withheld (BUG-BACKSTOP-RACES-RTO) - the receiver says
+nothing while the sender repeats a frame it cannot decode.
+
 ### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
 
 `capRxAuthorityInitialRung` (waveform_selection.hpp) sends the first coherent group at QPSK R1/2
@@ -2747,6 +2765,18 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-ACK-STAIRCASE-SLOW-ON-DROP + BUG-TNC-ACK-FIXED-25MS + BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (FIXED 2026-11-12) — was P2: tone ACKs too short for the channel
+
+Three faces of one input: (1) the GUI's ACK duration read the median of the last 5 frame SNRs, which
+after a 20 -> 5 dB drop held the pre-drop reading for three frames - 12 ms ACKs sent at 0.3-6.9 dB were
+lost (GUI ITU Good drop seeds 44/45), each a lost round; (2) the headless TNC sent every ACK at the
+25 ms baseline whatever the channel; (3) an MC-DPSK session's ACK was always 25 ms (its SNR source was
+not trusted), whose 95 % edge on fading (+2..+4 dB) is far above where MC-DPSK runs. Now one shared rule
+(`gui/modem/tone_ack_staircase.hpp`, GUI and TNC): min(median, latest), and an MC-DPSK reading may
+lengthen the ACK (AWGN column: the data-aided reading already carries the fade loss) but never shorten
+it below the baseline. Test `ToneAckStaircase`.
+CHANGELOG 2026-11-12.
 
 ### BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD (FIXED 2026-11-12) — was P1: session death after a failed first up-crossing
 

@@ -781,6 +781,12 @@ target_include_directories(test_ofdm_compact_frame PRIVATE
 target_link_libraries(test_ofdm_compact_frame PRIVATE ultra_core ota_channel_core)
 add_test(NAME OfdmCompactFrame COMMAND test_ofdm_compact_frame)
 
+# The tone-burst ACK's symbol duration, shared by the GUI and the TNC.
+add_executable(test_tone_ack_staircase test_tone_ack_staircase.cpp)
+target_include_directories(test_tone_ack_staircase PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_tone_ack_staircase PRIVATE ultra_core)
+add_test(NAME ToneAckStaircase COMMAND test_tone_ack_staircase)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.

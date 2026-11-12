@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(ack): one tone-ACK staircase for GUI and TNC, fast to lengthen (BUG-ACK-STAIRCASE-SLOW-ON-DROP, BUG-TNC-ACK-FIXED-25MS, BUG-MCDPSK-ACK-STAIRCASE-BYPASSED)
+
+**What broke.**
+- The GUI's ACK symbol duration read the median of the last 5 frame SNRs (ULTRA_ACK_SNR_MEDIAN,
+  against a single trough snapshot lengthening the ACK). After a real drop the median held the
+  pre-drop reading for three frames: GUI ITU Good 20 -> 5 dB (drop seeds 44/45, both g9 and g10
+  batches) - 12 ms ACKs (`snr_used=12.0`) sent while the latest readings were 0.3-6.9 dB, below the
+  12 ms ACK's 95 % edge on fading (6-8 dB); the sender heard none, and with no ACK it held QPSK R2/3
+  for 4 silent rounds (70 s) until the follow fell back.
+- The headless TNC passed no duration: every ACK went out at the 25 ms baseline whatever the channel.
+- An MC-DPSK session's readings (MCDPSK_IN_BAND) were not trusted, so its ACKs were always 25 ms,
+  whose 95 % edge on fading is +2..+4 dB - far above where MC-DPSK runs.
+
+**What changed.** `gui/modem/tone_ack_staircase.hpp` `ToneAckStaircase` (INV-TONE-ACK-006), fed by the
+shared binding's `after_rx_data` hook and read on the ACK callback by both `app.cpp` and
+`tools/ultra_tnc.cpp`: reading = min(median of 5, latest) - fast to lengthen, slow to shorten (a lost
+ACK costs the sender's whole round, 8-17 s; a needlessly long one at most ~3 s of air); an OFDM/idle
+source picks the rung (fading column when the frames measured fading); an MC-DPSK reading may lengthen
+the ACK past the baseline, never shorten it, read in the AWGN column - it is the data-aided estimate,
+which already carries the fade loss (a 5 dB ITU Good channel reads 0.6-2.3 dB); the fading column made
+every MC-DPSK ACK there 100 ms (3.4 s, +2.5 s a round) although all 25 ms ones had been heard (16/16);
+any other source: the baseline.
+
+**Verification.** ctest 124/124 on this commit's tree (`ToneAckStaircase` new). GUI (two `ultra_gui -sim` stations over OTASim), the ITU Good 5 dB marginal set with this staircase but MC-DPSK readings on the fading column: 8/8 PASS, 113-389 s, 1657 s in all (the 7 runs comparable with the two earlier batches 1317 s against 1395 and 1249 s - inside this zone's scatter); after the 20 -> 5 dB drop the receiver's ACK lengthened 12 -> 25 -> 50 -> 100 ms as its readings fell 14 -> 7 -> 5.1 -> 2.0 dB (before: 12 ms for three ACKs). With the AWGN column for MC-DPSK readings (this commit): Good 5 dB seeds 49 and 48 374 and 130 s, Good 0 dB 1 KB 244 s, AWGN -3 dB 1 KB 143 s, a 20 -> 0 dB drop held for a whole 4 KB transfer 875 s - all PASS, and MC-DPSK spells at Good 5 dB ACK at 25 ms.
+
+---
+
 ## 2026-11-12 — FIX(follow): an MC-DPSK receiver hears its peer's fallback geometry (BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD)
 
 **What broke (session death).** A session that connected on MC-DPSK Robust (DQPSK, 4 codewords per
