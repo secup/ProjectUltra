@@ -236,6 +236,18 @@ through the descriptor switch (`tryDescriptorModeSwitch`), which is wideband-onl
 keeps the MODE_CHANGE exchange (2.2 s anchors each way). A narrowband ladder needs its own command
 path (descriptor switch on the narrowband burst, whose every burst already carries an anchor).
 
+**Plan (not started).** The prize, from the measured narrowband curves above `kNarrowCoherentLadder`:
+on AWGN/Good, 16QAM R3/4 and 32QAM R2/3 hold at 20 dB (32QAM R2/3 3.33 bits per carrier against
+8PSK R2/3's 2: ~450 -> ~750 bps); on Moderate the ladder stays at 8PSK R2/3 (16QAM fails at any SNR
+measured). Steps: (1) `tryDescriptorModeSwitch` accepts OFDM_NARROW - every narrowband burst
+carries a chirp anchor and the descriptor, so a descriptor-committed rung is as safe as on
+wideband; the receiver applies it inside the narrowband geometry (`applyOfdmGeometryFor`); (2) the
+receiver authority and the EVM selector price rungs with narrowband frame timing
+(`narrowOFDMFrameTiming` in the `RungGeometryTable`) and a narrowband rung set (the EVM thresholds
+are per rung, not per geometry - re-check on narrowband frames); (3) default it for narrowband only
+after a GUI campaign (forced narrowband, AWGN/Good/Moderate 12-25 dB, with and without
+`--rx-filter 1250-1750`, n >= 3 seeds) beats the fixed column everywhere.
+
 ### BUG-IDLE-PING-FROM-OFDM-CHIRP (open, 2026-11-10) — P3: an idle receiver reports the chirp of a short OFDM frame as a PING
 
 A PING is a bare dual chirp, and every chirp-preambled OFDM frame opens with one. An idle
