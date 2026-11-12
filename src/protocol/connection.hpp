@@ -1391,6 +1391,10 @@ private:
     bool crossing_probe_rx_side_ = false;     // this station commanded it (the receiver)
     // The tone ACK that launched this end's up-crossing (its repeats are consumed while the first
     // OFDM group is on air).
+    // Retransmission-timeout rounds since the peer was last heard (any ACK round resets it): the
+    // escapes need the latest round to have drawn an ACK (escapeHasPeerEvidence).
+    int rto_rounds_since_peer_ack_ = 0;
+    bool escape_silence_hold_logged_ = false;
     bool crossing_launch_ack_valid_ = false;
     uint8_t crossing_launch_ack_seq_ = 0;
     uint16_t crossing_launch_ack_mask_ = 0;
@@ -1537,6 +1541,7 @@ private:
     };
     SessionPick sessionLadderPick() const;
     uint64_t mcDpskBurstSpanMs() const;
+    bool escapeHasPeerEvidence(const char* which);
     Bytes mcDpskTurnEndWireCopy(const Bytes& frame) const;
     bool isCrossingLaunchAckCopy(
         const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const;

@@ -268,6 +268,29 @@ void test_thresholds_carried_between_constellations() {
 
 }  // namespace
 
+// One group is one fade realization: its frames are adjacent in time (one coherence interval on
+// Good), so it cannot certify a jump of several rungs. After a crossing reset the window, one group
+// at a crest took 8PSK R2/3 to 32QAM R2/3 and the next 32QAM group failed whole (GUI, two seeds).
+void test_multi_rung_climb_needs_two_groups() {
+    EvmRateSelector s;
+    CHECK(s.groupsInWindow() == 0 && !s.multiRungClimbReady(), "empty window");
+    s.observeGroup(kRungIdxQam8R23, frames(25.0f, 5), 5, 5);
+    CHECK(s.ready() && s.groupsInWindow() == 1 && !s.multiRungClimbReady(),
+          "one group: ready for the next rung only");
+    s.observeGroup(kRungIdxQam8R23, frames(25.0f, 5), 5, 5);
+    CHECK(s.groupsInWindow() == 2 && s.multiRungClimbReady(),
+          "two groups: two realizations agree, a multi-rung climb may follow");
+    for (int g = 0; g < 6; ++g) s.observeGroup(kRungIdxQam8R23, frames(25.0f, 5), 5, 5);
+    CHECK(s.groupsInWindow() == EvmRateSelector::kWindowFrames / 5,
+          "the window keeps only its last 20 frames' groups");
+    EvmRateSelector big;
+    big.observeGroup(kRungIdxQam8R23, frames(25.0f, 25), 25, 25);
+    CHECK(big.groupsInWindow() == 1 && !big.multiRungClimbReady(),
+          "a long single group is still one realization");
+    s.reset();
+    CHECK(s.groupsInWindow() == 0, "a reset (a waveform crossing) empties it");
+}
+
 int main() {
     std::cout << "=== EVM Rate Selector Tests ===\n";
     test_margin_is_visible_from_any_rung();
@@ -276,6 +299,7 @@ int main() {
     test_window_and_unmeasured_frames();
     test_time_to_finish_objective();
     test_climb_mode_only_takes_reliable_rungs();
+    test_multi_rung_climb_needs_two_groups();
     test_thresholds_are_ordered();
     test_thresholds_carried_between_constellations();
     std::cout << (tests_failed == 0 ? "PASS" : "FAIL") << ": "

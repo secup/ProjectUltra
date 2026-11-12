@@ -732,6 +732,17 @@ tones and reports the carrier offset without the shift.
 (BUG-NARROW-ACK-OUT-OF-BAND).
 **Test:** `ToneBurstAckRoundTrip` (`test_narrowband_band_plan`); GUI gate `--rx-filter 1250-1750`.
 
+### INV-RATE-EVIDENCE-001: a rung decision rests on evidence about the rung (2026-11-12)
+**Rule:** (1) a climb of more than one rung needs EVM frames from at least two groups
+(`EvmRateSelector::kMinGroupsForMultiRungClimb`): a group's frames are one fade realization;
+(2) an escape-drop needs the latest round to have drawn an ACK (`escapeHasPeerEvidence`):
+retransmission timeouts in a row say the channel or the return path is dead, which no rung fixes.
+**Why:** one crest group took 8PSK R2/3 -> 32QAM R2/3 and the next group failed whole; escapes
+fired in a dead channel and committed a needless drop at the return (22 s handshake)
+(BUG-POST-CROSSING-OVERCLIMB, BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL).
+**Test:** `EVMRateSelector`, `WaveformFollow` (`test_first_ofdm_group_climbs_one_rung`,
+`test_escape_needs_the_peer_heard`).
+
 ### INV-THREAD-001: state shared between the engine's threads is atomic or locked (2026-11-12)
 **Rule:** the receiving engine runs one decode thread per decoder (two under dual-listen), the GUI's
 main thread (protocol tick, mode changes, TX) and its render reads. Anything two of them touch is an

@@ -58,3 +58,5 @@ recordings/*
 # ota_simulator runtime outputs (when scenario writes relative paths)
 /out_*.wav
 /out_*.jsonl
+
+build_tsan/

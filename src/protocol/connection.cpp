@@ -2976,6 +2976,7 @@ static int collapseEscapeRounds() {
     static const int v = [] {
         if (const char* e = std::getenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS")) {
             const int n = std::atoi(e);
+            if (n == 0 && e[0] == '0') return 0;  // opts out (it read as the default before)
             if (n >= 2 && n <= 8) return n;
         }
         return 2;  // DEFAULT 2026-07-05 (campaign standing value; 0 opts out)
@@ -3596,8 +3597,18 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                 // CLIMB: lift the latent pick only to a rung the recent frames say decodes as
                 // reliably as the controller ever credits any rung.
                 const uint8_t latent_rung = best.rung != kRungIdxNone ? best.rung : cur;
+                // One group is one fade realization: until the window holds two, climb at most
+                // to the next enabled rung (EvmRateSelector::kMinGroupsForMultiRungClimb).
+                uint8_t climb_ceiling = latent_ceiling;
+                if (!evm_selector_.multiRungClimbReady()) {
+                    const uint8_t next_up = snapRungIndexUpToEnabled(std::max(cur, latent_rung));
+                    if (next_up != kRungIdxNone &&
+                        (climb_ceiling == kRungIdxNone || next_up < climb_ceiling)) {
+                        climb_ceiling = next_up;
+                    }
+                }
                 const uint8_t up = evm_selector_.bestReliable(
-                    geometry, latent_ceiling, LatentRateController::kCapProb);
+                    geometry, climb_ceiling, LatentRateController::kCapProb);
                 if (up != kRungIdxNone && up > latent_rung) {
                     evm_pick.rung = up;
                     evm_pick.goodput = geometry[up].useful_bytes_per_frame *
@@ -4787,6 +4798,30 @@ void Connection::maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
     last_adaptive_action_ = buf;
 }
 
+// An escape-drop needs evidence that the peer hears this end: the latest round drew an ACK. Rounds
+// that drew nothing (retransmission timeouts in a row) are no evidence against the rung - a dead
+// channel or a dead return path kills every rung, and the drop's MODE_CHANGE cannot land there. It
+// was queued anyway, retried into the silence, and committed at the return over a link whose next
+// burst decoded at the old rung: the handshake collided with the burst's ACK and took 22 s (GUI,
+// follow off, ITU Good dip, seed 46; BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL). When the rung really is
+// too high the peer still hears the rung-independent descriptor and anchor and answers (crater ACK,
+// anchored-burst backstop), and under the receiver authority it commands the rung itself. Silence
+// is waveform follow's (the down-crossing's silence clock), or nobody's.
+bool Connection::escapeHasPeerEvidence(const char* which) {
+    if (rto_rounds_since_peer_ack_ == 0) {
+        escape_silence_hold_logged_ = false;
+        return true;
+    }
+    if (!escape_silence_hold_logged_) {
+        escape_silence_hold_logged_ = true;
+        LOG_MODEM(INFO,
+                  "Connection: %s escape held: %d retransmission timeout(s) since the peer was "
+                  "last heard (silence is no evidence against the rung)",
+                  which, rto_rounds_since_peer_ack_);
+    }
+    return false;
+}
+
 void Connection::maybeEscapeStuckFrame() {
     if (!rateAdaptationActive()) return;
     if (state_ != ConnectionState::CONNECTED) return;
@@ -4795,6 +4830,7 @@ void Connection::maybeEscapeStuckFrame() {
     if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
     if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
     if (arq_.maxInFlightRetryCount() < stuckRetransmitEscape()) return;
+    if (!escapeHasPeerEvidence("stuck-frame")) return;
 
     // The pathological-single-frame 5-retx backstop (ULTRA_STUCK_ESCAPE_RETX), kept verbatim
     // (§RETX_PACING_DESIGN_2026_07_03 §2.3). During genuine collapses the round-conditioned
@@ -4807,7 +4843,7 @@ void Connection::maybeEscapeStuckFrame() {
 }
 
 // Collapse-conditioned escape (§RETX_PACING_DESIGN_2026_07_03 §2, behind
-// ULTRA_COLLAPSE_ESCAPE_ROUNDS, default OFF). Polled from the CONNECTED tick beside
+// ULTRA_COLLAPSE_ESCAPE_ROUNDS, default 2 since 2026-07-05; 0 opts out). Polled from the CONNECTED tick beside
 // maybeEscapeStuckFrame — NEVER fired from inside an ARQ callback (an RTO-batch round
 // increments the counter while its physical batch is staged; the escape lands after
 // arq_.tick unwinds and before that batch is committed). Zero-DELIVERED evidence: only a whole-window zero
@@ -4815,9 +4851,10 @@ void Connection::maybeEscapeStuckFrame() {
 // (noteArqRoundOutcome), so a lone straggler amid deliveries cannot (g42-protective).
 void Connection::maybeCollapseEscape() {
     const int rounds_needed = collapseEscapeRounds();
-    if (rounds_needed <= 0) return;               // knob OFF (default) — byte-identical
+    if (rounds_needed <= 0) return;               // ULTRA_COLLAPSE_ESCAPE_ROUNDS=0 (default 2)
     if (zero_progress_rounds_ < rounds_needed) return;
     if (!rateAdaptationActive()) return;
+    if (!escapeHasPeerEvidence("collapse")) return;
     if (state_ != ConnectionState::CONNECTED) return;
     if (mode_change_pending_) return;             // a rate change is already in flight
     if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;  // scope gate (§1.3/§6.2)
@@ -5122,6 +5159,14 @@ void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
 }
 
 void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
+    if (progress_frames >= 0) {
+        // The peer is heard on any ACK round, progress or not; a timeout round heard nothing.
+        if (std::strcmp(origin, "rto") == 0) {
+            ++rto_rounds_since_peer_ack_;
+        } else {
+            rto_rounds_since_peer_ack_ = 0;
+        }
+    }
     if (progress_frames > 0) {
         noteFollowOfdmDelivery(progress_frames);  // what OFDM delivers, for the down-crossing
         follow_silent_rounds_ = 0;
@@ -9917,6 +9962,8 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     follow_fallback_age_ms_ = 0;
     ms_since_rx_burst_verdict_ = UINT64_MAX;
     crossing_launch_ack_valid_ = false;
+    rto_rounds_since_peer_ack_ = 0;
+    escape_silence_hold_logged_ = false;
     crossing_probe_active_ = false;
     crossing_probe_rx_side_ = false;
     crossing_probe_revert_ms_ = 0;

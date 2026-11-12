@@ -52,7 +52,7 @@ BUG-MCDPSK-RESEND-NO-TURN-END). After the fixes (GUI, CHANGELOG): dips -3.0 % (f
 length sweep -2.0 s, QSB even, 60 s outage +10 s (patience worst case). Remaining: the 60 s-outage
 case and BUG-POST-CROSSING-OVERCLIMB; downgraded to P3.
 
-### BUG-POST-CROSSING-OVERCLIMB (open, 2026-11-11) — P2: one group's EVM jumps the ladder three rungs
+### BUG-POST-CROSSING-OVERCLIMB (FIXED 2026-11-12, kMinGroupsForMultiRungClimb) — P2: one group's EVM jumps the ladder three rungs
 
 After an up-crossing the OFDM ladder starts fresh (`resetOfdmLadderState`); the receiver authority
 commanded 8PSK R2/3 -> 32QAM R2/3 on the first group's EVM, and the next 9-frame 32QAM burst failed
@@ -60,7 +60,7 @@ whole on ITU Good 20 dB (GUI, seeds 44 and 46: ~13-14 s each, then 16QAM). One g
 a fading channel; a multi-rung climb on it bets the next burst on a fade crest. Direction: bound a
 climb by the confidence of the EVM estimate over the groups behind it, not by one group.
 
-### BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL (open, 2026-11-11) — P2: a dip's retries demote the returned link
+### BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL (FIXED 2026-11-12, escapeHasPeerEvidence) — P2: a dip's retries demote the returned link
 
 Follow off, ITU Good 20 -> 0 -> 20 dB, seed 46 (GUI, carrier sense fixed): the collapse escape's
 MODE_CHANGE retried into the dead channel (80-110 s, all lost); at the return a "frame stuck, 5 retx

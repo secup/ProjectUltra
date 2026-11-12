@@ -192,9 +192,27 @@ struct ConnectionAdaptiveTestAccess {
         c.pending_ladder_rung_id_ = LadderRungId::OFDM_CHIRP;
     }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
+    static void allowRateAdaptation(Connection& c) {
+        c.adaptive_rate_enabled_ = true;
+        c.latent_startup_probe_allowed_ = true;
+    }
     static void agePool(Connection& c, uint32_t ms) { c.ageConnectSnrReadings(ms); }
     static size_t arqWindow(const Connection& c) { return c.arq_.getWindowSize(); }
     static size_t txCap(const Connection& c) { return c.arq_.getTxInFlightCap(); }
+    static void noteRound(Connection& c, int progress, const char* origin) {
+        c.noteArqRoundOutcome(progress, origin);
+    }
+    static void setZeroProgressRounds(Connection& c, int n) { c.zero_progress_rounds_ = n; }
+    static void pollCollapseEscape(Connection& c) { c.maybeCollapseEscape(); }
+    static bool escapeEvidence(Connection& c) { return c.escapeHasPeerEvidence("test"); }
+    // The receiver authority on one delivered OFDM group: its frames' EVMs, then the verdict.
+    static uint8_t authorityAfterGroup(Connection& c, const std::vector<float>& evm_db) {
+        c.burst_obs_frame_evm_db_ = evm_db;
+        const auto n = static_cast<uint8_t>(evm_db.size());
+        c.updateRxAuthorityCommand(/*all_ok=*/true, /*quality=*/1.0f, /*full_crater=*/false,
+                                   /*delivered_fraction=*/1.0f, n, n, /*geometry_proven=*/true);
+        return c.rx_authority_cmd_;
+    }
     static bool sendFixedData(Connection& c, const Bytes& payload, uint8_t flags) {
         return c.arq_.sendFixedDataWithFlags(payload, flags);
     }
@@ -979,6 +997,68 @@ void test_mcdpsk_one_frame_resend_ends_its_turn() {
     }
 }
 
+// After a crossing the EVM window starts empty, and one group is one fade realization: it may lift
+// the rung by one, not by three. One group certified 8PSK R2/3 -> 32QAM R2/3 and the next 32QAM group
+// failed whole (GUI, ITU Good 20 dB, two seeds). A second group that agrees may jump.
+void test_first_ofdm_group_climbs_one_rung() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 22.0f, 0.5f,
+                                                    Modulation::QAM8);
+    c.setBurstChannelObservation(22.0f, 0.5f, 0.9f, true, 0.1f);
+    const uint8_t incumbent = kRungIdxQam8R23;
+    const uint8_t one_up = snapRungIndexUpToEnabled(incumbent);
+    const std::vector<float> crest(5, 26.0f);
+    const uint8_t first = ConnectionAdaptiveTestAccess::authorityAfterGroup(c, crest);
+    CHECK(first != kRungIdxNone && first <= one_up,
+          "one group of crest frames lifts the rung by one at most");
+    const uint8_t second = ConnectionAdaptiveTestAccess::authorityAfterGroup(c, crest);
+    CHECK(second > one_up, "a second group that agrees lets the climb go further");
+}
+
+// Retransmission timeouts in a row are no evidence against the rung: a dead channel kills every
+// rung and the escape's MODE_CHANGE cannot land in it. Queued anyway, it committed at the return
+// over a link whose next burst decoded at the old rung and collided with that burst's ACK (GUI,
+// follow off, ITU Good dip: 22 s). An escape needs the latest round to have drawn an ACK.
+void test_escape_needs_the_peer_heard() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.5f,
+                                                    Modulation::QAM8);
+    CHECK(ConnectionAdaptiveTestAccess::escapeEvidence(c), "a fresh link has heard its peer");
+    ConnectionAdaptiveTestAccess::noteRound(c, 0, "rto");
+    CHECK(!ConnectionAdaptiveTestAccess::escapeEvidence(c),
+          "a round that drew no ACK: no evidence against the rung");
+    ConnectionAdaptiveTestAccess::noteRound(c, 0, "toneburst-ack");
+    CHECK(ConnectionAdaptiveTestAccess::escapeEvidence(c),
+          "a crater ACK (no progress) is the peer answering: evidence");
+    ConnectionAdaptiveTestAccess::noteRound(c, 2, "toneburst-ack");
+    ConnectionAdaptiveTestAccess::noteRound(c, 0, "rto");
+    ConnectionAdaptiveTestAccess::noteRound(c, 0, "rto");
+    CHECK(!ConnectionAdaptiveTestAccess::escapeEvidence(c), "two silent rounds since the last ACK");
+
+    // The collapse escape itself: two zero-progress rounds in silence do not move the rung; the
+    // same count right after an ACK round does.
+    ConnectionAdaptiveTestAccess::allowRateAdaptation(c);
+    bool queued = true;
+    for (int f = 0; f < 8; ++f) {  // a collapsed window: half a burst or more pending
+        queued = ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes(40, 0x33),
+                                                             v2::Flags::MORE_FRAG) && queued;
+    }
+    CHECK(queued, "a window of frames is in flight (the escape's scope)");
+    ConnectionAdaptiveTestAccess::setZeroProgressRounds(c, 2);
+    ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c) &&
+              c.getDataCodeRate() == CodeRate::R2_3 && c.getDataModulation() == Modulation::QAM8,
+          "in silence the collapse escape holds the rung");
+    ConnectionAdaptiveTestAccess::noteRound(c, 0, "toneburst-ack");
+    ConnectionAdaptiveTestAccess::setZeroProgressRounds(c, 2);
+    ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c) ||
+              c.getDataModulation() != Modulation::QAM8 || c.getDataCodeRate() != CodeRate::R2_3,
+          "with the peer just heard the collapse escape drops a rung (the positive control)");
+}
+
 }  // namespace
 
 int main() {
@@ -1014,6 +1094,8 @@ int main() {
     test_waveform_follow_fallback_spell_starts_with_single_frames();
     test_waveform_follow_crossing_ack_copy_is_not_a_candidate();
     test_mcdpsk_one_frame_resend_ends_its_turn();
+    test_first_ofdm_group_climbs_one_rung();
+    test_escape_needs_the_peer_heard();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

@@ -10,6 +10,53 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(rate): one group climbs one rung (BUG-POST-CROSSING-OVERCLIMB)
+
+**What was broken.** The EVM climb (`EvmRateSelector::bestReliable`, the default via `ULTRA_FAST`)
+lifts the rung to the best one the window's frames say decodes reliably. The window was "ready" at
+4 frames - about one group - while its design assumed ~4 groups spanning several coherence times.
+A group's frames are adjacent in time (one fade realization on Good: Tc ~4 s against a 5-8 s
+group), so after anything that empties the window - a waveform crossing, a new connection - one
+group at a fade crest certified a jump of several rungs: 8PSK R2/3 -> 32QAM R2/3, and the next
+9-frame 32QAM group failed whole (GUI, ITU Good 20 dB, two seeds: ~13-14 s each).
+
+**Fix.** `kMinGroupsForMultiRungClimb = 2`: until the window holds frames from two groups
+(`groupsInWindow`, one ordinal per observed group), the climb is capped at the next enabled rung
+above the incumbent. Demotions are unchanged; a window of two agreeing groups jumps as before.
+
+**Tests.** `EVMRateSelector` `test_multi_rung_climb_needs_two_groups` (one group: next rung only;
+two: ready; the window keeps its last 20 frames' groups; a long single group is one realization;
+a reset empties it). `WaveformFollow` `test_first_ofdm_group_climbs_one_rung` at production
+defaults: crest frames from 8PSK R2/3 command at most the next rung, a second group goes further
+(fails without the cap). GUI: below.
+
+---
+
+## 2026-11-12 — FIX(escape): silence is no evidence against the rung (BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL)
+
+**What was broken.** Under the receiver authority the collapse escape counts only retransmission
+timeouts (its "ack-silence self-rescue" charter), and the stuck-frame escape counts retries of any
+cause. In a dead channel both fired: the collapse escape's MODE_CHANGE retried into the silence,
+and at the return a "frame stuck, 5 retx" drop demoted 8PSK R2/3 -> QPSK R3/4 although that same
+8PSK burst decoded 4/4; its MODE_CHANGE was queued behind the burst, collided with the burst's ACK
+and took 22 s (GUI, follow off, ITU Good dip, seed 46). A dead channel or return path kills every
+rung; when the rung really is too high the peer still hears the rung-independent descriptor and
+anchor and answers (crater ACK, anchored-burst backstop), and under authority commands the rung.
+
+**Fix.** `escapeHasPeerEvidence`: both escapes require that the latest round drew an ACK
+(`rto_rounds_since_peer_ack_ == 0`, reset by any ACK round, progress or not). Under authority the
+collapse escape is therefore inert (silence is waveform follow's, via its silence clock); a stuck
+frame amid deliveries still escapes. Also: `ULTRA_COLLAPSE_ESCAPE_ROUNDS=0` now opts out as its
+comment always said (the parser accepted only 2-8, so 0 read as the default 2 - ConnectionAdaptive
+pinned it to 0 believing it off).
+
+**Tests.** `WaveformFollow` `test_escape_needs_the_peer_heard`: a timeout round removes the
+evidence, a crater ACK restores it; two zero-progress rounds in silence hold the rung, the same
+count right after an ACK round drops it (the positive control); the silence check fails without
+the rule. ConnectionAdaptive 861/861, dev ctest 112/112. GUI: below.
+
+---
+
 ## 2026-11-12 — FIX(threads): a ThreadSanitizer sweep of the receiving engine (BUG-DECODER-THREAD-RACES)
 
 **Why.** Two decode-thread crashes in the MC-DPSK chirp search (BUG-CHIRP-SEARCH-SEGV) coincided with

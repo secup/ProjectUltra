@@ -194,6 +194,13 @@ class EvmRateSelector {
 public:
     static constexpr size_t kWindowFrames = 20;
     static constexpr size_t kMinFrames = 4;
+    // A group's frames are adjacent in time - one fade realization on Good (Tc ~4 s against a
+    // 5-8 s group) - so a window holding one group cannot tell a fade crest from the channel's
+    // level. A climb of more than one rung needs frames from this many groups; with fewer, the
+    // caller climbs at most to the next enabled rung (multiRungClimbReady). One group certified
+    // 8PSK R2/3 -> 32QAM R2/3 after a waveform crossing reset the window, and the next 32QAM
+    // group failed whole (GUI, ITU Good 20 dB, two seeds: ~13 s each).
+    static constexpr size_t kMinGroupsForMultiRungClimb = 2;
     // Outer-loop step: dB of margin per unit of per-frame residual (predicted - delivered)/M.
     // A group whose EVMs predicted 5/5 that delivers 0/5 moves the margin by this much; a
     // perfectly calibrated link moves it by zero on average.
@@ -206,6 +213,7 @@ public:
     void reset() {
         ring_.fill(0.0f);
         ring_mod_.fill(Modulation::AUTO);
+        ring_group_.fill(0);
         next_ = 0;
         count_ = 0;
         margin_db_ = 0.0f;
@@ -234,6 +242,7 @@ public:
             if (rung < kRungIdxCount) predicted += frameSuccess(e, rung, margin_db_);
             ring_[next_] = e;
             ring_mod_[next_] = frame_mod;
+            ring_group_[next_] = groups_;
             next_ = (next_ + 1) % kWindowFrames;
             if (count_ < kWindowFrames) ++count_;
         }
@@ -251,6 +260,17 @@ public:
 
     bool ready() const { return count_ >= kMinFrames; }
     size_t frames() const { return count_; }
+    // Distinct groups among the window's frames (independent fade realizations, at most).
+    size_t groupsInWindow() const {
+        size_t distinct = 0;
+        for (size_t i = 0; i < count_; ++i) {
+            bool seen = false;
+            for (size_t j = 0; j < i && !seen; ++j) seen = ring_group_[j] == ring_group_[i];
+            if (!seen) ++distinct;
+        }
+        return distinct;
+    }
+    bool multiRungClimbReady() const { return groupsInWindow() >= kMinGroupsForMultiRungClimb; }
     float marginDb() const { return margin_db_; }
 
     // Counterfactual success of rung r over the window.
@@ -406,6 +426,7 @@ private:
 
     std::array<float, kWindowFrames> ring_{};
     std::array<Modulation, kWindowFrames> ring_mod_{};
+    std::array<int, kWindowFrames> ring_group_{};  // observeGroup ordinal of each frame
     size_t next_ = 0;
     size_t count_ = 0;
     float margin_db_ = 0.0f;
