@@ -744,7 +744,9 @@ tones and reports the carrier offset without the shift.
 (`EvmRateSelector::kMinGroupsForMultiRungClimb`): a group's frames are one fade realization;
 (2) an escape-drop needs the latest round to have drawn an ACK (`escapeHasPeerEvidence`):
 retransmission timeouts in a row say the channel or the return path is dead, which no rung fixes;
-under the receiver authority the collapse escape (whose rounds are timeouts only) never acts;
+under the receiver authority the collapse escape (whose rounds are timeouts only) never acts, and
+the stuck-frame escape counts the ACKs a frame was missing from (`heard_miss_count`), never its
+resends into silence;
 (3) the down-crossing is decided when a round ends without an ACK (its timeout), never while a
 burst it sent is still on the air or awaiting its ACK.
 **Why:** one crest group took 8PSK R2/3 -> 32QAM R2/3 and the next group failed whole; escapes

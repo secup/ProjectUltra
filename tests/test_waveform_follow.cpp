@@ -225,6 +225,19 @@ struct ConnectionAdaptiveTestAccess {
     }
     static void setZeroProgressRounds(Connection& c, int n) { c.zero_progress_rounds_ = n; }
     static void pollCollapseEscape(Connection& c) { c.maybeCollapseEscape(); }
+    static void pollStuckEscape(Connection& c) { c.maybeEscapeStuckFrame(); }
+    // One retransmission timeout inside the ARQ (no ACK heard).
+    static void arqTimeoutRound(Connection& c) { c.arq_.tick(c.arq_.getAckTimeout() + 1); }
+    // One heard ACK round in which seq `missing` (the base) did not arrive: an empty ACK.
+    static void arqAckWithout(Connection& c, uint16_t missing) {
+        auto ack = v2::ControlFrame::makeNack("K2DEF", "W1ABC",
+                                              static_cast<uint16_t>(missing - 1), 0x0);
+        ack.type = v2::FrameType::ACK;
+        c.arq_.onFrameReceived(ack.serialize());
+        c.arq_.tick(1000);  // past the duplicate-ACK window, short of a timeout
+    }
+    static int arqRetries(const Connection& c) { return c.arq_.maxInFlightRetryCount(); }
+    static int arqHeardMisses(const Connection& c) { return c.arq_.maxInFlightHeardMissCount(); }
     static bool escapeEvidence(Connection& c) { return c.escapeHasPeerEvidence("test"); }
     // The receiver authority on one delivered OFDM group: its frames' EVMs, then the verdict.
     static uint8_t authorityAfterGroup(Connection& c, const std::vector<float>& evm_db) {
@@ -1153,6 +1166,41 @@ void test_escape_needs_the_peer_heard() {
           "silent rounds then an empty ACK: under the authority the collapse escape holds the rung");
 }
 
+// The stuck-frame escape counts the ACK rounds a frame was missing from, never retransmissions
+// into silence: GUI, follow off, ITU Good dips of 100-145 s - the first ACK after the return carried
+// 8-11 silent "retx" and dropped 8PSK R2/3 -> QPSK R3/4, its MODE_CHANGE colliding twice.
+void test_stuck_frame_escape_counts_heard_misses() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.5f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowRateAdaptation(c);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes(40, 0x21), v2::Flags::MORE_FRAG),
+          "a frame in flight (seq 0)");
+    // Silent rounds until a frame has been resent six times (the modelled air schedule stretches
+    // each deadline behind the queued resends).
+    for (int r = 0; r < 60 && ConnectionAdaptiveTestAccess::arqRetries(c) < 6; ++r) {
+        ConnectionAdaptiveTestAccess::arqTimeoutRound(c);
+    }
+    CHECK(ConnectionAdaptiveTestAccess::arqRetries(c) >= 6 &&
+              ConnectionAdaptiveTestAccess::arqHeardMisses(c) == 0,
+          "six silent resends, no heard miss");
+    ConnectionAdaptiveTestAccess::arqAckWithout(c, 0);
+    ConnectionAdaptiveTestAccess::noteRound(c, 0, "toneburst-ack");
+    ConnectionAdaptiveTestAccess::pollStuckEscape(c);
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c) &&
+              c.getDataModulation() == Modulation::QAM8 && c.getDataCodeRate() == CodeRate::R2_3,
+          "the first (empty) ACK after the silence: one heard miss, six silent retries do not count");
+    for (int r = 0; r < 4; ++r) {
+        ConnectionAdaptiveTestAccess::arqAckWithout(c, 0);
+        ConnectionAdaptiveTestAccess::noteRound(c, 0, "toneburst-ack");
+    }
+    CHECK(ConnectionAdaptiveTestAccess::arqHeardMisses(c) >= 5, "five ACKs without seq 0");
+    ConnectionAdaptiveTestAccess::pollStuckEscape(c);
+    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c) ||
+              c.getDataModulation() != Modulation::QAM8 || c.getDataCodeRate() != CodeRate::R2_3,
+          "missing from five ACKs the peer sent: the stuck-frame escape drops a rung");
+}
+
 // A copy of the ACK that launched a latent startup probe is not a monitor candidate while the probe
 // group is airborne: consumed after delivery, it had already disarmed the monitor, and the probe's
 // own verdict would have gone unheard (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR; the crossing ACK's
@@ -1209,6 +1257,7 @@ int main() {
     test_waveform_follow_sender_waits_out_a_fade();
     test_waveform_follow_sender_silence_ends_when_the_peer_is_heard();
     test_dual_listen_up_crossing_needs_a_reading_from_the_burst();
+    test_stuck_frame_escape_counts_heard_misses();
     test_dual_listen_receiver_commands_up_and_follows_the_peer();
     test_dual_listen_receiver_commands_down_and_follows_the_peer();
     test_dual_listen_missed_up_crossing_backs_off();

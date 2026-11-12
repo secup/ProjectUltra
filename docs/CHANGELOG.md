@@ -10,6 +10,29 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(escape): a stuck frame is one the peer's ACKs keep reporting missing, not one resent into silence
+
+**What was broken.** The stuck-frame escape ("frame stuck, 5 retx at current rate") counted every
+retransmission, and the escape-evidence rule only asked that the latest round drew an ACK. After a
+long dip the first ACK at the return therefore carried the dip's silent resends as evidence: GUI,
+follow off, ITU Good dips of 100/130/145 s (seed 44) - 142.7 s "frame stuck, 8 retx", 174.3 s
+"9 retx", 189.8 s "11 retx", each right after the first (partial) ACK of the returned channel,
+each dropping 8PSK R2/3 -> QPSK R3/4; its MODE_CHANGE, queued behind the burst, collided twice and
+committed ~22 s later. 3 of 17 follow-off runs; the dip-length cells it hit ran 213/234/256 s
+against 191/228/241 with follow on.
+
+**What changed.** `TXSlot::heard_miss_count`: every fresh ACK (after the stale, epoch and
+duplicate guards) increments it for each frame still outstanding; a retransmission timeout does
+not. Reset with `retry_count`. `maybeEscapeStuckFrame` compares
+`maxInFlightHeardMissCount()` with the threshold (default 5) and logs both counts.
+
+**Verification.** `SelectiveRepeatARQ` 66/66 (new: six timeouts count no heard miss, each fresh
+ACK without the frame counts one). `WaveformFollow` 145/145 (new: one frame resent six times into
+silence, then an empty ACK, holds the rung; five ACKs without it drop a rung; the first check fails
+on the old retry count). `ConnectionAdaptive` 861/861. Dev ctest 112/112. GUI: below.
+
+---
+
 ## 2026-11-12 — FIX(follow, escape): a crossing waits for its round's verdict; the collapse escape is inert under the receiver authority
 
 **What was broken (GUI, ITU Good 40 s QSB, seed 44, follow on: 311 s against 236 s off).**

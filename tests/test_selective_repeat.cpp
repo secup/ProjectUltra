@@ -311,6 +311,47 @@ bool test_retransmit_timeout_follows_inflight_table() {
     return true;
 }
 
+// A frame's escape evidence counts the ACK rounds it was missing from, never retransmission
+// timeouts (INV-RATE-EVIDENCE-001): a dead channel resends without anyone hearing.
+bool test_heard_misses_count_ack_rounds_not_timeouts() {
+    TEST("Heard misses count ACK rounds, not timeouts");
+
+    ARQConfig config;
+    config.window_size = 4;
+    config.ack_timeout_ms = 10000;
+    config.sack_delay_ms = 100;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    ByteChannel channel;
+    tx.setTransmitCallback([&](const Bytes& data) { channel.send(data); });
+    for (uint8_t i = 0; i < 2; ++i) {
+        if (!tx.sendData(Bytes{static_cast<uint8_t>(0x10 + i)}))
+            FAIL("Failed to send data");
+    }
+    for (int round = 0; round < 6; ++round) tx.tick(10001);  // six silent rounds
+    if (tx.maxInFlightRetryCount() < 6)
+        FAIL("Six timeouts did not resend six times");
+    if (tx.maxInFlightHeardMissCount() != 0)
+        FAIL("Timeouts counted as heard misses");
+
+    // The peer answers: seq 1 arrived, seq 0 did not (nothing in order -> ACK seq 0xFFFF; SACK bit
+    // i is seq 0xFFFF + 1 + i, so bit 1 = seq 1). Each fresh ACK is one heard round, seq 0 missing.
+    for (int round = 1; round <= 3; ++round) {
+        auto ack = v2::ControlFrame::makeNack("RX1", "TX1", 0xFFFF, 0x2);
+        ack.type = v2::FrameType::ACK;
+        tx.onFrameReceived(ack.serialize());
+        if (tx.maxInFlightHeardMissCount() != round) {
+            std::cout << "(heard misses " << tx.maxInFlightHeardMissCount() << ", round " << round
+                      << ") ";
+            FAIL("A fresh ACK without the frame is one heard miss");
+        }
+        tx.tick(5000);  // past the duplicate-ACK window, short of another timeout
+    }
+    PASS();
+    return true;
+}
+
 bool test_send_window_full() {
     TEST("Send until window full");
 
@@ -3170,6 +3211,7 @@ int main() {
     // issue, unrelated to these changes).
     std::cout << "In-flight timeout:\n";
     test_retransmit_timeout_follows_inflight_table();
+    test_heard_misses_count_ack_rounds_not_timeouts();
 
     std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
     test_ack_batch_threshold_independent();

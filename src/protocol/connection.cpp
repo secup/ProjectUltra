@@ -4841,7 +4841,11 @@ void Connection::maybeEscapeStuckFrame() {
     if (!isOFDMMode(negotiated_mode_)) return;    // burst-transport rate ladder only
     if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
     if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
-    if (arq_.maxInFlightRetryCount() < stuckRetransmitEscape()) return;
+    // Frame-death evidence: ACK rounds that came back without the frame. Retransmissions into a
+    // dead channel are no evidence (INV-RATE-EVIDENCE-001): GUI, follow off, ITU Good dips of
+    // 100-145 s - the first ACK after the return carried 8-11 silent "retx" and dropped 8PSK R2/3
+    // -> QPSK R3/4 whose MODE_CHANGE then collided twice (~22 s each, 3 of 17 runs).
+    if (arq_.maxInFlightHeardMissCount() < stuckRetransmitEscape()) return;
     if (!escapeHasPeerEvidence("stuck-frame")) return;
 
     // The pathological-single-frame 5-retx backstop (ULTRA_STUCK_ESCAPE_RETX), kept verbatim
@@ -4849,8 +4853,8 @@ void Connection::maybeEscapeStuckFrame() {
     // maybeCollapseEscape typically preempts this (2 rounds ≈ retry 2-3 < 5); on healthy
     // windows only this backstop can fire — exactly the pre-pacing behavior.
     char trigger[64];
-    std::snprintf(trigger, sizeof(trigger), "frame stuck, %d retx at current rate",
-                  arq_.maxInFlightRetryCount());
+    std::snprintf(trigger, sizeof(trigger), "frame stuck, missing from %d ACKs (%d retx)",
+                  arq_.maxInFlightHeardMissCount(), arq_.maxInFlightRetryCount());
     executeEscapeDrop(trigger);
 }
 

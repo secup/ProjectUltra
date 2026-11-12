@@ -241,6 +241,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
         slot.retry_count = 0;
+        slot.heard_miss_count = 0;
         slot.hole_ack_count = 0;
         slot.fast_retx_count = 0;
         slot.fast_retx_cooldown_ms = 0;
@@ -391,6 +392,7 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
+    tx_window_[slot].heard_miss_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
     tx_window_[slot].fast_retx_count = 0;
@@ -492,6 +494,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
+    tx_window_[slot].heard_miss_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
     tx_window_[slot].fast_retx_count = 0;
@@ -567,6 +570,7 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
+    tx_window_[slot].heard_miss_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
     tx_window_[slot].fast_retx_count = 0;
@@ -647,6 +651,16 @@ int SelectiveRepeatARQ::maxInFlightRetryCount() const {
         }
     }
     return max_retry;
+}
+
+int SelectiveRepeatARQ::maxInFlightHeardMissCount() const {
+    int max_miss = 0;
+    for (const auto& slot : tx_window_) {
+        if (slot.active && !slot.acked && slot.heard_miss_count > max_miss) {
+            max_miss = slot.heard_miss_count;
+        }
+    }
+    return max_miss;
 }
 
 void SelectiveRepeatARQ::onFrameReceived(const Bytes& frame_data) {
@@ -1418,6 +1432,13 @@ bool SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
             tx_window_[slot].hole_probe_armed = false;
             tx_window_[slot].hole_probe_timer_ms = 0;
             tx_window_[slot].hole_probe_count = 0;
+        }
+    }
+    // A fresh ACK is a heard round: every frame still outstanding after it was missing from what
+    // the peer received (half-duplex bursts resend every hole in the next burst).
+    for (auto& slot : tx_window_) {
+        if (slot.active && !slot.acked) {
+            ++slot.heard_miss_count;
         }
     }
     return true;
@@ -2837,6 +2858,7 @@ void SelectiveRepeatARQ::abortPendingTx(bool force_move_epoch_bump) {
         slot.first_tx_ms = 0;
         slot.rtt_sample_eligible = false;
         slot.retry_count = 0;
+        slot.heard_miss_count = 0;
         slot.hole_ack_count = 0;
         slot.fast_retx_count = 0;
         slot.fast_retx_cooldown_ms = 0;

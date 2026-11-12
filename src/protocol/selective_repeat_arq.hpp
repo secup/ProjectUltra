@@ -68,6 +68,8 @@ public:
     // rate controller polls this to detect a frame STUCK at a too-aggressive rate (the fade
     // troughs keep killing it) so it can escape-drop to a more robust rung before max_retries.
     int maxInFlightRetryCount() const;
+    // The most ACK rounds any in-flight frame has been missing from (heard_miss_count).
+    int maxInFlightHeardMissCount() const;
 
     bool lastRxHadMoreData() const override { return last_rx_more_data_; }
     uint8_t lastRxFlags() const override { return last_rx_flags_; }
@@ -445,6 +447,9 @@ private:
         uint64_t first_tx_ms = 0;   // ARQ monotonic clock when first sent
         bool rtt_sample_eligible = false; // Karn-safe RTT sampling guard
         int retry_count = 0;        // Number of retransmits
+        // ACK rounds that came back without this frame. A retransmission timeout is not one: a
+        // round that drew nothing says nothing about the frame (INV-RATE-EVIDENCE-001).
+        int heard_miss_count = 0;
         bool acked = false;         // ACK received (waiting for earlier frames)
         int hole_ack_count = 0;     // Consecutive ACKs showing this frame as gap
         int fast_retx_count = 0;    // Number of fast retransmits for current hole context
