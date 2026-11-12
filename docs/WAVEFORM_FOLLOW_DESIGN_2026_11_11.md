@@ -104,7 +104,9 @@ Measured before this rule (GUI, crossing after 25-40 s): ITU Good 40 s QSB dips 
   `follow_silent_rounds_`; the collapse escapes consume theirs). Any ACK - an empty one is the peer
   answering, the receiver's to judge - and any CRC-valid frame from the peer end the silence
   (2026-11-12: a MODE_CHANGE ACK arrived after a 40 s QSB trough and the sender crossed 0.2 s later
-  on the trough's rounds). Polled before the escapes, so it replaces them: their MODE_CHANGE rides
+  on the trough's rounds). Decided at a round boundary only - the tick whose timeout staged the
+  resend; mid-round the burst on the air is evidence still to come (2026-11-12: a resend keyed at
+  20 dB after a trough was abandoned 6 s in). Polled before the escapes, so it replaces them: their MODE_CHANGE rides
   OFDM control frames, which do not get through a link this dead (fade run: four MODE_CHANGE
   retries, 40 s, at 0 dB).
 - Receiver hears nothing while an object is incoming - a file in progress, or a payload partly

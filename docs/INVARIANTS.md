@@ -743,10 +743,15 @@ tones and reports the carrier offset without the shift.
 **Rule:** (1) a climb of more than one rung needs EVM frames from at least two groups
 (`EvmRateSelector::kMinGroupsForMultiRungClimb`): a group's frames are one fade realization;
 (2) an escape-drop needs the latest round to have drawn an ACK (`escapeHasPeerEvidence`):
-retransmission timeouts in a row say the channel or the return path is dead, which no rung fixes.
+retransmission timeouts in a row say the channel or the return path is dead, which no rung fixes;
+under the receiver authority the collapse escape (whose rounds are timeouts only) never acts;
+(3) the down-crossing is decided when a round ends without an ACK (its timeout), never while a
+burst it sent is still on the air or awaiting its ACK.
 **Why:** one crest group took 8PSK R2/3 -> 32QAM R2/3 and the next group failed whole; escapes
-fired in a dead channel and committed a needless drop at the return (22 s handshake)
-(BUG-POST-CROSSING-OVERCLIMB, BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL).
+fired in a dead channel and committed a needless drop at the return (22 s handshake); an empty ACK
+after two silent rounds fired the collapse escape on the trough's rounds; a crossing abandoned a
+20 dB resend 6 s into its air (BUG-POST-CROSSING-OVERCLIMB, BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL,
+2026-11-12 QSB seed 44).
 **Test:** `EVMRateSelector`, `WaveformFollow` (`test_first_ofdm_group_climbs_one_rung`,
 `test_escape_needs_the_peer_heard`).
 

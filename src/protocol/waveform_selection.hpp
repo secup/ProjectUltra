@@ -850,8 +850,9 @@ inline float goodputBreakEvenDeliveredFraction(uint8_t cur) {
 // rung selection — the receiver maps ITS fresh per-group channel measurements
 // through selectCoherentOFDM and commands the sender's next rung on every group
 // ACK; the sender OBEYS (descriptor commit) and its own mid-transfer rate drivers
-// (EMA walk, climb streaks, crest walks, cooldowns, amnesty) go inert. Sender-side
-// ack-SILENCE escapes stay live (the receiver cannot command through a blackout).
+// (EMA walk, climb streaks, crest walks, cooldowns, amnesty) go inert. The sender's collapse
+// escape is inert too (2026-11-12): silence is no evidence against the rung (a blackout kills every
+// rung, and its MODE_CHANGE cannot land there), and the receiver commands again after it.
 // BOTH ends must set it: it reinterprets the ACK's [rate_hint|rung_cmd] bits and
 // requires the widened CRC span (a knob-OFF peer CRC-rejects the ACKs — fails safe
 // as ack loss). Supersedes ULTRA_RX_RATE_CMD's demote-only command when on.

@@ -180,14 +180,27 @@ struct ConnectionAdaptiveTestAccess {
     static bool putDataInFlight(Connection& c) {
         return c.arq_.sendFixedDataWithFlags(Bytes(64, 0x42), 0);
     }
+    // At a round boundary: the retransmission timeout staged its resend (handleArqTimeoutBatch).
     static void senderCollapsePoll(Connection& c, int rounds_without_progress) {
         c.follow_silent_rounds_ = rounds_without_progress;
+        c.staged_timeout_batch_.assign(1, Bytes(8, 0x11));
+        c.maybeCrossDownOnCollapse();
+        c.staged_timeout_batch_.clear();
+    }
+    // Mid-round: no timeout this tick.
+    static void senderCollapsePollMidRound(Connection& c, int rounds_without_progress) {
+        c.follow_silent_rounds_ = rounds_without_progress;
+        c.staged_timeout_batch_.clear();
         c.maybeCrossDownOnCollapse();
     }
     // The collapse escape consumed the shared counter: follow keeps its own.
     static void escapeConsumesEvidence(Connection& c) { c.zero_progress_rounds_ = 0; }
-    // The sender's poll on the evidence the rounds left (no override).
-    static void senderPollCrossing(Connection& c) { c.maybeCrossDownOnCollapse(); }
+    // The sender's poll at a round boundary on the evidence the rounds left (no override).
+    static void senderPollCrossing(Connection& c) {
+        c.staged_timeout_batch_.assign(1, Bytes(8, 0x11));
+        c.maybeCrossDownOnCollapse();
+        c.staged_timeout_batch_.clear();
+    }
     static int followSilentRounds(const Connection& c) { return c.follow_silent_rounds_; }
     static void setPendingModeChange(Connection& c, Modulation mod, CodeRate rate) {
         c.mode_change_pending_ = true;
@@ -659,6 +672,9 @@ void test_waveform_follow_sender_waits_out_a_fade() {
     const uint64_t wait = ConnectionAdaptiveTestAccess::downCrossingMs(delivering, false);
     ConnectionAdaptiveTestAccess::tickFollow(delivering, static_cast<uint32_t>(wait));
     ConnectionAdaptiveTestAccess::escapeConsumesEvidence(delivering);
+    ConnectionAdaptiveTestAccess::senderCollapsePollMidRound(delivering, 3);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(delivering) == WaveformMode::OFDM_CHIRP,
+          "past the crossing time but mid-round (a resend on the air): no crossing yet");
     ConnectionAdaptiveTestAccess::senderCollapsePoll(delivering, 3);
     CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(delivering) == WaveformMode::MC_DPSK,
           "silent past the crossing time: MC-DPSK");
@@ -1110,8 +1126,12 @@ void test_escape_needs_the_peer_heard() {
     ConnectionAdaptiveTestAccess::noteRound(c, 0, "rto");
     CHECK(!ConnectionAdaptiveTestAccess::escapeEvidence(c), "two silent rounds since the last ACK");
 
-    // The collapse escape itself: two zero-progress rounds in silence do not move the rung; the
-    // same count right after an ACK round does.
+    // The collapse escape itself, under the receiver authority (this binary's default): two
+    // zero-progress rounds in silence do not move the rung, and neither do they once an empty ACK
+    // has followed them (GUI QSB seed 44: that ACK lent the trough's rounds "peer heard" and the
+    // escape demoted the returned link). The receiver's crater verdict commands the rung. With the
+    // authority off the sender is the only driver and the escape acts (ConnectionAdaptive).
+    CHECK(rxRateAuthorityEnabled(), "this binary runs the receiver authority (production)");
     ConnectionAdaptiveTestAccess::allowRateAdaptation(c);
     bool queued = true;
     for (int f = 0; f < 8; ++f) {  // a collapsed window: half a burst or more pending
@@ -1126,10 +1146,11 @@ void test_escape_needs_the_peer_heard() {
           "in silence the collapse escape holds the rung");
     ConnectionAdaptiveTestAccess::noteRound(c, 0, "toneburst-ack");
     ConnectionAdaptiveTestAccess::setZeroProgressRounds(c, 2);
+    CHECK(ConnectionAdaptiveTestAccess::escapeEvidence(c), "an empty ACK: the peer is heard again");
     ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
-    CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c) ||
-              c.getDataModulation() != Modulation::QAM8 || c.getDataCodeRate() != CodeRate::R2_3,
-          "with the peer just heard the collapse escape drops a rung (the positive control)");
+    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c) &&
+              c.getDataCodeRate() == CodeRate::R2_3 && c.getDataModulation() == Modulation::QAM8,
+          "silent rounds then an empty ACK: under the authority the collapse escape holds the rung");
 }
 
 // A copy of the ACK that launched a latent startup probe is not a monitor candidate while the probe

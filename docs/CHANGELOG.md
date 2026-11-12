@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow, escape): a crossing waits for its round's verdict; the collapse escape is inert under the receiver authority
+
+**What was broken (GUI, ITU Good 40 s QSB, seed 44, follow on: 311 s against 236 s off).**
+1. The sender's down-crossing was polled every tick, so the silence clock passing the patience
+   crossed in the middle of a round: at 104.8 s the sender resent a 4-frame QPSK R2/3 burst at
+   20 dB (the first trough over); at 110.65 s, with that burst still on the air, it crossed to
+   MC-DPSK ("silent 60000 ms") and abandoned it.
+2. The collapse escape was not inert under the receiver authority, as the escape-evidence entry
+   below claimed: under authority it counts only retransmission timeouts, and the evidence rule
+   asks only that the latest round drew an ACK - so two silent rounds followed by an empty ACK at
+   a trough's end fired it on the trough's rounds. 181.4 s: 8PSK R2/3 -> QPSK R3/4 via MODE_CHANGE,
+   lost in the trough's tail, retried twice (10 s each) on a returned channel (also 172 s in the
+   earlier 294 s run).
+
+**What changed.**
+1. `maybeCrossDownOnCollapse` decides only at a round boundary: this tick's timeout staged the
+   resend (`staged_timeout_batch_`). A round in flight is evidence still to come.
+2. `maybeCollapseEscape` returns under `rxRateAuthorityEnabled()`. Silence is no evidence against
+   the rung, and the receiver's crater verdict commands a rung that really is too high; with the
+   authority off the sender is the only driver and the escape acts as before (ConnectionAdaptive).
+   The authority's header comment said the sender's silence escapes "stay live (the receiver cannot
+   command through a blackout)" - a demote cannot land in a blackout and the receiver commands
+   after it; corrected.
+
+**Verification.** `WaveformFollow` 140/140 (new: past the crossing time but mid-round no crossing,
+then at the round's timeout it crosses; under the authority two silent rounds and an empty ACK
+hold the rung; each check fails with its fix removed). `ConnectionAdaptive` 861/861 (authority
+off). Dev ctest 112/112. GUI: below.
+
+---
+
 ## 2026-11-12 — FEAT(rate): `ULTRA_ENTRY_PROBE=0` starts the first OFDM group at the connect pick (rig A/B knob)
 
 The receiver authority sends every session's first coherent group at QPSK R1/2
@@ -177,7 +208,9 @@ anchor and answers (crater ACK, anchored-burst backstop), and under authority co
 **Fix.** `escapeHasPeerEvidence`: both escapes require that the latest round drew an ACK
 (`rto_rounds_since_peer_ack_ == 0`, reset by any ACK round, progress or not). Under authority the
 collapse escape is therefore inert (silence is waveform follow's, via its silence clock); a stuck
-frame amid deliveries still escapes. Also: `ULTRA_COLLAPSE_ESCAPE_ROUNDS=0` now opts out as its
+frame amid deliveries still escapes. (Not quite: an empty ACK after two silent rounds still fired
+it; made explicitly inert under the authority in the entry above.) Also:
+`ULTRA_COLLAPSE_ESCAPE_ROUNDS=0` now opts out as its
 comment always said (the parser accepted only 2-8, so 0 read as the default 2 - ConnectionAdaptive
 pinned it to 0 believing it off).
 

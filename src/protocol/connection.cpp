@@ -4864,6 +4864,14 @@ void Connection::maybeEscapeStuckFrame() {
 void Connection::maybeCollapseEscape() {
     const int rounds_needed = collapseEscapeRounds();
     if (rounds_needed <= 0) return;               // ULTRA_COLLAPSE_ESCAPE_ROUNDS=0 (default 2)
+    // Under the receiver authority this escape counts only retransmission timeouts (F128), and
+    // silence is no evidence against the rung (escapeHasPeerEvidence): its only remaining trigger
+    // was two silent rounds followed by an empty ACK, which lent the trough's rounds the ACK's
+    // "peer heard". GUI, ITU Good QSB, seed 44 (twice): at a trough's end an empty ACK fired it,
+    // 8PSK R2/3 -> QPSK R3/4, and its MODE_CHANGE took two 10 s retries on a returned channel. The
+    // receiver's crater verdict commands a rung that really is too high; the sender has nothing
+    // to add.
+    if (rxRateAuthorityEnabled()) return;
     if (zero_progress_rounds_ < rounds_needed) return;
     if (!rateAdaptationActive()) return;
     if (!escapeHasPeerEvidence("collapse")) return;
@@ -9529,9 +9537,15 @@ uint64_t Connection::followDownCrossingMs(bool receiver_side) const {
 }
 
 void Connection::maybeCrossDownOnCollapse() {
+    // Decided at a round boundary only: this tick's retransmission timeout staged the resend
+    // (handleArqTimeoutBatch), i.e. a round just ended with nothing heard. Polled mid-round, the
+    // silence clock ran past the patience while a resend was on the air: GUI, ITU Good QSB,
+    // seed 44 - a QPSK R2/3 resend keyed 6 s earlier at 20 dB (the trough over) was abandoned for
+    // MC-DPSK. The round in flight is evidence still to come; its timeout decides.
     if (negotiated_mode_ != WaveformMode::OFDM_CHIRP || crossing_probe_active_ ||
         follow_silent_rounds_ < connection_policy::kFollowRoundsWithoutProgressToCross ||
-        arq_.getTxInFlightBytes() == 0 || !waveformFollowActive()) {
+        arq_.getTxInFlightBytes() == 0 || !waveformFollowActive() ||
+        staged_timeout_batch_.empty()) {
         return;
     }
     // The evidence says OFDM stopped; the economics say whether to leave it (ski rental): a link
