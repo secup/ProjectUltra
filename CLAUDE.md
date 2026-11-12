@@ -131,9 +131,11 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
    its tone ACK (session rung word 1..10 OFDM, 11/12 MC-DPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
    Dual-listen (the default, INV-DUAL-LISTEN-001): the receiver runs a second decoder on the other waveform
    and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md). GUI
-   2026-11-12 vs follow off (same build, interleaved): dip-length sweep 70-145 s 197.8 vs 209.3 s (on
-   ahead 5/6), step-up 3.5x faster, 60 s outage +10 s (the patience's worst case); on the FIXED 2-min
-   dip follow-off looks ~3 % faster only because its resend lands just after the return in every seed.
+   2026-11-12 at HEAD vs follow off (same build, 38 runs): 1-2.5-min 0 dB outages ~3-4 % slower (it
+   crosses at the 60 s patience and comes back on a one-burst pick; follow-off resumes its pre-dip rung),
+   QSB even, clean channels even; step-up 3.5x faster and outages past the ARQ horizon survive -
+   what follow-off cannot do. Compare on an interleaved dip-length sweep: a fixed dip profile aligns
+   follow-off's resend with the return in every seed.
    Crossings rest on evidence: the sender crosses down only at a round's timeout with the peer unheard
    for two rounds; the receiver crosses up only on a reading from the acknowledged burst that carries
    a physical SNR.
