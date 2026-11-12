@@ -173,6 +173,8 @@ uint32_t ackRepeatDelayForControlAirtimeMs(uint32_t control_airtime_ms) {
 
 Bytes makeOFDMBurstPadPayload(CodeRate rate, int cw_count, size_t pad_index,
                               int lifting_z = 27) {
+    // A pad frame keeps the v2 layout (the compact encoder sends only frames addressed to the
+    // peer), so it is sized by the v2 capacity.
     const size_t capacity = (lifting_z == 81)
         ? v2::getFixedFramePayloadCapacityZ(rate, cw_count, 81)
         : v2::getFixedFramePayloadCapacity(rate, cw_count);
@@ -4424,9 +4426,8 @@ bool Connection::startupProbeHasSufficientPayload() const {
         Modulation::QPSK, CodeRate::R2_3, cw);
     const int lifting_z = selectBurstLiftingZFor(
         Modulation::QPSK, CodeRate::R2_3, cw);
-    const size_t frame_payload = (lifting_z == 81)
-        ? v2::getFixedFramePayloadCapacityZ(CodeRate::R2_3, physical_cw, 81)
-        : v2::getFixedFramePayloadCapacity(CodeRate::R2_3, physical_cw);
+    const size_t frame_payload =
+        v2::ofdmSessionPayloadCapacity(CodeRate::R2_3, physical_cw, lifting_z);
     if (frame_payload <= FileTransferController::FILE_DATA_OVERHEAD) return false;
 
     // Four bytes-worth of prospective frames is not enough: all four must fit in
@@ -4488,9 +4489,8 @@ bool Connection::authorityClimbHasSufficientPayload(
         target_mod, target_rate, cw);
     const int lifting_z = selectBurstLiftingZFor(
         target_mod, target_rate, cw);
-    const size_t frame_payload = (lifting_z == 81)
-        ? v2::getFixedFramePayloadCapacityZ(target_rate, physical_cw, 81)
-        : v2::getFixedFramePayloadCapacity(target_rate, physical_cw);
+    const size_t frame_payload =
+        v2::ofdmSessionPayloadCapacity(target_rate, physical_cw, lifting_z);
     if (frame_payload <= FileTransferController::FILE_DATA_OVERHEAD) return false;
 
     size_t target_window = connection_policy::ofdmWindowSizeForChannel(
@@ -8153,7 +8153,7 @@ LatentRateCandidateGeometry Connection::latentRateCandidateGeometryFor(
     out.physical_cw = wire.physical_cw;
     out.lifting_z = wire.lifting_z;
 
-    const size_t arq_payload = v2::getFixedFramePayloadCapacityZ(
+    const size_t arq_payload = v2::ofdmSessionPayloadCapacity(
         rate, out.physical_cw, out.lifting_z);
     if (arq_payload <= FileTransferController::FILE_DATA_OVERHEAD) {
         return out;
@@ -8484,11 +8484,8 @@ size_t Connection::currentDataPayloadCapacity() const {
         // Z-aware capacity: at z=81 info bytes per codeword scale 3x. Sizing the
         // chunker at the active z (selectBurstLiftingZ) keeps the encoder from
         // zero-padding 70%+ of every burst (the real-world throughput killer).
-        if (selectBurstLiftingZ() == 81) {
-            return v2::getFixedFramePayloadCapacityZ(
-                data_code_rate_, physical_cw, 81);
-        }
-        return v2::getFixedFramePayloadCapacity(data_code_rate_, physical_cw);
+        return v2::ofdmSessionPayloadCapacity(data_code_rate_, physical_cw,
+                                              selectBurstLiftingZ());
     }
     if (usesBoundedVariableMCDPSKFrames()) {
         if (connection_policy::mcDpskCompactFrameEnabled()) {
@@ -9930,9 +9927,7 @@ bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
     if (remaining_bytes == 0) return false;
     const int physical_cw = physicalDataFrameCodewordsFor(mod, rate, cw);
     const int lifting_z = selectBurstLiftingZFor(mod, rate, cw);
-    const size_t frame_payload = (lifting_z == 81)
-        ? v2::getFixedFramePayloadCapacityZ(rate, physical_cw, 81)
-        : v2::getFixedFramePayloadCapacity(rate, physical_cw);
+    const size_t frame_payload = v2::ofdmSessionPayloadCapacity(rate, physical_cw, lifting_z);
     const size_t chunk_bytes =
         (frame_payload > FileTransferController::FILE_DATA_OVERHEAD)
             ? frame_payload - FileTransferController::FILE_DATA_OVERHEAD

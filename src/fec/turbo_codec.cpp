@@ -466,8 +466,15 @@ DecodeResult decode(std::span<const float> air_llrs, size_t info_bytes,
         const size_t nb = bytes.size() - kCrcBytes;
         const uint32_t got = (static_cast<uint32_t>(bytes[nb]) << 24) | (static_cast<uint32_t>(bytes[nb + 1]) << 16) |
                              (static_cast<uint32_t>(bytes[nb + 2]) << 8) | static_cast<uint32_t>(bytes[nb + 3]);
-        if ((crc32c(bytes.data(), nb) ^ opts.crc_seed) == got) {
+        const uint32_t crc = crc32c(bytes.data(), nb);
+        if ((crc ^ opts.crc_seed) == got) {
             res.crc_ok = true;
+            res.stop = Stop::Crc;
+            break;
+        }
+        if (opts.check_alt_crc_seed && (crc ^ opts.alt_crc_seed) == got) {
+            res.crc_ok = true;
+            res.alt_crc_seed_matched = true;
             res.stop = Stop::Crc;
             break;
         }

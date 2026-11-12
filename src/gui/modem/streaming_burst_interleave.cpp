@@ -223,8 +223,8 @@ bool StreamingDecoder::abandonUnprovenGeometryGroup(const char* reason) {
         burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER;
     const bool commanded_without_descriptor =
         burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY;
-    if (!marker_only && !commanded_without_descriptor) {
-        return false;
+    if ((!marker_only && !commanded_without_descriptor) || burst_position_proven_) {
+        return false;  // a descriptor, or a decoded member's position, proved this group
     }
 
     // A marker is only the sign of one LTS correlation.  Even two or more
@@ -292,16 +292,72 @@ bool StreamingDecoder::abandonUnprovenGeometryGroup(const char* reason) {
         sync_controller_.ring_.correlation_pos_ = burst_next_pos_;
     }
     burst_arm_provenance_ = BurstArmProvenance::NONE;
+    burst_position_proven_ = false;
+    burst_position_count_ = 0;
     burst_substantive_members_ = 0;
     burst_unproven_start_abs_ = 0;
     state_ = DecoderState::SEARCHING;
     return true;
 }
 
+// INV-OFDM-FRAME-001: a decoded compact member says which of its physical turn's DATA frames it
+// is and how many there are. In a group armed without its descriptor (a sign-only marker, or the
+// commanded geometry) that is the proof the descriptor would have given - N, and the geometry the
+// member decoded with at this stride - so the group may finalize at N and acknowledge instead of
+// being abandoned for want of its CRC tail (GUI ITU Good 5 dB: a 6-member marker group with a
+// decoded middle member was abandoned, the round silent). Used only when the member sits where the
+// slicer put it (the arm is at the group's head); otherwise the arm is misaligned and the group
+// keeps its unproven handling.
+void StreamingDecoder::noteBurstMemberPosition(int accumulated_index, const DecodeResult& result) {
+    if (!result.success || result.physical_count < 2 || result.physical_index < 0 ||
+        burst_position_count_ != 0) {
+        return;
+    }
+    if (result.physical_index != accumulated_index) {
+        LOG_MODEM(WARN,
+                  "[%s] [POSITION] member says it is frame %d of %d but was sliced as %d - "
+                  "arm misaligned, position not used",
+                  log_prefix_.c_str(), result.physical_index + 1, result.physical_count,
+                  accumulated_index + 1);
+        return;
+    }
+    burst_position_count_ = result.physical_count;
+    const bool descriptorless =
+        burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER ||
+        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY;
+    if (descriptorless) {
+        burst_position_proven_ = true;
+        ++burst_position_proofs_;
+        burst_group_size_ = ofdm_link_adaptation::sanitizeBurstGroupSize(result.physical_count);
+        if (burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER &&
+            burst_unproven_start_abs_ != 0) {
+            // The marker is now a proven group start (same as a second substantive member).
+            last_group_start_abs_ = burst_unproven_start_abs_;
+            noteGroupStartAbs(burst_unproven_start_abs_);
+            // This group's descriptor died with it: the latched seq is the previous group's
+            // (identical inference to the late-join and commanded-geometry arms).
+            last_burst_group_seq_ =
+                static_cast<uint8_t>((last_burst_group_seq_ + 1u) & 0x3Fu);
+        }
+        LOG_MODEM(INFO,
+                  "[%s] [POSITION] member %d of %d proves the descriptorless group (%s): N=%d",
+                  log_prefix_.c_str(), result.physical_index + 1, result.physical_count,
+                  burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER ? "marker"
+                                                                                : "commanded",
+                  result.physical_count);
+        refreshBurstAirEnd();
+    } else if (burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR &&
+               result.physical_count != std::max(2, burst_group_size_)) {
+        LOG_MODEM(WARN, "[%s] [POSITION] member says its turn has %d frames, the descriptor %d",
+                  log_prefix_.c_str(), result.physical_count, std::max(2, burst_group_size_));
+    }
+}
+
 void StreamingDecoder::accumulateBurstFrames() {
     const int burst_group_size = std::max(2, burst_group_size_);
     const bool commanded_n_unknown =
-        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY;
+        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY &&
+        !burst_position_proven_;
     const int collection_limit = commanded_n_unknown
         ? descriptorlessTailSearchLimit(
               sync_controller_.last_burst_descriptor_.modulation,
@@ -394,7 +450,8 @@ void StreamingDecoder::accumulateBurstFrames() {
         if (burst_transport_rx_ && burst_group_callback_) {
             const bool geometry_proven =
                 burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR ||
-                burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR_LATE_JOIN;
+                burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR_LATE_JOIN ||
+                burst_position_proven_;
             finalizeGroupEvmSnr(geometry_proven, burst_group_size);
             burst_group_callback_(last_burst_group_seq_, std::vector<Bytes>{},
                                   /*all_ok=*/false, /*quality=*/0.0f, /*frame_mask=*/0,
@@ -505,7 +562,11 @@ void StreamingDecoder::accumulateBurstFrames() {
         // fail closed at the sender-policy ceiling. This covers both directions:
         // previous N8/current N7 finalizes early at the tail, while previous
         // N7/current N8 continues safely through member 8.
-        if (commanded_n_unknown) {
+        // A decoded member's position may have proven N during this drain
+        // (noteBurstMemberPosition): from then on the group ends at that N.
+        const int group_n = burst_position_proven_ ? std::max(2, burst_group_size_)
+                                                   : burst_group_size;
+        if (commanded_n_unknown && !burst_position_proven_) {
             if (static_cast<int>(burst_soft_buffer_.size()) >= collection_limit) {
                 abandonUnprovenGeometryGroup(
                     "tail-search ceiling reached without CRC physical tail");
@@ -520,8 +581,9 @@ void StreamingDecoder::accumulateBurstFrames() {
             continue;
         }
 
-        // Descriptor-proven group, or a marker-only candidate at its guessed span.
-        if (static_cast<int>(burst_soft_buffer_.size()) == burst_group_size) {
+        // Descriptor-proven group, a position-proven one, or a marker-only candidate at its
+        // guessed span.
+        if (static_cast<int>(burst_soft_buffer_.size()) == group_n) {
             if (abandonUnprovenGeometryGroup(
                     "declared span contained no CRC physical tail")) {
                 return;
@@ -606,6 +668,8 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     burst_metric_templates_.clear();
     descriptor_group_size_locked_ = false;
     burst_arm_provenance_ = BurstArmProvenance::DESCRIPTOR_LATE_JOIN;
+    burst_position_proven_ = false;
+    burst_position_count_ = 0;
     burst_substantive_members_ = 0;
     burst_unproven_start_abs_ = 0;
     burst_min_block_ = data_block;
@@ -683,7 +747,8 @@ void StreamingDecoder::refreshBurstAirEnd() {
     provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
     provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
     const int physical_span =
-        burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY
+        burst_position_proven_ ? std::max(2, burst_position_count_)
+        : burst_arm_provenance_ == BurstArmProvenance::COMMANDED_GEOMETRY
             ? descriptorlessTailSearchLimit(
                   sync_controller_.last_burst_descriptor_.modulation,
                   sync_controller_.last_burst_descriptor_.code_rate,
@@ -1258,6 +1323,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
         physical_tail = frame_policy::hasPhysicalBurstEndMarker(
             pre.result.success, connected_, protocol::isOFDMMode(mode_),
             burst_transport_rx_, pre.result.frame_data);
+        noteBurstMemberPosition(idx, pre.result);
         burst_logical_index_ = -1;
         pending_total_cw_ = saved_pending_total_cw;
         // ULTRA_ITERATIVE_CHEST: the verdict for THIS frame is in and the
@@ -1433,7 +1499,8 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
     const bool geometry_proven =
         exact_physical_group_size > 0 ||
         burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR ||
-        burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR_LATE_JOIN;
+        burst_arm_provenance_ == BurstArmProvenance::DESCRIPTOR_LATE_JOIN ||
+        burst_position_proven_;
 
     // LATE-JOIN tail-anchor (design §3.4): the caught run has exact RELATIVE order (the
     // fixed-stride slicer preserves it, missed members already in-place erasures); the

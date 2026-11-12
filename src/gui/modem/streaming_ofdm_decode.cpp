@@ -4,6 +4,7 @@
 #include "streaming_decoder.hpp"
 #include "protocol/connection_policy.hpp"  // MC-DPSK data constellations
 #include "protocol/mcdpsk_frame.hpp"
+#include "protocol/ofdm_data_frame.hpp"
 #include "streaming_buffer_policy.hpp"
 #include "streaming_control_profile.hpp"
 #include "streaming_decode_policy.hpp"
@@ -2381,6 +2382,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                    ? BurstArmProvenance::DESCRIPTOR
                    : BurstArmProvenance::UNPROVEN_MARKER);
         burst_substantive_members_ = cg.armed ? 0u : 1u;
+        burst_position_proven_ = false;
+        burst_position_count_ = 0;
         burst_unproven_start_abs_ =
             burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER
                 ? static_cast<uint64_t>(frame_sync_abs)
@@ -3256,6 +3259,25 @@ void StreamingDecoder::decodeCurrentFrame() {
             // FINAL remains only a logical boundary. Clear before the callback so
             // its cumulative ACK carries safe reverse-egress provenance.
             clearProvisionalBurstAirGate();
+        } else if (result.success && result.physical_count > 0 &&
+                   result.physical_index < result.physical_count - 1 &&
+                   burst_air_end_provisional_.load(std::memory_order_relaxed) && frame_len > 0) {
+            // INV-OFDM-FRAME-001: an unmarked member that says which of its turn's frames it is
+            // replaces the descriptorless ceiling (~11 s after the anchor) with the turn's real
+            // end: the frames that follow it at this frame's stride. Its ACK then waits exactly
+            // for the burst, not for the sender's whole ACK window.
+            const uint64_t following = static_cast<uint64_t>(
+                result.physical_count - 1 - result.physical_index);
+            const uint64_t exact_end = static_cast<uint64_t>(frame_sync_abs) +
+                                       (following + 1) * static_cast<uint64_t>(frame_len);
+            if (exact_end < burst_air_end_abs_.load(std::memory_order_relaxed)) {
+                burst_air_end_abs_.store(exact_end, std::memory_order_relaxed);
+                LOG_MODEM(INFO,
+                          "[%s] [POSITION] frame %d of %d: the turn ends %llu frame(s) after it - "
+                          "air gate set to its end",
+                          log_prefix_.c_str(), result.physical_index + 1, result.physical_count,
+                          static_cast<unsigned long long>(following));
+            }
         }
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
@@ -5247,9 +5269,22 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 built_key_provisional = false;
                 harq_key_intentionally_ineligible = true;
                 provisional_key_used.reset();
-                Bytes hard_info;
-                auto st = v2::decodeTurboFixedFrame(soft_bits, rate, cw_count,
-                                                    active_lifting_z, &hard_info);
+                // Both layouts in one decode (INV-OFDM-FRAME-001): the compact one for this
+                // session's direction (peer -> us) and the v2 one.
+                const uint32_t session_peer = mc_compact_peer_hash_.load();
+                const uint32_t session_local = mc_compact_local_hash_.load();
+                const bool session_known = session_peer != 0 && session_local != 0;
+                protocol::ofdm_frame::DecodeResult frame_detail;
+                auto st = protocol::ofdm_frame::decodeStatus(
+                    soft_bits, rate, cw_count, active_lifting_z, session_peer, session_local,
+                    session_known, &frame_detail);
+                last_turbo_position_index_ = -1;
+                last_turbo_position_count_ = 0;
+                if (frame_detail.ok && frame_detail.compact && frame_detail.position.known()) {
+                    last_turbo_position_index_ = frame_detail.position.index;
+                    last_turbo_position_count_ = frame_detail.position.count;
+                }
+                const Bytes& hard_info = frame_detail.hard_info;
                 // Whole-frame chase combining. FRESH decode first (above), so a stored
                 // history can never block a decode the fresh reception manages alone.
                 const size_t air_bits =
@@ -5258,32 +5293,55 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 if (!harq_buffer_ || !harq_buffer_->enabled() || soft_bits.size() < air_bits) {
                     return st;
                 }
-                // Key from the decoded header on success, or from the failed decode's hard
-                // decisions when their header passes its own HCRC (magic + 16-bit CRC).
-                const Bytes& hsrc = st.allSuccess() ? st.data[0] : hard_info;
-                if (hsrc.size() < v2::DataFrame::HEADER_SIZE) {
-                    return st;
+                // Key from the decoded frame on success, or from the failed decode's hard
+                // decisions when their header passes its own CRC (v2: magic + 16-bit HCRC;
+                // compact: the session-seeded header CRC). Both receptions of one frame must
+                // build the same key, so a compact frame keys on its compact header either way.
+                struct KeyHeader {
+                    uint32_t src = 0, dst = 0;
+                    uint16_t seq = 0, hcrc = 0;
+                    uint8_t flags = 0;
+                };
+                std::optional<KeyHeader> kh;
+                if (session_known && (!st.allSuccess() || frame_detail.compact)) {
+                    if (const auto ch = protocol::ofdm_frame::parseHeader(
+                            hard_info, rate, cw_count, active_lifting_z, session_peer,
+                            session_local)) {
+                        kh = KeyHeader{session_peer & 0xFFFFFFu, session_local & 0xFFFFFFu,
+                                       ch->seq, ch->header_crc, ch->flags};
+                    }
                 }
-                const auto hdr = v2::parseHeader(hsrc);
-                if (!hdr.valid || hdr.is_control ||
-                    hdr.total_cw != v2::sanitizeFixedFrameCodewords(cw_count) ||
-                    v2::isOFDMBurstPadHeader(hdr)) {
+                if (!kh) {
+                    const Bytes& hsrc = st.allSuccess() ? st.data[0] : hard_info;
+                    if (hsrc.size() >= v2::DataFrame::HEADER_SIZE) {
+                        const auto hdr = v2::parseHeader(hsrc);
+                        if (hdr.valid && !hdr.is_control &&
+                            hdr.total_cw == v2::sanitizeFixedFrameCodewords(cw_count) &&
+                            !v2::isOFDMBurstPadHeader(hdr)) {
+                            kh = KeyHeader{hdr.src_hash, hdr.dst_hash, hdr.seq,
+                                           static_cast<uint16_t>(
+                                               (static_cast<uint16_t>(hsrc[15]) << 8) | hsrc[16]),
+                                           hsrc[3]};
+                        }
+                    }
+                }
+                if (!kh) {
                     return st;
                 }
                 fec::SoftCombineBuffer::HarqKeyInputs ki;
-                ki.sender_hash = hdr.src_hash;
-                ki.dst_hash = hdr.dst_hash;
-                ki.seq = hdr.seq;
+                ki.sender_hash = kh->src;
+                ki.dst_hash = kh->dst;
+                ki.seq = kh->seq;
                 ki.rate = rate;
                 ki.cw_count = static_cast<uint8_t>(v2::sanitizeFixedFrameCodewords(cw_count));
                 ki.cw_index = fec::SoftCombineBuffer::kWholeFrameCwIndex;
                 ki.lifting_z = active_lifting_z;
                 ki.modulation = current_modulation_;
                 ki.channel_interleave = false;
-                ki.physical_burst_end = (hsrc[3] & v2::Flags::PHYSICAL_BURST_END) != 0;
+                ki.physical_burst_end = (kh->flags & v2::Flags::PHYSICAL_BURST_END) != 0;
                 ki.waveform_mode = static_cast<int>(mode_);
                 ki.ofdm_data_carriers = ofdm_data_carriers_;
-                ki.header_crc = static_cast<uint16_t>((static_cast<uint16_t>(hsrc[15]) << 8) | hsrc[16]);
+                ki.header_crc = kh->hcrc;
                 const auto key = fec::SoftCombineBuffer::makeKey(ki);
                 if (st.allSuccess()) {
                     harq_buffer_->drop(key);
@@ -5302,15 +5360,22 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
                 std::vector<float> combined;
                 const int attempts = harq_buffer_->combine(key, fresh, combined);
                 if (attempts > 1) {
-                    auto st2 = v2::decodeTurboFixedFrame(combined, rate, cw_count, active_lifting_z);
+                    protocol::ofdm_frame::DecodeResult detail2;
+                    auto st2 = protocol::ofdm_frame::decodeStatus(
+                        combined, rate, cw_count, active_lifting_z, session_peer, session_local,
+                        session_known, &detail2);
                     if (st2.allSuccess()) {
                         const auto h2 = v2::parseHeader(st2.data[0]);
-                        if (h2.valid && h2.seq == hdr.seq && h2.src_hash == hdr.src_hash &&
-                            h2.dst_hash == hdr.dst_hash) {
+                        if (h2.valid && h2.seq == kh->seq && h2.src_hash == kh->src &&
+                            h2.dst_hash == kh->dst) {
                             harq_buffer_->drop(key);
                             std::fill(st2.harq_attempts.begin(), st2.harq_attempts.end(), attempts);
+                            if (detail2.compact && detail2.position.known()) {
+                                last_turbo_position_index_ = detail2.position.index;
+                                last_turbo_position_count_ = detail2.position.count;
+                            }
                             LOG_MODEM(INFO, "[%s] Turbo HARQ: seq=%u recovered from %d combined receptions",
-                                      log_prefix_.c_str(), static_cast<unsigned>(hdr.seq), attempts);
+                                      log_prefix_.c_str(), static_cast<unsigned>(kh->seq), attempts);
                             return st2;
                         }
                     }
@@ -5461,6 +5526,11 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
         if (cw_status.allSuccess()) {
             result.success = true;
             result.frame_data = cw_status.reassemble();
+            if (turbo_data_fec && last_turbo_position_count_ > 0) {
+                // A compact frame's place in its physical turn (INV-OFDM-FRAME-001).
+                result.physical_index = last_turbo_position_index_;
+                result.physical_count = last_turbo_position_count_;
+            }
 
             if (result.frame_data.empty()) {
                 // LDPC said all CWs were OK but reassemble failed — likely LDPC false positive

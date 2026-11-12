@@ -101,7 +101,12 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 - Multi-Carrier DPSK + chirp sync. ARQ selective-repeat with a **timing-derived window (1–5)** via `mcDpskWindowSizeForTiming` (not fixed window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
 
 ### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)
-- OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake; since 2026-11-09 (`ULTRA_FAST`) group starts carry NO chirp — the receiver finds each burst descriptor by frame-structure detection (chirp only at connect, the first groups and an RTO resend) — and data frames are ONE turbo codeword (`ULTRA_DATA_FEC`). Key: `decodeFixedFrame()` in frame_v2.cpp.
+- OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake; since 2026-11-09 (`ULTRA_FAST`) group starts carry NO chirp — the receiver finds each burst descriptor by frame-structure detection (chirp only at connect, the first groups and an RTO resend) — and data frames are ONE turbo codeword (`ULTRA_DATA_FEC`). Since 2026-11-12 a session's data frames
+  use the compact layout (`protocol/ofdm_data_frame.hpp`, INV-OFDM-FRAME-001: an 8-byte header with the
+  frame's index and count in its burst, CRC seeded from the callsign hashes, 11 more payload bytes per
+  frame); a decoded member's position gives a group whose descriptor was lost its N and end time. A
+  connected receiver decodes every acquired descriptor and retries a failed one with its 82
+  protocol-fixed bits pinned (INV-DESC-KNOWN-001). Key: `decodeFixedFrame()` in frame_v2.cpp.
 
 ### Mode 3: OFDM_NARROW (narrowband chirp 1250-1750 Hz, 500 Hz channel) — coherent since 2026-11-10
 - Disabled 2026-05-31 with differential OFDM; RETURNED 2026-11-10 as **coherent** OFDM (QPSK) on

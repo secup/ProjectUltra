@@ -515,6 +515,24 @@ The prior used before the station has measured its own bursts is 1.0 dB with whi
 frames (`peakNormalizedOfdmBelowMcDpskPriorDb`; 3.4 dB with `ULTRA_CONTROL_WHITEN=0`); re-measure
 it from a `--tx-model hardware --record` TX recording whenever a burst's opening content changes.
 
+### INV-OFDM-FRAME-001: a session's OFDM DATA frame says where it sits in its physical turn
+
+**Rule:** with turbo data frames, a sender inside a session (ModemEngine has the session's addresses)
+sends OFDM DATA frames in the compact layout (`protocol/ofdm_data_frame.hpp`: FLAGS SEQ POS LEN HCRC +
+payload, CRC-32C seeded from the direction's callsign hashes), each with its true physical position
+(index among the turn's DATA frames, and their count) set by `encodeBurstLight` per frame and 0/1 for a
+frame sent on its own. Every capacity that sizes a session's OFDM DATA (`Connection` chunker and rung
+sites, the SR-ARQ's fixed-frame accept) is `v2::ofdmSessionPayloadCapacity`, so a chunk always fits the
+layout the encoder will use; pad frames (addressed away) keep the v2 layout and size. The receiver
+accepts both layouts in one decode and rebuilds the v2 frame. A decoded member's position is used only
+where the slicer put it (accumulated index == position index): then it proves a descriptorless group's N
+(`noteBurstMemberPosition`: the group finalizes and acknowledges at N instead of being abandoned) and,
+on the classic path, replaces the descriptorless air ceiling with the turn's real end.
+
+**Why:** the v2 layout spent 19 bytes of a turbo frame on framing the codec already provides (24 % of a
+QPSK R1/4 4-codeword frame), and no frame told the receiver how long its burst was: a group whose
+descriptor and tail were lost could not be acknowledged even when its middle decoded.
+
 ### INV-DESC-KNOWN-001: a connected receiver decodes every descriptor it acquires, and uses what the protocol fixes
 
 **Rule:** in a connected OFDM session the control-first decode of a one-codeword control frame never

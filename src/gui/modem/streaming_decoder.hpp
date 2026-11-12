@@ -91,6 +91,11 @@ struct DecodeResult {
     // to emit a causally safe reverse ACK without mistaking an arbitrary/timer
     // callback for a half-duplex turn boundary.
     bool physical_turn_complete = false;
+    // A compact OFDM DATA frame's place in its physical turn (protocol/ofdm_data_frame.hpp,
+    // INV-OFDM-FRAME-001): index of this frame among the turn's DATA frames, and their count.
+    // count 0 = not known (a v2-layout frame, MC-DPSK, a control frame).
+    int physical_index = -1;
+    int physical_count = 0;
     // A failed one-codeword (turbo) data frame whose own LTS pair proves a real, aligned
     // peer frame (LTS-pair chi above its noise law). LDPC frames show the same thing via
     // codewords_ok > 0; a turbo frame is all-or-nothing, so without this every fade
@@ -504,6 +509,8 @@ public:
     uint32_t descriptorKnownBitRescuesForTesting() const { return descriptor_known_bit_rescues_; }
     void setDescriptorKnownBitsForTesting(bool on) { descriptor_known_bits_enabled_ = on; }
     uint32_t descriptorsConsumedForTesting() const { return descriptors_consumed_; }
+    // Descriptorless groups a decoded member's position proved (INV-OFDM-FRAME-001).
+    uint32_t burstPositionProofsForTesting() const { return burst_position_proofs_; }
     uint32_t classicLongGeometryArmsForTesting() const {
         return classic_long_geometry_arms_;
     }
@@ -1122,6 +1129,9 @@ private:
     // the wire ended before stale fallback geometry. Zero keeps descriptor/configured
     // geometry (including late-join head-erasure reconstruction).
     void finalizeBurstGroup(int exact_physical_group_size = 0);
+    // INV-OFDM-FRAME-001: a decoded compact member's place in its physical turn. In a group armed
+    // without its descriptor it proves N (and the geometry it decoded with); see the .cpp.
+    void noteBurstMemberPosition(int accumulated_index, const DecodeResult& result);
     // Every synthetic physical-frame erasure must use the descriptor-owned lifting Z.
     // The legacy BurstInterleaver default is Z27/81 bytes per CW; relying on it inside
     // a cw4/Z81 group creates 2592 LLRs where deinterleave requires 7776.
@@ -1548,6 +1558,9 @@ private:
         UNPROVEN_MARKER,
         DESCRIPTOR_LATE_JOIN,
     };
+    // The last turbo data frame decode's physical position (compact frames; -1/0 = none).
+    int last_turbo_position_index_ = -1;
+    int last_turbo_position_count_ = 0;
     uint32_t descriptor_known_bit_rescues_ = 0;
     uint32_t descriptors_consumed_ = 0;
     // ULTRA_DESCRIPTOR_KNOWN_BITS (default on; "0" = plain decode only, for an A/B).
@@ -1556,6 +1569,12 @@ private:
         return !(e != nullptr && e[0] == '0' && e[1] == '\0');
     }();
     BurstArmProvenance burst_arm_provenance_ = BurstArmProvenance::NONE;
+    // A descriptorless group (UNPROVEN_MARKER / COMMANDED_GEOMETRY) proven by a decoded compact
+    // member's position (noteBurstMemberPosition): its N is burst_position_count_. Reset at every
+    // arm.
+    bool burst_position_proven_ = false;
+    int burst_position_count_ = 0;
+    uint32_t burst_position_proofs_ = 0;
     size_t burst_substantive_members_ = 0;
     uint64_t burst_unproven_start_abs_ = 0;
     // A sign-only negated-LTS decision can classify a standalone repair/noise as a

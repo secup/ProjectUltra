@@ -460,11 +460,9 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
         return false;
     }
 
-    const size_t capacity = fixed_frame_lifting_z_ == 81
-        ? v2::getFixedFramePayloadCapacityZ(
-              code_rate_, fixed_frame_codewords_, 81)
-        : v2::getFixedFramePayloadCapacity(
-              code_rate_, fixed_frame_codewords_);
+    // The session's OFDM DATA layout decides how much one frame carries (INV-OFDM-FRAME-001).
+    const size_t capacity = v2::ofdmSessionPayloadCapacity(
+        code_rate_, fixed_frame_codewords_, fixed_frame_lifting_z_);
     if (data.size() > capacity) {
         // makeFixedDataFrame() is a general helper with legacy truncation
         // semantics. Production ARQ must never inherit that behavior: accepting
@@ -482,7 +480,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
 
     auto frame = v2::makeFixedDataFrame(local_call_, remote_call_, seq, data,
                                         code_rate_, fixed_frame_codewords_,
-                                        fixed_frame_lifting_z_);
+                                        fixed_frame_lifting_z_, capacity);
     frame.type = frame_type;
     frame.flags = stampMoveEpochFlags(dataFrameFlags(flags), seq);
 

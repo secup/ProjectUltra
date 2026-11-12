@@ -2137,6 +2137,29 @@ size_t fixedFrameInfoBytesPerCodeword(CodeRate rate, int lifting_z) {
 }
 }  // namespace
 
+size_t ofdmFixedFrameInfoBytes(CodeRate rate, int cw_count, int lifting_z) {
+    return static_cast<size_t>(sanitizeFixedFrameCodewords(cw_count)) *
+           fixedFrameInfoBytesPerCodeword(rate, (lifting_z == 81) ? 81 : 27);
+}
+
+bool ofdmCompactDataFrameEnabled() {
+    static const bool on = [] {
+        if (ofdmDataFrameFec() != DataFrameFec::TURBO) return false;  // one codeword per frame
+        const char* e = std::getenv("ULTRA_OFDM_COMPACT_FRAME");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');  // default ON
+    }();
+    return on;
+}
+
+size_t ofdmSessionPayloadCapacity(CodeRate rate, int cw_count, int lifting_z) {
+    if (ofdmCompactDataFrameEnabled()) {
+        const size_t info = ofdmFixedFrameInfoBytes(rate, cw_count, lifting_z);
+        return info > kOfdmCompactHeaderBytes ? info - kOfdmCompactHeaderBytes : 0;
+    }
+    return (lifting_z == 81) ? getFixedFramePayloadCapacityZ(rate, cw_count, 81)
+                             : getFixedFramePayloadCapacity(rate, cw_count);
+}
+
 Bytes encodeTurboFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count, int lifting_z) {
     cw_count = sanitizeFixedFrameCodewords(cw_count);
     lifting_z = (lifting_z == 81) ? 81 : 27;
@@ -2146,8 +2169,8 @@ Bytes encodeTurboFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count
     return fec::turbo::encode(padFixedFrameInfo(frame_data, total_info_bytes), air_bits);
 }
 
-CodewordStatus decodeTurboFixedFrame(const std::vector<float>& air_soft, CodeRate rate,
-                                     int cw_count, int lifting_z, Bytes* hard_info_bytes) {
+CodewordStatus turboFrameStatusShell(const std::vector<float>& air_soft, int cw_count,
+                                     int lifting_z) {
     cw_count = sanitizeFixedFrameCodewords(cw_count);
     lifting_z = (lifting_z == 81) ? 81 : 27;
     const size_t block = static_cast<size_t>(kLdpcBlockCols * lifting_z);
@@ -2180,6 +2203,19 @@ CodewordStatus decodeTurboFixedFrame(const std::vector<float>& air_soft, CodeRat
         status.llr_abs_p10[i] = s.p10;
         status.llr_abs_p50[i] = s.p50;
         status.llr_abs_p90[i] = s.p90;
+    }
+    return status;
+}
+
+CodewordStatus decodeTurboFixedFrame(const std::vector<float>& air_soft, CodeRate rate,
+                                     int cw_count, int lifting_z, Bytes* hard_info_bytes) {
+    cw_count = sanitizeFixedFrameCodewords(cw_count);
+    lifting_z = (lifting_z == 81) ? 81 : 27;
+    const size_t air_bits = static_cast<size_t>(cw_count * kLdpcBlockCols * lifting_z);
+    const size_t n = static_cast<size_t>(cw_count);
+    CodewordStatus status = turboFrameStatusShell(air_soft, cw_count, lifting_z);
+    if (air_soft.size() < air_bits) {
+        return status;
     }
 
     const size_t total_info_bytes = n * fixedFrameInfoBytesPerCodeword(rate, lifting_z);
@@ -3008,7 +3044,7 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
                               uint16_t seq, const Bytes& payload, CodeRate rate,
-                              int cw_count, int lifting_z) {
+                              int cw_count, int lifting_z, size_t payload_capacity) {
     cw_count = sanitizeFixedFrameCodewords(cw_count);
     // Z-aware capacity. The legacy getFixedFramePayloadCapacity returns the Z=27
     // size (~96 B at R3/4 cw=2) even when the encoder runs at z=81 (real capacity
@@ -3016,7 +3052,8 @@ DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
     // without it a z=81 FILE_DATA chunk gets SILENTLY TRUNCATED to 96 B and the
     // receiver's assembler skips ~244 B/frame — file never assembles even though
     // PHY decode succeeds on every group.
-    const size_t capacity = (lifting_z == 81)
+    const size_t capacity = payload_capacity > 0 ? payload_capacity
+        : (lifting_z == 81)
         ? getFixedFramePayloadCapacityZ(rate, cw_count, 81)
         : getFixedFramePayloadCapacity(rate, cw_count);
 

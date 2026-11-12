@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FEAT(ofdm): compact data frames that say where they sit in their burst (INV-OFDM-FRAME-001)
+
+**Why.** Inside the one-codeword turbo data frame, the v2 layout spent 19 bytes on framing the codec
+already provides (magic, type, both callsign hashes, codeword count, header CRC, frame CRC - the turbo
+codeword has a CRC-32C): 24 % of a QPSK R1/4 4-codeword frame. And no frame said how long its burst
+was: that came only from the descriptor or from the last frame's end-of-turn flag, so a group whose
+descriptor and tail were lost was abandoned with no ACK even when its middle decoded (GUI ITU Good
+5 dB: a 6-member marker group with a decoded member, the round silent), and a member decoded on its
+own kept the descriptorless air ceiling (~11 s) for its ACK.
+
+**What changed.**
+- `protocol/ofdm_data_frame.{hpp,cpp}`: FLAGS SEQ POS LEN HCRC + payload in the same turbo codeword
+  (same air geometry, same information size); POS = (index << 4) | (count - 1) of the frame among its
+  physical turn's DATA frames; the codec CRC-32C seeded from the direction's callsign hashes (addressing
+  costs no byte; distinct from the MC-DPSK seed); HCRC = CRC-16 over the header XOR the seed, so a
+  failed decode's hard decisions still key chase combining. Payload = information bytes - 8 (v2: - 19).
+- Sender: `StreamingEncoder` encodes a session's OFDM DATA frames compact (`setOfdmCompactFrames`, set
+  with the session addresses by `ModemEngine::setMcDpskSessionAddresses`), each with its position from
+  `encodeBurstLight` (a frame sent alone: 0 of 1); pad frames keep v2. Every capacity sizing session
+  OFDM DATA is `v2::ofdmSessionPayloadCapacity` (connection chunker and rung sites, SR-ARQ accept,
+  `makeFixedDataFrame` limit). `ULTRA_OFDM_COMPACT_FRAME=0` keeps the v2 layout.
+- Receiver: one turbo decode accepts both layouts (`fec::turbo::DecodeOptions::alt_crc_seed`) and
+  rebuilds the v2 frame (`ofdm_frame::decodeStatus`); `DecodeResult::physical_index/count`. A member's
+  position, where the slicer put it, proves a descriptorless group's N
+  (`StreamingDecoder::noteBurstMemberPosition`: the group finalizes and is acknowledged at N); on the
+  classic path it replaces the descriptorless air ceiling with the turn's real end.
+
+**Verification.** CTest `OfdmCompactFrame`: every rate x cw round-trips at its compact capacity (v2 +
+11 bytes) and rebuilds the v2 frame byte for byte; the position byte for every index/count; another
+session's receiver and a receiver outside the session reject the frame; the v2 layout decodes through
+the same call; the header CRC identifies a frame with payload errors and is session-seeded; a 4-frame
+burst through `StreamingEncoder`/`StreamingDecoder` arrives at compact capacity with each member's
+position, a v2 burst without; a descriptorless group with its tail destroyed is lost in the v2 layout
+(no callback) and delivered compact (1 position proof, 3 frames). ctest 123/123. GUI: high-SNR set
+(Good 20 x2, AWGN 20/25, fade, QSB) 6/6 PASS, goodput +9/0/-8/-4/+2/+2 % vs the previous build; ITU
+Good 5 dB batch (8 cases) 7/8 PASS - the failure is BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD (a latent
+follow bug this run exposed, fixed separately) - total of the 7 comparable cases 1395 s vs 1249 s
+before, per case within the historical spread (one -106 s, two equal, four +31..+82 s; the slow ones
+lost 12 ms ACKs after the 20 -> 5 dB drop in both builds), descriptors consumed 83 % (85 %). Delivered
+frames carry 312 instead of 301 payload bytes at QPSK R1/2 cw 8 (+3.7 %; +18 % at R1/4 cw 4).
+
+---
+
 ## 2026-11-12 — FIX(rx): a connected receiver decodes every descriptor it acquires, with the descriptor's fixed bits pinned on a second try (BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS)
 
 **What broke.** The OFDM control-first decode skipped any one-codeword control frame whose mean |LLR|

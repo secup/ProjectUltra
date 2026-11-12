@@ -86,6 +86,10 @@ struct DecodeOptions {
     float extrinsic_scale = 0.75f;
     bool early_fail = true;        // stop after 2 iterations with no decision flips
     uint32_t crc_seed = 0;         // must match the encoder's (see encode)
+    // A second seed the CRC may match instead (the OFDM receiver accepts the compact layout,
+    // seeded, and the v2 layout, plain, in one decode; DecodeResult says which matched).
+    bool check_alt_crc_seed = false;
+    uint32_t alt_crc_seed = 0;
 };
 
 struct DecodeResult {
@@ -99,6 +103,7 @@ struct DecodeResult {
     // iteration (fraction of info bits). Evidence that the window holds a REAL codeword
     // even when the CRC fails (a fade) versus noise / a misaligned window (~0.5).
     float extrinsic_agreement = 0.5f;
+    bool alt_crc_seed_matched = false;  // the CRC verified with DecodeOptions::alt_crc_seed
 };
 
 DecodeResult decode(std::span<const float> air_llrs, size_t info_bytes,

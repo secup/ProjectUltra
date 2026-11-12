@@ -190,6 +190,9 @@ public:
     // Compact MC-DPSK DATA frames inside a session (ULTRA_MCDPSK_COMPACT_FRAME): one turbo codeword
     // of fixed_frame_codewords_ x 648 air bits per DATA frame (protocol/mcdpsk_frame.hpp).
     void setMcDpskCompactFrames(bool on) { mc_dpsk_compact_frames_.store(on); }
+    // Compact OFDM DATA frames (protocol/ofdm_data_frame.hpp, INV-OFDM-FRAME-001): only inside a
+    // session, whose addresses seed the frame CRC (ModemEngine::setMcDpskSessionAddresses).
+    void setOfdmCompactFrames(bool on) { ofdm_compact_frames_.store(on); }
 
     // Burst-level long interleaver (spreads CW bytes across N-frame groups)
     void setBurstInterleave(bool enable) { use_burst_interleave_ = enable; }
@@ -297,6 +300,12 @@ private:
         ultra::waveform::tone_burst_ack::ToneAckBand::Wideband;
     int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
     std::atomic<bool> mc_dpsk_compact_frames_{false};
+    std::atomic<bool> ofdm_compact_frames_{false};
+    // The physical position the next OFDM DATA frame is encoded with: its index among the DATA
+    // frames of its physical turn, and their count (encodeBurstLight sets it per frame; a frame
+    // encoded on its own is a turn of one).
+    int next_physical_index_ = 0;
+    int next_physical_count_ = 1;
     bool use_burst_interleave_ = false;    // Burst-level long interleaver (N-frame groups)
     int burst_group_size_ = 8;
     // #69 monotonic GROUP ordinal for ULTRA_ANCHOR_SKIP_K (NOT the ARQ base seq, which jumps by

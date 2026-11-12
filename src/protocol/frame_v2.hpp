@@ -1326,6 +1326,24 @@ DataFrameFec ofdmDataFrameFec();
 /** Pads frame_data to total_info_bytes with the deterministic fixed-frame PRBS. */
 Bytes padFixedFrameInfo(const Bytes& frame_data, size_t total_info_bytes);
 
+/** Information bytes of an OFDM fixed frame: cw x the rate's information bytes per air block. */
+size_t ofdmFixedFrameInfoBytes(CodeRate rate, int cw_count, int lifting_z);
+
+/**
+ * OFDM DATA frame layout of a session (INV-OFDM-FRAME-001, 2026-11-12). With turbo data frames
+ * the sender uses the compact layout (protocol/ofdm_data_frame.hpp: an 8-byte header with the
+ * frame's physical position, the CRC seeded from the callsign hashes) unless
+ * ULTRA_OFDM_COMPACT_FRAME=0. Receivers accept both layouts, so only the sender's setting matters.
+ */
+inline constexpr size_t kOfdmCompactHeaderBytes = 8;
+bool ofdmCompactDataFrameEnabled();
+
+/**
+ * Payload bytes one OFDM DATA frame of a session carries at (rate, cw, Z): what the chunker cuts
+ * and the ARQ accepts. The compact layout's when it is in force, the v2 layout's otherwise.
+ */
+size_t ofdmSessionPayloadCapacity(CodeRate rate, int cw_count, int lifting_z);
+
 /** Turbo encode of an OFDM data frame: returns cw x (24*Z) coded bits, air order. */
 Bytes encodeTurboFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count, int lifting_z = 27);
 
@@ -1339,6 +1357,11 @@ Bytes encodeTurboFixedFrame(const Bytes& frame_data, CodeRate rate, int cw_count
 CodewordStatus decodeTurboFixedFrame(const std::vector<float>& air_soft, CodeRate rate,
                                      int cw_count, int lifting_z = 27,
                                      Bytes* hard_info_bytes = nullptr);
+
+/** The status of a turbo data frame before its decode (vectors sized cw, failed; per-air-block
+ *  pre-FEC |LLR| summaries filled). */
+CodewordStatus turboFrameStatusShell(const std::vector<float>& air_soft, int cw_count,
+                                     int lifting_z = 27);
 
 /**
  * Encode without channel interleaving for an explicit CW count.
@@ -1405,7 +1428,10 @@ CodewordStatus decodeFixedFrame(const std::vector<float>& interleaved_soft, Code
 DataFrame makeFixedDataFrame(const std::string& src, const std::string& dst,
                               uint16_t seq, const Bytes& payload, CodeRate rate,
                               int cw_count = kDefaultFixedFrameCodewords,
-                              int lifting_z = 27);  // 27 -> n=648, 81 -> n=1944
+                              int lifting_z = 27,   // 27 -> n=648, 81 -> n=1944
+                              // payload limit; 0 = the v2 layout's capacity (the ARQ passes
+                              // ofdmSessionPayloadCapacity: a compact frame carries more)
+                              size_t payload_capacity = 0);
 
 } // namespace v2
 

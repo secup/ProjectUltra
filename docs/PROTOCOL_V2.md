@@ -246,11 +246,27 @@ Two distinct paths are used.
 - Encoded through fixed 4-CW frame path with frame-level interleaving
 - Data payload capacity depends on code rate
 
-Fixed 4-CW payload capacities (`getFixedFramePayloadCapacity`):
+Fixed 4-CW payload capacities (`getFixedFramePayloadCapacity`, v2 layout):
 - `R1/4`: 61 bytes
 - `R1/2`: 141 bytes
 - `R2/3`: 197 bytes
 - `R3/4`: 221 bytes
+
+3. Compact OFDM DATA frames (2026-11-12, INV-OFDM-FRAME-001, `protocol/ofdm_data_frame.hpp`).
+With turbo data frames (one codeword per frame), a sender inside a session sends DATA frames in a
+compact layout instead of the v2 one (same air geometry, same turbo code, same information size
+cw x the rate's bytes per 648-bit block, a CRC-32C seeded from the direction's callsign hashes):
+- `FLAGS(1) SEQ(2) POS(1) LEN(2) HCRC(2) PAYLOAD(LEN) PAD`
+- `POS` = `(index << 4) | (count - 1)`: this frame is DATA frame `index` of the `count` (1..16) of
+  its physical turn; `0xF0` = not known
+- `HCRC` = CRC-16 over bytes 0-5 XOR the session seed's low 16 bits, so a failed decode's hard
+  decisions still identify the frame for chase combining
+- The type is implicit (DATA) and addressing costs no byte (the seeded CRC fails for any other
+  session). Payload = information bytes - 8 (v2: - 19): cw 4 at R1/4 carries 72 bytes, not 61.
+- The receiver accepts both layouts in one turbo decode (seeded CRC = compact, plain = v2) and
+  rebuilds the v2 frame, so the protocol above the modem is unchanged. A decoded member's `POS`
+  gives a group whose descriptor was lost its N (and its end time); a lone member's `POS` sets the
+  turn's air end. `ULTRA_OFDM_COMPACT_FRAME=0` makes a sender keep the v2 layout.
 
 ## ARQ Semantics (Selective Repeat)
 

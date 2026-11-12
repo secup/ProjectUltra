@@ -441,6 +441,7 @@ add_library(ultra_core STATIC
     # Protocol layer (callsign addressing, connection management)
     src/protocol/frame_v2.cpp
     src/protocol/mcdpsk_frame.cpp
+    src/protocol/ofdm_data_frame.cpp
     src/protocol/arq_interface.cpp
     src/protocol/arq.cpp
     src/protocol/selective_repeat_arq.cpp

@@ -264,6 +264,8 @@ public:
         forEachRxDecoder([&](StreamingDecoder* d) { d->setMcDpskSessionAddresses(local_hash, peer_hash); });
         if (streaming_encoder_) {
             streaming_encoder_->setMcDpskCompactFrames(local_hash != 0 && peer_hash != 0);
+            // Compact OFDM DATA frames too (protocol/ofdm_data_frame.hpp, INV-OFDM-FRAME-001).
+            streaming_encoder_->setOfdmCompactFrames(local_hash != 0 && peer_hash != 0);
         }
     }
     void setMcDpskMarginCallback(std::function<void(bool upper_rung_margin)> callback) {

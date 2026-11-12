@@ -769,6 +769,18 @@ target_include_directories(test_descriptor_known_bits PRIVATE
 target_link_libraries(test_descriptor_known_bits PRIVATE ultra_core ota_channel_core)
 add_test(NAME DescriptorKnownBits COMMAND test_descriptor_known_bits)
 
+# INV-OFDM-FRAME-001: the compact OFDM DATA frame (codec + a burst through encoder and decoder).
+add_executable(test_ofdm_compact_frame
+    test_ofdm_compact_frame.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_ofdm_compact_frame PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_ofdm_compact_frame PRIVATE ultra_core ota_channel_core)
+add_test(NAME OfdmCompactFrame COMMAND test_ofdm_compact_frame)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.

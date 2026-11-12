@@ -13,6 +13,7 @@
 #include "fec/burst_interleaver.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/mcdpsk_frame.hpp"
+#include "protocol/ofdm_data_frame.hpp"
 #include "ofdm/genie_tx_capture.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
@@ -593,11 +594,16 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
         return result;
     }
 
-    // Phase 1: LDPC encode all frames
+    // Phase 1: LDPC encode all frames. Each DATA frame carries its place in this physical turn
+    // (compact OFDM frames, INV-OFDM-FRAME-001).
     std::vector<Bytes> encoded_frames;
-    for (const auto& fd : wire_frame_data_list) {
-        encoded_frames.push_back(encodeFrameBytes(fd));
+    for (size_t i = 0; i < wire_frame_data_list.size(); ++i) {
+        next_physical_index_ = static_cast<int>(i);
+        next_physical_count_ = static_cast<int>(wire_frame_data_list.size());
+        encoded_frames.push_back(encodeFrameBytes(wire_frame_data_list[i]));
     }
+    next_physical_index_ = 0;
+    next_physical_count_ = 1;
 
     // Phase 2: Group into N-frame subgroups, burst-interleave each group
     // Track which groups are burst-interleaved (for LTS marker)
@@ -1407,7 +1413,32 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
 
     // Stage 1 of the 2026-11-08 speed plan: ONE turbo codeword over the whole frame when the
     // lockstep data-frame FEC is turbo (ULTRA_DATA_FEC / ULTRA_FAST); same air geometry and capacity.
-    Bytes encoded = (v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO)
+    const bool turbo = v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
+    // Compact layout inside a session (INV-OFDM-FRAME-001): an 8-byte header with this frame's
+    // physical position, the CRC seeded from the session's hashes. A pad frame (addressed away)
+    // or a frame that does not fit keeps the v2 layout; receivers accept both.
+    if (turbo && ofdm_compact_frames_.load(std::memory_order_relaxed) &&
+        v2::ofdmCompactDataFrameEnabled() && tx_data.size() >= 3 &&
+        tx_data[2] == static_cast<uint8_t>(v2::FrameType::DATA) &&
+        !v2::isOFDMBurstPadHeader(v2::parseHeader(tx_data))) {
+        protocol::ofdm_frame::Position position;
+        position.index = next_physical_index_;
+        position.count = next_physical_count_;
+        if (auto air = protocol::ofdm_frame::encode(tx_data, code_rate_, frame_cw_count, ldpc_z,
+                                                    position)) {
+            LOG_MODEM(DEBUG, "[%s] OFDM compact DATA: %zu bytes -> %d CWs (frame %d of %d)",
+                      log_prefix_.c_str(), tx_data.size(), frame_cw_count, position.index + 1,
+                      position.count);
+            return *air;
+        }
+        LOG_MODEM(WARN, "[%s] OFDM compact DATA: %zu bytes do not fit %d CWs, sending the v2 "
+                  "layout", log_prefix_.c_str(), tx_data.size(), frame_cw_count);
+    }
+    if (tx_data.size() > v2::ofdmFixedFrameInfoBytes(code_rate_, frame_cw_count, ldpc_z)) {
+        LOG_MODEM(ERROR, "[%s] OFDM DATA: %zu bytes exceed the v2 layout of %d CWs - truncated",
+                  log_prefix_.c_str(), tx_data.size(), frame_cw_count);
+    }
+    Bytes encoded = turbo
         ? v2::encodeTurboFixedFrame(tx_data, code_rate_, frame_cw_count, ldpc_z)
         : v2::encodeFixedFrame(tx_data, code_rate_, frame_cw_count,
                                use_channel_interleave_, bps,
