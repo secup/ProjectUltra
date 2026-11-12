@@ -68,6 +68,19 @@ the other constellation with the same waveform), the listener's demodulator stat
 false MC-DPSK syncs on OFDM bursts. Mitigated: an up-crossing needs a physical reading in the burst
 (2026-11-12), and the crossing's pool clear usually drops the reading.
 
+### BUG-HANDSHAKE-DBPSK-AT-HIGH-SNR (open, 2026-11-12) — P3, efficiency: CONNECT and CONNECT_ACK always go at DBPSK R1/4
+
+GUI AWGN 20 dB, seed 44: the modem's handshake takes 14.4 s from the PING (7.03 s) to the decoded
+CONNECT_ACK (21.41 s): PING and PONG 1.39 s each, CONNECT and CONNECT_ACK 4.85 s each (DBPSK R1/4,
+2 codewords, sized for the -6 dB floor), turnarounds and decode latency the rest. The PONG has
+already measured the link (21 dB here). DQPSK would halve both connect frames (~5 s per
+connection, a third of the handshake) wherever the PONG reading clears the DBPSK -> DQPSK step
+(6.02 dB, the margin test's own number) plus its uncertainty. Needs: the initiator picks the
+CONNECT constellation from the PONG's SNR, the responder its CONNECT_ACK's from the CONNECT's, and
+an unconnected receiver re-demodulates a failed fixed CONNECT at the other constellation (today
+`retryMcDpskFirstFrameConstellation` runs only when connected). The handshake is the one path
+nothing works without: behind a knob, with the handshake CTests and a GUI sweep from -6 to 25 dB.
+
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 
 The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample
