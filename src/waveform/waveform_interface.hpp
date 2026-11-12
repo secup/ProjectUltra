@@ -13,6 +13,7 @@
 
 #include "ultra/types.hpp"
 #include "protocol/frame_v2.hpp"
+#include <limits>
 #include <string>
 #include <vector>
 #include <memory>
@@ -50,6 +51,10 @@ struct SyncResult {
                                     // -1/0 = unavailable (single chirp, LTS).
     float correlation = 0.0f;       // Peak correlation value (0-1)
     float cfo_hz = 0.0f;            // Estimated carrier frequency offset
+    // The burst's own CFO measurement where the detector makes one beside cfo_hz (structure
+    // acquisition: the tracked value it searched at plus the LTS1->LTS2 rotation it measured,
+    // unambiguous to +-fs/(2 x symbol length) = 20.8 Hz). NaN = no own measurement.
+    float measured_cfo_hz = std::numeric_limits<float>::quiet_NaN();
     float gap_error_samples = 0.0f; // Dual-chirp actual_gap - expected_gap
     float snr_estimate = 0.0f;      // Estimated SNR from preamble
     bool has_training = false;      // True if preamble includes training sequence

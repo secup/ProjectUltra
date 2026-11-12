@@ -103,6 +103,13 @@ unestablished tracker accepts the chirp; the first OFDM frame's LTS stage correc
 into a 7.3 Hz error on 27/48 Good@20 frames — and looked correct for months because the simulator's
 truth was 0 Hz. Never judge "established" from |CFO| > ε either (a true 0 Hz is established too).
 
+**Same rule for the preamble-less detectors (2026-11-12):** structure acquisition and the light-LTS
+sync report the burst's own CFO (`SyncResult::measured_cfo_hz`); with the tracker unestablished
+`searchForSync` acquires on it, never on the 0 Hz default it searched at
+(BUG-STRUCTURE-ACQ-DROPS-CFO). **Test:** `FrameStructureDetector` §8 (−15..+15 Hz, cold or
+tracked, within 4σ).
+
+
 ### INV-CFO-006: A burst that proves nothing falls back to the session's measurement, never to 0 Hz (2026-11-10)
 
 **Rule:** when the burst outcome revokes the tracked CFO and no delivered group has certified a

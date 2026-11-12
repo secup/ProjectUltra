@@ -1026,9 +1026,13 @@ bool OFDMChirpWaveform::detectFrameStructure(SampleSpan samples, SyncResult& res
     // Report the start that puts the FFT window in the middle of the CP's ISI-free region.
     const int start = std::max(0, coarse.p - static_cast<int>(std::lround(late)) - cp / 2);
 
-    // LTS1->LTS2 phase (sign-corrected for the marker) for the residual-CFO log only.
+    // LTS1->LTS2 phase (sign-corrected for the marker): the rotation left after the search's
+    // derotation at the tracked CFO. The detection statistic is blind to it (a common phase per
+    // lag), so this is the burst's own CFO measurement; the decoder uses it when the tracker holds
+    // no measurement (BUG-STRUCTURE-ACQ-DROPS-CFO).
     const double resid_cfo =
         std::arg(marked ? -slts : slts) / (2.0 * M_PI * Ls / config_.sample_rate);
+    result.measured_cfo_hz = known_cfo_hz + static_cast<float>(resid_cfo);
     burst_interleaved_detected_ = marked;  // LTS1 negated = group-start marker
     burst_interleave_latched_ = burst_interleaved_detected_;
     // Per-cell coherence estimate: E[chi] = rho^2 * n + K * (1 - rho^2) for unit phasors of
@@ -1407,6 +1411,14 @@ bool OFDMChirpWaveform::detectDataSync(SampleSpan samples, SyncResult& result,
         Complex marker_metric = best_p * cfo_comp;
         burst_interleaved_detected_ = (marker_metric.real() < 0.0f);
         burst_interleave_latched_ = burst_interleaved_detected_;
+        // The pair's own CFO: its rotation between the two symbols, marker removed, relative to the
+        // known CFO it searched at. The marker decision just made assumes that rotation is within a
+        // quarter turn, so the measurement covers known +- fs / (4 L) (10.7 Hz wideband); the
+        // decoder uses it only when the tracker holds no measurement (BUG-STRUCTURE-ACQ-DROPS-CFO).
+        const Complex own_rotation = burst_interleaved_detected_ ? -marker_metric : marker_metric;
+        result.measured_cfo_hz =
+            known_cfo_hz + static_cast<float>(std::arg(own_rotation) * config_.sample_rate /
+                                              (2.0 * M_PI * symbol_samples));
         if (ultra::phyDiagnosticsEnabled()) {
             std::ostringstream oss;
             oss << "burst_marker site=warm re=" << marker_metric.real()

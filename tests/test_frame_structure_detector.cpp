@@ -15,7 +15,9 @@
 //     marker (LTS1 negated); it must be detected AND reported as marked, and an unmarked frame
 //     must not be (the first statistic cancelled itself on marked frames and locked frame 2);
 //  7. settling lead-in (chirp-less burst start): the settling symbols alone never trigger, and
-//     a descriptor that directly follows them is still found inside its CP plateau.
+//     a descriptor that directly follows them is still found inside its CP plateau;
+//  8. the burst's own CFO: searched cold (0 Hz) or at the tracked value, the detector measures
+//     the offset (-15..+15 Hz) from the LTS1->LTS2 rotation (BUG-STRUCTURE-ACQ-DROPS-CFO).
 #include "env_compat.hpp"  // setenv on MSVC
 #include "protocol/frame_v2.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
@@ -306,6 +308,50 @@ int main() {
         }
         std::printf("      warm-window light-LTS lock with structure mode on: %d/%d\n", locked, trials);
         check(locked == trials, "structure mode leaves the in-group detectDataSync lock intact");
+    }
+
+    // 8. The burst's own CFO (BUG-STRUCTURE-ACQ-DROPS-CFO): searched at 0 Hz (a cold tracker) or at
+    //    the true offset (a tracked one), the detector reports the offset it measured. Accuracy of the
+    //    LTS1->LTS2 rotation over 59 carriers: sigma ~ sqrt(2 / (59 SNR)) / (2 pi Ls / fs) = 0.40 Hz at
+    //    10 dB, 0.13 Hz at 20 dB; checked at 4 sigma. Marked group starts too (LTS1 negated).
+    {
+        Samples marked = desc;
+        for (int i = 0; i < Ls; ++i) marked[static_cast<size_t>(i)] = -marked[static_cast<size_t>(i)];
+        for (double snr : {10.0, 20.0}) {
+            const double tol = snr < 15.0 ? 1.6 : 0.6;
+            int ok_cold = 0, ok_tracked = 0, total = 0;
+            double worst = 0.0;
+            for (double cfo : {-15.0, -7.3, 7.3, 15.0}) {
+                for (int t = 0; t < 6; ++t) {
+                    const Samples& frame = (t % 2) ? marked : desc;
+                    const size_t lead = 4800 + static_cast<size_t>(rng() % 12000);
+                    Samples buf(lead + frame.size() + 9600, 0.0f);
+                    for (size_t i = 0; i < frame.size(); ++i) buf[lead + i] = frame[i];
+                    buf = shiftHz(buf, cfo);
+                    std::normal_distribution<double> nd(0.0, noiseSigmaFor(sig_rms, snr));
+                    for (auto& v : buf) v += static_cast<float>(nd(rng));
+                    ++total;
+                    for (int tracked = 0; tracked < 2; ++tracked) {
+                        OFDMChirpWaveform rx(cfg);
+                        rx.configure(Modulation::QPSK, CodeRate::R1_4);
+                        SyncResult r;
+                        const float known = tracked ? static_cast<float>(cfo) : 0.0f;
+                        if (!rx.detectFrameStructure(SampleSpan(buf.data(), buf.size()), r, known, kBudget)) {
+                            continue;
+                        }
+                        const double err = std::abs(static_cast<double>(r.measured_cfo_hz) - cfo);
+                        worst = std::max(worst, std::isfinite(err) ? err : 99.0);
+                        if (err <= tol && r.cfo_hz == known) (tracked ? ok_tracked : ok_cold)++;
+                    }
+                }
+            }
+            std::printf("      own CFO at %4.1f dB: cold %d/%d, tracked %d/%d within %.1f Hz (worst %.2f)\n",
+                        snr, ok_cold, total, ok_tracked, total, tol, worst);
+            char m[160];
+            std::snprintf(m, sizeof(m), "SNR %.0f dB: the burst's own CFO (-15..+15 Hz) measured within %.1f Hz, "
+                          "searched cold or tracked", snr, tol);
+            check(ok_cold == total && ok_tracked == total, m);
+        }
     }
 
     if (g_fail == 0) {

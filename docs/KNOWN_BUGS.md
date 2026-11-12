@@ -125,35 +125,6 @@ drops it — i.e. the backstop's ACK is effectively dead.
 group (or its minimum when the descriptor is lost) so the re-confirm can land inside the sender's
 listen window, minus the ACK airtime; or stop emitting a re-confirm that cannot arrive before it.
 
-### BUG-STRUCTURE-ACQ-DROPS-CFO (open, 2026-11-10) — P2: structure acquisition measures the residual CFO and throws it away
-
-`OFDMChirpWaveform::detectFrameStructure` (the `ULTRA_BURST_ACQ=structure` group-start detector,
-on by default through `ULTRA_FAST`) computes the LTS1 -> LTS2 residual CFO of the burst it finds,
-logs it (`STRUCTURE sync at ... resid_cfo=+7.39 Hz (known 0.0)`) and hands the decoder the tracked
-value (`last_cfo_ = known_cfo_hz`). Downstream the LTS stage may correct an uncertified prior only
-within the 5 Hz dual-chirp phantom bound (`LTS residual CFO 7.47 Hz NOT applied (beyond phantom
-bound)`), so a burst acquired with a tracked CFO more than ~5 Hz off is demodulated off-frequency
-and every frame fails, although the detector measured the right offset (chi 88, rho 0.96).
-
-Exposure: a live session seeds the tracker with the handshake's dual-chirp CFO and keeps it
-certified, so it is right at almost every group start. It bites whenever the tracker is empty or
-wrong at a group start: `measure_ack_fer --cfo-hz` with the default stack (every frame, cold
-decoder: 0/10 at 25 dB AWGN with a 7.3 Hz offset), and in a session any path that resets the
-tracker without a session reference. The detector's estimate is the burst's own measurement
-(unambiguous to +-20.8 Hz, one LTS symbol), so it should act as the Stage-1 CFO producer when the
-tracker is not established (as the chirp does under INV-CFO-005) instead of being dropped. The
-phantom bound exists for dual-chirp priors and does not describe this one.
-
-Measurement workaround (used 2026-11-10): `ULTRA_BURST_ACQ=chirp --preroll-ms 300` (8/8 at 25 dB,
-7.3 Hz); without the preroll the tool's chirp at sample 0 is not found either (best correlation
-0.09, the first-frame artifact of BUG-HARNESS-003) and the LTS fallback runs at 0 Hz.
-
-Also hits every receiver that joins without a handshake, so it has no session CFO: `ultra prx` on
-a KiwiSDR-like recording (12 kHz WAV, 18 dB, +7.3 Hz) decoded 4/8 frames with structure
-acquisition and 8/8 with chirp acquisition. Since 2026-11-10 `ultra prx` and the GUI's OFDM
-`--monitor` modes call `sync::preferChirpAcquisitionWithoutHandshake()` (chirp unless
-`ULTRA_BURST_ACQ` is set); remove that call when this bug is fixed.
-
 ### BUG-TX-LEVEL-HANDSET (open, 2026-11-10) — P3 cleanup: the OFDM data level is a hand-set number
 
 `ModemConfig::output_scale = 40` sets OFDM data loudness relative to the chirp ("to match chirp /
@@ -2556,6 +2527,47 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-STRUCTURE-ACQ-DROPS-CFO (FIXED 2026-11-12, SyncResult::measured_cfo_hz) — was P2: structure acquisition measured the residual CFO and threw it away
+
+`OFDMChirpWaveform::detectFrameStructure` (the `ULTRA_BURST_ACQ=structure` group-start detector,
+on by default through `ULTRA_FAST`) computes the LTS1 -> LTS2 residual CFO of the burst it finds,
+logs it (`STRUCTURE sync at ... resid_cfo=+7.39 Hz (known 0.0)`) and hands the decoder the tracked
+value (`last_cfo_ = known_cfo_hz`). Downstream the LTS stage may correct an uncertified prior only
+within the 5 Hz dual-chirp phantom bound (`LTS residual CFO 7.47 Hz NOT applied (beyond phantom
+bound)`), so a burst acquired with a tracked CFO more than ~5 Hz off is demodulated off-frequency
+and every frame fails, although the detector measured the right offset (chi 88, rho 0.96).
+
+Exposure: a live session seeds the tracker with the handshake's dual-chirp CFO and keeps it
+certified, so it is right at almost every group start. It bites whenever the tracker is empty or
+wrong at a group start: `measure_ack_fer --cfo-hz` with the default stack (every frame, cold
+decoder: 0/10 at 25 dB AWGN with a 7.3 Hz offset), and in a session any path that resets the
+tracker without a session reference. The detector's estimate is the burst's own measurement
+(unambiguous to +-20.8 Hz, one LTS symbol), so it should act as the Stage-1 CFO producer when the
+tracker is not established (as the chirp does under INV-CFO-005) instead of being dropped. The
+phantom bound exists for dual-chirp priors and does not describe this one.
+
+Measurement workaround (used 2026-11-10): `ULTRA_BURST_ACQ=chirp --preroll-ms 300` (8/8 at 25 dB,
+7.3 Hz); without the preroll the tool's chirp at sample 0 is not found either (best correlation
+0.09, the first-frame artifact of BUG-HARNESS-003) and the LTS fallback runs at 0 Hz.
+
+Also hits every receiver that joins without a handshake, so it has no session CFO: `ultra prx` on
+a KiwiSDR-like recording (12 kHz WAV, 18 dB, +7.3 Hz) decoded 4/8 frames with structure
+acquisition and 8/8 with chirp acquisition. Since 2026-11-10 `ultra prx` and the GUI's OFDM
+`--monitor` modes call `sync::preferChirpAcquisitionWithoutHandshake()` (chirp unless
+`ULTRA_BURST_ACQ` is set); remove that call when this bug is fixed.
+
+**Fixed 2026-11-12.** Structure acquisition reports the burst's own CFO (the tracked value it
+searched at plus the LTS1->LTS2 rotation) and the light-LTS sync reports the pair's rotation, both
+as `SyncResult::measured_cfo_hz`; `searchForSync` acquires on it when `CFOTracker::established()`
+is false (INV-CFO-005), and a burst that then fails revokes it (INV-CFO-006). A session's receiver
+holds the handshake's CFO, so the GUI path is unchanged. `measure_ack_fer --cfo-hz` (data4_light,
+AWGN 25 dB, cold per frame): 9/10 at 0, +7.3, -7.3 and -10 Hz (was 0/10 at 7.3; the miss is the
+first-frame artifact of BUG-HARNESS-003). `ultra prx` with `ULTRA_BURST_ACQ=structure` on a 12 kHz
+WAV at 18 dB (4 OFDM frames): 4/4 at 0, +7.3 and -15 Hz, against 4/0/0 before. Test:
+`FrameStructureDetector` §8. The chirp preference for receivers without a handshake stays: the
+structure measurement aliases beyond +-21.4 Hz, the chirp reaches +-50 Hz on chirped bursts (a
+monitor that combines both is open work).
 
 ### BUG-POST-CROSSING-OVERCLIMB (FIXED 2026-11-12, kMinGroupsForMultiRungClimb) — P2: one group's EVM jumps the ladder three rungs
 

@@ -147,6 +147,11 @@ float measureEvmSNR(float snr_db, uint32_t seed, const Bytes& payload,
     decoder.setLogPrefix("EVMCAL");
     decoder.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP,
                                  ofdmGeometry(mod, rate), mod, rate);
+    // A session's receiver holds the handshake's CFO (setKnownCFO at connect); the truth here is
+    // 0 Hz. Without it the decoder is cold and acquires on the burst's own CFO measurement
+    // (sigma 0.1-0.4 Hz, BUG-STRUCTURE-ACQ-DROPS-CFO): that measures acquisition, not this
+    // estimator.
+    decoder.setKnownCFO(0.0f);
     feedInChunks(decoder, audio);
     // The EVM SNR is captured on each decoded frame (result.evm_snr_db) — average the
     // per-frame readings; fall back to the decoder's decode-time atomic otherwise.

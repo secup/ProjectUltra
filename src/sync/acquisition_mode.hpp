@@ -22,11 +22,12 @@ namespace sync {
 inline bool structureAcquisitionEnabled();
 
 // A receiver that joins without a handshake (the GUI's OFDM --monitor mode, `ultra prx`) has no
-// session CFO reference, and the structure detector keeps the tracked CFO instead of the one it
-// measures (BUG-STRUCTURE-ACQ-DROPS-CFO): on a recording with a real dial offset every OFDM frame
-// fails. Such a receiver acquires on the dual chirp every chirp-preambled frame carries. Burst
-// groups sent without a chirp are then not acquired; an explicit ULTRA_BURST_ACQ wins. Call
-// before any modem object exists: the mode is read once.
+// session CFO reference. The structure detector then acquires on the CFO it measures from the
+// burst itself (BUG-STRUCTURE-ACQ-DROPS-CFO, fixed 2026-11-12), but that measurement aliases beyond
+// +-fs/(2 x symbol) = +-21.4 Hz, while the dual chirp every chirp-preambled frame carries reaches
+// +-50 Hz: a receiver whose dial offset is unknown acquires on the chirp. Burst groups sent without
+// a chirp are then not acquired; ULTRA_BURST_ACQ=structure decodes them within +-21.4 Hz (an
+// explicit value wins). Call before any modem object exists: the mode is read once.
 inline void preferChirpAcquisitionWithoutHandshake() {
     if (std::getenv("ULTRA_BURST_ACQ") != nullptr) return;
 #ifdef _WIN32

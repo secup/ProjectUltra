@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(cfo): preamble-less acquisition uses the burst's own CFO when nothing is tracked (BUG-STRUCTURE-ACQ-DROPS-CFO)
+
+**What was broken.** Structure acquisition (`detectFrameStructure`, the default group-start
+detector) measured the burst's LTS1->LTS2 rotation, logged it (`resid_cfo=+7.39 Hz (known 0.0)`)
+and handed the decoder the tracked value it had searched at. A decoder with no measured CFO - a
+cold one, a receiver that joined without a handshake (`ultra prx`, monitors) - then demodulated
+every frame at the 0 Hz default, and the LTS stage may correct at most the 5 Hz dual-chirp
+phantom bound. The light-LTS sync had the same gap.
+
+**What changed.** `SyncResult::measured_cfo_hz` (NaN by default): structure acquisition reports
+the tracked value plus the measured rotation (unambiguous to +-fs/(2 L) = +-21.4 Hz); the light-LTS
+sync reports its pair's Schmidl-Cox rotation with the marker removed (+-10.7 Hz around the value it
+searched at, the range its marker decision assumes). `searchForSync` acquires on it only when
+`CFOTracker::established()` is false, as the chirp under INV-CFO-005; a burst that then fails
+revokes it (INV-CFO-006). A session's receiver holds the handshake's CFO, so the GUI path does not
+change. `EVMSnrCalibration` now seeds its decoder with the session CFO (0 Hz, the truth) as a
+session does: run cold, it measured acquisition (16QAM R1/2 at 20 dB moved from inside the 2.0 dB
+gate to its edge; QPSK R1/4 at 10 dB read 0.2 dB lower with a one-burst estimate than with a
+perfect prior).
+
+**Verification.**
+- `FrameStructureDetector` 8. (new): -15..+15 Hz, searched cold or at the tracked value, measured
+  within 1.6 Hz at 10 dB (worst 0.82) and 0.6 Hz at 20 dB (worst 0.29), marked starts included.
+- `measure_ack_fer --config data4_light --cfo-hz` (AWGN 25 dB, QPSK R1/2, cold per frame, 10
+  frames): 9/10 at 0, +7.3, -7.3 and -10 Hz (was 0/10 at +7.3; the miss is BUG-HARNESS-003's first
+  frame).
+- `ultra prx` with `ULTRA_BURST_ACQ=structure`, a 12 kHz WAV at 18 dB in-band with 4 OFDM frames
+  (QPSK R1/2, 8PSK R2/3, 16QAM R3/4, 32QAM R2/3): 4/4 at 0, +7.3 and -15 Hz; the previous build:
+  4/4, 0/4, 0/4.
+- Dev ctest 112/112.
+
+`prx` and the GUI's OFDM monitor modes keep the chirp preference
+(`preferChirpAcquisitionWithoutHandshake`): the chirp reaches +-50 Hz on chirped bursts, the
+structure measurement aliases beyond +-21.4 Hz.
+
+---
+
 ## 2026-11-12 — FIX(follow): hearing the peer ends the sender's silence
 
 The sender's down-crossing (OFDM -> MC-DPSK) fires on two retransmission timeouts without an ACK

@@ -109,7 +109,23 @@ carry no chirp, so there is no chirp CFO for them. The structure lock reports th
 (`cfo_tracker_.tracked()`) as its CFO and uses it as the detector's known CFO (the χ statistic
 tolerates a ±3 Hz unknown residual, test `FrameStructureDetector` §4);
 `seedFromChirpConnectedAnchor` keeps the warm value, and Stage 2 below refines it per frame
-exactly as after a warm chirp lock. Cold acquisition is unchanged (handshake chirps).
+exactly as after a warm chirp lock.
+
+**The burst's own CFO when the tracker holds no measurement (2026-11-12,
+BUG-STRUCTURE-ACQ-DROPS-CFO).** Both preamble-less detectors also measure the CFO of the burst
+they lock: structure acquisition from the LTS1->LTS2 rotation in the frequency domain (the χ
+statistic is blind to it; unambiguous to ±fs/(2 L) = ±21.4 Hz), the light-LTS sync from the
+Schmidl-Cox rotation of the pair (marker removed; within ±fs/(4 L) = ±10.7 Hz of the value it
+searched at). They report it as `SyncResult::measured_cfo_hz` beside `cfo_hz` (the known value).
+`searchForSync` uses it as the Stage-1 estimate only when `CFOTracker::established()` is false -
+a cold decoder, a receiver that joined without a handshake (`ultra prx`, monitors) - exactly as
+the chirp under INV-CFO-005; a burst that then fails revokes it (INV-CFO-006). A session's
+receiver always holds the handshake's CFO, so its path is unchanged. Before: a cold decoder
+searched and demodulated at the default 0 Hz, and the LTS stage below may not correct more than
+the 5 Hz phantom bound (`measure_ack_fer --cfo-hz 7.3`, cold per frame: 0/10 -> 9/10, the same as
+at 0 Hz; `ultra prx` with structure acquisition on a 12 kHz recording at 18 dB: 0/4 -> 4/4 at
++7.3 and -15 Hz). Beyond ±21.4 Hz the structure measurement aliases: a monitor that may be
+mistuned further keeps chirp acquisition (`preferChirpAcquisitionWithoutHandshake`).
 
 ### Stage 2: LTS Residual CFO Correction (Per Frame)
 

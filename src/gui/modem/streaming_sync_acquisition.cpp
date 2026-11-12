@@ -1078,6 +1078,20 @@ void StreamingDecoder::searchForSync() {
         // frames, confident-but-rotated LLRs) vs 0% on the warm-LTS path. Cold /
         // idle / PING / MC-DPSK / narrow keep full chirp trust (other arm + the
         // pilot_seeded fallback inside).
+        // A detector that measured the burst's own CFO (structure acquisition: the LTS1->LTS2
+        // rotation; light-LTS sync: the pair's rotation) reports it beside the known value it
+        // searched at. With no measured CFO in the tracker (a cold decoder, a receiver that joined
+        // without a handshake) that measurement is the Stage-1 estimate, as the chirp is under
+        // INV-CFO-005: searching at the default 0 Hz and keeping it demodulated every frame
+        // off-frequency, past the LTS stage's 5 Hz correction bound (BUG-STRUCTURE-ACQ-DROPS-CFO).
+        // A burst that then fails revokes it (INV-CFO-006).
+        if (!cfo_tracker_.established() && std::isfinite(sync_result.measured_cfo_hz)) {
+            LOG_MODEM(INFO,
+                      "[%s] Acquisition CFO: no measured CFO yet - the burst's own %.2f Hz "
+                      "(searched at %.2f)",
+                      log_prefix_.c_str(), sync_result.measured_cfo_hz, sync_result.cfo_hz);
+            sync_result.cfo_hz = sync_result.measured_cfo_hz;
+        }
         float new_cfo = use_full_ofdm_anchor_search
             ? cfo_tracker_.seedFromChirpConnectedAnchor(
                   sync_result.cfo_hz, sync_result.correlation, log_prefix_.c_str())
