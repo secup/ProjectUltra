@@ -845,6 +845,21 @@ instead of waiting out its timeout. The window cap and the search hand-back keep
 eating the next burst, which the sender queues back to back.
 **Test:** `StreamingMCDPSK` (`compact burst, middle frame lost`), `MCDPSKFrame`.
 
+### INV-MCDPSK-TAIL-001: a burst continuation trusts a decoded frame's flags over a power test
+**Rule:** a continuation never runs the in-band burst-tail test on a slot the previous frame proved: a
+CRC-valid DATA frame with MORE_FRAG and without PHYSICAL_BURST_END means the sender's next frame is on
+the air (the marker is stamped on the last DATA frame of every MC-DPSK turn,
+`shouldStampPhysicalBurstEnd`, `Connection::mcDpskTurnEndWireCopy`). The test (window power against
+the inter-chirp gap's noise, `inBandPowerReadsAsNoise`) decides only after a lost (compact) or partial
+(v2) frame, which may have been the turn's last. State: `StreamingDecoder::mc_burst_next_slot_proven_`,
+set by `startMCDPSKBurstContinuation(..., next_slot_proven)` and by each continuation frame.
+**Why:** the reference is the 60 ms centre of one 100 ms gap (7.6 % spread, threshold 1.23x): a -5 dB
+frame (1.32x the noise) read as noise in about one burst out of five and a static crash in the gap
+ended bursts at any SNR; each false end lost the rest of the burst and cost a 25-45 s timeout
+(BUG-MCDPSK-FALSE-TAIL).
+**Test:** `DualListenEngine` (compact) and `DualListenEngineV2GapCrash` (v2): a static crash in the
+gap, 3 of 3 frames.
+
 ### INV-FOLLOW-001: a waveform crossing switches the modem's waveform before its data mode
 **Rule:** with `ULTRA_WAVEFORM_FOLLOW`, a session crosses between MC-DPSK and wideband OFDM only
 through `Connection::applyWaveformCrossing`, which fires the crossing callback (modem: waveform first,

@@ -1121,8 +1121,10 @@ private:
                                         bool process_ok);
     void logBurstDiagnosticsAbort(const char* reason, size_t collected_frames);
     void clearBurstDiagnostics();
+    // next_slot_proven: the frame that opens the continuation proved the next slot holds a frame
+    // (mc_burst_next_slot_proven_).
     void startMCDPSKBurstContinuation(size_t next_pos, size_t next_abs,
-                                      float snr_db, float cfo_hz);
+                                      float snr_db, float cfo_hz, bool next_slot_proven);
     void continueMCDPSKBurst();
     void finishMCDPSKBurstContinuation(size_t search_pos, size_t search_abs);
 
@@ -1412,6 +1414,15 @@ private:
     size_t mc_first_lost_next_abs_ = 0;
     int mc_first_lost_window_ = 0;
     int mc_burst_compact_window_ = 0;
+    // The slot a burst continuation reads next holds a frame by proof: the frame before it decoded
+    // CRC-valid with MORE_FRAG and without PHYSICAL_BURST_END, which the sender stamps on the last
+    // DATA frame of every MC-DPSK turn (shouldStampPhysicalBurstEnd, mcDpskTurnEndWireCopy). The
+    // in-band burst-tail test does not run on such a slot: it compares the window with a noise
+    // reference taken from the 60 ms centre of one inter-chirp gap (7.6 % spread), so a -5 dB frame
+    // read as noise whenever that reference read ~7 % high, and a static crash in the gap ended a
+    // burst at any SNR (BUG-MCDPSK-FALSE-TAIL). The test still decides after a lost frame, which may
+    // have been the turn's last.
+    bool mc_burst_next_slot_proven_ = false;
     size_t mc_burst_compact_fail_pos_ = SIZE_MAX;
     size_t mc_burst_compact_fail_abs_ = 0;
     void noteMcDpskFrameLost(int modulation) {

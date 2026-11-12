@@ -168,9 +168,10 @@ void checkGuiHarqWiring() {
                         "GUI does not invoke the shared modem<->protocol binding");
 
     const auto modem_engine = readSourceFile("src/gui/modem/modem_engine.cpp");
+    // Every receive decoder (the dual-listen second decoder included) gets the buffer.
     checkSourceContains(modem_engine,
-                        "streaming_decoder_->setSoftCombineBuffer(buffer);",
-                        "ModemEngine does not forward the HARQ buffer to StreamingDecoder");
+                        "forEachRxDecoder([&](StreamingDecoder* d) { d->setSoftCombineBuffer(buffer); });",
+                        "ModemEngine does not forward the HARQ buffer to its StreamingDecoders");
 
     const auto ultra_tnc = readSourceFile("tools/ultra_tnc.cpp");
     checkSourceContains(ultra_tnc,

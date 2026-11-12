@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(MC-DPSK): a frame that says more follows proves the next slot (BUG-MCDPSK-FALSE-TAIL)
+
+**What broke.** An MC-DPSK burst continuation ran its in-band burst-tail test on every slot: the
+next frame's window against a noise reference from the 60 ms centre of one 100 ms inter-chirp gap
+(2880 samples, 7.6 % spread, threshold 1.23x). A -5 dB frame reads 1.32x the noise, so a reference
+~7 % high ended the burst after its first frame, even though that frame was CRC-valid with MORE_FRAG
+and no PHYSICAL_BURST_END - proof the sender had another frame on the air. 24 of 25 burst-tail
+decisions in 18 GUI runs were of this kind; each lost the rest of the burst and cost a 25-45 s
+timeout (AWGN -5 dB, 1 KB: 349-425 s with four false tails, 176 s without one).
+
+**What changed.** `StreamingDecoder::mc_burst_next_slot_proven_`: set when a frame opens or continues
+a burst with its flags saying a frame follows, cleared by a lost (compact) or partial (v2) frame and at
+the burst's end. Both continuations (compact `continueMCDPSKCompactBurst`, v2 `continueMCDPSKBurst`)
+run the tail test only on an unproven slot (INV-MCDPSK-TAIL-001).
+
+Also two regression tests that failed at HEAD: `OtasimServeSmoke` keys both stations in one tick to
+check routing, which half-duplex radios (default since 6373991) cannot hear - it now runs the lobby
+`--lobby-full-duplex` (T/R blanking keeps its own `SessionHalfDuplexBlackout`); `UltraGuiOtaClient`'s
+source check still named the single-decoder HARQ forwarding replaced by `forEachRxDecoder` in ec8ec13.
+
+**Verification.** `DualListenEngine` / `DualListenEngineV2GapCrash`: a static crash (white noise 5x
+the signal RMS) in the inter-chirp gap - 3 of 3 frames on both paths, 1 of 3 with the gate removed.
+ctest 120/120. GUI: below.
+
+---
+
 ## 2026-11-12 — GUI verification of the night's fixes at HEAD (follow on vs off, same build)
 
 ITU Good unless noted, 7.3 Hz, half-duplex radios, 20 KB (QSB 30 KB); `f16` follow on, `q16` follow

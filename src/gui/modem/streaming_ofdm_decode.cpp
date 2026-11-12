@@ -3542,7 +3542,7 @@ void StreamingDecoder::decodeCurrentFrame() {
     if (can_continue_mc_dpsk) {
         mc_first_frame_lost_continue_ = false;
         startMCDPSKBurstContinuation(next_block_pos, next_search_abs,
-                                     sync_snr_, sync_cfo_);
+                                     sync_snr_, sync_cfo_, /*next_slot_proven=*/true);
         return;
     }
     // A compact burst whose first frame was lost with data energy (retryMcDpskFirstFrameConstellation):
@@ -3556,7 +3556,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (mc) {
             const int codewords = mcDpskCompactCodewords();
             startMCDPSKBurstContinuation(mc_first_lost_next_pos_, mc_first_lost_next_abs_,
-                                         sync_snr_, sync_cfo_);
+                                         sync_snr_, sync_cfo_, /*next_slot_proven=*/false);
             mc_burst_compact_ = true;
             mc_burst_compact_window_ = mc_first_lost_window_;
             mc_burst_compact_fail_pos_ = mc_first_lost_next_pos_;
@@ -3588,7 +3588,9 @@ void StreamingDecoder::decodeCurrentFrame() {
 }
 
 void StreamingDecoder::startMCDPSKBurstContinuation(size_t next_pos, size_t next_abs,
-                                                    float snr_db, float cfo_hz) {
+                                                    float snr_db, float cfo_hz,
+                                                    bool next_slot_proven) {
+    mc_burst_next_slot_proven_ = next_slot_proven;
     mc_burst_next_pos_ = next_pos;
     mc_burst_next_abs_ = next_abs;
     mc_burst_snr_ = snr_db;
@@ -3605,6 +3607,7 @@ void StreamingDecoder::startMCDPSKBurstContinuation(size_t next_pos, size_t next
 }
 
 void StreamingDecoder::finishMCDPSKBurstContinuation(size_t search_pos, size_t search_abs) {
+    mc_burst_next_slot_proven_ = false;
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
     mc_burst_frames_decoded_ = 0;
@@ -3714,8 +3717,10 @@ void StreamingDecoder::continueMCDPSKBurst() {
         // inter-chirp gap through the same in-band filter (BUG-RX-ABSOLUTE-LEVEL). It was an
         // absolute 0.012 RMS: about 17 dB under the simulator's MC-DPSK level, so a station
         // hearing its peer 17 dB quieter ended every burst after its first frame. Without a gap
-        // reference the decode attempt decides (a failure ends the burst).
-        if (sync_noise_ref_rms_ > 0.0f && sync_noise_ref_samples_ > 0) {
+        // reference the decode attempt decides (a failure ends the burst). A slot the previous
+        // frame proved holds a frame skips the test (mc_burst_next_slot_proven_).
+        if (!mc_burst_next_slot_proven_ && sync_noise_ref_rms_ > 0.0f &&
+            sync_noise_ref_samples_ > 0) {
             FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
             const size_t prime = std::min<size_t>(100, cw0_samples.size());
             for (size_t i = 0; i < prime; ++i) band.process(cw0_samples[i]);
@@ -3845,6 +3850,9 @@ void StreamingDecoder::continueMCDPSKBurst() {
 
     const bool more_frag = decodedFrameHasMoreFrag(result);
     const int total_cw = mc_burst_pending_total_cw_;
+    // Only a CRC-valid frame proves the next slot (a partial frame's end marker is unknown); the
+    // burst ends below when the frame says no frame follows.
+    mc_burst_next_slot_proven_ = result.success;
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
     mc_burst_frames_decoded_++;
@@ -4167,7 +4175,8 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
               log_prefix_.c_str(), modulationToString(mc->getModulation()), codewords,
               result.physical_turn_complete ? ", end of turn" : "");
     if (!result.physical_turn_complete && decodedFrameHasMoreFrag(result)) {
-        startMCDPSKBurstContinuation(next_pos, next_abs, sync_snr_, sync_cfo_);
+        startMCDPSKBurstContinuation(next_pos, next_abs, sync_snr_, sync_cfo_,
+                                     /*next_slot_proven=*/true);
         mc_burst_compact_ = true;
         mc_burst_compact_fail_pos_ = SIZE_MAX;
         mc_burst_compact_window_ = window;
@@ -4254,8 +4263,10 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
     }
 
     // The burst is over when the next frame's window reads as this burst's own noise (the same
-    // in-band test as the v2 continuation, BUG-RX-ABSOLUTE-LEVEL).
-    if (sync_noise_ref_rms_ > 0.0f && sync_noise_ref_samples_ > 0 && window.size() > 200) {
+    // in-band test as the v2 continuation, BUG-RX-ABSOLUTE-LEVEL) - unless the frame before it
+    // proved this slot holds a frame (mc_burst_next_slot_proven_): the test then only loses it.
+    if (!mc_burst_next_slot_proven_ && sync_noise_ref_rms_ > 0.0f &&
+        sync_noise_ref_samples_ > 0 && window.size() > 200) {
         FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
         for (size_t i = 0; i < 100; ++i) band.process(window[i]);
         double sum_sq = 0.0;
@@ -4319,6 +4330,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
             frame_callback_(result);
         }
         mc_burst_compact_fail_pos_ = SIZE_MAX;
+        mc_burst_next_slot_proven_ = true;  // it continues only if its flags say a frame follows
         LOG_MODEM(INFO, "[%s] MC-DPSK compact burst frame %d decoded%s",
                   log_prefix_.c_str(), mc_burst_frames_decoded_,
                   result.physical_turn_complete ? ", end of turn" : "");
@@ -4332,6 +4344,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
             stats_.frames_failed++;
         }
         noteMcDpskFrameLost(static_cast<int>(mc->getModulation()));
+        mc_burst_next_slot_proven_ = false;  // a lost frame may have been the turn's last
         publishMcDpskCompactAirEnd(
             mc_burst_frames_decoded_ < std::max(1, mc_burst_compact_window_),
             frame_abs + frame_samples, frame_samples,

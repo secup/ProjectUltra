@@ -216,9 +216,98 @@ LossRun receiveBurstWithLostFrame(bool repair, int lost) {
     return run;
 }
 
+// BUG-MCDPSK-FALSE-TAIL: a static crash (a QRN impulse) inside the silent inter-chirp gap - the
+// burst's only noise reference - makes that reference read far above the noise floor. The in-band
+// burst-tail test then read every continuation slot as noise and ended a 3-frame burst after frame
+// 1 at any SNR (at -5 dB the reference's own 7.6 % spread did the same in one burst out of five).
+// Frames 1 and 2 say a frame follows (MORE_FRAG without PHYSICAL_BURST_END), so 2 and 3 must decode.
+std::vector<std::string> receiveBurstWithGapCrash() {
+    ModemEngine tx;
+    tx.setLogPrefix("ALPHA");
+    tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    std::vector<Bytes> frames;
+    for (int i = 0; i < 3; ++i) {
+        auto f = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(i + 1),
+                                         "burst frame " + std::to_string(i + 1));
+        f.flags |= v2::Flags::MORE_FRAG;
+        frames.push_back(f.serialize());
+    }
+    std::vector<float> burst = tx.transmitBurst(frames);
+    size_t start = 0;
+    while (start < burst.size() && std::abs(burst[start]) < 1e-6f) ++start;
+    double sum = 0.0;
+    size_t voiced = 0;
+    for (size_t i = start; i < burst.size(); ++i) {
+        if (std::abs(burst[i]) >= 1e-6f) {
+            sum += burst[i] * burst[i];
+            ++voiced;
+        }
+    }
+    const double rms = std::sqrt(sum / static_cast<double>(std::max<size_t>(1, voiced)));
+    // The inter-chirp gap is the burst's first silent run of 50 ms or more (it is 100 ms).
+    size_t gap_begin = 0, gap_end = 0, run = 0;
+    for (size_t i = start; i < burst.size(); ++i) {
+        if (std::abs(burst[i]) < 1e-6f) {
+            if (++run == 2400) gap_begin = i + 1 - run;
+        } else {
+            if (run >= 2400) {
+                gap_end = i;
+                break;
+            }
+            run = 0;
+        }
+    }
+    check(gap_end > gap_begin + 2400, "the sender's burst has its silent inter-chirp gap");
+    // White noise 5x the signal's RMS: ~12 % of it falls in the 50-2950 Hz test band, so the
+    // reference reads ~3x the signal's in-band power.
+    std::mt19937 rng(11);
+    std::normal_distribution<double> crash(0.0, 5.0 * rms);
+    for (size_t i = gap_begin; i < gap_end; ++i) burst[i] += static_cast<float>(crash(rng));
+
+    ModemEngine rx;
+    rx.setSynchronousMode(true);
+    rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    std::vector<std::string> heard;
+    rx.setRawDataCallback([&](const Bytes& data, bool) { heard.push_back(payloadText(data)); });
+    std::vector<float> air(24000, 0.0f);
+    air.insert(air.end(), burst.begin(), burst.end());
+    air.insert(air.end(), 4 * 48000, 0.0f);
+    std::normal_distribution<double> bg(0.0, 1e-3);
+    for (auto& v : air) v += static_cast<float>(bg(rng));
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    return heard;
+}
+
+void checkGapCrashBurst(const char* path) {
+    const auto heard = receiveBurstWithGapCrash();
+    std::printf("static crash in the inter-chirp gap (%s frames): %zu of 3 frames\n", path,
+                heard.size());
+    check(heard.size() == 3 && heard[0] == "burst frame 1" && heard[1] == "burst frame 2" &&
+              heard[2] == "burst frame 3",
+          "a static crash in the gap does not end a burst whose frames say more follow");
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "--gap-crash-only") {
+        // The v2 (non-compact) continuation, run with ULTRA_MCDPSK_COMPACT_FRAME=0: the setting
+        // is read once per process.
+        checkGapCrashBurst(protocol::connection_policy::mcDpskCompactFrameEnabled() ? "compact"
+                                                                                     : "v2");
+        std::printf("%s\n", failures == 0 ? "DualListenEngine gap crash: PASS"
+                                          : "DualListenEngine gap crash: FAIL");
+        return failures == 0 ? 0 : 1;
+    }
+    checkGapCrashBurst("compact");
     {
         const auto with_repair = receiveBurstWithLostFirstFrame(true);
         const auto without = receiveBurstWithLostFirstFrame(false);

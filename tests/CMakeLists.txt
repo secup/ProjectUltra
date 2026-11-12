@@ -798,6 +798,10 @@ target_include_directories(test_dual_listen_engine PRIVATE
 target_link_libraries(test_dual_listen_engine PRIVATE ultra_core ota_channel_core)
 add_test(NAME DualListenEngine COMMAND test_dual_listen_engine)
 set_tests_properties(DualListenEngine PROPERTIES TIMEOUT 300)
+# The v2 (non-compact) MC-DPSK burst continuation: the compact setting is read once per process.
+add_test(NAME DualListenEngineV2GapCrash COMMAND test_dual_listen_engine --gap-crash-only)
+set_tests_properties(DualListenEngineV2GapCrash PROPERTIES TIMEOUT 120
+    ENVIRONMENT "ULTRA_MCDPSK_COMPACT_FRAME=0")
 
 # The GUI main thread reconfiguring a receiving engine while its decode thread runs (the race check
 # under ThreadSanitizer; a smoke test otherwise).

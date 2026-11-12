@@ -2655,6 +2655,24 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-MCDPSK-FALSE-TAIL (FIXED 2026-11-12, mc_burst_next_slot_proven_) — was P1 at low SNR: a burst ended after frame 1 while its frames said more follow
+
+The receiver ended an MC-DPSK burst continuation whenever the next frame's window read as noise
+(`inBandPowerReadsAsNoise`) against a reference measured in the 60 ms centre of one 100 ms
+inter-chirp gap: 2880 samples, a 7.6 % spread, so the 3-spread threshold sits at 1.23x the reference.
+A -5 dB frame reads 1.32x the noise: whenever the reference read ~7 % high (about one burst in five)
+every continuation slot of that burst read as noise, and a static crash in the gap did the same at
+any SNR. GUI, MC-DPSK 1 KB (ULTRA_MCDPSK_ACK_REPAIR A/B at HEAD, 18 runs): 24 of the 25 burst-tail
+decisions came right after a CRC-valid frame with MORE_FRAG and no PHYSICAL_BURST_END - proof that
+another frame was on the air (sender: "TX Burst: 3 frames", receiver: frame 1, tail at frame 2's
+slot, all three resent 43.5 s later). AWGN -5 dB: seeds with four false tails took 349-425 s, the
+seed without one 176 s; no continuation frame was actually lost at -5 dB.
+
+Fix: a slot the previous frame proved skips the test (compact and v2 continuations); the test decides
+only after a lost (compact) or partial (v2) frame, which may have been the turn's last
+(INV-MCDPSK-TAIL-001). Tests: `DualListenEngine` and `DualListenEngineV2GapCrash` - a static crash in
+the gap: 3 of 3 frames (1 of 3 with the gate removed).
+
 ### BUG-SIM-TX-KEYED-EARLY (FIXED 2026-11-12, App::keyedUntilAfterQueuing) — was P2, simulator fidelity: a frame queued behind a burst ended the keyed state early
 
 The sim TX path set the key-down end to now + the new frame's length, so a control frame queued

@@ -188,6 +188,10 @@ ChildProcess startDaemon(const std::string& binary,
                 "--tokens", token_path.c_str(),
                 "--captures-root", capture_root.c_str(),
                 "--lobby-channel", "passthrough",
+                // Both stations transmit in the same tick to check routing; half-duplex radios
+                // (the default since 2026-11-11) blank their own receive while keyed and would
+                // hear nothing. The T/R blanking has its own coverage.
+                "--lobby-full-duplex",
                 "--shutdown-deadline-sec", "2",
                 nullptr);
         ::_exit(127);
