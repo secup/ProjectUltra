@@ -107,6 +107,16 @@ struct ConnectionAdaptiveTestAccess {
     static bool obeyCrossing(Connection& c, uint8_t word) {
         return c.maybeObeyCrossingCommand(word, "test");
     }
+    // The sender reads the receiver's MC-DPSK rung command from a tone ACK.
+    static void obeyMcDpskRung(Connection& c, int rung, uint8_t group_seq) {
+        c.maybeObeyMcDpskRungCommand(connection_policy::encodeMcDpskRungCommand(rung), group_seq);
+    }
+    static size_t txInFlightCap(const Connection& c) { return c.arq_.getTxInFlightCap(); }
+    static void setDataFrameCodewords(Connection& c, int cw) {
+        c.data_frame_cw_count_ = cw;
+        c.config_.fixed_frame_codewords = cw;
+        c.configureArqForCurrentDataMode();
+    }
     // The receiver's word for the ACK that closes one MC-DPSK burst (clean = end of turn, no hole).
     static uint8_t mcDpskAckWord(Connection& c, bool clean) {
         c.rx_mcdpsk_last_modulation_ = c.data_modulation_;
@@ -1263,6 +1273,42 @@ void test_mcdpsk_turn_loss_ack() {
 // group is airborne: consumed after delivery, it had already disarmed the monitor, and the probe's
 // own verdict would have gone unheard (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR; the crossing ACK's
 // copy showed what follows).
+// An MC-DPSK up-step probes with the lower rung's window (mcDpskProbeBurstFrames): with 4 codewords
+// per frame DBPSK carries 2 frames per burst and DQPSK 3, so the first DQPSK bursts carry 2 until an
+// ACK newer than the commanding one keeps DQPSK. At the production 3 codewords both windows are 3
+// and nothing is capped.
+void test_mcdpsk_up_step_probes_small() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    ConnectionAdaptiveTestAccess::setDataFrameCodewords(c, 4);
+    CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0, "no cap at DBPSK");
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 5);
+    CHECK(ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DQPSK, "steps up to DQPSK");
+    CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2,
+          "the probe carries the DBPSK window (2 frames), not DQPSK's 3");
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 5);
+    CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2,
+          "a repeated copy of the commanding ACK confirms nothing");
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 8);
+    CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0,
+          "the probe's own ACK keeps DQPSK: the full window");
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 0, 11);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 14);
+    CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2, "a second up-step probes small again");
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 0, 17);
+    CHECK(ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK &&
+              ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0,
+          "a failed probe steps down and clears the cap");
+
+    Connection p;
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(p);
+    ConnectionAdaptiveTestAccess::setDataFrameCodewords(p, 3);  // the production MC-DPSK frame
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(p, 1, 5);
+    CHECK(ConnectionAdaptiveTestAccess::dataModulation(p) == Modulation::DQPSK &&
+              ConnectionAdaptiveTestAccess::txInFlightCap(p) == 0,
+          "at 3 codewords both windows are 3: no cap (unchanged behaviour)");
+}
+
 void test_startup_probe_launch_copy_is_not_a_candidate() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 20.0f, 0.5f,
@@ -1331,6 +1377,7 @@ int main() {
     test_first_ofdm_group_climbs_one_rung();
     test_escape_needs_the_peer_heard();
     test_startup_probe_launch_copy_is_not_a_candidate();
+    test_mcdpsk_up_step_probes_small();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

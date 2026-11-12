@@ -1439,6 +1439,14 @@ private:
     Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
     uint32_t rx_mcdpsk_frames_since_command_ = 0;
     int mcdpsk_last_command_group_seq_ = -1;
+    // SENDER: an MC-DPSK up-step probes with the lower rung's window (mcDpskProbeBurstFrames): the
+    // first bursts at the new rung carry at most mcdpsk_probe_cap_frames_ until an ACK newer than
+    // the one that commanded the step confirms the rung. A no-op while both windows are equal (the
+    // default cap of 3); with ULTRA_MCDPSK_WINDOW_MAX a failed probe still costs a small burst,
+    // which is what the receiver's probe schedule prices.
+    bool mcdpsk_probe_cap_active_ = false;
+    size_t mcdpsk_probe_cap_frames_ = 0;
+    int mcdpsk_probe_command_group_seq_ = -1;
     int rx_mcdpsk_margin_ = -1;  // -1 no test this burst, 0 failed, 1 passed
     // RECEIVER: fade-averaging ring for the verdict SNR. The per-frame broadband
     // EMA is a fade SNAPSHOT (measured ±5 dB swing on a dial-20 Good channel) —
@@ -1560,6 +1568,9 @@ private:
             ms_since_rx_burst_verdict_ += elapsed_ms;
         }
     }
+    // Frames an MC-DPSK burst may carry right now: 1 in a young fallback spell, the probe's
+    // window while an up-step is unconfirmed, else no cap (0).
+    size_t mcDpskTxInFlightCap() const;
     bool followFallbackSmallWindowActive() const {
         return follow_fallback_spell_ && negotiated_mode_ == WaveformMode::MC_DPSK &&
                follow_fallback_age_ms_ < follow_fallback_small_window_ms_;

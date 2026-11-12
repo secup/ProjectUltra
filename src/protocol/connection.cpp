@@ -7680,8 +7680,9 @@ void Connection::configureArqForCurrentDataMode() {
         const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing);
         arq_.setWindowSize(window_size);
         // A young fallback spell sends one frame per burst (followFallbackSmallWindowMs); the
-        // receive window stays the window (the peer acknowledges at the marked last frame).
-        arq_.setTxInFlightCap(followFallbackSmallWindowActive() ? 1 : 0);
+        // receive window stays the window (the peer acknowledges at the marked last frame). An
+        // up-step probe sends the lower rung's window until the rung is confirmed.
+        arq_.setTxInFlightCap(mcDpskTxInFlightCap());
         arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
         arq_.setSackDelayShort(0);
         arq_.setAckBatchThroughMoreFrag(true);
@@ -8760,6 +8761,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
                 data_frame_cw_count_));
         rx_mcdpsk_frames_since_command_ = 0;
         mcdpsk_last_command_group_seq_ = -1;
+        mcdpsk_probe_cap_active_ = false;
     }
     // §RETX-PACING: a mode/rate change starts a NEW era — the zero-round evidence and any
     // armed hold belong to the rung we just left (§7 checklist: reset on applyDataMode).
@@ -8898,10 +8900,37 @@ bool Connection::applyMcDpskTxModulation(Modulation mod, const char* reason) {
     // rung, so the ARQ geometry is unchanged and frames already cut resend as they are (their
     // codeword count rides in each frame's header); configureArqForCurrentDataMode only
     // re-derives the window and timeouts from the new frame airtime.
+    const int from_rung = connection_policy::mcDpskRungIndexFor(data_modulation_);
+    const int to_rung = connection_policy::mcDpskRungIndexFor(mod);
+    mcdpsk_probe_cap_active_ = false;
+    if (to_rung > from_rung) {
+        const auto lo = connection_policy::mcDpskFrameTiming(
+            data_modulation_, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
+            data_frame_cw_count_);
+        const auto hi = connection_policy::mcDpskFrameTiming(
+            mod, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
+            data_frame_cw_count_);
+        const size_t w_lo = connection_policy::mcDpskWindowSizeForTiming(lo);
+        const size_t w_probe = connection_policy::mcDpskProbeBurstFrames(lo, hi);
+        if (w_probe < connection_policy::mcDpskWindowSizeForTiming(hi)) {
+            mcdpsk_probe_cap_active_ = true;
+            mcdpsk_probe_cap_frames_ = std::min(w_probe, w_lo);
+            mcdpsk_probe_command_group_seq_ = mcdpsk_last_command_group_seq_;
+            LOG_MODEM(INFO, "Connection: MC-DPSK RATE tx: probing %s with %zu-frame bursts until "
+                      "confirmed", modulationToString(mod), mcdpsk_probe_cap_frames_);
+        }
+    }
     data_modulation_ = mod;
     configureArqForCurrentDataMode();
     notifyDataModeChanged(measured_snr_db_, wireFadingIndex(), /*snr_is_wire=*/false);
     return true;
+}
+
+size_t Connection::mcDpskTxInFlightCap() const {
+    if (followFallbackSmallWindowActive()) {
+        return 1;
+    }
+    return mcdpsk_probe_cap_active_ ? mcdpsk_probe_cap_frames_ : 0;
 }
 
 void Connection::maybeFallBackMcDpskRungOnTimeout(uint32_t elapsed_ms) {
@@ -9038,6 +9067,15 @@ void Connection::maybeObeyMcDpskRungCommand(uint8_t command_word, uint8_t group_
         return;
     }
     mcdpsk_last_command_group_seq_ = group_seq;
+    if (mcdpsk_probe_cap_active_ &&
+        connection_policy::kMcDpskRungModulations[rung] == data_modulation_ &&
+        static_cast<int>(group_seq) != mcdpsk_probe_command_group_seq_) {
+        // The probe burst's own ACK keeps the rung: it holds, carry the full window.
+        mcdpsk_probe_cap_active_ = false;
+        arq_.setTxInFlightCap(mcDpskTxInFlightCap());
+        LOG_MODEM(INFO, "Connection: MC-DPSK RATE tx: %s confirmed -> full window",
+                  modulationToString(data_modulation_));
+    }
     applyMcDpskTxModulation(connection_policy::kMcDpskRungModulations[rung], "receiver command");
 }
 
@@ -9652,7 +9690,7 @@ void Connection::tickWaveformFollow(uint32_t elapsed_ms) {
                       "Connection: WAVEFORM FOLLOW: the MC-DPSK spell outlived %llu ms -> full "
                       "window",
                       static_cast<unsigned long long>(follow_fallback_small_window_ms_));
-            arq_.setTxInFlightCap(0);
+            arq_.setTxInFlightCap(mcDpskTxInFlightCap());
         }
     }
     if (negotiated_mode_ == WaveformMode::OFDM_CHIRP &&

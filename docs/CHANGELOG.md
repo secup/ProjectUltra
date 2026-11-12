@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FEAT(MC-DPSK): an up-step probes with the lower rung's window
+
+**Why.** The receiver schedules a DBPSK -> DQPSK probe after `ceil(failed probe / clean cycle)`
+clean bursts, the failed probe priced as a full DQPSK window plus its timeout. With
+ULTRA_MCDPSK_WINDOW_MAX=8 (DQPSK window 6) that is 4 clean bursts instead of 2, and the slower climb
+ate the larger window's gain on a 2 KB file (GUI AWGN +3 dB: 210-211 s vs 208 s at window 3, while a
+6-frame DQPSK burst is 13 % faster per frame).
+
+**What.** `mcDpskProbeBurstFrames(lower, upper)` = min of the two windows; the probe schedule prices
+that burst, and the sender caps its bursts to it after an up-step (`Connection::
+mcdpsk_probe_cap_active_`, via the ARQ in-flight cap) until an ACK newer than the commanding one
+keeps the rung (a repeated copy of the commanding ACK confirms nothing; a failed probe steps down
+and clears the cap). No change at the production 3-codeword geometry (both windows 3); at 4
+codewords (operator override) the probe is 2 frames and comes after 2 clean bursts (was 3).
+
+**Verification.** `WaveformFollow` `test_mcdpsk_up_step_probes_small` (fails with the cap removed);
+`ConnectionPolicy` probe-schedule checks re-derived (4 codewords: 2 x 3.69 s + 23.5 s = 30.9 s over a
+16.1 s clean cycle -> 2). ctest 120/120. GUI A/B with the window knob: pending.
+
+---
+
 ## 2026-11-12 — FIX(handshake): a connected receiver demodulates a repeated CONNECT at DBPSK (BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK)
 
 **What broke.** GUI ITU Good 0 dB seed 47 never connected: the responder decoded the CONNECT, picked

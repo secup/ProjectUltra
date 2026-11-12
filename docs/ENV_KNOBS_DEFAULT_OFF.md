@@ -812,7 +812,9 @@ key-down target allows more. Only DQPSK and the shorter-symbol geometries reach 
 #71 (2026-07-01): DQPSK at window 5 timed out with clean decodes because the ACK arrived more than
 26 s after the burst; that is BUG-MCDPSK-ACK-DROPPED (every MC-DPSK file ACK held 13 s and dropped,
 fixed 2026-11-09). Today the ACK arrives 1.43 s after the burst end (p99 1.54 s, 187 GUI bursts).
-GUI A/B pending (`8` = timing-only).
+First GUI A/B (2 KB, AWGN +3 dB, before the up-step probe cap): 210-211 s vs 208 s - a 6-frame DQPSK
+burst is 13 % faster per frame, but the probe schedule then waited 4 clean DBPSK bursts instead of
+2. An up-step now probes with the lower rung's window (`mcDpskProbeBurstFrames`); re-test pending.
 
 ## `ULTRA_MCDPSK_MEASURED_RTO` (added 2026-11-12)
 `1` on the sending station: an MC-DPSK burst's retransmission timeout is its airtime plus the

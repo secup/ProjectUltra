@@ -1180,11 +1180,23 @@ void test_mcdpsk_rate_controller() {
     // (8 carriers, 1024 samples/symbol). A DBPSK session's frames have 3 codewords (kept across the
     // constellation change): a failed DQPSK probe is a 3-frame burst (3 x 2.82 s) plus its 24.8 s
     // timeout = 33.3 s, a clean DBPSK cycle 3 x 5.38 s + the 1.92 s ACK = 18.1 s -> 2 bursts. With
-    // 4 codewords: 3 x 3.69 s + 30.9 s = 42.0 s over 2 x 7.10 s + 1.92 s = 16.1 s -> 3.
+    // 4 codewords the DBPSK window is 2 and DQPSK's 3; the probe goes with the lower rung's window
+    // (mcDpskProbeBurstFrames): 2 x 3.69 s + its 23.5 s timeout = 30.9 s over 2 x 7.10 s + 1.92 s =
+    // 16.1 s -> 2 (a full 3-frame probe priced 42.0 s -> 3).
     CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 3) == 2,
           "first probe after 2 clean DBPSK bursts at the production 3-codeword geometry");
-    CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 4) == 3,
-          "first probe after 3 clean DBPSK bursts with 4 codewords per frame");
+    CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 4) == 2,
+          "first probe after 2 clean DBPSK bursts with 4 codewords per frame (2-frame probe)");
+    {
+        const auto lo4 = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 4);
+        const auto hi4 = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
+        CHECK(mcDpskProbeBurstFrames(lo4, hi4) == 2 && mcDpskWindowSizeForTiming(hi4) == 3,
+              "the 4-codeword probe carries the DBPSK window (2), not DQPSK's (3)");
+        const auto lo3 = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 3);
+        const auto hi3 = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 3);
+        CHECK(mcDpskProbeBurstFrames(lo3, hi3) == mcDpskWindowSizeForTiming(hi3),
+              "at the production geometry the probe is a full window (no cap)");
+    }
     CHECK(mcDpskFirstProbeAfterCleanBursts(1, 8, 1024, 3) ==
               McDpskRateController::kMinFirstProbeAfterCleanBursts,
           "no rung above DQPSK: the minimum");

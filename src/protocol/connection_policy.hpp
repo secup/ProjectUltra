@@ -2804,6 +2804,15 @@ inline uint32_t mcDpskPartialSackHoldMs(const MCDPSKFrameTiming& timing) {
 // the upper rung's window burst plus its retransmission timeout (the sender hears nothing back and
 // falls back only then); a clean cycle at the lower rung is its window burst plus the ACK. The run
 // is the first divided by the second, so probing never spends more airtime than the evidence took.
+// Frames in an MC-DPSK up-step probe: the lower rung's window when the upper rung's is larger,
+// so a failed probe costs no more airtime than a burst at the rung it leaves (the sender caps its
+// bursts until the rung is confirmed, Connection::mcdpsk_probe_cap_active_). Equal to both
+// windows at the default cap of 3.
+inline size_t mcDpskProbeBurstFrames(const MCDPSKFrameTiming& lower,
+                                     const MCDPSKFrameTiming& upper) {
+    return std::min(mcDpskWindowSizeForTiming(lower), mcDpskWindowSizeForTiming(upper));
+}
+
 inline int mcDpskFirstProbeAfterCleanBursts(int lower_rung, int num_carriers,
                                             int samples_per_symbol, int cw_count) {
     if (lower_rung < 0 || lower_rung + 1 >= kMcDpskRungCount) {
@@ -2814,7 +2823,7 @@ inline int mcDpskFirstProbeAfterCleanBursts(int lower_rung, int num_carriers,
     const auto hi = mcDpskFrameTiming(kMcDpskRungModulations[lower_rung + 1], num_carriers,
                                       samples_per_symbol, cw_count);
     const uint64_t w_lo = mcDpskWindowSizeForTiming(lo);
-    const uint64_t w_hi = mcDpskWindowSizeForTiming(hi);
+    const uint64_t w_hi = mcDpskProbeBurstFrames(lo, hi);  // the probe burst, not the full window
     const uint64_t failed_probe_ms =
         w_hi * hi.data_ms +
         computeMCDPSKAckTimeoutMs(hi, static_cast<size_t>(w_hi), mcDpskPartialSackHoldMs(hi),
