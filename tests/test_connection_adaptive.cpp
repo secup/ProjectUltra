@@ -6078,8 +6078,8 @@ void test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend() 
     CHECK(marginal_acks.size() == before,
           "a re-confirm that would still be on the air at the sender's resend must be withheld");
     marginal.noteAnchoredBurstNoGroup(/*payload_seen=*/true);
-    CHECK(marginal_acks.size() > before,
-          "a backstop that decoded payload must still acknowledge it");
+    CHECK(marginal_acks.size() == before,
+          "a backstop with decoded payload is withheld too when it cannot end before the resend");
 
     // A sender whose resend comes 24.4 s after key-up (an 8-frame QPSK R1/2 group at the
     // production defaults): even the longest staircase ACK (3.4 s) ends before it.
@@ -6092,6 +6092,10 @@ void test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend() 
     ConnectionAdaptiveTestAccess::setFlatAckTimeout(strong, 24398);
     strong.noteAnchoredBurstNoGroup();
     CHECK(!strong_acks.empty(), "a re-confirm that fits before the sender's resend must be sent");
+    const size_t before_payload = strong_acks.size();
+    strong.noteAnchoredBurstNoGroup(/*payload_seen=*/true);
+    CHECK(strong_acks.size() > before_payload,
+          "a backstop with decoded payload that fits acknowledges it");
 }
 
 void test_software_alc_uses_current_partial_group_delivery_provenance() {

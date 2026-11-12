@@ -762,6 +762,13 @@ public:
         return last_group_evm_carrier_counts_;  // decode-thread/group-callback scope
     }
 
+    // Whether this decoder learns the channel's idle noise from audio it searched without a lock.
+    // A dual-listen LISTENER must not: it cannot lock the session waveform's bursts, so it would
+    // learn the peer's traffic as "idle" - an MC-DPSK listener through an OFDM spell set its floor at
+    // signal level, and once primary in the fallback spell (busy, rarely refreshing the 3 s
+    // min-statistics ring) its physical-SNR reference read 6-8 dB high and the gate failed for
+    // minutes (BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED). ModemEngine sets it with each role.
+    void setIdleNoiseLearning(bool on) { idle_noise_learning_.store(on, std::memory_order_relaxed); }
     bool hasIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.hasEstimate(); }
     float getIdleNoiseSNREstimate() const { return idle_noise_snr_estimator_.snrDb(); }
     IdleNoiseSNREstimator::Snapshot getIdleNoiseSNRSnapshot() const {
@@ -1450,6 +1457,7 @@ private:
     std::function<void()> burst_outcome_unknown_callback_;
     mutable std::atomic<float> last_ofdm_broadband_snr_db_{0.0f};
     IdleNoiseSNREstimator idle_noise_snr_estimator_;
+    std::atomic<bool> idle_noise_learning_{true};  // false while a dual-listen listener
     // Software-ALC RX level verdict (protocol::connection_policy::RxLevelVerdict as
     // int) + a monotonically increasing measurement sequence so consumers can tell a
     // FRESH per-burst measurement from a stale re-read (e.g. a timed-out group's

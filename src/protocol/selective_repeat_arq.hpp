@@ -339,6 +339,15 @@ public:
     // The retransmission timeout for a burst of `frames` in flight (the INFLIGHT-RTO table): both
     // ends build it for the rung, so a receiver can predict when the sender resends a group.
     uint32_t ackTimeoutForFrameCount(size_t frames) const { return ackTimeoutForFrames(frames); }
+    // Forget a pending (delayed) SACK without sending it: an ACK that could not reach the sender
+    // before its resend is not keyed at all. What it would have reported rides the next ACK, which
+    // is cumulative (base + hole bitmap).
+    void dropPendingSack() {
+        sack_pending_ = false;
+        sack_timer_ms_ = 0;
+        frames_since_ack_ = 0;
+        group_ack_deferred_ = false;
+    }
 
     // Commit an explicit deadline to the exact DATA frame identities that physically
     // went on air in one half-duplex round. Padding contributes to the Connection's

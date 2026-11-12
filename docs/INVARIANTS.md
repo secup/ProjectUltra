@@ -362,9 +362,10 @@ every such ACK through its deadline (BUG-ASYNC-ACK-ALWAYS-DROPPED). Never count 
 noise false-lock attempts set it (F147). The anchored-burst backstop's re-confirm (recognized by
 the decoder's backstop stamp, `toneAckIsTimerReconfirm`) keeps the age rule: it fires about when
 the sender's RTO resend starts, before that resend has produced any evidence
-(BUG-BACKSTOP-RACES-RTO). For the same reason the connection withholds a pure re-confirm that could
+(BUG-BACKSTOP-RACES-RTO). For the same reason the connection withholds any re-confirm that could
 not END before the sender's resend of the last framed group (`anchoredBackstopReconfirmFits`; the
-window is timed from the anchor's training start): no sensor here sees a resend's first ~1.5 s. `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
+window is timed from the anchor's training start), and drops its pending delayed SACK: no sensor here
+sees a resend's first ~1.5 s. `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
 TNC's immediate drop). **Test:** `ConnectionPolicy` (`test_deferred_tone_ack_policy`).
 
 ---
@@ -936,7 +937,10 @@ hears (BUG-LISTENER-WAITS-FOR-CONFIRMATION). A decoder that BECOMES the MC-DPSK 
 (the session crossed up to OFDM) is configured exactly as a new one (`configureListener`): the
 down-crossing target ROBUST_MID, never the session's own MC-DPSK profile - a session that connected on
 Robust (DQPSK, 4 codewords) otherwise slices every fallback burst wrong and never follows the sender
-down (BUG-LISTENER-KEEPS-SESSION-PROFILE).
+down (BUG-LISTENER-KEEPS-SESSION-PROFILE). A listener never learns idle noise
+(`setIdleNoiseLearning(false)`): it cannot lock the session waveform's bursts, so it would learn the
+peer's traffic as noise and carry that floor into its next role as primary
+(BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED).
 **Why:** the MC-DPSK chirp and the OFDM anchor chirp are identical, so each decoder locks on the
 other's bursts and fails them: an OFDM listener would fire the anchored-burst backstop ACK on every
 MC-DPSK frame, an MC-DPSK listener would feed the constellation controller a loss per OFDM anchor.

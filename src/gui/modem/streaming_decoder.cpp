@@ -423,7 +423,8 @@ void StreamingDecoder::observeIdleNoiseCandidate(const float* samples, size_t co
     // is active, the samples are not an idle-noise observation.
     if (state_ != DecoderState::SEARCHING ||
         pending_total_cw_ != 0 ||
-        mc_burst_pending_frame_) {
+        mc_burst_pending_frame_ ||
+        !idle_noise_learning_.load(std::memory_order_relaxed)) {
         return;
     }
 

@@ -8,22 +8,6 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED (open, 2026-11-12) — P2: an MC-DPSK decoder that listened through an OFDM spell can carry an idle-noise floor at signal level, and its physical SNR gate then fails for minutes
-
-GUI ITU Good 5 dB seed 49 (all of the day's fixes, before the spell-class fix): in the fallback spell
-after a down-crossing, 42 of 47 up-crossing picks had no physical reading ("x0"), so none could command
-OFDM; the session stayed on MC-DPSK ~800 s (PASS at 1102 s against 270-517 s). A frame got a physical
-reading only when its training SNR was >= 8.8 dB; at 5-7 dB (gap noise 0.16-0.18 = the true floor) the
-gate `rx_power > 2 x ref^2` failed - the reference must have read 6-8 dB high. The reference is
-max(inter-chirp gap, idle min-statistics floor) (F231, for a bench whose noise "breathes"); the idle
-estimator learns from any audio a SEARCHING decoder did not lock, and an MC-DPSK listener locks nothing
-during an OFDM spell, so it learns the peer's OFDM bursts as "idle". Once primary in the fallback spell
-it is mostly busy and rarely refreshes the 3 s min-statistics ring. Intermittent: the same seed rerun
-(diagnostic log: idle 0.16, gap 0.16-0.18) lost 1 reading in 12. Not caused by the listener flip fix
-(a new listener has the same exposure; drop runs show 10-20 % x0). Fix direction: a listener must not
-learn idle noise from the session's other waveform (decoder role flag), or the physical gate uses the
-burst-time gap alone (the definition), the idle floor only as a sanity bound.
-
 ### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
 
 `capRxAuthorityInitialRung` (waveform_selection.hpp) sends the first coherent group at QPSK R1/2
@@ -331,7 +315,12 @@ tail).
 late) exceeds the INFLIGHT-RTO of most groups (QPSK R1/2 x4: 15.7 s; 16QAM R3/4 x16: 15.5 s), so the
 re-confirm almost never fitted. Now timed from the anchor's training start, and withheld unless it
 can end before the resend of the last framed group (`anchoredBackstopReconfirmFits`); the crater
-verdict rides the next ACK. Remaining: an EARLIER re-confirm (at the expected group's air end) would
+verdict rides the next ACK. Extended the same day to re-confirms with decoded payload (the payload is
+delivered; the next, cumulative ACK reports it), and the withheld one's pending delayed SACK is dropped
+too - GUI 5 dB seed 46 keyed one 1.9 s into the resend, and a delayed SACK the provisional air gate held
+to its 12 s ceiling keyed 0.5 s before it. Silent rounds at 5 dB (22 runs, 72): 37 the receiver's ACK
+lost (12 keyed into the sender's own transmission), 24 a group start without its descriptor, 11
+nothing acquired. Remaining: an EARLIER re-confirm (at the expected group's air end) would
 reach the sender a round sooner - it needs the descriptor-lost group's size and the novelty rule for
 the timer re-confirm (the age rule drops any re-confirm younger than 13 s).
 
@@ -2758,6 +2747,17 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED (FIXED 2026-11-12, setIdleNoiseLearning) — was P2: an MC-DPSK decoder that listened through an OFDM spell carried an idle-noise floor at signal level, and its physical SNR gate failed for minutes
+
+The physical reference is max(inter-chirp gap, idle min-statistics floor); the idle estimator learned
+from any audio a SEARCHING decoder did not lock, and an MC-DPSK listener locks nothing during an OFDM
+spell - it learned the peer's OFDM bursts as "idle". Primary in the fallback spell (busy, rarely
+refreshing its 3 s ring), its gate failed below ~9 dB: GUI ITU Good 5 dB seed 49, 42 of 47 up-crossing
+picks without a physical reading, ~800 s on MC-DPSK (intermittent: it depends on what the ring held at
+the flip). A listener no longer learns idle noise; the role flag flips with the decoders.
+Test: `DualListenEngine` (listener through 10.8 s of OFDM at ~7 dB, then the fallback frame: physical
+MISSING before, 6.8 dB after). CHANGELOG 2026-11-12.
 
 ### BUG-FOLLOW-SPELL-CLASS-ONE-FRAME (FIXED 2026-11-12) — was P2: a fallback spell read AWGN from one OFDM frame's fading, and the way back up waited for luck
 

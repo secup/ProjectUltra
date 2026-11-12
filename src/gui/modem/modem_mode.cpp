@@ -52,6 +52,14 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     if (flip) {
         listener_waveform_.store(waveform_mode_, std::memory_order_release);
         streaming_decoder_.flip();
+        // The new primary hears the session waveform: it learns the idle noise again (as a
+        // listener it learned nothing - BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED); the new listener
+        // stops below (configureListener) or here.
+        streaming_decoder_.primary()->setIdleNoiseLearning(true);
+        if (StreamingDecoder* now_listening =
+                streaming_decoder_.slot(1 - streaming_decoder_.primaryIndex())) {
+            now_listening->setIdleNoiseLearning(false);
+        }
         LOG_MODEM(INFO, "[%s] Listener: %s decoder is now primary, %s listens",
                   log_prefix_.c_str(), protocol::waveformModeToString(mode),
                   protocol::waveformModeToString(waveform_mode_));

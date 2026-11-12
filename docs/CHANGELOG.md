@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(ack): the backstop withhold covers re-confirms with decoded payload (BUG-BACKSTOP-RACES-RTO)
+
+**What broke.** The morning's withhold applied only to pure re-confirms. GUI ITU Good 5 dB seed 46: an
+anchored backstop with payload decoded since the anchor (`payload_seen=1`, the descriptor lost) keyed a
+3.4 s ACK 1.9 s into the sender's resend; and the same payload's delayed SACK, held by the provisional
+air gate to its 12 s ceiling (no descriptor, so no group size), keyed 0.5 s before the resend. Both
+were lost, and both blanked this end's receive over the resend's head.
+
+**What changed.** `noteAnchoredBurstNoGroup` applies `anchoredBackstopReconfirmFits` to every
+re-confirm; one that does not fit is withheld and `SelectiveRepeatARQ::dropPendingSack` forgets the
+pending delayed SACK. The payload is delivered either way; the next ACK, cumulative, reports it.
+
+**Verification.** `ConnectionAdaptive`: a marginal group's payload-seen backstop is withheld (fails
+with the old `!payload_seen` scope), a 24.4 s RTO's is sent. Silent-round census, 22 GUI runs at 5 dB
+(72 rounds): 37 the receiver's ACK lost (12 keyed into the sender's transmission), 24 a group start
+without its descriptor, 11 nothing acquired.
+
+---
+
+## 2026-11-12 — FIX(dual-listen): a listener never learns the session waveform's traffic as idle noise (BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED)
+
+**What broke.** The MC-DPSK physical SNR's noise reference is max(the inter-chirp gap, the idle
+min-statistics floor) (F231). The idle estimator learns from any audio a SEARCHING decoder did not lock
+(`observeIdleNoiseCandidate`) - and a dual-listen MC-DPSK listener locks nothing while the session runs
+OFDM, so it learned the peer's OFDM bursts as idle noise. When the sender fell back and the listener
+became primary, it was mostly busy decoding and rarely refreshed its 3 s ring: the reference read 6-8 dB
+high and the 3 dB presence gate failed on every frame below ~9 dB training SNR. GUI ITU Good 5 dB seed 49:
+42 of 47 up-crossing picks without a physical reading (the up-crossing needs one), ~800 s on MC-DPSK; a
+rerun of the same seed lost 1 in 12 (intermittent: it depends on what the ring held at the flip).
+
+**What changed.** `StreamingDecoder::setIdleNoiseLearning`: `observeIdleNoiseCandidate` learns only when
+set. `configureListener` clears it; `setWaveformMode`'s flip sets it on the new primary and clears it on
+the new listener.
+
+**Verification.** `DualListenEngine` `listenerThroughOfdmSpellMeasuresFallbackPhysical`: a receiver on
+OFDM whose MC-DPSK listener sits through 10.8 s of continuous OFDM at ~7 dB, then the sender's
+ROBUST_MID fallback frame - physical SNR MISSING with the learning left on, 6.8 dB with it off.
+
+---
+
 ## 2026-11-12 — FIX(follow): a fallback spell keeps the class its OFDM spell measured, pooled (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME)
 
 **What broke.** MC-DPSK frames measure no fading, so a fallback spell's up-crossing pick classified

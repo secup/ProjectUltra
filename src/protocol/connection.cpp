@@ -6356,8 +6356,9 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     tone_ack_alc_group_context_ = false;
     tone_ack_group_has_decoded_data_context_ = false;
     tone_ack_exact_group_geometry_context_ = false;
-    // BUG-BACKSTOP-RACES-RTO: a pure re-confirm (nothing decoded since the anchor) that cannot
-    // end before the sender resends this group is withheld. Those gates cannot stop it: the
+    // BUG-BACKSTOP-RACES-RTO: a re-confirm that cannot end before the sender resends this group is
+    // withheld - with or without payload decoded since the anchor (that payload is delivered; the
+    // next ACK, cumulative, reports it). Those gates cannot stop it: the
     // backstop fires as the resend keys, before the resend has produced any decoder evidence,
     // and the energy CCA does not see a marginal burst (busy = 6 dB over the floor; a 5 dB
     // signal reads 6.2 dB) - every GUI backstop at ITU Good 5 dB keyed 0.85 s into the resend.
@@ -6368,7 +6369,7 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     // keyed 3.4 s and let a re-confirm through into the resend (GUI ITU Good 5 dB seed 47). The
     // crater verdict above rides the next ACK, the one this end sends for the resend it now hears
     // whole.
-    if (!payload_seen) {
+    {
         namespace tba = ultra::waveform::tone_burst_ack;
         const size_t frames_est =
             last_rx_group_frames_ > 0 ? last_rx_group_frames_ : arq_.getWindowSize();
@@ -6383,6 +6384,10 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
                   fits ? "sent" : "withheld", frames_est, sender_rto_ms, kLongestAckMs,
                   fits ? "ends before it" : "could not end before it - the verdict rides the next ACK");
         if (!fits) {
+            // Nor later: a delayed SACK still pending for that payload would key just as blindly
+            // (GUI ITU Good 5 dB seed 46: one deferred until the provisional air end, 0.5 s
+            // before the sender's resend).
+            arq_.dropPendingSack();
             return;
         }
     }

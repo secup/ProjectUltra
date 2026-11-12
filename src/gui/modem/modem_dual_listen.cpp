@@ -184,6 +184,7 @@ void ModemEngine::applyStoredDecoderSettings(StreamingDecoder* decoder) {
 void ModemEngine::configureListener(StreamingDecoder* listener, protocol::WaveformMode waveform) {
     listener->reset();
     listener->setHandshakeConfirmationPending(false);
+    listener->setIdleNoiseLearning(false);  // the peer's traffic on the session waveform is not noise
     if (waveform == protocol::WaveformMode::OFDM_CHIRP) {
         // The first OFDM burst after a switch carries the full dual chirp and its descriptor names
         // the rung; the floor data mode only seeds the decoder until then.

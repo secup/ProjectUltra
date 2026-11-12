@@ -404,6 +404,81 @@ std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
     return heard;
 }
 
+// BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED: the MC-DPSK listener sits through the peer's OFDM traffic,
+// which it cannot lock; learning that audio as "idle" put its noise floor at signal level, and the
+// physical-SNR reference (max of the inter-chirp gap and that floor) then failed the 3 dB presence gate
+// on the fallback frame - the up-crossing's evidence was gone for minutes (GUI Good 5 dB seed 49:
+// 42 of 47 picks). The listener hears ~6 s of continuous OFDM at ~7 dB, then the sender's ROBUST_MID
+// fallback frame; returns that frame's physical SNR (NAN when missing).
+float listenerThroughOfdmSpellMeasuresFallbackPhysical() {
+    ModemEngine tx;
+    tx.setLogPrefix("ALPHA");
+    tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
+    const int cw = protocol::connection_policy::recommendCWCount(Modulation::QPSK, CodeRate::R1_4,
+                                                                 WaveformMode::OFDM_CHIRP);
+    tx.crossConnectedWaveform(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4, cw, 0, 0);
+    const int ofdm_cw = tx.getFixedFrameCodewords();
+    std::vector<Bytes> group;
+    for (uint16_t seq = 10; seq < 16; ++seq) {
+        group.push_back(v2::makeFixedDataFrame("ALPHA", "BRAVO", seq, Bytes(40, 0x6B),
+                                               CodeRate::R1_4, ofdm_cw)
+                            .serialize());
+    }
+    const auto ofdm = tx.transmitBurst(group);
+    const std::string down_text = "the fallback after an OFDM spell";
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    const auto down = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 2, down_text).serialize());
+
+    // Noise for ~7 dB in-band SNR on the MC-DPSK burst (white: 2900/24000 of it in band).
+    double p_sig = 0.0;
+    size_t n_sig = 0;
+    for (float v : down) {
+        if (v != 0.0f) { p_sig += static_cast<double>(v) * v; ++n_sig; }
+    }
+    p_sig /= static_cast<double>(std::max<size_t>(1, n_sig));
+    const double sigma = std::sqrt(p_sig / std::pow(10.0, 0.7) * 24000.0 / 2900.0);
+
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    ModemEngine rx;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    rx.setLogPrefix("BRAVO");
+    rx.setSynchronousMode(true);
+    rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+    rx.setRxWaveformObservedCallback([&](WaveformMode mode) {
+        if (mode == WaveformMode::MC_DPSK) {
+            rx.crossConnectedWaveform(mode, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+        }
+    });
+    float physical = NAN;
+    rx.setDecodeObserver([&](const DecodeResult& r) {
+        if (r.success && payloadText(r.frame_data) == down_text && r.has_physical_snr_db) {
+            physical = r.physical_snr_db;
+        }
+    });
+    // The OFDM spell without its own lead-in/tail silences: continuous traffic, as on the air.
+    std::vector<float> ofdm_active;
+    for (float v : ofdm) if (v != 0.0f) ofdm_active.push_back(v);
+    std::vector<float> air(48000, 0.0f);
+    for (int rep = 0; rep < 2; ++rep) air.insert(air.end(), ofdm_active.begin(), ofdm_active.end());
+    air.insert(air.end(), 2400, 0.0f);  // 50 ms: T/R turnaround
+    air.insert(air.end(), down.begin(), down.end());
+    air.insert(air.end(), 3 * 48000, 0.0f);
+    std::mt19937 rng(41);
+    std::normal_distribution<double> noise(0.0, sigma);
+    for (auto& v : air) v += static_cast<float>(noise(rng));
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    std::printf("MC-DPSK listener through %.1f s of OFDM, fallback at ~7 dB: physical %s\n",
+                static_cast<double>(2 * ofdm_active.size()) / 48000.0,
+                std::isfinite(physical) ? (std::to_string(physical) + " dB").c_str() : "MISSING");
+    return physical;
+}
+
 void checkGapCrashBurst(const char* path) {
     const auto heard = receiveBurstWithGapCrash();
     std::printf("static crash in the inter-chirp gap (%s frames): %zu of 3 frames\n", path,
@@ -431,6 +506,12 @@ int main(int argc, char** argv) {
         check(heard.size() == 2 && heard[1] == "the fallback's MC-DPSK frame",
               "a session that started on MC-DPSK Robust hears the sender's ROBUST_MID fallback "
               "after following it up to OFDM");
+    }
+    {
+        const float physical = listenerThroughOfdmSpellMeasuresFallbackPhysical();
+        check(std::isfinite(physical) && physical > 3.0f && physical < 11.0f,
+              "a listener that sat through OFDM traffic measures the fallback frame's physical SNR "
+              "(~7 dB)");
     }
     {
         const bool heard = connectedDqpskResponderHearsConnect();
