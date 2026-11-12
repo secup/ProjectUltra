@@ -1906,6 +1906,33 @@ std::pair<bool, Bytes> decodeSingleCodeword(const std::vector<float>& soft_bits,
     return {true, result};
 }
 
+const std::vector<KnownCodewordBit>& burstDescriptorKnownBits() {
+    static const std::vector<KnownCodewordBit> bits = [] {
+        // Any descriptor: the fixed fields do not depend on the geometry it declares.
+        const Bytes frame = whitenControlFrame(
+            ControlFrame::makeBurstHeader(kBurstDescriptorIdentity, kBurstDescriptorIdentity,
+                                          /*seq=*/0, /*group_size=*/2, /*cw_per_frame=*/1,
+                                          Modulation::QPSK, CodeRate::R1_4,
+                                          /*interleave_flags=*/0)
+                .serialize());
+        std::vector<KnownCodewordBit> out;
+        // bytes 0-3: magic, type, flags; bytes 6-11: source and destination hashes.
+        for (size_t byte : {0u, 1u, 2u, 3u, 6u, 7u, 8u, 9u, 10u, 11u}) {
+            for (int b = 7; b >= 0; --b) {
+                out.push_back({static_cast<uint16_t>(byte * 8 + static_cast<size_t>(7 - b)),
+                               static_cast<uint8_t>((frame[byte] >> b) & 1u)});
+            }
+        }
+        // The R1/4 codeword carries 162 information bits; the frame's 160 come first and the
+        // encoder pads the last two with zeros (LDPCEncoder::encode).
+        for (size_t pos = ControlFrame::SIZE * 8; pos < LDPC_INFO_BITS; ++pos) {
+            out.push_back({static_cast<uint16_t>(pos), 0});
+        }
+        return out;
+    }();
+    return bits;
+}
+
 bool controlFrameWhiteningEnabled() {
     static const bool on = [] {
         const char* e = std::getenv("ULTRA_CONTROL_WHITEN");

@@ -2748,6 +2748,13 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS (FIXED 2026-11-12) — was P1 at the OFDM floor: 41 % of descriptors lost at ITU Good 5 dB
+
+A mean-|LLR| < 1.5 pre-screen skipped the decode of weak but real one-codeword control frames; at the
+floor a descriptor reads 0.6-1.5. Connected OFDM now always decodes, and retries a failed descriptor with
+its 82 protocol-fixed bits pinned (INV-DESC-KNOWN-001). GUI 5 dB: descriptors consumed 55-65 % -> 85 %,
+transfer time -27..-33 %. Test `DescriptorKnownBits`. CHANGELOG 2026-11-12.
+
 ### BUG-OFDM-SINGLETON-UNMARKED (FIXED 2026-11-12) — was P1 at the OFDM floor: a decoded OFDM single frame's ACK held ~11 s, past the sender's ACK window
 
 The singleton flush and the frame-by-frame timeout batch stamped `PHYSICAL_BURST_END` for MC-DPSK only;

@@ -150,6 +150,7 @@ Rate→K (per `getCodeParams`, `ldpc_encoder.cpp:39`): R1/4=162, R1/2=324, R2/3=
 | Code rate on wire — DataFrame flags (2-bit, R1/4–R3/4 only) | `frame_v2.hpp:272` (`RATE_MASK`) | 🟢 ⚠️ can't express R5/6 or R1/3 on this path |
 | Code rate on wire — MODE_CHANGE / BURST_HEADER (full byte) | `frame_v2.hpp:537` / `:588` | 🟢 |
 | BURST_HEADER descriptor (0x25): size/cw/mod/rate/interleave/Z | `makeBurstHeader` `frame_v2.cpp:450` | 🟢 default ON (`ULTRA_BURST_DESCRIPTOR`) |
+| Descriptor known-bit decode (INV-DESC-KNOWN-001): connected OFDM decodes every acquired control codeword (no mean-|LLR| pre-screen), then retries a failed one as a descriptor with its 82 protocol-fixed bits pinned | `frame_v2.cpp` `burstDescriptorKnownBits`; `streaming_ofdm_decode.cpp` `decodeBurstDescriptorWithKnownBits` + control-first `prescreen_applies` | 🟢 default ON 2026-11-12 (`ULTRA_DESCRIPTOR_KNOWN_BITS=0` = plain decode only) |
 | GROUP_ACK 0x26 / GROUP_NACK 0x27 (+fast-NACK §14.30) | `frame_v2.hpp:245` | 🟢 |
 | DATA_START/CONT/END (0x31–33) | `frame_v2.hpp` | 🔴 scaffolding (file-segment types not fully used) |
 | **FrameInterleaver** (intra-frame across CWs) | `frame_interleaver.*`; TX `frame_v2.cpp:1944` | 🟢 **always on for OFDM** (skipped when cw=1) |

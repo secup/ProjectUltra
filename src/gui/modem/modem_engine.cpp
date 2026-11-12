@@ -541,7 +541,8 @@ std::vector<float> ModemEngine::transmitBurst(
         kBurstDescriptorEnabled && (!kBurstHeaderOnce || group_seq == 0);
     if (emit_descriptor_this_burst && protocol::isOFDMMode(waveform_mode_)) {
         streaming_encoder_->setBurstDescriptorEnabled(true);
-        streaming_encoder_->setBurstDescriptorIdentity("", "");
+        streaming_encoder_->setBurstDescriptorIdentity(protocol::v2::kBurstDescriptorIdentity,
+                                                       protocol::v2::kBurstDescriptorIdentity);
     } else {
         streaming_encoder_->setBurstDescriptorEnabled(false);
     }

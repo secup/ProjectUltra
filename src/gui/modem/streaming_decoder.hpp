@@ -499,6 +499,11 @@ public:
         return truncation_hold_sync_pos_ != 0 || truncation_hold_frame_len_ != 0;
     }
     uint32_t commandedGeometryArmsForTesting() const { return commanded_geometry_arms_; }
+    // Descriptors the plain decode lost and the known-bit decode recovered (INV-DESC-KNOWN-001),
+    // and every descriptor consumed. Decode thread.
+    uint32_t descriptorKnownBitRescuesForTesting() const { return descriptor_known_bit_rescues_; }
+    void setDescriptorKnownBitsForTesting(bool on) { descriptor_known_bits_enabled_ = on; }
+    uint32_t descriptorsConsumedForTesting() const { return descriptors_consumed_; }
     uint32_t classicLongGeometryArmsForTesting() const {
         return classic_long_geometry_arms_;
     }
@@ -1443,7 +1448,7 @@ private:
     int mc_burst_compact_window_ = 0;
     // The slot a burst continuation reads next holds a frame by proof: the frame before it decoded
     // CRC-valid with MORE_FRAG and without PHYSICAL_BURST_END, which the sender stamps on the last
-    // DATA frame of every MC-DPSK turn (shouldStampPhysicalBurstEnd, mcDpskTurnEndWireCopy). The
+    // DATA frame of every MC-DPSK turn (shouldStampPhysicalBurstEnd, physicalTurnEndWireCopy). The
     // in-band burst-tail test does not run on such a slot: it compares the window with a noise
     // reference taken from the 60 ms centre of one inter-chirp gap (7.6 % spread), so a -5 dB frame
     // read as noise whenever that reference read ~7 % high, and a static crash in the gap ended a
@@ -1543,6 +1548,13 @@ private:
         UNPROVEN_MARKER,
         DESCRIPTOR_LATE_JOIN,
     };
+    uint32_t descriptor_known_bit_rescues_ = 0;
+    uint32_t descriptors_consumed_ = 0;
+    // ULTRA_DESCRIPTOR_KNOWN_BITS (default on; "0" = plain decode only, for an A/B).
+    bool descriptor_known_bits_enabled_ = [] {
+        const char* e = std::getenv("ULTRA_DESCRIPTOR_KNOWN_BITS");
+        return !(e != nullptr && e[0] == '0' && e[1] == '\0');
+    }();
     BurstArmProvenance burst_arm_provenance_ = BurstArmProvenance::NONE;
     size_t burst_substantive_members_ = 0;
     uint64_t burst_unproven_start_abs_ = 0;

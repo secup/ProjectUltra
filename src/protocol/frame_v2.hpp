@@ -1129,6 +1129,29 @@ inline bool unwhitenControlCodeword(Bytes& info_bytes) {
 }
 
 // ============================================================================
+// Burst descriptor known bits (INV-DESC-KNOWN-001, 2026-11-12)
+// ============================================================================
+//
+// A BURST_HEADER descriptor is ONE R1/4 LDPC codeword (162 information bits), and most of it is
+// fixed by the protocol: the magic, the type, the flags byte (VERSION_V2), the descriptor
+// identity's two callsign hashes (every descriptor is sent with kBurstDescriptorIdentity), and
+// the codeword's two pad bits - 82 bits. Only seq, the six geometry bytes and the CRC vary.
+// A receiver whose plain decode failed decodes the codeword again with those bits pinned to
+// their (whitened) values: a shortened (566, 80) code from the same air bits. Measured offline
+// (QPSK, two-path Rayleigh with 0.5 ms delay, perfect channel knowledge): FER at Es/N0 5 dB
+// 10.4 % -> 5.2 %, about 2 dB; on AWGN about 1.5 dB. The wire is unchanged: a codeword that does
+// not match the pinned pattern simply fails the second decode.
+inline constexpr char kBurstDescriptorIdentity[] = "";
+
+struct KnownCodewordBit {
+    uint16_t position;  // bit index in the codeword (information bits come first, MSB-first)
+    uint8_t value;      // 0 or 1, after whitening
+};
+
+// The descriptor's protocol-fixed information bits in a whitened codeword (computed once).
+const std::vector<KnownCodewordBit>& burstDescriptorKnownBits();
+
+// ============================================================================
 // Fixed-Codeword Frame with Frame-Level Interleaving
 // ============================================================================
 //

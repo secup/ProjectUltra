@@ -757,6 +757,18 @@ target_include_directories(test_evm_snr_calibration PRIVATE
 target_link_libraries(test_evm_snr_calibration PRIVATE ultra_core ota_channel_core)
 add_test(NAME EVMSnrCalibration COMMAND test_evm_snr_calibration)
 
+# INV-DESC-KNOWN-001: the descriptor's protocol-fixed bits and the receiver's pinned decode.
+add_executable(test_descriptor_known_bits
+    test_descriptor_known_bits.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_descriptor_known_bits PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_descriptor_known_bits PRIVATE ultra_core ota_channel_core)
+add_test(NAME DescriptorKnownBits COMMAND test_descriptor_known_bits)
+
 # TX-burst normalization (PA/ALC gain staging) — self-contained; never used
 # SimulatedStation (compiles the modem engine directly), so it survives the
 # 2026-05-30 cli_simulator/SimulatedStation retirement.

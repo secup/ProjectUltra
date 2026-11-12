@@ -42,6 +42,7 @@ enum class MeasureConfig {
     AckFull,
     WarmSyncLight,
     BurstChunk,
+    DescLight,  // a production BURST_HEADER descriptor (full anchor: decode given sync)
 };
 
 struct Args {
@@ -147,7 +148,7 @@ void classify(const TrialOutcome& outcome, const Bytes& expected, Counts& counts
 void usage(const char* argv0) {
     std::cerr
         << "Usage: " << argv0
-        << " --snr <db> --config <ack_light|data4_light|data4_full|ack_full|warm_sync_light|burst_chunk>"
+        << " --snr <db> --config <ack_light|data4_light|data4_full|ack_full|warm_sync_light|burst_chunk|desc_light>"
         << " --seed <u64> --n <frames|chunks>"
         << " [--channel awgn|good|moderate|poor]"
         << " [--waveform wide|narrow] [--mod dqpsk|qpsk|d8psk|qam8|qam16|qam32]"
@@ -177,6 +178,9 @@ MeasureConfig parseConfig(const std::string& name) {
     }
     if (name == "warm_sync_light") {
         return MeasureConfig::WarmSyncLight;
+    }
+    if (name == "desc_light") {
+        return MeasureConfig::DescLight;
     }
     throw std::runtime_error("unknown --config: " + name);
 }
@@ -422,6 +426,17 @@ FrameTrial makeFrame(gui::StreamingEncoder& encoder,
         trial.tx_samples = config == MeasureConfig::Data4Full
             ? encoder.encodeFrame(trial.frame_bytes)
             : encoder.encodeFrameLight(trial.frame_bytes);
+    } else if (config == MeasureConfig::DescLight) {
+        // Exactly what ModemEngine::transmitBurst sends ahead of a group: the production
+        // identity, the vestigial seq 0, the session geometry.
+        const auto desc = v2::ControlFrame::makeBurstHeader(
+            v2::kBurstDescriptorIdentity, v2::kBurstDescriptorIdentity, /*seq=*/0,
+            /*group_size=*/6, static_cast<uint8_t>(args.frame_cw), args.mod, args.rate,
+            /*interleave_flags=*/0);
+        trial.frame_bytes = desc.serialize();
+        // Full chirp+LTS so acquisition is not what is measured (production finds a group's
+        // descriptor by its frame structure; the LTS the decode then rests on is the same).
+        trial.tx_samples = encoder.encodeFrame(trial.frame_bytes);
     } else {
         const auto ack = v2::ControlFrame::makeAck("BRAVO", "ALPHA", seq);
         trial.frame_bytes = ack.serialize();
@@ -1090,6 +1105,25 @@ Counts measure(const Args& args) {
             continue;
         }
 
+        if (args.config == MeasureConfig::DescLight) {
+            // A consumed descriptor leaves the decoder waiting for the group it declared (that
+            // state outlives reset()), so every descriptor trial starts from a fresh connected
+            // decoder, as the first group of a session would.
+            gui::StreamingDecoder fresh;
+            configureDecoder(fresh, args);
+            auto outcome = runFrame(fresh, channel, trial.tx_samples, /*full_preamble=*/true,
+                                    /*reset_decoder=*/true, /*expect_full_anchor=*/true,
+                                    /*fixed_budget=*/args.fixed_budget,
+                                    /*preroll_samples=*/static_cast<size_t>(args.preroll_ms) * 48);
+            if (fresh.descriptorsConsumedForTesting() > 0) {
+                ++counts.pass;
+            } else if (!outcome.sync_seen) {
+                ++counts.sync_fail;
+            } else {
+                ++counts.decode_fail;
+            }
+            continue;
+        }
         auto outcome = runFrame(decoder, channel, trial.tx_samples, full_preamble,
                                 /*reset_decoder=*/true,
                                 /*expect_full_anchor=*/expect_anchor,

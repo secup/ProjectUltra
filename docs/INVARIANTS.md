@@ -515,6 +515,21 @@ The prior used before the station has measured its own bursts is 1.0 dB with whi
 frames (`peakNormalizedOfdmBelowMcDpskPriorDb`; 3.4 dB with `ULTRA_CONTROL_WHITEN=0`); re-measure
 it from a `--tx-model hardware --record` TX recording whenever a burst's opening content changes.
 
+### INV-DESC-KNOWN-001: a connected receiver decodes every descriptor it acquires, and uses what the protocol fixes
+
+**Rule:** in a connected OFDM session the control-first decode of a one-codeword control frame never
+skips on its LLR magnitude (frame-structure detection or an anchored search found it; the LDPC decode and
+the CRC arbitrate). When that decode yields no control frame, the codeword is decoded once more as a
+BURST_HEADER descriptor with its protocol-fixed information bits pinned
+(`v2::burstDescriptorKnownBits`: magic, type, VERSION_V2 flags, the two hashes of
+`kBurstDescriptorIdentity`, the pad bits) and accepted only as a CRC-valid BURST_HEADER. Anything that
+changes a fixed descriptor field (its identity, flags or layout) must change the table with it - the
+CTest `DescriptorKnownBits` compares the table with real descriptors bit for bit.
+
+**Why:** at the OFDM floor a real descriptor's mean |LLR| is 0.6-1.5; the old 1.5 pre-screen lost 41 % of
+them at ITU Good 5 dB (BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS), and pinning the 82 fixed bits is a
+shortened code worth ~2 dB on a fading channel, from the same air bits.
+
 ### INV-FRAME-WHITEN-001: nothing but the data sets an OFDM burst's peak
 
 **Rule:** every burst is scaled to its loudest sample on a peak-limited transmitter, so no

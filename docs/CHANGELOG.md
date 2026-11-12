@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(rx): a connected receiver decodes every descriptor it acquires, with the descriptor's fixed bits pinned on a second try (BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS)
+
+**What broke.** The OFDM control-first decode skipped any one-codeword control frame whose mean |LLR|
+was below 1.5 ("looks like noise"), a pre-screen from the era of OFDM ACK frames and false chirp locks.
+On the current LLR scale a real, decodable descriptor reads 0.6-1.5 at the OFDM floor, and in a
+connected session the frames reaching this decode come from frame-structure detection (one false
+alarm an hour) or an anchored search. GUI ITU Good 5 dB, 24 runs (g6-g8): the sender sent 372
+BURST_HEADER descriptors and the receiver consumed 221 - 41 % lost, the group then running on a
+latched geometry with no N (abandoned unless its CRC tail decoded; its ACK held to the sender-policy
+ceiling). measure_ack_fer desc_light (a production descriptor, ITU Good 5 dB, decode given
+acquisition): the pre-screen kept 37 %, the decode alone recovers 63 % (AWGN 5 dB: 0 % -> 79 %).
+
+**What changed.**
+- `streaming_ofdm_decode.cpp` control-first path: no mean-|LLR| pre-screen in a connected OFDM
+  session (`prescreen_applies = !(connected_ && is_ofdm)`); the LDPC decode and the CRC arbitrate.
+- INV-DESC-KNOWN-001 (`frame_v2.hpp` `burstDescriptorKnownBits`): 82 of the descriptor codeword's 162
+  information bits are fixed by the protocol (magic, type, VERSION_V2 flags, the descriptor identity
+  `kBurstDescriptorIdentity`'s two hashes, two pad bits). A control codeword whose plain decode gave no
+  control frame is decoded again with those bits pinned (|LLR| 50) - a shortened (566, 80) code from the
+  same air bits - and accepted only as a CRC-valid BURST_HEADER. Offline (QPSK, two-path Rayleigh
+  0.5 ms, perfect CSI): FER at Es/N0 5 dB 10.4 % -> 5.2 %, ~2 dB; AWGN ~1.5 dB. Wire unchanged.
+  `ULTRA_DESCRIPTOR_KNOWN_BITS=0` = plain decode only (A/B).
+- `ModemEngine::transmitBurst` names the identity through the shared constant.
+
+**Verification.** measure_ack_fer `desc_light` (new config; seed 11, 200 trials, decode given
+acquisition), plain -> pinned: ITU Good 3 dB 48 -> 69 %, 5 dB 63 -> 84 %, 7 dB 76 -> 93 %; AWGN 3 dB
+21 -> 76 %, 5 dB 79 -> 95 %. CTest `DescriptorKnownBits`: the table matches real descriptors bit for bit;
+AWGN 2 dB, same 24 channel realizations both arms: 2 -> 8 descriptors consumed, every extra one a
+pinned rescue. ctest 122/122. GUI ITU Good 5 dB batch (same 8 cases as g6-g8): descriptors consumed 85 %
+(91/107) vs 55-65 %; silent rounds 8 vs ~28 per batch; 8/8 PASS, total 1545 s vs 2121 / 2292 / 2233 s
+(two identical-logic batches differ by 8 %). High-SNR set (Good 20 x2, AWGN 20/25, fade, QSB): 6/6
+PASS, times unchanged.
+
+---
+
 ## 2026-11-12 — FIX(ack): an OFDM single frame carries the end-of-turn marker on every path (BUG-OFDM-SINGLETON-UNMARKED)
 
 **What broke.** A wideband OFDM single frame (a file's last frame, a one-frame repair or RTO resend)

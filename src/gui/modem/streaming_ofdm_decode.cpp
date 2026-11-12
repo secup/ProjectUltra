@@ -336,6 +336,25 @@ static std::pair<bool, Bytes> robustDecodeSingleCW(
     return {ok, data};
 }
 
+// INV-DESC-KNOWN-001 (frame_v2.hpp): the descriptor hypothesis for a control codeword whose plain
+// decode failed, decoded again with the descriptor's protocol-fixed bits pinned. Returns the
+// unwhitened 20-byte frame only when it IS a CRC-valid BURST_HEADER.
+static std::pair<bool, Bytes> decodeBurstDescriptorWithKnownBits(const float* llrs) {
+    std::vector<float> pinned(llrs, llrs + v2::LDPC_CODEWORD_BITS);
+    // Beyond any channel LLR (positive = bit 0): these bits are certain.
+    constexpr float kPinnedLlr = 50.0f;
+    for (const auto& kb : v2::burstDescriptorKnownBits()) {
+        pinned[kb.position] = kb.value ? -kPinnedLlr : kPinnedLlr;
+    }
+    auto decoded = robustDecodeSingleCW(pinned.data(), pinned.size(), CodeRate::R1_4, nullptr,
+                                        ultra::timing::SingleCWCallSite::ControlFirst,
+                                        /*max_retries=*/2);
+    if (!decoded.first || decoded.second.size() < v2::ControlFrame::SIZE) return {false, {}};
+    const auto frame = v2::ControlFrame::deserialize(decoded.second);
+    if (!frame || frame->type != v2::FrameType::BURST_HEADER) return {false, {}};
+    return decoded;
+}
+
 int StreamingDecoder::expectedOFDMCodewordsForSamples(size_t sample_count) const {
     if (!waveform_ || !connected_ || !protocol::isOFDMMode(mode_)) {
         return 1;
@@ -1408,10 +1427,18 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // LLR pre-screen: skip the 1-CW decode (~85ms incl. retries)
                 // when the soft bits look like noise. Real ACKs cluster well
                 // above this threshold; false-sync attempts cluster near 1.
+                // NOT in a connected OFDM session (BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS,
+                // 2026-11-12): its frames are found by frame-structure detection (one false
+                // alarm an hour) or an anchored search, and a real weak descriptor reads below
+                // the threshold - in measure_ack_fer desc_light, ITU Good, the prescreen kept
+                // only 37 % of the acquired descriptors at 5 dB and 49 % at 7 dB, where the
+                // decode itself recovers 69 % and 77 %; on AWGN at 5 dB (|llr| 1.0-1.2) it
+                // dropped them all. The LDPC decode and the CRC are the arbiters there.
                 std::pair<bool, Bytes> control_decode = {false, {}};
                 const float llr_avg = signal_policy::meanAbsLLR(
                     control_soft_bits.data(), CONTROL_LDPC_BLOCK);
-                if (llr_avg < signal_policy::kMinLLRForSingleCWDecode) {
+                const bool prescreen_applies = !(connected_ && is_ofdm);
+                if (prescreen_applies && llr_avg < signal_policy::kMinLLRForSingleCWDecode) {
                     ultra::timing::globalDecoderProfile()
                         .low_llr_1cw_skipped_control_first
                         .fetch_add(1, std::memory_order_relaxed);
@@ -1435,6 +1462,26 @@ void StreamingDecoder::decodeCurrentFrame() {
                 }
                 auto [ok_r14, data_r14] = control_decode;
                 size_t bpc_r14 = v2::getBytesPerCodeword(CodeRate::R1_4);
+                // INV-DESC-KNOWN-001: a group's descriptor that the plain decode lost gets a
+                // second decode with its protocol-fixed bits pinned (~2 dB on a fading channel).
+                // Connected OFDM only: descriptors exist nowhere else.
+                const bool plain_control_frame =
+                    ok_r14 && data_r14.size() >= 4 && data_r14[0] == 0x55 && data_r14[1] == 0x4C;
+                if (!plain_control_frame && connected_ && is_ofdm &&
+                    descriptor_known_bits_enabled_) {
+                    auto pinned = decodeBurstDescriptorWithKnownBits(control_soft_bits.data());
+                    if (pinned.first) {
+                        const bool plain_decoded = ok_r14;
+                        ok_r14 = true;
+                        data_r14 = std::move(pinned.second);
+                        ++descriptor_known_bit_rescues_;
+                        LOG_MODEM(INFO,
+                                  "[%s] Burst descriptor recovered with its fixed bits pinned "
+                                  "(plain decode %s, |llr|_avg=%.2f; rescue #%u)",
+                                  log_prefix_.c_str(), plain_decoded ? "not a frame" : "failed",
+                                  llr_avg, descriptor_known_bit_rescues_);
+                    }
+                }
 
                 if (ok_r14 && data_r14.size() >= 4
                     && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
@@ -1622,6 +1669,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 burst_harq_ctx_pulled_ = false;
                                 burst_harq_prediction_invalid_ = false;
                                 burst_harq_prediction_validated_ = false;
+                                ++descriptors_consumed_;
                                 LOG_MODEM(INFO,
                                     "[%s] Burst descriptor RX: group=%u cw/frame=%u z=%u bi=%d cldpc=%d current_anchor=%s",
                                     log_prefix_.c_str(), bi.group_size, bi.cw_per_frame,
