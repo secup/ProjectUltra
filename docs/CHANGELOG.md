@@ -10,6 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(ack): a startup probe's launch-ACK copy is not a monitor candidate (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR)
+
+The same mechanism as the crossing ACK's copy (2026-11-11): a CRC-valid detection the tone-ACK
+monitor delivers has already disarmed it, so consuming the flagged copy of the ACK that launched a
+latent startup probe in `onToneBurstAck` could leave the probe's own verdict unheard. The acceptance
+predicate now rejects it while the probe is airborne; an unflagged ACK (the probe's verdict) stays a
+candidate. Latent: no GUI run has committed a startup probe. Test
+`WaveformFollow` `test_startup_probe_launch_copy_is_not_a_candidate` (fails without the rule).
+
+---
+
 ## 2026-11-12 — FIX(rate): one group climbs one rung (BUG-POST-CROSSING-OVERCLIMB)
 
 **What was broken.** The EVM climb (`EvmRateSelector::bestReliable`, the default via `ULTRA_FAST`)

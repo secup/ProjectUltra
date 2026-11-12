@@ -2558,6 +2558,18 @@ bool Connection::isToneBurstAckCandidatePlausible(
     if (isCrossingLaunchAckCopy(payload)) {
         return false;  // not an answer to the burst on air: keep listening for the one that is
     }
+    // The same for a copy of the ACK that launched a latent startup probe: while the one probe
+    // group is airborne every flagged command is that launch ACK's diversity (target outcomes are
+    // unflagged). Rejected here, the monitor keeps listening for the probe's own verdict; consumed
+    // in onToneBurstAck (still there as a backstop) the monitor had already disarmed on it
+    // (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR).
+    if (tx_latent_startup_probe_active_ && tx_latent_startup_probe_airborne_) {
+        const uint8_t authority_word = static_cast<uint8_t>((payload.rate_hint & 0x7) |
+                                                            ((payload.rung_cmd & 0x3) << 3));
+        if ((authority_word & kRungAuthorityStartupProbeFlag) != 0) {
+            return false;
+        }
+    }
 
     // The reserved WAITING-REBASE voice is intentionally outside the sender's
     // ordinary SACK support. It is the one legitimate NACK-typed tone accepted by

@@ -85,15 +85,6 @@ threads resizing the same vectors corrupt the heap, which can fault anywhere lat
 included - and five other cross-thread races; the stress test is now race-free. No recurrence in the
 follow matrix since; keep open until a soak shows none.
 
-### BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR (suspected, latent, 2026-11-11) — P3
-
-`Connection::onToneBurstAck` consumes a flagged copy of the ACK that launched a latent startup probe
-("duplicate LATENT startup launch ACK consumed") after the tone-ACK monitor delivered it, and a
-delivered detection disarms the monitor. The waveform-follow crossing ACK showed what follows: the
-probe group's own ACK would go unheard until the RTO. Not exercised: no startup probe committed in
-any GUI run of the follow matrix (2026-11-11). Fix shape when it is: reject the copy in
-`isToneBurstAckCandidatePlausible`, as `isCrossingLaunchAckCopy` does.
-
 ### BUG-TX-SPLATTER-SYMBOL-EDGES (open, 2026-11-11) — P3: data symbols switch hard; their splatter shows on every waterfall
 
 **What.** Operator report: the waterfall "isn't smooth". Measured on the transmitted audio
@@ -2585,6 +2576,15 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR (FIXED 2026-11-12, latent) — a probe's launch-ACK copy disarmed the monitor
+
+`onToneBurstAck` consumed a flagged copy of the ACK that launched a latent startup probe after the
+tone-ACK monitor had delivered it - and a delivered detection disarms the monitor, so the probe's
+own verdict could go unheard until the RTO (the crossing ACK's copy showed exactly this). Never
+seen in a GUI run (no probe committed). Fix: `isToneBurstAckCandidatePlausible` rejects the flagged
+copy while the probe is airborne (the handler rule stays as a backstop). Test
+`test_startup_probe_launch_copy_is_not_a_candidate`.
 
 ### BUG-DECODER-THREAD-RACES (FIXED 2026-11-12) — cross-thread races in the receiving engine
 

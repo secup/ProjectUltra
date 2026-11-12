@@ -192,6 +192,10 @@ struct ConnectionAdaptiveTestAccess {
         c.pending_ladder_rung_id_ = LadderRungId::OFDM_CHIRP;
     }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
+    static void setStartupProbeAirborne(Connection& c, bool airborne) {
+        c.tx_latent_startup_probe_active_ = airborne;
+        c.tx_latent_startup_probe_airborne_ = airborne;
+    }
     static void allowRateAdaptation(Connection& c) {
         c.adaptive_rate_enabled_ = true;
         c.latent_startup_probe_allowed_ = true;
@@ -1059,6 +1063,36 @@ void test_escape_needs_the_peer_heard() {
           "with the peer just heard the collapse escape drops a rung (the positive control)");
 }
 
+// A copy of the ACK that launched a latent startup probe is not a monitor candidate while the probe
+// group is airborne: consumed after delivery, it had already disarmed the monitor, and the probe's
+// own verdict would have gone unheard (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR; the crossing ACK's
+// copy showed what follows).
+void test_startup_probe_launch_copy_is_not_a_candidate() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 20.0f, 0.5f,
+                                                    Modulation::QPSK);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes{0x10}, 0), "a frame in flight");
+    ultra::waveform::tone_burst_ack::ToneBurstAckPayload flagged;
+    flagged.group_seq = 0x3F;
+    flagged.type = ultra::waveform::tone_burst_ack::AckType::Ack;
+    const uint8_t word = static_cast<uint8_t>(kRungIdxQpskR23 | kRungAuthorityStartupProbeFlag);
+    flagged.rate_hint = word & 0x7;
+    flagged.rung_cmd = (word >> 3) & 0x3;
+    ultra::waveform::tone_burst_ack::ToneBurstAckPayload plain = flagged;
+    plain.rate_hint = kRungIdxQpskR23 & 0x7;
+    plain.rung_cmd = (kRungIdxQpskR23 >> 3) & 0x3;
+    const bool arq_verdict = c.isToneBurstAckCandidatePlausible(flagged);
+    CHECK(arq_verdict, "fixture: the payload is ARQ-plausible");
+    ConnectionAdaptiveTestAccess::setStartupProbeAirborne(c, true);
+    CHECK(!c.isToneBurstAckCandidatePlausible(flagged),
+          "while the probe is airborne a flagged copy is not a candidate");
+    CHECK(c.isToneBurstAckCandidatePlausible(plain),
+          "an unflagged ACK (the probe's own verdict) still is");
+    ConnectionAdaptiveTestAccess::setStartupProbeAirborne(c, false);
+    CHECK(c.isToneBurstAckCandidatePlausible(flagged) == arq_verdict,
+          "with no probe airborne the flag changes nothing");
+}
+
 }  // namespace
 
 int main() {
@@ -1096,6 +1130,7 @@ int main() {
     test_mcdpsk_one_frame_resend_ends_its_turn();
     test_first_ofdm_group_climbs_one_rung();
     test_escape_needs_the_peer_heard();
+    test_startup_probe_launch_copy_is_not_a_candidate();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";
