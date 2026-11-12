@@ -27,7 +27,10 @@ elapsed, timeout)` - true only when samples are missing and the budget is spent;
 check uses it.
 
 **Verification.** `StreamingDecodePolicy` (present -> decode whatever the clock; missing past the
-budget -> give up; missing within it -> wait). ctest 120/120. GUI: below.
+budget -> give up; missing within it -> wait). ctest 120/120. GUI: ITU Good 0 dB seed 47 (the case that failed twice) passes,
+218 s with the measured timeout and 343 s without - the responder logged "Duplicate CONNECT from ALPHA
+while responder ACK unconfirmed; re-sending cached CONNECT_ACK" and the connection recovered; Good 20
+dB 92 s, AWGN 20 dB 66 s, 2-minute dip seed 44 219 s (unchanged); no "Frame timeout" anywhere.
 
 ---
 
@@ -176,7 +179,12 @@ in-flight table, which governs alone until the first sample. 3-frame DBPSK: 43.6
 **Verification.** `SelectiveRepeatARQ` 68/68: `test_measured_burst_timeout` (the table before any
 sample, no sample from a resent burst, airtime + latency + 4 rttvar, doubling, the table as ceiling,
 an ACK ends the back-off) and `..._survives_constellation_change`; both fail with the measured path
-removed. ctest 120/120. GUI A/B: below.
+removed. ctest 120/120. GUI A/B at HEAD (after the look-ahead guard): ITU Good 0 dB 1 KB, 5
+seeds x 2 runs: off 183/199/261/206/243, on 175/204/204/(fail: the handshake bug, since fixed)/173 s
+- mean of the passing pairs 221.5 vs 189.0 s (-14.7 %; an earlier 5-seed run -14 %). Follow matrix
+(dips, QSB, dip lengths, Good/AWGN 20 dB): mean 183.8 vs 184.8 s, 9/9 PASS each. Stays default off:
+its gain and its risk both depend on real-radio latencies the simulator does not have (CAT/PTT, a
+receiver's carrier-sense hold under QRM) - for a rig A/B.
 
 ---
 

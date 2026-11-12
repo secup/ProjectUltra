@@ -826,7 +826,8 @@ frame error rate. Default stays 3 until that rule is a frame-error-rate decision
 `1` on the sending station: an MC-DPSK burst's retransmission timeout is its airtime plus the
 post-burst ACK latency measured on earlier bursts (RFC 6298, back-off on silent rounds, the formula
 as ceiling) instead of the formula's 43.6 s for a 3-frame DBPSK burst (measured round trip 18.4 s).
-Saves ~23 s per lost tone ACK. GUI 2026-11-12: Good 0 dB 5 seeds 197 vs 228 s mean; follow matrix
-9/9 PASS, but a one-frame DQPSK burst's ACK (2.8 s late, the receiver's first-frame look-ahead)
-collided with the 3.0 s timeout - the guard now includes that look-ahead; re-run before any flip.
-On a rig the peer's decode speed and CAT latency are measured, not assumed.
+Saves ~23 s per lost tone ACK. GUI 2026-11-12 at HEAD (guard includes the receiver's first-frame
+look-ahead): ITU Good 0 dB 189.0 vs 221.5 s (-14.7 %, 4 passing pairs), follow matrix neutral
+(184.8 vs 183.8 s, 9/9 PASS each). Rig A/B wanted before a default flip: the peer's decode speed and
+CAT latency are measured, but how long a receiver's carrier sense can hold an ACK under QRM is not -
+a hold longer than the guard would key a resend over the ACK. Set it on the sending station.
