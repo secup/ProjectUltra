@@ -168,6 +168,9 @@ void ModemEngine::wireDecoderRoleCallbacks() {
                     descriptor_mode_change_cb_(mod, rate, cw_per_frame);
                 }
             });
+        d->setBurstWindowAnchorCallback([this](uint8_t epoch, uint16_t base_low) {
+            if (burst_window_anchor_cb_) burst_window_anchor_cb_(epoch, base_low);
+        });
     });
 }
 

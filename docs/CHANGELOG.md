@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(arq): every burst descriptor names the sender's window; the receiver anchors to it (BUG-STEPDOWN-ANSWER-DISCARDED, BUG-ERA-HEAD-LOST-SILENCE)
+
+**What broke.** A rate change that re-cuts the sender's ARQ window starts a new move epoch, and the
+sender ignores any ACK of another era. The receiver learned the era only from a decoded DATA frame.
+GUI, ITU Good, 20 -> 5 dB drop (12 drop runs over the g9/g10/g12 batches):
+- seed 44 (all three batches) and seed 45 (g10): the first group at the stepped-down rung failed
+  entirely; the receiver's answer - "nothing decoded, go to QPSK R1/2" - was in the old era and the
+  sender rejected it before commit, 3-6 times. With the receiver as rate authority the sender held the
+  failing rung for 4 rounds until the follow left OFDM at its 60 s patience (39.6-40.0 s -> 102.5-103.0 s).
+- seed 45 (g9, g12): the group's era-head frame failed while frames 2-4 decoded; the receiver adopted
+  the era unanchored and suppressed every ACK - six silent rounds, follow crossing at 92-93 s.
+
+**What changed.** `protocol/descriptor_window_anchor.hpp` (INV-DESC-WINDOW-001): the BURST_HEADER
+header seq field (always 0 on the unified-seq path) carries `present | move epoch | tx base mod 8192`.
+`Connection::burstWindowAnchorWord()` stamps it at both burst sends (through the existing group_seq
+argument, so the GUI, TNC and test frontends pass it unchanged). The decoder unpacks it at descriptor
+consume and fires `BurstWindowAnchorCallback` before the group's frames (from every decoder - one ARQ
+per session); `ProtocolEngine/Connection::noteBurstWindowAnchor` -> `SelectiveRepeatARQ::
+adoptPeerWindowAnchor` adopts the era (old-era slots discarded, FILE payloads delivered first) and
+sets `rx_base` to the sender's base, unless already anchored in that era. A base more than one
+window behind the receiver's next-expected seq, or more than one window per era change ahead of it,
+is refused (the sender's cannot be there: a switch's abort abandons the frames in flight and moves
+the base past them - in the seed-44 drop the new base was 9 while the receiver waited for 5). Safety is the EPOCH_REBASE argument: a cumulative claim below the sender's tx base names only
+retired seqs. The known-bit decode (INV-DESC-KNOWN-001) is unaffected (the seq bytes are not pinned).
+`ULTRA_DESCRIPTOR_WINDOW_ANCHOR=0` turns both halves off.
+
+**Verification.** ctest 125/125 on this commit's tree (`DescriptorWindowAnchor` new: the word codec,
+the known bits, the decoder handing the anchor over end to end, and at the ARQ both failures reproduced
+and fixed, including the switch's own abandon path; 14 checks fail with the adoption disabled). GUI A/B
+(two `ultra_gui -sim` stations over OTASim, this tree against the previous commit in a second checkout,
+run side by side): ITU Good 20 -> 5 dB drop, 16 KB, seeds 44-47 - 919 s against 1228 s (-25 %:
+229/332, 195/236, 209/265, 286/395 s), every seed faster; the anchor was adopted 1-2 times per run and
+the receiver never went unanchored (control: 1-3 suppressed groups in seeds 45-47, 4 old-era answers
+rejected in seed 44); seeds 44-46 stayed on OFDM where the control crossed to MC-DPSK and back in 44
+and 47. ITU Good 5 dB, 8 KB, seeds 44-49: 1063 s against 1161 s - no era change in these runs, the
+difference is the MC-DPSK -> OFDM crossing time. 20/20 PASS. The first version refused a sender base
+ahead of the receiver's; the GUI showed the refusal (base 9 against 5) and the span was corrected
+before these runs.
+
+---
+
 ## 2026-11-12 — FIX(ack): one tone-ACK staircase for GUI and TNC, fast to lengthen (BUG-ACK-STAIRCASE-SLOW-ON-DROP, BUG-TNC-ACK-FIXED-25MS, BUG-MCDPSK-ACK-STAIRCASE-BYPASSED)
 
 **What broke.**

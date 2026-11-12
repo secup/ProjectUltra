@@ -308,8 +308,9 @@ public:
 
     // Burst mode TX callback - transmits multiple frames as single audio burst.
     // Used for OFDM connected mode and MC-DPSK DATA file-window bursts.
-    // group_seq stamps the burst descriptor (§14.27) for whole-burst GROUP_ACK;
-    // 0 for the legacy arq_ burst path / single-shot.
+    // group_seq is the 16-bit word the burst descriptor's header seq carries: the sender's
+    // window anchor (INV-DESC-WINDOW-001, protocol/descriptor_window_anchor.hpp - bit 15
+    // present, bits 13-14 move epoch, bits 0-12 tx base mod 8192), or 0 for none.
     // anchor_reason selects descriptor and DATA-group anchor ownership for this exact
     // physical request. RESEND and MODE_SWITCH robustly anchor both the descriptor and
     // the following DATA group. PROVEN_PARTIAL_REPAIR robustly anchors the descriptor
@@ -533,6 +534,11 @@ public:
     // (BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD): at the follow's down-target geometry the peer fell
     // back - its OFDM burst went unacknowledged - and this end follows it there.
     void noteRxMcDpskGeometry(int cw_count);
+    // A burst descriptor named the peer's window anchor (INV-DESC-WINDOW-001): its ARQ move
+    // epoch and tx base mod 8192. The receive window adopts that era and base.
+    void noteBurstWindowAnchor(uint8_t epoch, uint16_t base_low);
+    // The window anchor this end's next burst descriptor carries (0 = none).
+    uint16_t burstWindowAnchorWord() const;
     // MC-DPSK rate change (receiver side): a frame the modem could not decode, with its burst's
     // constellation (static_cast<int>(Modulation), -1 = unknown). Loss evidence, applied at once.
     void noteRxMcDpskFrameLost(int modulation);

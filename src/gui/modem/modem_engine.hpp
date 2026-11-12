@@ -294,6 +294,13 @@ public:
         descriptor_mode_change_cb_ = std::move(callback);
         wireDecoderRoleCallbacks();
     }
+    // A burst descriptor named the peer's window anchor (INV-DESC-WINDOW-001). From every
+    // decoder: the session has one ARQ, and a listener that hears the peer's first OFDM burst
+    // after an up-crossing hears the new era's anchor.
+    void setBurstWindowAnchorCallback(BurstWindowAnchorCallback callback) {
+        burst_window_anchor_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
+    }
     void setBurstTransportRxEnabled(bool enabled) {
         burst_transport_rx_enabled_ = enabled;
         forEachRxDecoder([&](StreamingDecoder* d) { d->setBurstTransportRxEnabled(enabled); });
@@ -646,6 +653,7 @@ private:
     std::function<void(bool)> mcdpsk_turn_loss_cb_;
     std::function<void()> burst_outcome_unknown_cb_;
     DescriptorModeChangeCallback descriptor_mode_change_cb_;
+    BurstWindowAnchorCallback burst_window_anchor_cb_;
     ToneBurstAckCallback tone_ack_cb_;
     ToneBurstAckAcceptancePredicate tone_ack_predicate_;
     StreamingDecoder::HarqProvisionalContextCallback harq_context_cb_;

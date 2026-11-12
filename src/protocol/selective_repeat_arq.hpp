@@ -221,6 +221,13 @@ public:
     // not yet seen, total ack silence). Connection reads it per burst-group event
     // to emit the rung_cmd=3 "waiting-rebase" tone signal (ULTRA_RX_RATE_CMD).
     bool rxWaitingRebase() const { return rx_epoch_wait_rebase_; }
+    // The peer's burst descriptor named its window anchor (INV-DESC-WINDOW-001,
+    // protocol/descriptor_window_anchor.hpp): its move epoch and its tx base mod 8192. Adopts
+    // the era and anchors rx_base at that base unless this end is already anchored in that
+    // era. A descriptor reaches us before any of its group's frames, so a group whose every
+    // frame fails still draws an ACK in the sender's era, and a lost era-head frame no longer
+    // leaves us unanchored. Returns true when adopted.
+    bool adoptPeerWindowAnchor(uint8_t epoch, uint16_t base_low);
     // WAITING-REBASE voice, sender side: the peer told us it is unanchored — the
     // era-base frame (head-of-burst, the most fade-exposed acquisition slot) keeps
     // dying. Force the BASE slot's retransmit timer due so the existing resend

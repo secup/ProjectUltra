@@ -237,6 +237,8 @@ public:
     void noteRxMcDpskModulation(Modulation mod);
     // The peer's MC-DPSK frames are cw_count codewords, not the session's (Connection::noteRxMcDpskGeometry).
     void noteRxMcDpskGeometry(int cw_count);
+    // A burst descriptor named the peer's window anchor (Connection::noteBurstWindowAnchor).
+    void noteBurstWindowAnchor(uint8_t epoch, uint16_t base_low);
     void noteRxMcDpskFrameLost(int modulation);
     void noteRxMcDpskTurnLoss(bool turn_over);
     void noteRxWaveform(WaveformMode mode);

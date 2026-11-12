@@ -268,6 +268,13 @@ cw x the rate's bytes per 648-bit block, a CRC-32C seeded from the direction's c
   gives a group whose descriptor was lost its N (and its end time); a lone member's `POS` sets the
   turn's air end. `ULTRA_OFDM_COMPACT_FRAME=0` makes a sender keep the v2 layout.
 
+4. The burst descriptor's header seq is the sender's window anchor (2026-11-12,
+INV-DESC-WINDOW-001, `protocol/descriptor_window_anchor.hpp`). It was always 0 on the unified-seq
+path; it now reads `present(1) epoch(2) tx_base mod 8192 (13)` (bit 15 down). The receiver adopts
+the sender's ARQ era and base from it before decoding the group, so a group that fails entirely
+after a rate change is answered in the sender's era, and a lost era-head frame no longer leaves
+the receiver unanchored. `ULTRA_DESCRIPTOR_WINDOW_ANCHOR=0` sends and ignores 0.
+
 ## ARQ Semantics (Selective Repeat)
 
 ULTRA connection currently uses `SelectiveRepeatARQ`.

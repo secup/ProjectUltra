@@ -221,6 +221,10 @@ inline void wireModemToProtocol(ModemEngine& modem,
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);
         });
+    // The peer's window anchor from its burst descriptor (INV-DESC-WINDOW-001).
+    modem.setBurstWindowAnchorCallback([&protocol](uint8_t epoch, uint16_t base_low) {
+        protocol.noteBurstWindowAnchor(epoch, base_low);
+    });
 
     // Accepted OFDM data-sync -> protocol (warm-sync / burst-cadence bookkeeping).
     modem.setDataSyncAcceptedCallback(

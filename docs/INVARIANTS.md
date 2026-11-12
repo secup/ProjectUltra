@@ -562,6 +562,34 @@ CTest `DescriptorKnownBits` compares the table with real descriptors bit for bit
 them at ITU Good 5 dB (BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS), and pinning the 82 fixed bits is a
 shortened code worth ~2 dB on a fading channel, from the same air bits.
 
+### INV-DESC-WINDOW-001: every burst descriptor names the sender's window; the receiver anchors to it
+
+**Rule:** a BURST_HEADER's 16-bit header seq field carries the sender's ARQ window anchor
+(`protocol/descriptor_window_anchor.hpp`): bit 15 present, bits 13-14 its move epoch (`tx_epoch_`),
+bits 0-12 its tx base (oldest unacknowledged seq) mod 8192. `Connection::burstWindowAnchorWord()`
+stamps it at both burst-send sites; the decoder hands it to the protocol before the group's frames
+(`BurstWindowAnchorCallback`, from every decoder - one ARQ per session), and
+`SelectiveRepeatARQ::adoptPeerWindowAnchor` adopts the era and sets `rx_base` to that base unless
+the receiver is already anchored in that era. It refuses a base more than one window behind its own
+next-expected seq (the sender cannot have sent less than this end holds) or more than one window per
+era change ahead of it (an era change abandons at most the frames in flight - `abortPendingTx` moves
+the base past them and re-queues their bytes; the epoch's mod-4 distance counts the changes, 1 for
+the unanchored same-epoch case).
+`ULTRA_DESCRIPTOR_WINDOW_ANCHOR=0` turns both halves off; either end off is safe (a zero field, or
+an ignored one).
+
+**Why:** a rate change that re-cuts the window starts a new era, and the sender ignores any ACK of
+another era (its seq claims were made on the old grid). Learning the era only from a decoded DATA
+frame left two holes at the margin, both measured at ITU Good after a 20 -> 5 dB drop: a first
+group at the new rung that failed entirely drew an ACK in the old era that the sender discarded -
+the receiver's "drop another rung" never arrived and the sender repeated the failing rung for four
+rounds (~63 s) until the follow left OFDM (seed 44, every run); a group whose era-head frame failed
+while the rest decoded left the receiver unanchored and ACK-silent for six rounds (seed 45). The
+descriptor reaches the receiver before any of its frames, so both become ordinary ACKs.
+**Safety:** anchoring at the sender's tx base can only make the receiver's cumulative ACK claim
+seqs the sender already retired - the EPOCH_REBASE argument; a corrupt descriptor that passes its
+CRC must also land inside the one-window span to be used.
+
 ### INV-FRAME-WHITEN-001: nothing but the data sets an OFDM burst's peak
 
 **Rule:** every burst is scaled to its loudest sample on a peak-limited transmitter, so no

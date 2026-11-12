@@ -73,6 +73,9 @@ struct ARQStats {
     int data_repair_cws_merged = 0;     // Repair CWs accepted into partial RX slots
     int stale_epoch_acks_ignored = 0;   // ACK ignored: move-epoch != current TX epoch
                                         // (ULTRA_ARQ_MOVE_EPOCH, BUG-ARQ-SEQ-COLLISION)
+    int descriptor_anchor_adoptions = 0;  // RX anchored to the peer's era/base from a burst
+                                          // descriptor (INV-DESC-WINDOW-001)
+    int descriptor_anchor_rejected = 0;   // descriptor anchor outside the peer's possible span
 };
 
 /**

@@ -20,7 +20,10 @@ the rung"), and the receiver had no frame to answer - six silent rounds until th
 patience fell back to MC-DPSK. Directions (rate control - needs the rig A/B, not the seeded sim): feed
 the failed group's EVM reading into the latent posterior as a likelihood (the EVM decode thresholds
 are per-rung and class-independent, docs/EVM_RATE_SELECTION_2026_11_08.md), and/or let a singleton
-carry a descriptor so its rung can change. A related gap on the receiver: a failed single frame is
+carry a descriptor so its rung can change. (Part of what the seed-45 rounds looked like - the
+group whose era-head frame failed while the rest decoded drew no ACK at all - was
+BUG-ERA-HEAD-LOST-SILENCE, fixed 2026-11-12; the single-frame rounds that follow remain.) A related
+gap on the receiver: a failed single frame is
 answered only by the anchored-burst backstop, 14.6 s after its anchor (the longest physical turn,
 because a failed chirp-anchored codeword may be a group resend's descriptor), which is always later
 than a singleton's resend (~8.7 s) and so is withheld (BUG-BACKSTOP-RACES-RTO) - the receiver says
@@ -2765,6 +2768,29 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-STEPDOWN-ANSWER-DISCARDED + BUG-ERA-HEAD-LOST-SILENCE (FIXED 2026-11-12) — was P1: after a rate step-down the receiver's answers were lost for a minute
+
+A rate change that re-cuts the sender's ARQ window starts a new move epoch (era), and the sender
+ignores every ACK of another era (its seq claims were made on the old grid). The receiver learned
+the era only from a decoded DATA frame. Two consequences, measured on the GUI gate at ITU Good after
+a 20 -> 5 dB drop (12 drop runs over three batches):
+- **Answer discarded** (seed 44 in all three batches, seed 45 once): the first group at the
+  stepped-down rung failed entirely; the receiver, holding no frame of the new era, answered in the
+  old one - its "nothing decoded, drop to QPSK R1/2" ACK was heard clearly (normalized peak 0.19,
+  min confidence 4.75) and rejected before commit as a stale era, 3-6 times. With RX authority the
+  sender moves only on the receiver's command, so it repeated the failing rung for 4 rounds until the
+  waveform follow's 60 s patience left OFDM (bump at 39.6-40.0 s, crossing at 102.5-103.0 s).
+- **Era head lost** (seed 45, two batches): the group's first frame (the EPOCH_REBASE head) failed
+  and frames 2-4 decoded; the receiver adopted the era unanchored and suppressed every ACK
+  ("group ack suppressed", 3-6 times) - six silent rounds, the follow crossed at 92-93 s.
+Fix (INV-DESC-WINDOW-001): the burst descriptor's header seq field, always 0 on the unified-seq path,
+carries the sender's move epoch and tx base; the receiver adopts the era and anchors its base there
+before the group's frames (`SelectiveRepeatARQ::adoptPeerWindowAnchor`, refusing any base the
+sender's cannot be: more than one window behind, or more than one window per era change ahead - the
+switch's abort abandons the frames in flight and moves the base past them, so in the seed-44 drop the
+sender's new base was 9 while the receiver still waited for 5). CTest `DescriptorWindowAnchor` reproduces both
+failures at the ARQ and checks the field end to end through the encoder and decoder.
 
 ### BUG-ACK-STAIRCASE-SLOW-ON-DROP + BUG-TNC-ACK-FIXED-25MS + BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (FIXED 2026-11-12) — was P2: tone ACKs too short for the channel
 

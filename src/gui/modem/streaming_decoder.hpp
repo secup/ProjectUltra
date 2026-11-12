@@ -236,6 +236,10 @@ using BurstGroupCallback =
 // without a MODE_CHANGE exchange. Only fired when the knob is ON (byte-identical OFF).
 using DescriptorModeChangeCallback =
     std::function<void(Modulation mod, CodeRate rate, int cw_per_frame)>;
+// A consumed BURST_HEADER carried the sender's window anchor (INV-DESC-WINDOW-001): its ARQ
+// move epoch and tx base mod 8192. Fired before the group's frames are decoded, outside the
+// decoder's locks, on the same decoder-thread -> protocol path as the mode-change callback.
+using BurstWindowAnchorCallback = std::function<void(uint8_t epoch, uint16_t base_low)>;
 
 // StreamingDecoder - Unified RX decoder for all waveform types
 class StreamingDecoder {
@@ -407,6 +411,9 @@ public:
     void setFrameCallback(FrameDecodedCallback callback) { frame_callback_ = callback; }
     void setBurstGroupCallback(BurstGroupCallback callback) { burst_group_callback_ = callback; }
     // DESC-SWITCH Phase 1: mode-hop descriptor notification (see the typedef above).
+    void setBurstWindowAnchorCallback(BurstWindowAnchorCallback callback) {
+        burst_window_anchor_callback_ = std::move(callback);
+    }
     void setDescriptorModeChangeCallback(DescriptorModeChangeCallback callback) {
         descriptor_mode_change_callback_ = std::move(callback);
     }
@@ -1403,6 +1410,7 @@ private:
     // Callbacks
     FrameDecodedCallback frame_callback_;
     BurstGroupCallback burst_group_callback_;
+    BurstWindowAnchorCallback burst_window_anchor_callback_;
     DescriptorModeChangeCallback descriptor_mode_change_callback_;  // DESC-SWITCH Phase 1
     StreamingPingCallback ping_callback_;
     DataSyncAcceptedCallback data_sync_accepted_callback_;

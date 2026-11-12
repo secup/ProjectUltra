@@ -889,6 +889,11 @@ void ProtocolEngine::noteRxMcDpskGeometry(int cw_count) {
     connection_.noteRxMcDpskGeometry(cw_count);
 }
 
+void ProtocolEngine::noteBurstWindowAnchor(uint8_t epoch, uint16_t base_low) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteBurstWindowAnchor(epoch, base_low);
+}
+
 void ProtocolEngine::noteRxMcDpskMargin(bool upper_rung_margin) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.noteRxMcDpskMargin(upper_rung_margin);

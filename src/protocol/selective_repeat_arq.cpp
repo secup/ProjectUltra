@@ -1,5 +1,6 @@
 #include "selective_repeat_arq.hpp"
 #include "selective_repeat_arq_policy.hpp"
+#include "descriptor_window_anchor.hpp"
 #include "file_transfer.hpp"  // PayloadType — below-window FILE salvage gate only
 #include "ultra/logging.hpp"
 #include "ultra/phy_diagnostics.hpp"
@@ -205,6 +206,57 @@ bool SelectiveRepeatARQ::handleMoveEpochOnData(const v2::DataFrame& frame) {
                   v2::frameTypeToString(frame.type), frame.seq);
     }
     return true;  // consumed: no window state touched, no SACK emitted
+}
+
+bool SelectiveRepeatARQ::adoptPeerWindowAnchor(uint8_t epoch, uint16_t base_low) {
+    if (!move_epoch_enabled_) {
+        return false;
+    }
+    epoch = static_cast<uint8_t>(epoch & 0x3u);
+    if (epoch == rx_epoch_ && !rx_epoch_wait_rebase_) {
+        return false;  // anchored in the sender's era already: our own window is as current
+    }
+    // Where the sender's tx base can lie relative to our next-expected seq. It trails it by
+    // at most one window (we cannot hold more than the frames it has sent). It runs ahead of
+    // it only when an era change abandons the frames in flight (abortPendingTx moves the base
+    // past them; their bytes are re-queued under new seqs) - at most one window per era
+    // change, and at most three changes lie between our era and the anchor's (the epoch is
+    // mod 4; the unanchored case, same epoch, is one). Outside that span the field is not the
+    // sender's base - a descriptor that decoded wrong - and anchoring above the true base
+    // would claim frames we never got.
+    const int window = static_cast<int>(config_.window_size);
+    const unsigned era_changes = (static_cast<unsigned>(epoch - rx_epoch_) & 0x3u) != 0
+                                     ? (static_cast<unsigned>(epoch - rx_epoch_) & 0x3u)
+                                     : 1u;
+    const int distance = descriptor_window_anchor::baseDistance(base_low, rx_base_seq_);
+    if (distance < -window || distance > static_cast<int>(era_changes) * window) {
+        stats_.descriptor_anchor_rejected++;
+        LOG_MODEM(WARN,
+                  "SR-ARQ: descriptor window anchor (epoch %u, base mod 8192 = %u) lies %d "
+                  "from rx_base %u - outside the sender's possible span, ignored",
+                  static_cast<unsigned>(epoch), static_cast<unsigned>(base_low), distance,
+                  static_cast<unsigned>(rx_base_seq_));
+        return false;
+    }
+    const uint16_t base =
+        static_cast<uint16_t>(static_cast<int>(rx_base_seq_) + distance);
+    const bool new_era = epoch != rx_epoch_;
+    rx_epoch_ = epoch;
+    // New era: the old grid's buffered frames are unusable (FILE payloads are delivered
+    // before the discard - SACKed bytes stay durable). Same era while unanchored: the slots
+    // are empty by construction; discard defensively, as the late-rebase path does.
+    discardRxStateForEpochAdoption(new_era ? "descriptor anchor" : "descriptor late anchor");
+    rx_base_seq_ = base;
+    rx_epoch_wait_rebase_ = false;
+    stats_.descriptor_anchor_adoptions++;
+    LOG_MODEM(WARN,
+              "SR-ARQ: MOVE-EPOCH %s epoch %u from the burst descriptor, rx_base anchored to %u",
+              new_era ? "adopted" : "anchored", static_cast<unsigned>(rx_epoch_),
+              static_cast<unsigned>(rx_base_seq_));
+    if (on_rx_window_advanced_) {
+        on_rx_window_advanced_(rx_base_seq_, config_.window_size);
+    }
+    return true;
 }
 
 void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {

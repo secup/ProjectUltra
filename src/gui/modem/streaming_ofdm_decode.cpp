@@ -3,6 +3,7 @@
 #include "ofdm/genie_tx_capture.hpp"
 #include "streaming_decoder.hpp"
 #include "protocol/connection_policy.hpp"  // MC-DPSK data constellations
+#include "protocol/descriptor_window_anchor.hpp"
 #include "protocol/mcdpsk_frame.hpp"
 #include "protocol/ofdm_data_frame.hpp"
 #include "streaming_buffer_policy.hpp"
@@ -1538,6 +1539,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // decoder-local locks are released.
                             bool descriptor_mode_hop = false;
                             bool descriptor_current_group_full_anchor = false;
+                            protocol::descriptor_window_anchor::Anchor descriptor_window_anchor;
                             Modulation descriptor_hop_mod = current_modulation_;
                             CodeRate descriptor_hop_rate = code_rate_;
                             int descriptor_hop_cw = 0;
@@ -1631,11 +1633,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 if (waveform_) {
                                     waveform_->setActiveLDPCLiftingZ(bi.lifting_z);
                                 }
-                                // §14.27: the descriptor frame header seq carries
-                                // the burst group_seq (encoder stamps it via
-                                // setBurstGroupSeq). The following group's
-                                // logical frames inherit it for whole-burst ACK.
-                                last_burst_group_seq_ = hdr.seq;
+                                // The descriptor's header seq carries the sender's
+                                // window anchor (INV-DESC-WINDOW-001): its move epoch
+                                // and tx base, handed to the protocol below. The group
+                                // number the logs and the GUI show is that base (it
+                                // advances with delivery); a descriptor without an
+                                // anchor keeps the old field as it was.
+                                descriptor_window_anchor =
+                                    protocol::descriptor_window_anchor::unpack(hdr.seq);
+                                last_burst_group_seq_ =
+                                    descriptor_window_anchor.present
+                                        ? static_cast<uint16_t>(
+                                              descriptor_window_anchor.base_low & 0x3Fu)
+                                        : hdr.seq;
                                 // HARQ provisional keys: reset per-group state at
                                 // descriptor consume. Gate D2 (timeout-batch resend,
                                 // whose fill rule differs from the steady-state
@@ -1843,6 +1853,13 @@ void StreamingDecoder::decodeCurrentFrame() {
                             // burst_group_callback_ uses (§6 row 11: no new concurrency
                             // class; the demod config itself applies at the top of the
                             // next processBuffer via the pending_descriptor_* channel).
+                            // The sender's window anchor first: the era this group's
+                            // frames belong to is fixed before any of them is processed.
+                            if (descriptor_window_anchor.present &&
+                                burst_window_anchor_callback_) {
+                                burst_window_anchor_callback_(descriptor_window_anchor.epoch,
+                                                              descriptor_window_anchor.base_low);
+                            }
                             if (descriptor_mode_switch_enabled_ && descriptor_mode_hop &&
                                 descriptor_mode_change_callback_) {
                                 descriptor_mode_change_callback_(

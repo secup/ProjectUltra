@@ -6,6 +6,7 @@
 #include "connection.hpp"
 #include "mcdpsk_frame.hpp"
 #include "connection_policy.hpp"
+#include "descriptor_window_anchor.hpp"
 #include "sync/acquisition_mode.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/logging.hpp"
@@ -9416,6 +9417,21 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
     return true;
 }
 
+void Connection::noteBurstWindowAnchor(uint8_t epoch, uint16_t base_low) {
+    if (state_ != ConnectionState::CONNECTED || disconnect_teardown_active_ ||
+        !descriptor_window_anchor::enabled()) {
+        return;
+    }
+    arq_.adoptPeerWindowAnchor(epoch, base_low);
+}
+
+uint16_t Connection::burstWindowAnchorWord() const {
+    if (!descriptor_window_anchor::enabled() || !arq_.moveEpochEnabled()) {
+        return 0;
+    }
+    return descriptor_window_anchor::pack(arq_.txMoveEpoch(), arq_.getTxBaseSeq());
+}
+
 void Connection::noteRxMcDpskGeometry(int cw_count) {
     if (state_ != ConnectionState::CONNECTED || negotiated_mode_ != WaveformMode::MC_DPSK ||
         cw_count == data_frame_cw_count_) {
@@ -10635,8 +10651,8 @@ void Connection::flushBurstBuffer(bool retransmission_required,
                       "%zu frames, robust descriptor + light DATA group",
                       committed_frames.size());
         }
-        on_transmit_burst_(committed_frames, /*group_seq=*/0,
-                           anchor_reason);
+        // The descriptor names this end's window anchor (INV-DESC-WINDOW-001).
+        on_transmit_burst_(committed_frames, burstWindowAnchorWord(), anchor_reason);
     } else if (on_transmit_) {
         // Fallback: send individually
         for (const auto& frame : committed_frames) {
@@ -10891,7 +10907,7 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list,
     // pre-unification reliability coupling the merge dropped when it hardcoded this to false.
     LOG_MODEM(INFO, "Connection: Resending ARQ timeout-repair as re-interleaved burst of %zu frames (full anchor)",
               physical_frames.size());
-    on_transmit_burst_(physical_frames, /*group_seq=*/0,
+    on_transmit_burst_(physical_frames, burstWindowAnchorWord(),
                        /*anchor_reason=*/kAnchorReasonResend);  // full chirp re-anchor +
                                                               // recool the skip streak
 }

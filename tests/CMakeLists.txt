@@ -769,6 +769,18 @@ target_include_directories(test_descriptor_known_bits PRIVATE
 target_link_libraries(test_descriptor_known_bits PRIVATE ultra_core ota_channel_core)
 add_test(NAME DescriptorKnownBits COMMAND test_descriptor_known_bits)
 
+# INV-DESC-WINDOW-001: the descriptor carries the sender's window anchor (codec, decoder, ARQ).
+add_executable(test_descriptor_window_anchor
+    test_descriptor_window_anchor.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_descriptor_window_anchor PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_descriptor_window_anchor PRIVATE ultra_core ota_channel_core)
+add_test(NAME DescriptorWindowAnchor COMMAND test_descriptor_window_anchor)
+
 # INV-OFDM-FRAME-001: the compact OFDM DATA frame (codec + a burst through encoder and decoder).
 add_executable(test_ofdm_compact_frame
     test_ofdm_compact_frame.cpp
