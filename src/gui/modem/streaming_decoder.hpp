@@ -1769,7 +1769,7 @@ private:
     size_t mc_burst_pending_consumed_samples_ = 0;
     std::vector<float> mc_burst_pending_soft_bits_;
     std::chrono::steady_clock::time_point mc_burst_wait_start_time_;
-    static constexpr int MC_DPSK_MAX_BURST_FRAMES = 8;
+    static constexpr int MC_DPSK_MAX_BURST_FRAMES = 8;  // >= connection_policy::kMCDPSKMaxBurstFrames
 
     // Pending frame state for multi-codeword frames
     // After reading header, if more codewords needed, wait for more samples

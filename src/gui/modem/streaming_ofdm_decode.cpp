@@ -4224,6 +4224,9 @@ void StreamingDecoder::finishMCDPSKCompactBurst(bool turn_over) {
 }
 
 void StreamingDecoder::continueMCDPSKCompactBurst() {
+    static_assert(MC_DPSK_MAX_BURST_FRAMES >=
+                      static_cast<int>(protocol::connection_policy::kMCDPSKMaxBurstFrames),
+                  "a burst continuation must reach the largest MC-DPSK window");
     auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
     if (!mc) {
         finishMCDPSKCompactBurst();

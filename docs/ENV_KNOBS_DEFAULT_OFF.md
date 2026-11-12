@@ -804,3 +804,12 @@ So nobody re-proposes them from the name alone:
 instead of at its retransmission timeout, and the receiver ACKs a turn whose last frames or first
 frame it lost. Default off until a GUI A/B at low SNR (MC-DPSK sessions) shows it does not hurt;
 see CHANGELOG 2026-11-12.
+
+## `ULTRA_MCDPSK_WINDOW_MAX` (added 2026-11-12)
+`N` (1-8, same on both stations; default 3): the most frames an MC-DPSK burst carries when the 19 s
+key-down target allows more. Only DQPSK and the shorter-symbol geometries reach the cap (DQPSK at
+1024 samples/symbol: 6 frames, a 17.0 s burst); DBPSK at 1024 stays at 3. The cap of 3 dates from
+#71 (2026-07-01): DQPSK at window 5 timed out with clean decodes because the ACK arrived more than
+26 s after the burst; that is BUG-MCDPSK-ACK-DROPPED (every MC-DPSK file ACK held 13 s and dropped,
+fixed 2026-11-09). Today the ACK arrives 1.43 s after the burst end (p99 1.54 s, 187 GUI bursts).
+GUI A/B pending (`8` = timing-only).

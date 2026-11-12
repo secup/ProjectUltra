@@ -2648,6 +2648,28 @@ inline uint32_t mcDpskBurstAirtimeMs(const MCDPSKFrameTiming& timing,
         std::min<uint64_t>(burst_ms, static_cast<uint64_t>(UINT32_MAX)));
 }
 
+// The most frames a receiver's burst continuation decodes (StreamingDecoder::
+// MC_DPSK_MAX_BURST_FRAMES must not be smaller).
+inline constexpr size_t kMCDPSKMaxBurstFrames = 8;
+
+// ULTRA_MCDPSK_WINDOW_MAX (default 3, the #71 rig cap below; same setting on both stations - the
+// receiver sizes its burst continuation with the same function): the most frames an MC-DPSK burst
+// carries when the key-down target allows more, 1..kMCDPSKMaxBurstFrames. Only DQPSK and the
+// shorter-symbol geometries reach the cap; DBPSK at 1024 samples/symbol is held at 3 by the 19 s
+// target itself. A/B knob: #71's DQPSK window-5 spiral ("the ACK just didn't get back in time",
+// clean decodes) matches BUG-MCDPSK-ACK-DROPPED (every MC-DPSK file ACK held 13 s and dropped,
+// fixed 2026-11-09), so the cap may be a workaround for a bug that is gone.
+inline size_t mcDpskMaxWindowFromEnvironment() {
+    static const size_t cap = [] {
+        const char* e = std::getenv("ULTRA_MCDPSK_WINDOW_MAX");
+        if (e == nullptr || e[0] == '\0') return size_t{3};
+        const long v = std::strtol(e, nullptr, 10);
+        return static_cast<size_t>(
+            std::clamp<long>(v, 1, static_cast<long>(kMCDPSKMaxBurstFrames)));
+    }();
+    return cap;
+}
+
 inline size_t mcDpskWindowSizeForTiming(const MCDPSKFrameTiming& timing) {
     if (timing.data_ms == 0 || timing.data_only_ms == 0) return 1;
 
@@ -2664,9 +2686,9 @@ inline size_t mcDpskWindowSizeForTiming(const MCDPSKFrameTiming& timing) {
     // already cap it below 5 (test_connection_policy + the rig log confirm ROBUST_MID/sps=1024
     // -> 3, ROBUST_LOW/sps=2048 -> 1). So cap at the round-trip-safe, rig-validated 3.
     constexpr uint32_t kTargetContinuousBurstMs = 19000;
-    constexpr size_t kMaxRoundTripSafeMCDPSKWindow = 3;
+    const size_t max_window = mcDpskMaxWindowFromEnvironment();  // 3 unless ULTRA_MCDPSK_WINDOW_MAX
     size_t selected = 1;
-    for (size_t candidate = 2; candidate <= kMaxRoundTripSafeMCDPSKWindow; ++candidate) {
+    for (size_t candidate = 2; candidate <= max_window; ++candidate) {
         if (mcDpskBurstAirtimeMs(timing, candidate) > kTargetContinuousBurstMs) {
             break;
         }
@@ -2688,9 +2710,8 @@ inline size_t mcDpskWindowSizeForTiming(uint32_t data_frame_ms) {
     // rig-validated rationale). This coarse overload is not on the production window path
     // (connection.cpp uses the timing overload); kept consistent to avoid a stale bound.
     constexpr uint32_t kTargetBurstMs = 19000;
-    constexpr size_t kMaxRoundTripSafeMCDPSKWindow = 3;
     const size_t by_burst = std::max<size_t>(1, kTargetBurstMs / data_frame_ms);
-    return std::clamp<size_t>(by_burst, 1, kMaxRoundTripSafeMCDPSKWindow);
+    return std::clamp<size_t>(by_burst, 1, mcDpskMaxWindowFromEnvironment());
 }
 
 // Sender ACK RTO for an MC-DPSK selective-repeat window burst. It MUST exceed the real
