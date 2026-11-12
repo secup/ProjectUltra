@@ -40,6 +40,16 @@ FER cannot be measured offline until the tool sends bursts through the productio
 (descriptor + frames + tail as `ModemEngine::transmitBurst` makes them; the tools rule: run the
 modem as the GUI does).
 
+### BUG-CONTROL-RETRY-OVER-UNDECODED-ACK (open, 2026-11-12) — P3: a MODE_CHANGE retry keys while the peer's ACK is still in the decoder's backlog
+
+The MODE_CHANGE retry waits only for the energy CCA to clear (`channel_busy_query_`, 30 ms polls);
+the decoder runs ~1-2 s behind live audio, so a retry can key right after the peer's ACK ends but
+before that ACK is decoded, and the key-down's echo clear discards it (GUI, follow off, Good 100 s
+dip, seed 44, 152.58 s: the peer's ACK aired 151.18-152.6 s, the decoder was at 150.49 s of audio).
+Listen-before-ACK holds a deferred ACK on new decoder evidence (INV-TONE-ACK-005); a control retry
+has no such hold. Rare since the escapes need evidence (MODE_CHANGE now comes almost only from
+them and the startup-probe rollback).
+
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 
 The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample
@@ -2564,6 +2574,15 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-SIM-TX-KEYED-EARLY (FIXED 2026-11-12, App::keyedUntilAfterQueuing) — was P2, simulator fidelity: a frame queued behind a burst ended the keyed state early
+
+The sim TX path set the key-down end to now + the new frame's length, so a control frame queued
+behind a 6.4 s burst cleared `tx_in_progress_` 6 s before the station stopped transmitting; the
+MODE_CHANGE retry deadline (held while keyed) then fired while the peer's ACK was still in the
+decoder's backlog, and the retry's own key-down lost it (GUI follow off, Good 100 s dip, seed 44:
+two retries, 22 s). Fixed: queued transmissions extend the key-down end.
+
 
 ### BUG-UPCROSS-STALE-SCALAR (FIXED 2026-11-12, SessionPick::burst_reading) — was P2: the first MC-DPSK ACK after following the peer down commanded OFDM on the pre-fade SNR
 

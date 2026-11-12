@@ -157,6 +157,20 @@ private:
     uint32_t render_frames_seen_ = 0;
     std::atomic<bool> tx_in_progress_{false};  // Thread-safe TX flag for waterfall control
     std::chrono::steady_clock::time_point tx_end_time_;  // When current TX finishes
+    // The key-down end after queuing a transmission of `duration_ms`: one queued behind audio still
+    // on the air plays after it, so the station stays keyed until the queue drains, never until
+    // this frame's length from now. (Until 2026-11-12 the sim path set now + length: a MODE_CHANGE
+    // queued behind a 6.4 s burst cleared tx_in_progress_ 5 s early and its retry deadline, held
+    // while keyed, ran out before the peer's ACK could be decoded.) +100 ms tail margin once.
+    std::chrono::steady_clock::time_point keyedUntilAfterQueuing(size_t duration_ms) const {
+        constexpr auto kTailMargin = std::chrono::milliseconds(100);
+        const auto now = std::chrono::steady_clock::now();
+        auto start = now;
+        if (tx_in_progress_.load(std::memory_order_relaxed) && tx_end_time_ - kTailMargin > now) {
+            start = tx_end_time_ - kTailMargin;  // the audio still queued ahead of this frame
+        }
+        return start + std::chrono::milliseconds(duration_ms) + kTailMargin;
+    }
 
     // OFDM carrier-sense TX defer queue (half-duplex collision avoidance). Touched
     // only on the main thread (queueRealTxSamples runs from protocol_.tick(), and

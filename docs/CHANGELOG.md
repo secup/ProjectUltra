@@ -10,6 +10,29 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(sim fidelity): a transmission queued behind one on the air keeps the station keyed (BUG-SIM-TX-KEYED-EARLY)
+
+**What was broken.** The GUI's sim TX path (`doQueueRealTxSamples`, OTASim) set
+`tx_end_time_ = now + this frame's length` for every queued transmission, and clears
+`tx_in_progress_` at that time; the hardware path clears it when the audio queue drains. A frame
+queued while another was still playing therefore ended the station's keyed state early. GUI, follow
+off, ITU Good 100 s dip, seed 44: a MODE_CHANGE queued behind a 6.4 s burst at 142.68 s cleared
+`tx_in_progress_` at ~144.2 s while the station transmitted until ~150.4 s; the MODE_CHANGE retry
+deadline, which holds while keyed (BUG-MC-RETRY-SPURIOUS), started 6 s early and fired at
+152.58 s - while the peer's ACK (sent 151.18 s) was still in the decoder's backlog (it runs ~2 s
+behind live audio). The retry keyed over it and the ACK was lost; the exchange needed two retries
+(22 s). The peer had decoded every copy.
+
+**What changed.** `App::keyedUntilAfterQueuing(duration)`: a transmission queued behind audio still
+on the air keys after it (start at the previous end), on both the sim and the hardware path (the
+latter's flag already followed the queue; its `tx_end_time_` feeds the in-QSO DATA deferral).
+
+**Verification.** Builds (`ultra_gui`). GUI: below. Also seen in the same exchange, not changed:
+the MODE_CHANGE retry fires right after the peer's ACK ends, before the decoder has processed it
+(listen-before-ACK's evidence rule has no counterpart for control retries).
+
+---
+
 ## 2026-11-12 — FIX(escape): a stuck frame is one the peer's ACKs keep reporting missing, not one resent into silence
 
 **What was broken.** The stuck-frame escape ("frame stuck, 5 retx at current rate") counted every

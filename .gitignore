@@ -60,3 +60,4 @@ recordings/*
 /out_*.jsonl
 
 build_tsan/
+build_gui3/

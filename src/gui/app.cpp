@@ -4035,8 +4035,8 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
         }
 
         const size_t tx_duration_ms = (sim_samples.size() * 1000) / 48000;
+        tx_end_time_ = keyedUntilAfterQueuing(tx_duration_ms);
         tx_in_progress_ = true;
-        tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
 
         if (waterfall_) {
             waterfall_->addSamples(sim_samples.data(), sim_samples.size());
@@ -4138,8 +4138,8 @@ bool App::doQueueRealTxSamples(const std::vector<float>& samples, const char* co
     }
 
     size_t tx_duration_ms = (hardware_samples.size() * 1000) / 48000;
+    tx_end_time_ = keyedUntilAfterQueuing(tx_duration_ms);
     tx_in_progress_ = true;
-    tx_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(tx_duration_ms + 100);
 
     if (waterfall_) {
         waterfall_->addSamples(hardware_samples.data(), hardware_samples.size());
