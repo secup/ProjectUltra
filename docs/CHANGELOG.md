@@ -38,8 +38,10 @@ ate the larger window's gain on a 2 KB file (GUI AWGN +3 dB: 210-211 s vs 208 s 
 that burst, and the sender caps its bursts to it after an up-step (`Connection::
 mcdpsk_probe_cap_active_`, via the ARQ in-flight cap) until an ACK newer than the commanding one
 keeps the rung (a repeated copy of the commanding ACK confirms nothing; a failed probe steps down
-and clears the cap). No change at the production 3-codeword geometry (both windows 3); at 4
-codewords (operator override) the probe is 2 frames and comes after 2 clean bursts (was 3).
+and clears the cap). No change at the 3-codeword geometry (both windows 3), which almost every
+MC-DPSK session uses; at 4 codewords - the entry pick's "Robust" rung (DQPSK, 1 of 433 picks in the
+2026-11-12 GUI runs) or an operator override - the probe is 2 frames (the DBPSK window) and comes
+after 2 clean bursts (was 3).
 
 **Verification.** `WaveformFollow` `test_mcdpsk_up_step_probes_small` (fails with the cap removed);
 `ConnectionPolicy` probe-schedule checks re-derived (4 codewords: 2 x 3.69 s + 23.5 s = 30.9 s over a

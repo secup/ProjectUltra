@@ -1275,8 +1275,8 @@ void test_mcdpsk_turn_loss_ack() {
 // copy showed what follows).
 // An MC-DPSK up-step probes with the lower rung's window (mcDpskProbeBurstFrames): with 4 codewords
 // per frame DBPSK carries 2 frames per burst and DQPSK 3, so the first DQPSK bursts carry 2 until an
-// ACK newer than the commanding one keeps DQPSK. At the production 3 codewords both windows are 3
-// and nothing is capped.
+// ACK newer than the commanding one keeps DQPSK (4 codewords: the entry pick's Robust rung). At the
+// 3 codewords almost every session uses both windows are 3 and nothing is capped.
 void test_mcdpsk_up_step_probes_small() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
