@@ -190,6 +190,22 @@ drops it — i.e. the backstop's ACK is effectively dead.
 group (or its minimum when the descriptor is lost) so the re-confirm can land inside the sender's
 listen window, minus the ACK airtime; or stop emitting a re-confirm that cannot arrive before it.
 
+**Analysis 2026-11-12 (not implemented).** The sender listens from its burst's end to
+start + RTO(n), with RTO(n) ~ 2 x air(n) + tail (INFLIGHT-RTO table: `burst_n + sack_hold_n +
+tails`), n = frames in the burst - unknown to a receiver that lost the descriptor. No fixed timer
+fits every n: it must fire after air(n_max) (~12 s) yet before 2 x air(n_min) (~6 s for one frame).
+What can place it: (1) the burst's energy tail - fire when the in-band power reads as noise
+(`frame_policy::inBandPowerReadsAsNoise`, as the MC-DPSK compact tail does), synchronous provenance,
+right at the start of the listen window; the risk is a fade that reads as a tail mid-burst (the
+ACK then keys over the burst, unheard, and blanks the frames the classic path could still decode);
+(2) the receiver's last framed group at the commanded rung as the estimate of n. The listen-before-
+ACK deadline rule ("energy-only busy sends it" after 2.5 s) is why an early asynchronous backstop
+is not enough on its own. In the 2-minute 0 dB dips the backstop fires 1-5 times per follow-off
+run and its re-confirm is lost to the channel anyway; the race matters at marginal SNR on fading
+(Moderate@10), where a campaign is needed to judge any change. The MC-DPSK counterpart (a lost
+compact burst draws no ACK) is handled by `ULTRA_MCDPSK_ACK_REPAIR` (turn-loss ACK at the burst's
+tail).
+
 ### BUG-TX-LEVEL-HANDSET (open, 2026-11-10) — P3 cleanup: the OFDM data level is a hand-set number
 
 `ModemConfig::output_scale = 40` sets OFDM data loudness relative to the chirp ("to match chirp /
