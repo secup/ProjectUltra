@@ -209,6 +209,14 @@ capped at 8PSK R2/3 (`kNarrowCoherentLadder`). Measured headroom it leaves: 16QA
 from 18 dB and wins goodput on Good from 21 dB (not on Moderate). `ULTRA_RATE_ADAPT=1` enables the
 wideband machinery on any OFDM mode; it is not validated on narrowband.
 
+**Measured 2026-11-12 (GUI, forced narrowband, 6 KB): `ULTRA_RATE_ADAPT=1` is no fix.** AWGN 22 dB,
+seed 44: 240 s / 240 bps against 143 s / 450 bps at the fixed 8PSK R2/3 (seed 45 fixed: 144 s). The
+knob makes `entryRateCapsApply` true, so the receiver authority's measured-entry probe sends the
+first group at QPSK R1/2 - and nothing climbs from there: the authority's commands reach the sender
+through the descriptor switch (`tryDescriptorModeSwitch`), which is wideband-only, and narrowband
+keeps the MODE_CHANGE exchange (2.2 s anchors each way). A narrowband ladder needs its own command
+path (descriptor switch on the narrowband burst, whose every burst already carries an anchor).
+
 ### BUG-IDLE-PING-FROM-OFDM-CHIRP (open, 2026-11-10) — P3: an idle receiver reports the chirp of a short OFDM frame as a PING
 
 A PING is a bare dual chirp, and every chirp-preambled OFDM frame opens with one. An idle
