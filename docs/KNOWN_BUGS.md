@@ -123,7 +123,7 @@ an unconnected receiver re-demodulates a failed fixed CONNECT at the other const
 `retryMcDpskFirstFrameConstellation` runs only when connected). The handshake is the one path
 nothing works without: behind a knob, with the handshake CTests and a GUI sweep from -6 to 25 dB.
 
-### BUG-TAIL-DEMOTE-VIA-MODE-CHANGE (open, 2026-11-12) — P3: at a file's tail the receiver's demote goes through MODE_CHANGE and retries into the trough
+### BUG-TAIL-DEMOTE-VIA-MODE-CHANGE (FIXED 2026-11-12, tryDescriptorModeSwitch counts the re-queued bytes) — was P3: at a file's tail the receiver's demote goes through MODE_CHANGE and retries into the trough
 
 `tryDescriptorModeSwitch` refuses when the file's unsent bytes fit in one chunk or every chunk is
 already in flight (`remaining_bytes <= chunk_bytes`); the receiver authority's DOWN command then
@@ -134,6 +134,14 @@ no longer fire). The exchange cannot land in a trough and is answered at the fir
 channel returns (a few seconds lost per trough). Direction: let a demote regrid the in-flight frames
 by descriptor at the tail as well (the move-epoch abort already re-queues them), or hold the
 command while the round draws no ACK.
+
+**Cause and fix (2026-11-12).** `transferred_bytes` is the chunking offset, not the acknowledged
+one, so at the tail (all chunks out) the switch saw 0 bytes left and refused before its >= 2-frame
+check. GUI QSB seed 44 on the burst-tail build lost 43 s to it (8PSK -> QPSK demote at 237.8 s,
+answered at 280.7 s after four retries into a trough; 285-296 s vs 221-225 s on earlier builds where
+the tail missed the trough). The check now counts the unchunked bytes plus the in-flight bytes the
+commit's move-epoch regrid re-queues. Test: `WaveformFollow` `test_tail_demote_commits_by_descriptor`
+(a MODE_CHANGE without the fix).
 
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 

@@ -10,10 +10,13 @@
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
+#include "helpers/temp_dir.hpp"
 
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -107,6 +110,20 @@ struct ConnectionAdaptiveTestAccess {
     static bool obeyCrossing(Connection& c, uint8_t word) {
         return c.maybeObeyCrossingCommand(word, "test");
     }
+    // A receiver-authority (OFDM rung) command read from a tone ACK.
+    static void obeyAuthority(Connection& c, uint8_t rung, bool accepted_clean_round) {
+        c.maybeObeyAuthorityCommand(rung, accepted_clean_round);
+    }
+    static bool startFile(Connection& c, const std::string& path) {
+        return c.file_transfer_.startSend(path);
+    }
+    static void pumpFile(Connection& c) { c.sendNextFileChunk(); }
+    static bool fileFullyChunked(const Connection& c) {
+        const auto p = c.file_transfer_.getProgress();
+        return p.total_bytes > 0 && p.transferred_bytes >= p.total_bytes;
+    }
+    static size_t arqInFlightBytes(const Connection& c) { return c.arq_.getTxInFlightBytes(); }
+    static bool modeChangePendingNow(const Connection& c) { return c.mode_change_pending_; }
     // The sender reads the receiver's MC-DPSK rung command from a tone ACK.
     static void obeyMcDpskRung(Connection& c, int rung, uint8_t group_seq) {
         c.maybeObeyMcDpskRungCommand(connection_policy::encodeMcDpskRungCommand(rung), group_seq);
@@ -1273,6 +1290,46 @@ void test_mcdpsk_turn_loss_ack() {
 // group is airborne: consumed after delivery, it had already disarmed the monitor, and the probe's
 // own verdict would have gone unheard (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR; the crossing ACK's
 // copy showed what follows).
+// BUG-TAIL-DEMOTE-VIA-MODE-CHANGE: at the file tail every chunk is out and none acknowledged.
+// tryDescriptorModeSwitch counted only the unchunked bytes (0 there) and refused, so the receiver's
+// demote fell back to a MODE_CHANGE exchange that retried into the trough it answered (GUI QSB:
+// four 10 s retries, 43 s). The commit's move-epoch regrid re-queues the in-flight frames, which the
+// new geometry carries in a descriptor-bearing burst: the demote must commit by descriptor.
+void test_tail_demote_commits_by_descriptor() {
+    Connection c;
+    std::vector<Bytes> tx_frames;
+    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.30f,
+                                                    Modulation::QAM8);
+    ultra::test::TempDir dir("tail_demote");
+    CHECK(dir.valid(), "temp dir");
+    const auto path = (std::filesystem::path(dir.path()) / "payload.bin").string();
+    {
+        std::ofstream out(path, std::ios::binary);
+        for (size_t i = 0; i < 1100; ++i) out.put(static_cast<char>((i * 37 + 11) & 0xFF));
+    }
+    CHECK(ConnectionAdaptiveTestAccess::startFile(c, path), "start the file");
+    for (int i = 0; i < 4 && !ConnectionAdaptiveTestAccess::fileFullyChunked(c); ++i) {
+        ConnectionAdaptiveTestAccess::pumpFile(c);
+    }
+    CHECK(ConnectionAdaptiveTestAccess::fileFullyChunked(c) &&
+              ConnectionAdaptiveTestAccess::arqInFlightBytes(c) > 0,
+          "the file tail: every chunk out, none acknowledged");
+    size_t mode_changes = 0;
+    tx_frames.clear();
+    const auto switches_before = c.getStats().descriptor_mode_switches;
+    ConnectionAdaptiveTestAccess::obeyAuthority(c, kRungIdxQpskR23, /*accepted_clean_round=*/false);
+    for (const auto& f : tx_frames) {
+        const auto hdr = v2::parseHeader(f);
+        if (hdr.valid && hdr.type == v2::FrameType::MODE_CHANGE) ++mode_changes;
+    }
+    CHECK(mode_changes == 0 && !ConnectionAdaptiveTestAccess::modeChangePendingNow(c),
+          "no MODE_CHANGE exchange for a demote at the file tail");
+    CHECK(c.getDataModulation() == Modulation::QPSK && c.getDataCodeRate() == CodeRate::R2_3 &&
+              c.getStats().descriptor_mode_switches == switches_before + 1,
+          "the demote committed at once, by descriptor");
+}
+
 // An MC-DPSK up-step probes with the lower rung's window (mcDpskProbeBurstFrames): with 4 codewords
 // per frame DBPSK carries 2 frames per burst and DQPSK 3, so the first DQPSK bursts carry 2 until an
 // ACK newer than the commanding one keeps DQPSK (4 codewords: the entry pick's Robust rung). At the
@@ -1378,6 +1435,7 @@ int main() {
     test_escape_needs_the_peer_heard();
     test_startup_probe_launch_copy_is_not_a_candidate();
     test_mcdpsk_up_step_probes_small();
+    test_tail_demote_commits_by_descriptor();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(rate): a demote at the file tail commits by descriptor (BUG-TAIL-DEMOTE-VIA-MODE-CHANGE)
+
+**What broke.** `tryDescriptorModeSwitch` refused unless the bytes left made a >= 2-frame burst at
+the new geometry, but counted `transferred_bytes` - the chunking offset - as sent. At the file tail
+every chunk is out and none acknowledged, so it saw 0 bytes and refused; the receiver's demote fell
+back to a MODE_CHANGE exchange. GUI QSB seed 44: an 8PSK -> QPSK demote at 237.8 s retried four times
+at 10 s into a 2 dB trough and landed at 280.7 s - 43 s, the whole difference between 285-296 s on
+this build and 221-225 s on earlier builds whose tail missed the trough.
+
+**What changed.** The bytes the new geometry carries = unchunked bytes + the in-flight bytes the
+commit's move-epoch regrid re-queues (`arq_.getTxInFlightBytes()`, only with move-epoch on). An
+up-step still waits for a clean boundary (nothing in flight), so it is unchanged.
+
+**Verification.** `WaveformFollow` `test_tail_demote_commits_by_descriptor` (all chunks of a 1.1 KB
+file in flight, a QPSK R2/3 command: descriptor commit, no MODE_CHANGE; a MODE_CHANGE without the
+fix). ctest 120/120.
+
+---
+
 ## 2026-11-12 — FIX(MC-DPSK measured timeout, knob off): the guard covers the receiver's first-frame look-ahead
 
 **What broke (GUI, ULTRA_MCDPSK_MEASURED_RTO=1, follow matrix dip seed 42).** A one-frame DQPSK burst

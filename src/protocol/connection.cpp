@@ -9852,8 +9852,17 @@ bool Connection::tryDescriptorModeSwitch(Modulation mod, CodeRate rate,
     // nothing the design targets.
     if (file_transfer_.getState() != FileTransferState::SENDING) return false;
     const auto progress = file_transfer_.getProgress();
-    if (progress.total_bytes <= progress.transferred_bytes) return false;
-    const size_t remaining_bytes = progress.total_bytes - progress.transferred_bytes;
+    // What the new geometry carries: the bytes not yet chunked (transferred_bytes is the chunking
+    // offset, not the acknowledged one) plus the in-flight ones the commit's move-epoch regrid
+    // re-queues. Counting only the unchunked bytes refused every switch at the file tail - all
+    // chunks out, none acknowledged - and the receiver's demote fell back to a MODE_CHANGE that
+    // retried into the trough it answered (BUG-TAIL-DEMOTE-VIA-MODE-CHANGE: 43 s, GUI QSB).
+    const size_t unchunked_bytes = progress.total_bytes > progress.transferred_bytes
+        ? progress.total_bytes - progress.transferred_bytes
+        : 0;
+    const size_t requeued_bytes = arq_.moveEpochEnabled() ? arq_.getTxInFlightBytes() : 0;
+    const size_t remaining_bytes = unchunked_bytes + requeued_bytes;
+    if (remaining_bytes == 0) return false;
     const int physical_cw = physicalDataFrameCodewordsFor(mod, rate, cw);
     const int lifting_z = selectBurstLiftingZFor(mod, rate, cw);
     const size_t frame_payload = (lifting_z == 81)
