@@ -25,6 +25,11 @@ ITU Good / AWGN, 7.3 Hz, half-duplex radios, follow on (default), all 9 PASS wit
   227 s). With it on, the two MC-DPSK timeouts waited 15.5 s (formula, before the first latency
   sample) and 5.1 s (DQPSK guard 3627 ms); no timeout keyed over a late ACK.
 
+Follow matrix at HEAD (f25off, default knobs), 9/9 PASS against the start of the night (f16,
+d9c54ff): dips seeds 42/44/46 214/215/228 s (212/229/222), QSB seeds 44/45 220/203 (225/200), dip
+length 100/130 s 191/225 (191/225), Good 20 dB 92 (92), AWGN 20 dB 66 (66) - no regression from the
+burst-tail, handshake, listener, tail-demote and probe-cap changes.
+
 ---
 
 ## 2026-11-12 — FIX(rate): a demote at the file tail commits by descriptor (BUG-TAIL-DEMOTE-VIA-MODE-CHANGE)
