@@ -86,7 +86,9 @@ after 2 clean bursts (was 3).
 
 **Verification.** `WaveformFollow` `test_mcdpsk_up_step_probes_small` (fails with the cap removed);
 `ConnectionPolicy` probe-schedule checks re-derived (4 codewords: 2 x 3.69 s + 23.5 s = 30.9 s over a
-16.1 s clean cycle -> 2). ctest 120/120. GUI A/B with the window knob: pending.
+16.1 s clean cycle -> 2). ctest 120/120. GUI A/B with the window knob (AWGN +3 dB, 2 KB, seeds
+44/45/46, interleaved): ULTRA_MCDPSK_WINDOW_MAX=8 191/191/191 s vs 3 208/209/209 s (-8.5 %; before
+the probe cap the same cells ran 210-211 vs 208 s). Fading A/B before any default change.
 
 ---
 

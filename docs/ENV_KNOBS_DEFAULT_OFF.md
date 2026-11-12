@@ -814,7 +814,8 @@ key-down target allows more. Only DQPSK and the shorter-symbol geometries reach 
 fixed 2026-11-09). Today the ACK arrives 1.43 s after the burst end (p99 1.54 s, 187 GUI bursts).
 First GUI A/B (2 KB, AWGN +3 dB, before the up-step probe cap): 210-211 s vs 208 s - a 6-frame DQPSK
 burst is 13 % faster per frame, but the probe schedule then waited 4 clean DBPSK bursts instead of
-2. An up-step now probes with the lower rung's window (`mcDpskProbeBurstFrames`); re-test pending.
+2. An up-step now probes with the lower rung's window (`mcDpskProbeBurstFrames`): re-test (same
+cells, interleaved) 191/191/191 s vs 208/209/209 s, -8.5 %. Fading A/B (ITU Good +3 dB) next.
 
 ## `ULTRA_MCDPSK_MEASURED_RTO` (added 2026-11-12)
 `1` on the sending station: an MC-DPSK burst's retransmission timeout is its airtime plus the

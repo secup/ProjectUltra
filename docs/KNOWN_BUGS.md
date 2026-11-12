@@ -109,6 +109,13 @@ cuts C_loss ~2x and moves the optimum toward shorter ACKs); (3) a fading indicat
 (frame-to-frame SNR spread). With ULTRA_MCDPSK_MEASURED_RTO, a lengthened ACK must stay inside the
 timeout's guard (one ACK airtime, 1.92 s at DBPSK: covers 25 -> 50 ms, not 25 -> 100 ms).
 
+**ITU Good, measured** (`measure_ack_staircase 300 0 -8 2 1 0 7.3 0 3`, success per symbol length):
+0 dB: 25 ms 85.3 %, 50 ms 93.0 %, 100 ms 96.7 %; +2 dB: 92.7 / 98.0 / 98.3 %. The GUI's 7.5 % loss
+at a 0 dB session matches the tool's +2 dB row (the ~2 dB scale offset above). Per 18.4 s DBPSK
+cycle at that point, 25 ms costs 0.85 s + 0.073 C_loss and 50 ms 1.70 s + 0.020 C_loss: with
+today's timeout (C_loss ~44 s) 50 ms saves ~1.5 s a cycle, with the measured one (~22 s) ~0.3 s;
+on AWGN -5 dB (25 ms ~1 % loss) 25 ms is cheaper. The choice needs the fading indicator of (3).
+
 ### BUG-HANDSHAKE-DBPSK-AT-HIGH-SNR (open, 2026-11-12) — P3, efficiency: CONNECT and CONNECT_ACK always go at DBPSK R1/4
 
 GUI AWGN 20 dB, seed 44: the modem's handshake takes 14.4 s from the PING (7.03 s) to the decoded
