@@ -2683,6 +2683,23 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-LISTENER-WAITS-FOR-CONFIRMATION (FIXED 2026-11-12, updateDualListen) — was P1: a session that started on a waveform the channel could not carry died at the half-open timeout
+
+GUI ITU Good +5 dB seed 44, 2 KB, both arms of an A/B: the responder's entry pick chose OFDM QPSK R1/4
+on a 4.0 dB reading (`sel=8.3`, BUG-CONNECT-PICK-LOW-SNR-FADING). No OFDM group decoded, so the
+responder never confirmed its handshake (it confirms on the first CRC-valid frame from the
+initiator). The initiator followed down to MC-DPSK DBPSK after two silent rounds (58 s) and sent five
+bursts - but the responder's dual-listen listener starts only once the handshake is complete
+(`updateDualListen`: `connected_ && handshake_complete_`), so nothing heard MC-DPSK. At 257 s the
+responder released the "half-open" session ("handshake never confirmed 240011 ms after CONNECT_ACK"),
+the initiator retried until its ARQ gave up at 711 s. RESULT=FAIL in both window arms.
+
+Fix: the listener runs from the moment the session exists (`connected_`); the initiator's MC-DPSK
+frame then both confirms the handshake and moves the session. A listener always runs the other
+waveform from the primary, so a repeated CONNECT cannot be delivered twice. Test: `DualListenEngine`
+- a connected responder awaiting confirmation hears the initiator's MC-DPSK frame (1 of 2 frames
+with the old condition, 2 of 2 with the fix).
+
 ### BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK (FIXED 2026-11-12, decoder handshake profile) — was P1: a lost CONNECT_ACK made the handshake unrecoverable when the responder picked DQPSK
 
 GUI ITU Good 0 dB, seed 44-48 batch, seed 47: BRAVO decoded ALPHA's CONNECT at 19.0 s, connected,

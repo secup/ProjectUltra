@@ -10,6 +10,22 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): the dual-listen listener runs from connection, not handshake confirmation (BUG-LISTENER-WAITS-FOR-CONFIRMATION)
+
+**What broke.** GUI ITU Good +5 dB seed 44 failed in both arms of an A/B: the session started on OFDM
+from an optimistic entry pick, no OFDM group decoded, so the responder never confirmed its handshake;
+the initiator followed down to MC-DPSK, but the responder's MC-DPSK listener waited for that
+confirmation and never ran. The responder released the half-open session at 257 s, the initiator's
+ARQ gave up at 711 s.
+
+**What changed.** `ModemEngine::updateDualListen`: the listener wants `connected_` (the responder is
+connected once it sends CONNECT_ACK), no longer `handshake_complete_`. INV-DUAL-LISTEN-001 extended.
+
+**Verification.** `DualListenEngine`: a connected responder awaiting confirmation hears the
+initiator's MC-DPSK frame (missed with the old condition). ctest 120/120.
+
+---
+
 ## 2026-11-12 — FEAT(MC-DPSK): an up-step probes with the lower rung's window
 
 **Why.** The receiver schedules a DBPSK -> DQPSK probe after `ceil(failed probe / clean cycle)`

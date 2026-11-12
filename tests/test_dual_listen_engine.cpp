@@ -76,13 +76,17 @@ std::string payloadText(const Bytes& frame) {
 
 // BRAVO connected on OFDM; the sender's MC-DPSK frame, then its OFDM frame, through feedAudio and
 // processRxBuffer 20 ms at a time (the GUI's synchronous receive loop).
+// handshake_confirmed=false: a responder connected (it sent CONNECT_ACK) whose handshake is not yet
+// confirmed by a frame from the initiator.
 std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
-                           std::vector<WaveformMode>& reports, bool render_reads = false) {
+                           std::vector<WaveformMode>& reports, bool render_reads = false,
+                           bool handshake_confirmed = true) {
     setenv("ULTRA_WAVEFORM_FOLLOW", dual_listen ? "2" : "0", 1);
     ModemEngine rx;  // no callsign, no label: it hears every station (the CLI's prx does the same)
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
     rx.setSynchronousMode(true);
     rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    if (!handshake_confirmed) rx.setHandshakeComplete(false);
     rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
     std::vector<Heard> heard;
     rx.setRxWaveformObservedCallback([&](WaveformMode mode) {
@@ -390,6 +394,17 @@ int main(int argc, char** argv) {
     check(reports.size() == 2 && reports[0] == WaveformMode::MC_DPSK &&
               reports[1] == WaveformMode::OFDM_CHIRP,
           "each waveform reported once, before its frame");
+
+    // BUG-LISTENER-WAITS-FOR-CONFIRMATION: a responder whose handshake is not confirmed yet (the
+    // session started on OFDM and no OFDM frame got through) still hears the initiator's MC-DPSK
+    // frame - the follow crossing that would confirm it. The listener used to wait for the
+    // confirmation, so the crossing was never heard (half-open timeout after 240 s).
+    std::vector<WaveformMode> pending_reports;
+    const auto pending = receive(/*dual_listen=*/true, audio, pending_reports,
+                                 /*render_reads=*/false, /*handshake_confirmed=*/false);
+    std::printf("unconfirmed responder: %zu frame(s) heard\n", pending.size());
+    check(!pending.empty() && pending[0].text == kMcText,
+          "a responder awaiting handshake confirmation hears the initiator's MC-DPSK frame");
 
     std::vector<WaveformMode> no_reports;
     const auto single = receive(/*dual_listen=*/false, audio, no_reports);

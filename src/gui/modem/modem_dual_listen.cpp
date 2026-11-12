@@ -224,7 +224,12 @@ void ModemEngine::configureListener(StreamingDecoder* listener, protocol::Wavefo
 void ModemEngine::updateDualListen() {
     const bool wideband = waveform_mode_ == protocol::WaveformMode::MC_DPSK ||
                           waveform_mode_ == protocol::WaveformMode::OFDM_CHIRP;
-    const bool want = dual_listen_enabled_ && connected_ && handshake_complete_ && wideband;
+    // From the moment the session exists (a responder is connected once it sends CONNECT_ACK), not
+    // from handshake confirmation: the responder confirms on the first frame it decodes from the
+    // initiator, and if the session started on a waveform the channel cannot carry, the initiator's
+    // follow crossing to the other waveform is that first frame - which only the listener hears
+    // (BUG-LISTENER-WAITS-FOR-CONFIRMATION: half-open timeout after 240 s, GUI Good +5 dB).
+    const bool want = dual_listen_enabled_ && connected_ && wideband;
     if (!want) {
         if (streaming_decoder_.listenerActive()) {
             // The other slot is no longer fed; its thread idles on its own condition variable.

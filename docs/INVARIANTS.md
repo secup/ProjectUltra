@@ -915,7 +915,11 @@ report (MC-DPSK frame lost, anchored burst without a group, burst outcome unknow
 sync, PING, decode-failure diagnostics) comes from the primary alone (`wireDecoderRoleCallbacks`,
 `wireDecoderCoreCallbacks`). A listener's successful delivery is preceded by the waveform report
 (`noteListenerDelivery`), so the connection crosses to that waveform and the decoders flip before the
-frame is processed. Decoder threads are bound to slots (objects), never to roles.
+frame is processed. Decoder threads are bound to slots (objects), never to roles. The listener runs
+from the moment the session exists (`connected_`), not from handshake confirmation: a responder
+confirms on the first frame it decodes from the initiator, and when the session started on a waveform
+the channel cannot carry, that frame is the initiator's follow crossing, which only the listener
+hears (BUG-LISTENER-WAITS-FOR-CONFIRMATION).
 **Why:** the MC-DPSK chirp and the OFDM anchor chirp are identical, so each decoder locks on the
 other's bursts and fails them: an OFDM listener would fire the anchored-burst backstop ACK on every
 MC-DPSK frame, an MC-DPSK listener would feed the constellation controller a loss per OFDM anchor.
