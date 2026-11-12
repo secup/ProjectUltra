@@ -16,6 +16,8 @@
 #include "protocol/file_transfer.hpp"
 #include <iostream>
 #include <cassert>
+#include <cmath>
+#include <memory>
 #include <cstdlib>
 #include <queue>
 #include <string>
@@ -348,6 +350,115 @@ bool test_heard_misses_count_ack_rounds_not_timeouts() {
         }
         tx.tick(5000);  // past the duplicate-ACK window, short of another timeout
     }
+    PASS();
+    return true;
+}
+
+// ULTRA_MCDPSK_MEASURED_RTO: a 3-frame DBPSK burst (1392 + 3 x 5184 = 16944 ms) whose ACK comes
+// 1433 ms after it ends. The in-flight table (the formula) holds 43552 ms for 3 frames.
+namespace measured_rto {
+constexpr uint32_t kOverheadMs = 1392, kFrameMs = 5184, kGuardMs = 1920;
+constexpr uint32_t kBurstMs = kOverheadMs + 3 * kFrameMs;  // 16944
+constexpr uint32_t kLatencyMs = 1433;
+constexpr uint32_t kCeilingMs = 43552;
+
+struct Rig {
+    ARQConfig config;
+    std::unique_ptr<SelectiveRepeatARQ> tx;
+    ByteChannel channel;
+    uint16_t next_seq = 0;
+    explicit Rig(bool measured) {
+        config.window_size = 3;
+        config.ack_timeout_ms = kCeilingMs;
+        config.sack_delay_ms = 100;
+        tx = std::make_unique<SelectiveRepeatARQ>(config);
+        tx->setCallsigns("TX1", "RX1");
+        tx->setTransmitCallback([this](const Bytes& data) { channel.send(data); });
+        const uint32_t table[4] = {0, 22048, 32800, kCeilingMs};
+        tx->setAckTimeoutTable(table, 4);
+        if (measured) tx->setMeasuredBurstTimeouts(kOverheadMs, kFrameMs, kGuardMs, 0);
+    }
+    bool sendBurst() {  // three frames in one tick: one physical burst
+        for (int i = 0; i < 3; ++i) {
+            if (!tx->sendData(Bytes{static_cast<uint8_t>(next_seq + i)})) return false;
+        }
+        next_seq = static_cast<uint16_t>(next_seq + 3);
+        return true;
+    }
+    void ackAll() {  // cumulative ACK of everything sent
+        auto ack = v2::ControlFrame::makeNack("RX1", "TX1",
+                                              static_cast<uint16_t>(next_seq - 1), 0);
+        ack.type = v2::FrameType::ACK;
+        tx->onFrameReceived(ack.serialize());
+    }
+    // A resend fires within `deadline_ms` (+100) of now, and not before (-50).
+    bool resendsAt(uint32_t deadline_ms) {
+        const int before = tx->maxInFlightRetryCount();
+        tx->tick(deadline_ms - 50);
+        if (tx->maxInFlightRetryCount() != before) return false;
+        tx->tick(150);
+        return tx->maxInFlightRetryCount() == before + 1;
+    }
+};
+}  // namespace measured_rto
+
+bool test_measured_burst_timeout() {
+    TEST("Measured burst timeout: burst airtime + measured ACK latency, back-off to the table");
+    using namespace measured_rto;
+    {
+        Rig control(false);
+        if (!control.sendBurst()) FAIL("send");
+        control.tx->tick(kBurstMs + kLatencyMs);
+        control.ackAll();
+        if (!control.sendBurst()) FAIL("send 2");
+        if (!control.resendsAt(kCeilingMs)) FAIL("control: without the model the table governs");
+    }
+    Rig rig(true);
+    if (!rig.sendBurst()) FAIL("send");
+    if (!rig.resendsAt(kCeilingMs)) FAIL("before any sample the table governs");
+    rig.ackAll();  // after a resend: Karn, no sample
+    if (rig.tx->haveMeasuredPostBurstLatency()) FAIL("a resent burst gave a latency sample");
+
+    rig.tx->tick(5000);
+    if (!rig.sendBurst()) FAIL("send 2");
+    rig.tx->tick(kBurstMs + kLatencyMs);
+    rig.ackAll();
+    if (!rig.tx->haveMeasuredPostBurstLatency() ||
+        std::abs(rig.tx->postBurstLatencySrttMs() - kLatencyMs) > 1.0f) {
+        std::cout << "(srtt " << rig.tx->postBurstLatencySrttMs() << ") ";
+        FAIL("the sample is the ACK's arrival after the modelled burst end");
+    }
+    // First sample: rttvar = L/2 = 716.5, 4 x rttvar = 2866 > guard.
+    const uint32_t base = kBurstMs + kLatencyMs + 2866;  // 21243
+    if (!rig.sendBurst()) FAIL("send 3");
+    if (!rig.resendsAt(base)) FAIL("the burst's timeout is its airtime + latency + 4 rttvar");
+    if (!rig.resendsAt(2 * base)) FAIL("a silent round doubles it");
+    if (!rig.resendsAt(kCeilingMs)) FAIL("back-off stops at the table");
+    rig.ackAll();  // the peer is heard again (no sample: resent)
+    rig.tx->tick(5000);
+    if (!rig.sendBurst()) FAIL("send 4");
+    if (!rig.resendsAt(base)) FAIL("an ACK ends the back-off");
+    PASS();
+    return true;
+}
+
+bool test_measured_burst_timeout_survives_constellation_change() {
+    TEST("Measured burst timeout: a model change between send and ACK keeps the sample exact");
+    using namespace measured_rto;
+    Rig rig(true);
+    if (!rig.sendBurst()) FAIL("send");
+    // The ACK that closes this DBPSK burst also commands DQPSK: the model changes first.
+    constexpr uint32_t kDqpskFrameMs = 2624;
+    rig.tx->setMeasuredBurstTimeouts(kOverheadMs, kDqpskFrameMs, 1067, 0);
+    rig.tx->tick(kBurstMs + kLatencyMs);
+    rig.ackAll();
+    if (std::abs(rig.tx->postBurstLatencySrttMs() - kLatencyMs) > 1.0f) {
+        std::cout << "(srtt " << rig.tx->postBurstLatencySrttMs() << ") ";
+        FAIL("the sample used the airtime the burst was sent at");
+    }
+    if (!rig.sendBurst()) FAIL("send 2");
+    if (!rig.resendsAt(kOverheadMs + 3 * kDqpskFrameMs + kLatencyMs + 2866))
+        FAIL("the DQPSK burst's timeout uses the DQPSK airtime");
     PASS();
     return true;
 }
@@ -3212,6 +3323,8 @@ int main() {
     std::cout << "In-flight timeout:\n";
     test_retransmit_timeout_follows_inflight_table();
     test_heard_misses_count_ack_rounds_not_timeouts();
+    test_measured_burst_timeout();
+    test_measured_burst_timeout_survives_constellation_change();
 
     std::cout << "ack_batch_size Decoupling Tests (Phase 1b):\n";
     test_ack_batch_threshold_independent();

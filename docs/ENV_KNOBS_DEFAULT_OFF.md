@@ -813,3 +813,10 @@ key-down target allows more. Only DQPSK and the shorter-symbol geometries reach 
 26 s after the burst; that is BUG-MCDPSK-ACK-DROPPED (every MC-DPSK file ACK held 13 s and dropped,
 fixed 2026-11-09). Today the ACK arrives 1.43 s after the burst end (p99 1.54 s, 187 GUI bursts).
 GUI A/B pending (`8` = timing-only).
+
+## `ULTRA_MCDPSK_MEASURED_RTO` (added 2026-11-12)
+`1` on the sending station: an MC-DPSK burst's retransmission timeout is its airtime plus the
+post-burst ACK latency measured on earlier bursts (RFC 6298, back-off on silent rounds, the formula
+as ceiling) instead of the formula's 43.6 s for a 3-frame DBPSK burst (measured round trip 18.4 s).
+Saves ~23 s per lost tone ACK. Default off until a GUI A/B on fading channels; on a rig the peer's
+decode speed and CAT latency are measured, not assumed.

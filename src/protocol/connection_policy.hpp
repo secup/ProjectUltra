@@ -2767,6 +2767,22 @@ inline bool mcDpskCompactFrameEnabled() {
     return on;
 }
 
+// ULTRA_MCDPSK_MEASURED_RTO (default OFF; "1" on; sender side only): an MC-DPSK burst's
+// retransmission timeout is its own airtime plus the post-burst ACK latency this sender measured on
+// earlier bursts, with RFC 6298 back-off on silent rounds (SelectiveRepeatARQ::
+// setMeasuredBurstTimeouts), instead of computeMCDPSKAckTimeoutMs, which budgets a serial decode
+// as long as the burst (rx_decode = n x data_ms) plus a partial-SACK hold: 43.6 s for a 3-frame
+// DBPSK burst whose ACK arrives 18.4 s after it starts (GUI 2026-11-12: 1.43 s after the burst
+// end, p99 1.54 s over 187 bursts). Every lost tone ACK cost the difference in dead air. The
+// formula stays the ceiling and the value before the first sample. Needs ULTRA_MCDPSK_INFLIGHT_RTO.
+inline bool mcDpskMeasuredRtoEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_MCDPSK_MEASURED_RTO");
+        return e != nullptr && e[0] == '1' && e[1] == '\0';
+    }();
+    return on;
+}
+
 // ULTRA_MCDPSK_INFLIGHT_RTO (default ON; "0" restores the full-window scalar): MC-DPSK sizes each
 // retransmission timeout on the frames actually outstanding (BUG-MCDPSK-RTO-FULL-WINDOW).
 inline bool mcDpskInflightRtoEnabled() {

@@ -3,6 +3,8 @@
 #include "file_transfer.hpp"  // PayloadType — below-window FILE salvage gate only
 #include "ultra/logging.hpp"
 #include "ultra/phy_diagnostics.hpp"
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <sstream>
 
@@ -392,6 +394,7 @@ bool SelectiveRepeatARQ::sendDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
+    noteEgress();
     tx_window_[slot].heard_miss_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
@@ -494,6 +497,7 @@ bool SelectiveRepeatARQ::sendFixedDataWithTypeAndFlags(const Bytes& data,
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
+    noteEgress();
     tx_window_[slot].heard_miss_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
@@ -570,6 +574,7 @@ bool SelectiveRepeatARQ::sendVariableDataWithFlags(const Bytes& data, uint8_t fl
     tx_window_[slot].first_tx_ms = arq_time_ms_;
     tx_window_[slot].rtt_sample_eligible = true;
     tx_window_[slot].retry_count = 0;
+    noteEgress();
     tx_window_[slot].heard_miss_count = 0;
     tx_window_[slot].acked = false;
     tx_window_[slot].hole_ack_count = 0;
@@ -1130,6 +1135,7 @@ void SelectiveRepeatARQ::handleDataRepairFrame(const v2::DataRepairFrame& repair
 }
 
 bool SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
+    silent_timeout_rounds_ = 0;  // the peer is heard: the next timeout is the measured one again
     uint16_t seq = frame.seq;
     uint32_t bitmap = arq_policy::decodeSackBitmap(frame.payload);
 
@@ -1733,6 +1739,11 @@ void SelectiveRepeatARQ::performRetransmitFrame(
     size_t slot, RetransmitCause cause,
     std::vector<Bytes>* deferred_timeout_batch) {
     TXSlot& s = tx_window_[slot];
+    if (cause == RetransmitCause::TIMEOUT && arq_time_ms_ != last_timeout_round_ms_) {
+        // One round per tick: a burst's frames time out together.
+        last_timeout_round_ms_ = arq_time_ms_;
+        ++silent_timeout_rounds_;
+    }
 
     s.repair_in_flight = false;
     s.repair_guard_ms = 0;
@@ -1822,6 +1833,7 @@ void SelectiveRepeatARQ::performRetransmitFrame(
     s.timeout_ms = ackTimeoutForFrames(tx_in_flight_);
     s.timeout_suspended = false;
     s.timeout_transition_suspended = false;
+    noteEgress();
     if (cause == RetransmitCause::TIMEOUT && deferred_timeout_batch != nullptr) {
         deferred_timeout_batch->push_back(s.frame_data);
     } else {
@@ -2640,7 +2652,32 @@ uint32_t SelectiveRepeatARQ::ackTimeoutForFrames(size_t frames) const {
     if (t == 0) return currentAckTimeoutMs();
     // Never exceed the scalar: the table is a REDUCTION for small bursts, never a licence
     // to wait longer than the configured bound.
-    return std::min(t, currentAckTimeoutMs());
+    const uint32_t ceiling = std::min(t, currentAckTimeoutMs());
+    if (!measured_burst_rto_ || !have_post_burst_latency_) {
+        return ceiling;
+    }
+    // The burst's own airtime plus the latency its ACK has been measured to take after it.
+    const double latency =
+        static_cast<double>(post_burst_latency_srtt_ms_) +
+        std::max(4.0 * static_cast<double>(post_burst_latency_rttvar_ms_),
+                 static_cast<double>(latency_guard_ms_));
+    const double base = static_cast<double>(burst_overhead_ms_) +
+                        static_cast<double>(idx) * static_cast<double>(frame_airtime_ms_) +
+                        latency + static_cast<double>(latency_extra_ms_);
+    const double backed_off =
+        std::ldexp(base, static_cast<int>(std::min<uint32_t>(silent_timeout_rounds_, 8)));
+    return static_cast<uint32_t>(std::min(backed_off, static_cast<double>(ceiling)));
+}
+
+void SelectiveRepeatARQ::noteEgress() {
+    if (!measured_burst_rto_) {
+        return;
+    }
+    if (arq_time_ms_ != egress_group_tx_ms_) {
+        egress_group_tx_ms_ = arq_time_ms_;
+        egress_group_airtime_ms_ = burst_overhead_ms_;
+    }
+    egress_group_airtime_ms_ += frame_airtime_ms_;
 }
 
 // Re-arm every outstanding slot to the timeout for the burst as it now stands. Called as
@@ -2671,6 +2708,25 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
     if (!arq_policy::shouldUseRTTSample(
             true, arq_time_ms_, slot.first_tx_ms)) {
         return;
+    }
+
+    // One post-burst latency sample per burst, from the first of its frames to be acknowledged.
+    if (measured_burst_rto_ && slot.first_tx_ms == egress_group_tx_ms_ &&
+        egress_group_tx_ms_ != last_latency_sample_tx_ms_ &&
+        sample_ms > egress_group_airtime_ms_) {
+        last_latency_sample_tx_ms_ = egress_group_tx_ms_;
+        const auto latency = arq_policy::smoothLatency(
+            have_post_burst_latency_, post_burst_latency_srtt_ms_,
+            post_burst_latency_rttvar_ms_,
+            static_cast<float>(sample_ms - egress_group_airtime_ms_));
+        post_burst_latency_srtt_ms_ = latency.srtt_ms;
+        post_burst_latency_rttvar_ms_ = latency.rttvar_ms;
+        have_post_burst_latency_ = true;
+        LOG_MODEM(INFO,
+                  "SR-ARQ: post-burst ACK latency %u ms after a %u ms burst: srtt=%.0f "
+                  "rttvar=%.0f ms",
+                  sample_ms - egress_group_airtime_ms_, egress_group_airtime_ms_,
+                  post_burst_latency_srtt_ms_, post_burst_latency_rttvar_ms_);
     }
 
     // RFC6298-style estimator (Karn-safe: retransmitted slots are marked ineligible).
@@ -2950,6 +3006,14 @@ void SelectiveRepeatARQ::reset() {
     srtt_ms_ = 0.0f;
     rttvar_ms_ = 0.0f;
     adaptive_ack_timeout_ms_ = config_.ack_timeout_ms;
+    egress_group_tx_ms_ = UINT64_MAX;
+    egress_group_airtime_ms_ = 0;
+    last_latency_sample_tx_ms_ = UINT64_MAX;
+    have_post_burst_latency_ = false;
+    post_burst_latency_srtt_ms_ = 0.0f;
+    post_burst_latency_rttvar_ms_ = 0.0f;
+    silent_timeout_rounds_ = 0;
+    last_timeout_round_ms_ = UINT64_MAX;
 
     // MOVE-EPOCH: a reset is a new session — both stations restart at era 0,
     // anchored (matches seq counters restarting at 0).

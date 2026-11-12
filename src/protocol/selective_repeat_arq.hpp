@@ -305,6 +305,30 @@ public:
         for (size_t i = 0; i < ack_timeout_table_n_; ++i) ack_timeout_table_[i] = table[i];
     }
 
+    // Measured burst timeout (ULTRA_MCDPSK_MEASURED_RTO; the Connection supplies the burst's
+    // airtime model: a burst of n frames lasts burst_overhead_ms + n x frame_airtime_ms). Each
+    // first-transmission burst whose ACK comes back yields one sample of the post-burst ACK
+    // latency - the ACK's arrival minus the modelled end of the burst (the peer's decode, T/R,
+    // ACK airtime, detection), RFC 6298 smoothed, Karn-safe - and a burst's timeout becomes its
+    // airtime + latency + max(4 x variation, guard_ms) + extra_ms, doubled after each consecutive
+    // timeout round that heard no ACK (RFC 6298 back-off, which keeps the outage horizon of
+    // max_retries rounds), and never above the in-flight table (setAckTimeoutTable), which
+    // governs alone until the first sample. Works only with that table.
+    void setMeasuredBurstTimeouts(uint32_t burst_overhead_ms, uint32_t frame_airtime_ms,
+                                  uint32_t guard_ms, uint32_t extra_ms) {
+        measured_burst_rto_ = frame_airtime_ms > 0;
+        burst_overhead_ms_ = burst_overhead_ms;
+        frame_airtime_ms_ = frame_airtime_ms;
+        latency_guard_ms_ = guard_ms;
+        latency_extra_ms_ = extra_ms;
+    }
+    void clearMeasuredBurstTimeouts() { measured_burst_rto_ = false; }
+    bool measuredBurstTimeoutsEnabled() const { return measured_burst_rto_; }
+    bool haveMeasuredPostBurstLatency() const { return have_post_burst_latency_; }
+    float postBurstLatencySrttMs() const { return post_burst_latency_srtt_ms_; }
+    float postBurstLatencyRttvarMs() const { return post_burst_latency_rttvar_ms_; }
+    uint32_t silentTimeoutRounds() const { return silent_timeout_rounds_; }
+
     void setAckTimeout(uint32_t timeout_ms) {
         config_.ack_timeout_ms = timeout_ms;
         if (!have_rtt_estimator_) {
@@ -639,6 +663,25 @@ private:
     uint32_t ack_timeout_table_[selective_repeat_arq_policy::kMaxWindow + 1] = {};
     size_t ack_timeout_table_n_ = 0;
     uint32_t last_logged_rto_ms_ = 0;  // null-control dedup (see maybeSampleRTT)
+    // Measured burst timeout (setMeasuredBurstTimeouts). The egress group is the DATA frames
+    // that left in one ARQ tick (a physical burst: the Connection hands a burst over at once),
+    // with the airtime they were sent at; a latency sample needs the acknowledged frame to be in
+    // the last group, so a constellation change between send and ACK cannot skew it.
+    void noteEgress();
+    bool measured_burst_rto_ = false;
+    uint32_t burst_overhead_ms_ = 0;
+    uint32_t frame_airtime_ms_ = 0;
+    uint32_t latency_guard_ms_ = 0;
+    uint32_t latency_extra_ms_ = 0;
+    uint64_t egress_group_tx_ms_ = UINT64_MAX;
+    uint32_t egress_group_airtime_ms_ = 0;
+    uint64_t last_latency_sample_tx_ms_ = UINT64_MAX;
+    bool have_post_burst_latency_ = false;
+    float post_burst_latency_srtt_ms_ = 0.0f;
+    float post_burst_latency_rttvar_ms_ = 0.0f;
+    // Consecutive timeout rounds without an ACK in between (one per tick that resends on timeout).
+    uint32_t silent_timeout_rounds_ = 0;
+    uint64_t last_timeout_round_ms_ = UINT64_MAX;
 
     // Statistics
     ARQStats stats_;

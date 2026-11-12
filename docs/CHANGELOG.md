@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FEAT(MC-DPSK): a measured retransmission timeout (ULTRA_MCDPSK_MEASURED_RTO, default off)
+
+**Why.** `computeMCDPSKAckTimeoutMs` budgets a serial decode as long as the burst (rx_decode =
+n x data_ms, "measured ~16 s on the rig" in July, which matches BUG-MCDPSK-ACK-DROPPED's 13 s ACK
+hold rather than decoding) plus a partial-SACK hold: 43.6 s for a 3-frame DBPSK burst whose ACK
+arrives 18.4 s after it starts. GUI: the ACK arrives 1.43 s after the modelled burst end (p99
+1.54 s over 187 bursts). Each lost tone ACK (6 of 80 on ITU Good 0 dB; one even on AWGN -5 dB) cost
+~25 s of dead air before the resend.
+
+**What.** With `ULTRA_MCDPSK_MEASURED_RTO=1` (sender side): `SelectiveRepeatARQ::
+setMeasuredBurstTimeouts(overhead, frame airtime, guard, extra)` - each first-transmission burst whose
+ACK returns gives one sample of the post-burst latency (ACK arrival minus the modelled burst end, the
+burst taken as the frames that left in one ARQ tick with the airtime they were sent at, Karn-safe),
+RFC 6298 smoothed; a burst's timeout is its airtime + srtt + max(4 rttvar, one ACK airtime) [+ one
+frame with ULTRA_MCDPSK_ACK_REPAIR, whose loss ACK comes a frame late], doubled per consecutive silent
+timeout round (RFC 6298 back-off: ten rounds still span ~408 s against 435 s), never above the
+in-flight table, which governs alone until the first sample. 3-frame DBPSK: 43.6 -> ~20.3 s.
+
+**Verification.** `SelectiveRepeatARQ` 68/68: `test_measured_burst_timeout` (the table before any
+sample, no sample from a resent burst, airtime + latency + 4 rttvar, doubling, the table as ceiling,
+an ACK ends the back-off) and `..._survives_constellation_change`; both fail with the measured path
+removed. ctest 120/120. GUI A/B: below.
+
+---
+
 ## 2026-11-12 — FIX(MC-DPSK): a frame that says more follows proves the next slot (BUG-MCDPSK-FALSE-TAIL)
 
 **What broke.** An MC-DPSK burst continuation ran its in-band burst-tail test on every slot: the
@@ -32,7 +57,11 @@ source check still named the single-decoder HARQ forwarding replaced by `forEach
 
 **Verification.** `DualListenEngine` / `DualListenEngineV2GapCrash`: a static crash (white noise 5x
 the signal RMS) in the inter-chirp gap - 3 of 3 frames on both paths, 1 of 3 with the gate removed.
-ctest 120/120. GUI: below.
+ctest 120/120. GUI (1 KB, 7.3 Hz, ULTRA_MCDPSK_ACK_REPAIR off/on
+interleaved, seeds 44/45/46): AWGN -5 dB 176/175/219 and 176/176/219 s (before: 262/425/262 and
+350/349/176), no burst-tail decision after a decoded frame; the 219 s runs lost one tone ACK each.
+ITU Good 0 dB 202/200/261 and 232/217/200 s (before: 236/189/287 and 266/217/239); the remaining
+timeouts are tone ACKs lost in fades (6 of 80 on Good 0 dB) and lost DQPSK probes.
 
 ---
 

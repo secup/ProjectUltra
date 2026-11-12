@@ -7654,6 +7654,7 @@ void Connection::tickModeChangeAckRepeats(uint32_t elapsed_ms) {
 void Connection::configureArqForCurrentDataMode() {
     // Each mode supplies its own in-flight timeout table below, or none (the scalar applies).
     arq_.setAckTimeoutTable(nullptr, 0);
+    arq_.clearMeasuredBurstTimeouts();  // MC-DPSK only, below
     arq_.setTxInFlightCap(0);  // only a young MC-DPSK fallback spell caps it (below)
     arq_.setCodeRate(data_code_rate_);
     const int physical_data_cw = physicalDataFrameCodewords();
@@ -7735,6 +7736,22 @@ void Connection::configureArqForCurrentDataMode() {
                       "(scalar=%ums; identity at n=window %s)",
                       win, table[1], table[win], ack_timeout_ms,
                       table[win] == ack_timeout_ms ? "OK" : "MISMATCH");
+            // ULTRA_MCDPSK_MEASURED_RTO: that table becomes the ceiling and the value before the
+            // first measured burst. Guard = one ACK airtime of this geometry; with the ACK repair,
+            // a turn that lost its last frame is acknowledged one frame after the burst (the
+            // continuation's tail decision), so that frame is budgeted too.
+            if (connection_policy::mcDpskMeasuredRtoEnabled()) {
+                const uint32_t overhead_ms =
+                    connection_policy::kMCDPSKDualChirpPreambleMs + timing.overhead_ms;
+                const uint32_t extra_ms = mcdpsk_ack_repair_enabled_ ? timing.data_only_ms : 0;
+                arq_.setMeasuredBurstTimeouts(overhead_ms, timing.data_only_ms, timing.ack_ms,
+                                              extra_ms);
+                LOG_MODEM(INFO, "Connection: MC-DPSK measured timeout: burst = %u + n x %u ms, "
+                          "guard %u ms, extra %u ms (latency srtt %.0f ms%s)",
+                          overhead_ms, timing.data_only_ms, timing.ack_ms, extra_ms,
+                          arq_.postBurstLatencySrttMs(),
+                          arq_.haveMeasuredPostBurstLatency() ? "" : ", not yet measured");
+            }
         }
         LOG_MODEM(INFO, "Connection: ARQ window=%zu, timeout=%.1fs (data=%ums, ack=%ums x%d), carrier_sense_sack_coalesce=%ums, cw=%d (MC-DPSK %s %s, carriers=%d, sps=%d)",
                   window_size,

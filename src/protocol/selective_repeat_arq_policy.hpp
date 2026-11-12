@@ -290,6 +290,25 @@ inline bool inflightRtoEnabled() {
     return on;
 }
 
+// RFC 6298 smoothing (alpha 1/8, beta 1/4) of one latency sample; the first sample seeds
+// srtt = L, rttvar = L/2.
+struct LatencyEstimate {
+    float srtt_ms = 0.0f;
+    float rttvar_ms = 0.0f;
+};
+inline LatencyEstimate smoothLatency(bool have_estimate, float srtt_ms, float rttvar_ms,
+                                     float sample_ms) {
+    LatencyEstimate out;
+    if (!have_estimate) {
+        out.srtt_ms = sample_ms;
+        out.rttvar_ms = 0.5f * sample_ms;
+        return out;
+    }
+    out.rttvar_ms = 0.75f * rttvar_ms + 0.25f * std::fabs(srtt_ms - sample_ms);
+    out.srtt_ms = 0.875f * srtt_ms + 0.125f * sample_ms;
+    return out;
+}
+
 inline RTOUpdate updateRTO(bool have_estimator,
                            float previous_srtt_ms,
                            float previous_rttvar_ms,
