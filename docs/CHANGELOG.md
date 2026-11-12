@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — GUI verification of 94d0fa4 (the night's fixes, file-ledger fix included)
+
+Same rig as the matrix entry below, both arms on the committed build. Every cell PASS with the file
+CRC verified; no crash report.
+
+| Cell | follow on | follow off |
+|---|---|---|
+| Dip 20 -> 0 -> 20 dB, 20 KB, seeds 42/44/45/46/47/48 | 231/225/224/228/208/214 = 221.7 | 227/229/222/235/235/233 = 230.2 |
+| QSB, 30 KB, seeds 44/45 | 213/208 | 224/208 |
+| AWGN 25 dB, 30 KB (32QAM R2/3 <-> 16QAM R2/3 territory), seeds 44/45 | 79/79 (4.5 kbps) | 79/79 |
+| ITU Good 20 dB, 4 KB | 46 | 46 |
+
+Dips paired -8.5 s (-3.7 %); seed 47, which lost a chunk to BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT before
+the fix, completes in 208 s.
+
+---
+
 ## 2026-11-11 — GUI: the follow matrix after the night's fixes (dual-listen follow vs follow off)
 
 Two real stations over OTASim, ITU Good unless noted, CFO 7.3 Hz, half-duplex radios; seconds, every
