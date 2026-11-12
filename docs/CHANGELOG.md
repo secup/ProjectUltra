@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — GUI verification of the night's fixes at HEAD (follow on vs off, same build)
+
+ITU Good unless noted, 7.3 Hz, half-duplex radios, 20 KB (QSB 30 KB); `f16` follow on, `q16` follow
+off, two trees in parallel at the same commit; all 38 runs PASS with both files CRC-clean.
+
+| Cells | Follow on | Follow off |
+|---|---|---|
+| 2-minute 0 dB dip, seeds 42/44/45/46/47/48 | 212/229/225/222/209/221 (219.7) | 217/214/212/206/211/219 (213.2) |
+| 40 s QSB, seeds 44/45/46 | 225/200/199 (208.0) | 222/200/198 (206.7) |
+| Dip length 70/85/100/115/130/145 s, seed 44 | 167/187/191/214/225/239 (203.8) | 163/179/185/198/215/232 (195.3) |
+| Good 20 dB, seeds 44/45 | 92/77 | 92/76 |
+| AWGN 20 dB, seeds 44/45 | 66/65 | 66/66 |
+
+Against the start of the night (2c3be02): follow on QSB seed 44 311 -> 225 s; follow off's long
+dips 213/234/256 -> 185/215/232 s. With both arms now free of the stale-evidence losses, follow-off
+is ~3-4 % faster on 1-2.5-minute 0 dB outages: follow-on crosses at the 60 s patience, spends the
+rest of the dip on MC-DPSK and comes back up on the pick of one MC-DPSK burst, while follow-off
+resumes at its pre-dip rung on its next resend. Follow-on's value is what follow-off cannot do:
+sessions that start below the OFDM floor (step-up 3.5x faster, 2026-11-11) and outages past the ARQ
+horizon (~3.5-5 min, where follow-off abandons frames). The patience is the trade-off between
+those; it stays at 60 s (WAVEFORM_FOLLOW_DESIGN).
+
+---
+
 ## 2026-11-12 — FEAT(mcdpsk): `ULTRA_MCDPSK_ACK_REPAIR` - a lost MC-DPSK frame is repaired at the next turn (default off, A/B pending)
 
 **What is slow today.** Every tone ACK is a turn boundary that triggers the sender's refill, but
@@ -60,7 +84,9 @@ commands carried a physical reading; the three without one were the false ones.
 
 **Verification.** `WaveformFollow` 146/146 (new: a 40.2 dB reading with no physical SNR commands
 nothing; fixtures that expect an up-crossing now feed a physical reading; the check fails without
-the rule). Dev ctest 112/112. GUI: below.
+the rule). Dev ctest 112/112. GUI (HEAD, follow on): seed 46's 2-minute dip 222 s
+against 229 at 7fb494a; the one OFDM pick without a physical reading in the whole batch (11.7 dB at
+0 dB, mid-dip) was held, and every run still commanded its return (one command per run).
 
 ---
 
@@ -81,7 +107,9 @@ behind live audio). The retry keyed over it and the ACK was lost; the exchange n
 on the air keys after it (start at the previous end), on both the sim and the hardware path (the
 latter's flag already followed the queue; its `tx_end_time_` feeds the in-QSO DATA deferral).
 
-**Verification.** Builds (`ultra_gui`). GUI: below. Also seen in the same exchange, not changed:
+**Verification.** Builds (`ultra_gui`). GUI (HEAD): Good 20 dB 20 KB 92/77 s and AWGN 20 dB 66/65 s
+in both follow arms (unchanged); the only MODE_CHANGE exchanges left in 38 runs are the file-tail
+demotes of BUG-TAIL-DEMOTE-VIA-MODE-CHANGE, which no longer race an undecoded ACK. Also seen in the same exchange, not changed:
 the MODE_CHANGE retry fires right after the peer's ACK ends, before the decoder has processed it
 (listen-before-ACK's evidence rule has no counterpart for control retries).
 
@@ -106,7 +134,9 @@ not. Reset with `retry_count`. `maybeEscapeStuckFrame` compares
 **Verification.** `SelectiveRepeatARQ` 66/66 (new: six timeouts count no heard miss, each fresh
 ACK without the frame counts one). `WaveformFollow` 145/145 (new: one frame resent six times into
 silence, then an empty ACK, holds the rung; five ACKs without it drop a rung; the first check fails
-on the old retry count). `ConnectionAdaptive` 861/861. Dev ctest 112/112. GUI: below.
+on the old retry count). `ConnectionAdaptive` 861/861. Dev ctest 112/112. GUI (HEAD, follow off): dip-length sweep, seed 44,
+163/179/185/198/215/232 s against 163/181/213/199/234/256 at 2c3be02 (the 100/130/145 s cells were
+the ones the stale escape hit); no stuck-frame escape fired in 38 runs (19 per follow arm).
 
 ---
 

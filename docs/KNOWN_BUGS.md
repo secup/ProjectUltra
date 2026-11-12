@@ -81,6 +81,18 @@ an unconnected receiver re-demodulates a failed fixed CONNECT at the other const
 `retryMcDpskFirstFrameConstellation` runs only when connected). The handshake is the one path
 nothing works without: behind a knob, with the handshake CTests and a GUI sweep from -6 to 25 dB.
 
+### BUG-TAIL-DEMOTE-VIA-MODE-CHANGE (open, 2026-11-12) — P3: at a file's tail the receiver's demote goes through MODE_CHANGE and retries into the trough
+
+`tryDescriptorModeSwitch` refuses when the file's unsent bytes fit in one chunk or every chunk is
+already in flight (`remaining_bytes <= chunk_bytes`); the receiver authority's DOWN command then
+falls back to `requestModeChange`. GUI, ITU Good 40 s QSB, seeds 45/46, both follow arms at HEAD:
+at 142.4 s, as the second trough began, "RX-AUTHORITY obey 16QAM R2/3 -> 8PSK R2/3 via MODE_CHANGE",
+then three 10 s retries into the trough (only those runs had MODE_CHANGE retries at all; the escapes
+no longer fire). The exchange cannot land in a trough and is answered at the first retry after the
+channel returns (a few seconds lost per trough). Direction: let a demote regrid the in-flight frames
+by descriptor at the tail as well (the move-epoch abort already re-queues them), or hold the
+command while the round draws no ACK.
+
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 
 The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample
