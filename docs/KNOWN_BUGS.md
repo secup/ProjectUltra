@@ -68,13 +68,37 @@ the other constellation with the same waveform), the listener's demodulator stat
 false MC-DPSK syncs on OFDM bursts. Mitigated: an up-crossing needs a physical reading in the burst
 (2026-11-12), and the crossing's pool clear usually drops the reading.
 
+### BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (open, 2026-11-12) — P2, low SNR: an MC-DPSK session's tone ACK never lengthens
+
+`app.cpp` sizes the tone-burst ACK by the staircase (`symbolMsForSNR`: 12/25/50/100 ms symbols by
+SNR, with a fading column) only when the cached SNR source is IDLE_IN_BAND or OFDM_BROADBAND
+("only a trusted physical in-band source shortens"). An MC-DPSK session reports MCDPSK_IN_BAND, so
+it always sends the 25 ms baseline (850 ms) - the guard meant to stop an untrusted source from
+SHORTENING the ACK also stops it from LENGTHENING it, at exactly the SNRs where that matters. And
+MC-DPSK measures no fading index (the cached value read 0.44 on AWGN and 0.35 on ITU Good), so the
+fading column could not be chosen anyway. GUI 2026-11-12 (1 KB, MC-DPSK DBPSK): 6 of 80 end-of-turn
+ACKs lost on Good 0 dB, 1 of ~100 on AWGN -5 dB, 0 of 48 on AWGN -3 dB; each loss cost a full
+retransmission timeout (43.6 s today) plus a duplicate burst.
+
+Not changed yet, because the trade is not free: a 100 ms ACK adds 2.55 s to an 18.4 s DBPSK cycle
+(-12 %), a 50 ms ACK 0.85 s. `measure_ack_staircase` (300 trials, 7.3 Hz, prior) puts the 25 ms
+AWGN edge 2 dB higher than the table (-2 dB, 60.7 % at -4 dB) while the GUI decodes 25 ms ACKs
+~99 % at a session SNR of -5 dB: the tool's SNR and the session's are not on the same scale for
+the ACK, which has to be settled before any edge is trusted here. Direction: (1) a calibrated
+source may lengthen (never shorten) the ACK; (2) choose the length that minimises
+T_ack + P_loss x C_loss with MC-DPSK's own C_loss (the measured timeout, ULTRA_MCDPSK_MEASURED_RTO,
+cuts C_loss ~2x and moves the optimum toward shorter ACKs); (3) a fading indicator for MC-DPSK
+(frame-to-frame SNR spread). With ULTRA_MCDPSK_MEASURED_RTO, a lengthened ACK must stay inside the
+timeout's guard (one ACK airtime, 1.92 s at DBPSK: covers 25 -> 50 ms, not 25 -> 100 ms).
+
 ### BUG-HANDSHAKE-DBPSK-AT-HIGH-SNR (open, 2026-11-12) — P3, efficiency: CONNECT and CONNECT_ACK always go at DBPSK R1/4
 
 GUI AWGN 20 dB, seed 44: the modem's handshake takes 14.4 s from the PING (7.03 s) to the decoded
 CONNECT_ACK (21.41 s): PING and PONG 1.39 s each, CONNECT and CONNECT_ACK 4.85 s each (DBPSK R1/4,
 2 codewords, sized for the -6 dB floor), turnarounds and decode latency the rest. The PONG has
-already measured the link (21 dB here). DQPSK would halve both connect frames (~5 s per
-connection, a third of the handshake) wherever the PONG reading clears the DBPSK -> DQPSK step
+already measured the link (21 dB here). DQPSK would halve the data part of both connect frames
+(3456 -> 1728 ms each; the 1392 ms chirp preamble + training stays): ~3.5 s per connection, a
+quarter of the handshake, wherever the PONG reading clears the DBPSK -> DQPSK step
 (6.02 dB, the margin test's own number) plus its uncertainty. Needs: the initiator picks the
 CONNECT constellation from the PONG's SNR, the responder its CONNECT_ACK's from the CONNECT's, and
 an unconnected receiver re-demodulates a failed fixed CONNECT at the other constellation (today
