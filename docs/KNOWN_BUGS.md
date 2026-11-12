@@ -59,8 +59,10 @@ listener, only that first frame (in 342 routed data-aided readings tonight, the 
 are frames straddling the channel's return, which is physical). Not reproduced offline: `ultra prx`
 on MC-DPSK v2 frames at 0/6/12 dB AWGN with 7.3 Hz reads 0.2/6.3/12.5 dB; a dual-listen receiver
 (ModemEngine, compact frames, four OFDM frames heard first) reads its first MC-DPSK frame at
--0.2..+20.8 dB on AWGN 0/6/20 dB and -5.4..+0.3 dB on ITU Good 0-3 dB (16 seeds) - no over-read
-without the GUI's 7.3 Hz offset, a long session history and the threaded decode. Candidates not yet ruled
+-0.2..+20.8 dB on AWGN 0/6/20 dB and -5.4..+0.3 dB on ITU Good 0-3 dB (16 seeds), and -4.2..-6.2 dB
+on Good 0 dB with +7.3 Hz after twelve OFDM frames 20 dB louder (10 seeds) - no over-read in the
+synchronous harness. Remaining difference: the GUI's threaded decode, where the crossing reconfigures
+the receiver (crossConnectedWaveform) while the listener's thread may be inside that frame. Candidates not yet ruled
 out: the compact first-frame constellation retry (`decodeMcDpskCompactFirstFrame` re-demodulates at
 the other constellation with the same waveform), the listener's demodulator state after a minute of
 false MC-DPSK syncs on OFDM bursts. Mitigated: an up-crossing needs a physical reading in the burst
