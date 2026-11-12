@@ -2734,6 +2734,15 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-MCDPSK-PHYSICAL-REPUBLISHED (FIXED 2026-11-12, updateDataSpanPhysicalSNR) — was P2: a compact burst's continuation frames re-published the first frame's physical SNR
+
+Continuation frames (no training span) kept the demodulator's latch from the burst's first frame, so
+one ~85 ms snapshot reached the follow pick and the decoder's ring three times. GUI ITU Good 0 -> 20 dB
+step, seed 43: "physical 4.7 dB x3" on a 20 dB channel (data-aided 12.9 dB) held the up-crossing one
+burst. Each continuation now measures its own data span; a frame that cannot measure publishes
+nothing. Test: `StreamingMCDPSK` (`runCompactBurstPhysicalPerFrame`, middle frame 6 dB down reads
+6 dB down). CHANGELOG 2026-11-12.
+
 ### BUG-LISTENER-WAITS-FOR-CONFIRMATION (FIXED 2026-11-12, updateDualListen) — was P1: a session that started on a waveform the channel could not carry died at the half-open timeout
 
 GUI ITU Good +5 dB seed 44, 2 KB, both arms of an A/B: the responder's entry pick chose OFDM QPSK R1/4

@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(MC-DPSK SNR): every burst frame measures its own physical SNR (BUG-MCDPSK-PHYSICAL-REPUBLISHED)
+
+**What broke.** The physical SNR (power of the frame's span over the burst-time noise reference,
+handoff §2) is measured on a frame's training span. A compact burst's continuation frames have no
+training span (`MCDPSKWaveform::processDataOnly`), so the demodulator's latch still held the FIRST
+frame's ~85 ms snapshot and `populateDecodeMetrics` published it again for every continuation: one
+fade state counted as three readings. The follow up-crossing pick (`sessionLadderPick`, the burst's
+`ConnectSnrPool::physicalMeanDb`) and the decoder's distribution ring both took the triplicate as
+independent evidence. GUI, ITU Good 0 -> 20 dB step (seed 43, HEAD 81476f26): the first burst at
+20 dB read "physical 4.7 dB x3" against a data-aided 12.9 dB (a lower bound) - one snapshot in a
+fade, three times - and the crossing to OFDM waited one more burst (131 s against 112 s the day
+before).
+
+**What changed.** `MultiCarrierDPSKDemodulator::demodulateDataOnly` ends with
+`updateDataSpanPhysicalSNR`: the same in-band (50-2950 Hz) power ratio over the continuation's own
+data span (every carrier at the training's unit amplitude), the same 3 dB signal-presence gate, and
+a frame that cannot measure publishes nothing (per-frame semantics, external review 2026-07-10
+finding 4).
+
+**Verification.** `StreamingMCDPSK` `runCompactBurstPhysicalPerFrame`: a 3-frame compact burst at
+AWGN 20 dB with the middle frame sent 6.02 dB down reads 21.1 / 15.1 / 21.1 dB per frame, also
+through the first-frame constellation retry (DQPSK burst at a DBPSK receiver: 20.8 / 14.8 / 20.8).
+With the call disabled it reads 21.1 / 21.1 / 21.1 and fails. ctest: see the commit.
+
+---
+
 ## 2026-11-12 — FIX(decoder): a frame wait times out only while its samples are missing
 
 **What broke.** `checkIfReadyToDecode` tested the frame clock (elapsed since the sync) before

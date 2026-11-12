@@ -935,7 +935,43 @@ public:
                             static_cast<double>(data.size()) /
                             static_cast<double>(config_.sample_rate);
         corr_origin_ = nullptr;
+        updateDataSpanPhysicalSNR(data);
         return bits;
+    }
+
+    // PHYSICAL SNR of a burst continuation frame: the same payload-referenced power ratio as the
+    // training span's (handoff §2 option (a): the data section carries the training's power, every
+    // carrier at unit amplitude), over this frame's own data span against the burst-time noise
+    // reference. A continuation has no training span; until 2026-11-12 it kept the first frame's
+    // latch, so every frame of a burst re-published one ~85 ms snapshot: the follow pick counted one
+    // fade state three times ("physical 4.7 dB x3" on a 20 dB channel, GUI step-up seed 43) and the
+    // decoder's distribution ring held triplicates. Per-frame semantics: a frame that cannot measure
+    // publishes nothing.
+    void updateDataSpanPhysicalSNR(SampleSpan data) {
+        last_physical_snr_valid_ = false;
+        last_physical_snr_db_ = 0.0f;
+        constexpr size_t kTaps = 101;
+        if (noise_ref_rms_ <= 0.0f || data.size() <= 2 * kTaps) {
+            return;
+        }
+        FIRFilter rx_filter = FIRFilter::bandpass(kTaps, 50.0f, 2950.0f,
+                                                  config_.sample_rate);
+        for (size_t i = 0; i < kTaps; ++i) {
+            rx_filter.process(data[i]);  // settle: the span's first samples have no history
+        }
+        double rx_power = 0.0;
+        for (size_t i = kTaps; i < data.size(); ++i) {
+            const float y = rx_filter.process(data[i]);
+            rx_power += static_cast<double>(y) * static_cast<double>(y);
+        }
+        rx_power /= static_cast<double>(data.size() - kTaps);
+        const double p_n =
+            static_cast<double>(noise_ref_rms_) * static_cast<double>(noise_ref_rms_);
+        // The training span's signal-presence gate (3 dB over the reference).
+        if (p_n > 0.0 && rx_power > 2.0 * p_n) {
+            last_physical_snr_db_ = static_cast<float>(10.0 * std::log10((rx_power - p_n) / p_n));
+            last_physical_snr_valid_ = true;
+        }
     }
 
 private:

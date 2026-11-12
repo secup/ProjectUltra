@@ -389,6 +389,81 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
     return true;
 }
 
+// Per-frame physical SNR (handoff §2, per-frame semantics): every frame of a compact burst reports
+// the power ratio of ITS OWN span. The middle frame goes out 6 dB down; a receiver that re-publishes
+// the first frame's training snapshot for the continuations (the 2026-11-12 defect: "physical
+// 4.7 dB x3" on a 20 dB channel, GUI step-up seed 43) reads all three alike. Also through the
+// first-frame constellation retry (a DQPSK burst at a DBPSK receiver), whose re-demodulated first
+// frame must keep its own reading.
+bool runCompactBurstPhysicalPerFrame(Modulation tx_mod, Modulation rx_configured) {
+    const char* name = tx_mod == rx_configured ? "per-frame physical SNR"
+                                               : "per-frame physical SNR through the retry";
+    const uint32_t alpha = v2::hashCallsign("ALPHA");
+    const uint32_t bravo = v2::hashCallsign("BRAVO");
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(tx_mod, CodeRate::R1_4);
+    encoder.setFixedFrameCodewords(3);
+    encoder.setMcDpskCompactFrames(true);
+    std::vector<Bytes> frames;
+    for (uint16_t i = 0; i < 3; ++i) {
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(700 + i),
+                                             Bytes(48, static_cast<uint8_t>(0x30 + i)), CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(v2::Flags::VERSION_V2 | v2::Flags::MORE_FRAG);
+        frames.push_back(frame.serialize());
+    }
+    auto samples = encoder.encodeBurstLight(frames);
+    const int bits = tx_mod == Modulation::DBPSK ? 1 : 2;
+    const size_t frame_samples =
+        static_cast<size_t>(((3 * 648 + 8 * bits - 1) / (8 * bits)) * 1024);
+    if (samples.size() <= 3 * frame_samples) {
+        std::cout << "FAIL: " << name << ": burst shorter than three frames\n";
+        return false;
+    }
+    for (size_t i = samples.size() - 2 * frame_samples; i < samples.size() - frame_samples; ++i) {
+        samples[i] *= 0.5f;  // the middle frame 6.02 dB down
+    }
+    auto audio = withSilence(samples);
+    ultra::ota_channel_core::SimulatedChannel channel;
+    channel.setSeed(0x2718u);
+    channel.configure(20.0f, ultra::ota_channel_core::ChannelType::AWGN);
+    channel.transmitFromA(audio);
+    audio = channel.receiveForB(audio.size());
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    decoder.setDataMode(rx_configured, CodeRate::R1_4);
+    decoder.setFixedFrameCodewords(3);
+    decoder.setMcDpskSessionAddresses(bravo, alpha);
+    feedInChunks(decoder, audio);
+    std::vector<float> physical(3, NAN);
+    while (decoder.hasFrame()) {
+        auto result = decoder.getFrame();
+        if (!result.success || !v2::isDataFrame(result.frame_type)) continue;
+        auto frame = v2::DataFrame::deserialize(result.frame_data);
+        if (!frame || frame->seq < 700 || frame->seq > 702) continue;
+        if (result.has_physical_snr_db) physical[frame->seq - 700] = result.physical_snr_db;
+    }
+    std::cout << name << ": physical " << physical[0] << " / " << physical[1] << " / "
+              << physical[2] << " dB\n";
+    for (float p : physical) {
+        if (!std::isfinite(p)) {
+            std::cout << "FAIL: " << name << ": a decoded frame carries no physical SNR\n";
+            return false;
+        }
+    }
+    // Frames 1 and 3 share the channel; frame 2 is 6 dB down (the noise reference is the burst's).
+    if (std::fabs(physical[0] - physical[2]) > 2.0f || physical[2] - physical[1] < 4.0f ||
+        physical[2] - physical[1] > 8.0f || physical[0] < 15.0f) {
+        std::cout << "FAIL: " << name << ": readings are not each frame's own\n";
+        return false;
+    }
+    return true;
+}
+
 // MC-DPSK rate change: the up-step's evidence. A compact DBPSK burst through AWGN; the receiver
 // re-decodes the first frame with 4x the in-band noise. At 20 dB that still decodes (DQPSK would);
 // at -4 dB DBPSK decodes but the 4x-noise copy does not (DQPSK would not).
@@ -682,6 +757,8 @@ int main() {
     if (!runCompactBurst("compact burst", Modulation::DBPSK, false)) return 1;
     if (!runCompactBurst("compact burst, middle frame lost", Modulation::DBPSK, true)) return 1;
     if (!runCompactBurst("compact DQPSK burst at a DBPSK receiver", Modulation::DQPSK, false)) return 1;
+    if (!runCompactBurstPhysicalPerFrame(Modulation::DBPSK, Modulation::DBPSK)) return 1;
+    if (!runCompactBurstPhysicalPerFrame(Modulation::DQPSK, Modulation::DBPSK)) return 1;
     if (!runMarginTest(20.0f, true)) return 1;
     if (!runMarginTest(-4.0f, false)) return 1;
     if (!runConnectedOFDMHalfOpenConnectFallback()) return 1;

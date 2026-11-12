@@ -896,14 +896,18 @@ spell shortens bursts on the TRANSMIT side only (`setTxInFlightCap`, `followFall
 the burst length is the sender's choice and the receiver acknowledges at the burst's marked last
 frame, so a receive window must never shrink with it (the two ends' spells age differently). The
 pick's physical bound comes from the same frames (each reading carries its frame's physical SNR,
-`ConnectSnrPool::physicalMeanDb`), never from the decoder's spell-wide ring. A frame whose
+`ConnectSnrPool::physicalMeanDb`), never from the decoder's spell-wide ring. "Its frame's" is
+literal: a compact burst continuation has no training span and measures its own data span
+(`updateDataSpanPhysicalSNR`); a frame that cannot measure publishes nothing - never the burst's
+first-frame snapshot again (BUG-MCDPSK-PHYSICAL-REPUBLISHED: one fade state read as three). A frame whose
 decoder never measured a fading index carries none (NAN), never 0.0: the spell keeps the session's
 measured channel class (BUG-FOLLOW-SPELL-FADING-AWGN). A repeat of the ACK that
 launched an up-crossing, heard while the first OFDM group is on air, is rejected in the monitor's
 acceptance predicate (`isCrossingLaunchAckCopy`): a detection delivered to `onToneBurstAck` has
 already disarmed the monitor, so consuming it there loses the group's real ACK.
 **Test:** `WaveformFollow` (`test_waveform_follow_*`, own binary at the production defaults:
-ConnectionAdaptive pins the authority off), `ConnectionPolicy` (word codec, gate, revert window).
+ConnectionAdaptive pins the authority off), `ConnectionPolicy` (word codec, gate, revert window),
+`StreamingMCDPSK` (`runCompactBurstPhysicalPerFrame`).
 
 ---
 
