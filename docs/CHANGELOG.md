@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — GUI verification of the morning's fixes at HEAD (v22)
+
+ITU Good / AWGN, 7.3 Hz, half-duplex radios, follow on (default), all 9 PASS with both files CRC-clean:
+- ITU Good +5 dB 2 KB, seeds 44/45/46: 244 / 95 / 130 s. Seed 44 failed at ~715 s in both arms of the
+  window A/B before BUG-LISTENER-WAITS-FOR-CONFIRMATION was fixed (the responder's listener now starts
+  at 17.3 s, at connection); seed 46 ran 331 s in one arm (an up-crossing that failed and came back).
+- ITU Good 0 dB 1 KB seed 47 with ULTRA_MCDPSK_MEASURED_RTO=1: 217 s (failed "Connect failed after 10
+  attempts" before BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK was fixed).
+- AWGN -5 dB seed 44: 208 s (176 s on the burst-tail build; this run lost the last burst's tone ACK
+  and waited the formula's 32.8 s - the measured timeout would have saved ~20 s).
+- Good 20 dB 20 KB 96 s, AWGN 20 dB 20 KB 65 s (unchanged).
+- 2-minute 0 dB dip seed 42, measured timeout on vs off: 215 vs 215 s (before the guard fix 240 vs
+  227 s). With it on, the two MC-DPSK timeouts waited 15.5 s (formula, before the first latency
+  sample) and 5.1 s (DQPSK guard 3627 ms); no timeout keyed over a late ACK.
+
+---
+
 ## 2026-11-12 — FIX(rate): a demote at the file tail commits by descriptor (BUG-TAIL-DEMOTE-VIA-MODE-CHANGE)
 
 **What broke.** `tryDescriptorModeSwitch` refused unless the bytes left made a >= 2-frame burst at
