@@ -26,6 +26,8 @@ struct LoopbackStats {
     float ofdm_broadband_snr_db = 0.0f;
     float ofdm_internal_snr_db = 0.0f;
     float sync_quality_db = 0.0f;
+    bool has_frame_physical_snr_db = false;  // the last delivered frame's physical SNR
+    float frame_physical_snr_db = 0.0f;
     float ber = 0.0f;
     int frames_sent = 0;
     int frames_received = 0;

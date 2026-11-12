@@ -15,8 +15,7 @@
 namespace ultra {
 namespace gui {
 
-namespace {
-void copySNRMetricsTo(LoopbackStats& stats, const DecodeResult& result) {
+void copyDecodeSnrMetrics(LoopbackStats& stats, const DecodeResult& result) {
     stats.snr_db = result.snr_db;
     stats.snr_source = result.snr_source;
     stats.mcdpsk_snr_routed_data_aided = result.mcdpsk_snr_routed_data_aided;
@@ -26,8 +25,9 @@ void copySNRMetricsTo(LoopbackStats& stats, const DecodeResult& result) {
     stats.ofdm_broadband_snr_db = result.ofdm_broadband_snr_db;
     stats.ofdm_internal_snr_db = result.ofdm_internal_snr_db;
     stats.sync_quality_db = result.sync_quality_db;
+    stats.has_frame_physical_snr_db = result.has_physical_snr_db;
+    stats.frame_physical_snr_db = result.physical_snr_db;
 }
-}  // namespace
 
 // The callbacks every decoder slot gets (they were the constructor's). A decoder that is not the
 // primary - dual-listen's listener on the other waveform - delivers only what decoded: its failures
@@ -50,7 +50,7 @@ void ModemEngine::wireDecoderCoreCallbacks(StreamingDecoder* decoder) {
         // Update SNR/sync stats before delivering frame so downstream callbacks
         // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
         updateStats([&](LoopbackStats& s) {
-            copySNRMetricsTo(s, result);
+            copyDecodeSnrMetrics(s, result);
             s.synced = result.success;
         });
 

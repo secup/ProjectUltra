@@ -1825,7 +1825,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                         // hardened control profile; keep the adaptation meter
                         // tied to data-channel frames after the link is up.
                         if (!connected_) {
-                            last_fading_index_.store(waveform_->getFadingIndex());
+                            noteFadingIndex(waveform_->getFadingIndex());
                         }
 
                         if (switched_profile) {
@@ -3116,9 +3116,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         result.success && connected_ && is_ofdm && !is_non_data_frame &&
         clean_fading_timing;
     if (initial_link_quality_frame) {
-        last_fading_index_.store(waveform_->getFadingIndex());
+        noteFadingIndex(waveform_->getFadingIndex());
     } else if (measurement_quality_data_frame) {
-        last_fading_index_.store(result.lts_fading_index);
+        noteFadingIndex(result.lts_fading_index);
     } else if (result.success && connected_ && is_ofdm && !is_non_data_frame &&
                sync_from_full_anchor_fallback_) {
         LOG_MODEM(INFO,
@@ -3181,6 +3181,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);
+        }
+        if (mode_ == protocol::WaveformMode::MC_DPSK) {
+            captureConstellationSnapshot();  // the GUI's view (OFDM paths capture their own)
         }
         if ((result.success || deliver_partial_mc_dpsk) && frame_callback_) {
             frame_callback_(result);
@@ -3473,7 +3476,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
             if (next_result.success || next_result.codewords_ok > 0) {
                 if (next_result.success && hasCleanFadingMeasurementTiming(next_result)) {
-                    last_fading_index_.store(next_result.lts_fading_index);
+                    noteFadingIndex(next_result.lts_fading_index);
                 } else if (next_result.success) {
                     LOG_MODEM(INFO,
                               "[%s] Burst continuation fading measurement held: "
@@ -3645,6 +3648,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
                 std::lock_guard<std::mutex> qlock(queue_mutex_);
                 frame_queue_.push(result);
             }
+            captureConstellationSnapshot();  // the GUI's view of this MC-DPSK frame
             if ((result.success || deliver_partial) && frame_callback_) {
                 frame_callback_(result);
             }
@@ -4086,6 +4090,7 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
         std::lock_guard<std::mutex> qlock(queue_mutex_);
         frame_queue_.push(result);
     }
+    captureConstellationSnapshot();  // the GUI's view of this MC-DPSK frame
     if (frame_callback_) {
         frame_callback_(result);
     }
@@ -4245,6 +4250,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
             std::lock_guard<std::mutex> qlock(queue_mutex_);
             frame_queue_.push(result);
         }
+        captureConstellationSnapshot();  // the GUI's view of this MC-DPSK frame
         if (frame_callback_) {
             frame_callback_(result);
         }

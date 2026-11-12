@@ -564,7 +564,7 @@ public:
     // fading_index: combined freq_cv + temporal_cv, where > 0.65 indicates significant fading
     void setChannelQuality(float snr_db, float fading_index,
                            SNRSource source = SNRSource::NONE,
-                           bool data_aided = false) {
+                           bool data_aided = false, float physical_db = NAN) {
         if (!std::isfinite(snr_db) || !acceptsRateSelectionSNR(source)) {
             return;
         }
@@ -576,7 +576,7 @@ public:
         // has the fading observed with the reading, so it rides along (increment 4:
         // the entry pick pools FADING like it pools SNR — single-frame fading at
         // Watterson Good scatters 0.24-0.74 around the 0.65 class boundary).
-        connect_snr_pool_.addReading(snr_db, source, data_aided, fading_index);
+        connect_snr_pool_.addReading(snr_db, source, data_aided, fading_index, physical_db);
         if (std::isfinite(fading_index)) {
             fading_index_ = fading_index;
             ms_since_fading_update_ = 0;
@@ -1389,6 +1389,11 @@ private:
     bool rx_crossing_apply_pending_ = false;
     bool crossing_probe_active_ = false;
     bool crossing_probe_rx_side_ = false;     // this station commanded it (the receiver)
+    // The tone ACK that launched this end's up-crossing (its repeats are consumed while the first
+    // OFDM group is on air).
+    bool crossing_launch_ack_valid_ = false;
+    uint8_t crossing_launch_ack_seq_ = 0;
+    uint16_t crossing_launch_ack_mask_ = 0;
     uint32_t crossing_probe_revert_ms_ = 0;   // receiver: countdown while no OFDM burst arrived
     Modulation crossing_return_mod_ = Modulation::DBPSK;
     bool waveform_follow_enabled_ = connection_policy::waveformFollowEnabled();  // the knob
@@ -1414,6 +1419,14 @@ private:
     // depend on when they last fired (GUI: 113 s of silence instead of the 60 s patience).
     int follow_silent_rounds_ = 0;
     bool in_waveform_crossing_ = false;  // applyWaveformCrossing is applying the data mode
+    // A fallback MC-DPSK spell (crossed down from an OFDM link that was delivering): one-frame bursts
+    // until it outlives connection_policy::followFallbackSmallWindowMs, then the full window.
+    bool follow_fallback_spell_ = false;
+    uint64_t follow_fallback_age_ms_ = 0;
+    uint64_t follow_fallback_small_window_ms_ = 0;
+    // Age of this end's last MC-DPSK burst verdict (ACK), on the connect-SNR pool's clock;
+    // UINT64_MAX = none in this spell. Bounds the up-crossing pick to the burst being acknowledged.
+    uint64_t ms_since_rx_burst_verdict_ = UINT64_MAX;
     Modulation rx_mcdpsk_last_modulation_ = Modulation::DBPSK;
     uint32_t rx_mcdpsk_frames_since_command_ = 0;
     int mcdpsk_last_command_group_seq_ = -1;
@@ -1518,9 +1531,26 @@ private:
         Modulation mod = Modulation::DBPSK;
         CodeRate rate = CodeRate::R1_4;
         float selection_snr_db = 0.0f;
+        float reading_db = 0.0f;        // the burst's pooled reading
+        float physical_db = 0.0f;       // the burst's physical evidence (linear mean)
+        uint32_t physical_n = 0;        // readings that carried one
     };
     SessionPick sessionLadderPick() const;
     uint64_t mcDpskBurstSpanMs() const;
+    Bytes mcDpskTurnEndWireCopy(const Bytes& frame) const;
+    bool isCrossingLaunchAckCopy(
+        const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const;
+    // The connect-SNR pool and the verdict age share one clock (Connection::tick).
+    void ageConnectSnrReadings(uint64_t elapsed_ms) {
+        connect_snr_pool_.tick(elapsed_ms);
+        if (ms_since_rx_burst_verdict_ != UINT64_MAX) {
+            ms_since_rx_burst_verdict_ += elapsed_ms;
+        }
+    }
+    bool followFallbackSmallWindowActive() const {
+        return follow_fallback_spell_ && negotiated_mode_ == WaveformMode::MC_DPSK &&
+               follow_fallback_age_ms_ < follow_fallback_small_window_ms_;
+    }
     bool waveformFollowActive() const;
     // Cross to the rung a session rung word names (an OFDM rung from MC-DPSK, an MC-DPSK rung
     // from OFDM): protocol geometry, per-waveform controllers, then the modem. False when the word

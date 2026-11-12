@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cmath>
+
 #include "gui/modem/modem_engine.hpp"
 #include "protocol/protocol_engine.hpp"
 
@@ -51,7 +53,12 @@ inline void wireModemToProtocol(ModemEngine& modem,
             const auto stats = modem.getStats();
             const float snr_db = stats.snr_db;
             const SNRSource snr_source = stats.snr_source;
+            // A decoder that never measured a fading index (dual-listen's MC-DPSK decoder in a
+            // fallback spell) reports 0.0 = unmeasured; passed on, it told the connection the
+            // channel was AWGN and the up-crossing pick dropped its fading basis (GUI, ITU Good
+            // dip: the returned frame read 5.7 dB, physical 17.6, and stayed below the AWGN floor).
             const float fading = modem.getFadingIndex();
+            const float measured_fading = modem.hasFadingIndex() ? fading : NAN;
             const bool use_quality = protocol.shouldUseRxFrameForChannelQuality(data);
             const bool snr_data_aided = stats.mcdpsk_snr_routed_data_aided;
             protocol.setMeasuredSNR(snr_db, snr_source, snr_data_aided);
@@ -63,7 +70,10 @@ inline void wireModemToProtocol(ModemEngine& modem,
                 protocol.setPhysicalChannelStats(pm, ps, static_cast<uint32_t>(pn));
             }
             if (use_quality) {
-                protocol.setChannelQuality(snr_db, fading, snr_source, snr_data_aided);
+                protocol.setChannelQuality(snr_db, measured_fading, snr_source, snr_data_aided,
+                                           stats.has_frame_physical_snr_db
+                                               ? stats.frame_physical_snr_db
+                                               : NAN);
                 // Doppler coherence (Good/Moderate discriminator) — refines the channel
                 // classification once enough OFDM data has pooled (see design doc). The
                 // approximate dopplerHz readout rides the same feed (retx trough-pacing

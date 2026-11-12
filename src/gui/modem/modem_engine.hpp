@@ -42,6 +42,10 @@ inline Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config
     return Modulation::DQPSK;
 }
 
+// A decoded frame's SNR metrics into the engine stats, before the frame is delivered (the
+// protocol reads them in the delivery callback). One definition (modem_dual_listen.cpp).
+void copyDecodeSnrMetrics(LoopbackStats& stats, const DecodeResult& result);
+
 // Real modem engine using OFDM modulator/demodulator and LDPC codec
 class ModemEngine {
 public:
@@ -143,6 +147,8 @@ public:
     bool isSynced() const;
     float getCurrentSNR() const;
     float getFadingIndex() const;  // Fading index from per-carrier variance (0-1)
+    // Whether the primary decoder ever measured one (StreamingDecoder::hasLastFadingIndex).
+    bool hasFadingIndex() const;
     bool isFading() const;         // True if fading_index > 0.65
     // Doppler coherence (Good/Moderate discriminator) from the OFDM demodulator.
     float getDopplerCoherenceScore() const;

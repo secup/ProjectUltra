@@ -1007,6 +1007,10 @@ struct ConnectSnrReading {
     // fading 0.24-0.74, sigma 0.129, straddling kFadingGoodMax=0.65 — one 0.66
     // reading classified a true-Good channel Moderate and bought a QPSK R1/4 entry).
     float fading_index = NAN;
+    // The frame's physical channel SNR (training-span power vs its burst-time noise, dB) when its
+    // waveform measured one; NAN = absent. Lets a pick bound itself by the physical evidence of
+    // the same frames it reads (Connection::sessionLadderPick), not by a ring over a whole spell.
+    float physical_db = NAN;
     uint64_t age_ms = 0;     // advanced from Connection::tick elapsed_ms (modem-time)
     bool data_aided = false;
     SNRSource source = SNRSource::NONE;
@@ -1026,7 +1030,7 @@ public:
     // setMeasuredSNR-only feeds); it NEVER gates admission — the SNR population
     // contract decides, and the fading aggregate simply skips absent values.
     bool addReading(float snr_db, SNRSource source, bool data_aided,
-                    float fading_index = NAN) {
+                    float fading_index = NAN, float physical_db = NAN) {
         if (!std::isfinite(snr_db)) {
             return false;
         }
@@ -1043,8 +1047,27 @@ public:
             --count_;
         }
         readings_[count_++] =
-            ConnectSnrReading{snr_db, fading_index, 0, data_aided, source};
+            ConnectSnrReading{snr_db, fading_index, physical_db, 0, data_aided, source};
         return true;
+    }
+
+    // Linear-power mean (the decoder ring's dial convention) of the physical SNRs carried by the
+    // qualifying readings younger than max_age_ms; n_out = how many carried one (0: NAN).
+    float physicalMeanDb(bool handshake_only, uint64_t max_age_ms, uint32_t& n_out) const {
+        double lin = 0.0;
+        n_out = 0;
+        for (size_t i = 0; i < count_; ++i) {
+            const ConnectSnrReading& r = readings_[i];
+            if (handshake_only && !((r.source == SNRSource::MCDPSK_IN_BAND) && r.data_aided)) {
+                continue;
+            }
+            if (r.age_ms > max_age_ms || !std::isfinite(r.physical_db)) {
+                continue;
+            }
+            lin += std::pow(10.0, r.physical_db / 10.0);
+            ++n_out;
+        }
+        return n_out > 0 ? static_cast<float>(10.0 * std::log10(lin / n_out)) : NAN;
     }
 
     // Ages every reading (call from Connection::tick with its elapsed_ms).
@@ -1936,6 +1959,37 @@ inline FollowReturnCost followReturnCost(uint32_t ofdm_rto_ms, size_t mcdpsk_win
     c.tau_ms = static_cast<uint32_t>(std::max(0.0, via_mcdpsk_ms - ofdm_rto_ms / 2.0));
     return c;
 }
+// A fallback MC-DPSK spell (crossed down from an OFDM link that was delivering) starts with one-frame
+// bursts. The way back up rides the ACK of the first MC-DPSK burst that starts after the channel
+// returns, so the burst length IS the return latency: GUI dips, OFDM resumed 8-27 s (mean 19.8 s)
+// later than without follow - the whole dip cost (BUG-FOLLOW-DIP-COST). The full window carries more
+// while the drop lasts. With bursts of B and a cycle C = B + ACK + guards, a return at a uniform
+// instant of the cycle waits C/2 for the next burst start, then B + ACK: E = C/2 + B + ack, so w-frame
+// bursts return 1.5 x (round_W - round_1) later than one-frame bursts. Ski rental: one frame costs
+// r_m(W) - r_m(1) bytes per second of spell and saves that much OFDM time on return:
+//   T_w = 1.5 x (round_W - round_1) x r_o / (r_m(W) - r_m(1)),  round_w = w x frame + ack + guards,
+// ~25 min at 8PSK R2/3 (a dip of any length a QSO sits through); a link that delivered little gets
+// the full window within minutes, one that delivered nothing at once.
+inline uint64_t followFallbackSmallWindowMs(double ofdm_bytes_per_s, uint32_t frame_ms,
+                                            uint32_t ack_ms, size_t full_window,
+                                            size_t payload_bytes, uint32_t guards_ms) {
+    if (full_window <= 1 || frame_ms == 0 || payload_bytes == 0 || !(ofdm_bytes_per_s > 0.0)) {
+        return 0;
+    }
+    const auto round_ms = [&](size_t w) {
+        return static_cast<double>(w) * frame_ms + ack_ms + guards_ms;
+    };
+    const auto rate = [&](size_t w) {
+        return static_cast<double>(w * payload_bytes) * 1000.0 / round_ms(w);
+    };
+    const double gain = rate(full_window) - rate(1);
+    if (!(gain > 0.0)) {
+        return 0;
+    }
+    const double saved_ms = 1.5 * (round_ms(full_window) - round_ms(1));
+    return static_cast<uint64_t>(std::min(saved_ms * ofdm_bytes_per_s / gain, 3.6e6));
+}
+
 // The operator's patience with a silent link that was delivering, the one policy choice here (the
 // ski-rental T* above runs to minutes, unrealistic on the air). Fading deep enough to take OFDM out
 // lasts about a second on an ITU Good channel (Rayleigh average fade duration at -14 dB, 0.1 Hz) and

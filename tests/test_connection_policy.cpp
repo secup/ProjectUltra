@@ -1148,6 +1148,20 @@ void test_mcdpsk_rate_controller() {
         CHECK(followSkiRentalMs(207.0, followReturnCost(24350, 0, 52, 43552, 5376, 1920)) == 0,
               "no MC-DPSK model: the evidence decides");
     }
+    // Fallback spell window (ski rental on the burst length): DBPSK 3 x 52-byte frames of 5.4 s; a
+    // return costs 1.5 x 10.75 s more with 3-frame bursts, so a link that delivered 207 B/s keeps
+    // one-frame bursts ~33 min; a tenth of that rate, a tenth of the time; nothing delivered, or a
+    // one-frame window anyway: the full window at once.
+    {
+        const uint64_t good = followFallbackSmallWindowMs(207.0, 5376, 1920, 3, 52, 400);
+        CHECK(good > 20 * 60000 && good < 45 * 60000,
+              "a delivering link keeps single frames through any dip a QSO sits through");
+        const uint64_t weak = followFallbackSmallWindowMs(20.7, 5376, 1920, 3, 52, 400);
+        CHECK(weak * 9 < good && weak * 11 > good, "the single-frame span scales with what OFDM delivered");
+        CHECK(followFallbackSmallWindowMs(0.0, 5376, 1920, 3, 52, 400) == 0 &&
+                  followFallbackSmallWindowMs(207.0, 5376, 1920, 1, 52, 400) == 0,
+              "nothing delivered, or a one-frame window: no single-frame phase");
+    }
     // Revert window after an up-crossing: ACK + lead-in + burst head + two search windows. At
     // 8PSK R2/3 x 12 codewords with the slowest (3.4 s) ACK: longer than the head and the ACK,
     // and well inside a DBPSK sender's one-frame retransmission timeout (22.0 s).

@@ -443,7 +443,9 @@ switch; pricing one there is a ~25 % phantom penalty that kept the controller of
 
 **Rule:** every physical DATA turn whose end the receiver must ACK carries a CRC-protected
 `PHYSICAL_BURST_END` on its last frame (multi-frame OFDM bursts; EVERY MC-DPSK turn, singletons
-included), and the receiver reports `physical_turn_complete` for it BEFORE the frame callback, so
+included, on EVERY transmit path: the burst encoder, the singleton flush and a timeout batch sent
+frame by frame, `Connection::mcDpskTurnEndWireCopy`), and the receiver reports
+`physical_turn_complete` for it BEFORE the frame callback, so
 the ACK takes the completed-group path. An ACK without that provenance goes through
 listen-before-ACK's evidence-novelty rule (INV-TONE-ACK-005), which is right only for genuinely
 asynchronous ACKs (timer backstops, descriptor loss): it waits out a peer that is still on the air.
@@ -730,12 +732,26 @@ tones and reports the carrier offset without the shift.
 (BUG-NARROW-ACK-OUT-OF-BAND).
 **Test:** `ToneBurstAckRoundTrip` (`test_narrowband_band_plan`); GUI gate `--rx-filter 1250-1750`.
 
+### INV-FILE-LEDGER-001: the file ledger rewinds exactly when the ARQ abandons frames (2026-11-11)
+**Rule:** the file transfer re-queues its pending chunks (`requeuePendingChunks`) if and only if
+the ARQ abandoned the in-flight frames that carry them - `SelectiveRepeatARQ::txAbortGeneration`
+advanced across the ARQ reconfiguration - never on a prediction of it (a geometry change).
+**Why:** the ARQ keeps in-flight frames across a change that leaves the frame payload capacity alone
+(modulation only: 32QAM R2/3 <-> 16QAM R2/3) and retransmits them. A file layer rewound for it sends
+the same bytes again as new frames and its sent/acked counts fall out of step with the ARQ's; the
+next real abort then re-queues nothing and a chunk is lost while the sender reports the file
+complete (BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT).
+**Test:** `ConnectionAdaptive` `test_mod_only_move_keeps_the_file_ledger_with_the_arq`.
+
 ### INV-RX-LEVEL-001: the receiver reads no absolute level
 **Rule:** every receive-side presence, noise or SNR decision is a ratio of two measured quantities
 or relative to a measured noise reference, never a fixed RMS/power/amplitude: a station hears its
 peer at whatever level its operator set (AF gain, USB audio level, sound-card gain), tens of dB
 apart between stations. The one absolute test allowed is digital silence
-(`signal_policy::kDigitalSilenceRms` = 1e-7, under a 24-bit converter step).
+(`signal_policy::kDigitalSilenceRms` = 1e-7, under a 24-bit converter step), and digital silence
+is never a noise observation: a half-duplex radio's receive while its own transmitter is keyed, a
+muted or unplugged input (the carrier-sense floor learned it and read busy for most of a session,
+BUG-CCA-SILENCE-FLOOR).
 **Why:** the simulator delivered every station's audio at its peer's transmit level, so gates
 calibrated there (sync search 0.015-0.040 RMS, tone-ACK floor at 5 % of the transmit amplitude,
 MC-DPSK burst tail 0.012, PING ceiling 0.16, carrier-sense floor 0.005, burst-erasure backstop
@@ -809,6 +825,19 @@ commands are its rung bits, and only an authority sender reads them and ends its
 `waveformFollowActive()` requires it. A down-crossing restarts the channel evidence (SNR pool, the
 connection's physical measurement and the decoder's physical ring): the way back up is decided on
 what the MC-DPSK spell measures, never on the channel that collapsed (BUG-FOLLOW-STALE-EVIDENCE).
+The way back up reads only the burst being acknowledged: pool readings younger than this end's
+previous burst verdict minus one ACK airtime, capped at the window span (`mcDpskBurstSpanMs`) - never
+a fixed span, which holds earlier bursts when the sender's are shorter than its window. A fallback
+spell shortens bursts on the TRANSMIT side only (`setTxInFlightCap`, `followFallbackSmallWindowMs`):
+the burst length is the sender's choice and the receiver acknowledges at the burst's marked last
+frame, so a receive window must never shrink with it (the two ends' spells age differently). The
+pick's physical bound comes from the same frames (each reading carries its frame's physical SNR,
+`ConnectSnrPool::physicalMeanDb`), never from the decoder's spell-wide ring. A frame whose
+decoder never measured a fading index carries none (NAN), never 0.0: the spell keeps the session's
+measured channel class (BUG-FOLLOW-SPELL-FADING-AWGN). A repeat of the ACK that
+launched an up-crossing, heard while the first OFDM group is on air, is rejected in the monitor's
+acceptance predicate (`isCrossingLaunchAckCopy`): a detection delivered to `onToneBurstAck` has
+already disarmed the monitor, so consuming it there loses the group's real ACK.
 **Test:** `WaveformFollow` (`test_waveform_follow_*`, own binary at the production defaults:
 ConnectionAdaptive pins the authority off), `ConnectionPolicy` (word codec, gate, revert window).
 

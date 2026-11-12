@@ -1197,7 +1197,7 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     const auto cfo_update = cfo_tracker_.ingestPilotResidual(
         burst_pre_cfo, residual_cfo, burst_cfo_, /*clamp_drift=*/true);
     burst_cfo_ = cfo_update.accepted_cfo;
-    last_fading_index_.store(waveform_->getFadingIndex());
+    noteFadingIndex(waveform_->getFadingIndex());
 
     ++burst_substantive_members_;
     if (burst_arm_provenance_ == BurstArmProvenance::UNPROVEN_MARKER &&

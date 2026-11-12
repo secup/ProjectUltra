@@ -241,10 +241,11 @@ public:
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;
 
-    // Set channel quality including fading detection
+    // Set channel quality including fading detection; physical_db: the frame's physical channel
+    // SNR when its waveform measured one (NAN otherwise).
     void setChannelQuality(float snr_db, float fading_index,
                            SNRSource source = SNRSource::NONE,
-                           bool data_aided = false);
+                           bool data_aided = false, float physical_db = NAN);
     // Set the OFDM Doppler-coherence verdict (Good/Moderate discriminator), measured
     // separately from fading_index. See docs/CHANNEL_DISCRIMINATOR_DESIGN_2026_06_15.md.
     // doppler_hz: the estimator's SECONDARY/approximate RMS-Doppler readout (0 = not

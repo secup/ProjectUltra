@@ -109,6 +109,10 @@ struct DecodeResult {
     bool has_evm_snr_db = false;
     float evm_snr_db = 0.0f;                 // Radio-agnostic decision-directed EVM SNR (Stage 1).
     size_t evm_carrier_count = 0;             // Fresh post-EQ decisions behind evm_snr_db.
+    // This frame's physical channel SNR (training-span power vs its burst-time noise), when the
+    // waveform measured one: per-reading physical evidence for the waveform-follow pick.
+    bool has_physical_snr_db = false;
+    float physical_snr_db = 0.0f;
     // #58 BUG-CONNECT-SNR-VARIANCE: both MC-DPSK in-band estimates, surfaced so
     // consumers/tests can compare spreads. training = ~170 ms preamble snapshot
     // (ONE fade state); data_aided = whole-frame differential estimate
@@ -591,6 +595,10 @@ public:
     // Get last measured fading index (from per-carrier magnitude variance)
     // 0-1 range, > 0.4 indicates significant fading
     float getLastFadingIndex() const { return last_fading_index_.load(); }
+    // Whether this decoder measured a fading index since its reset (an OFDM LTS, or the
+    // handshake's shared-chirp view). A decoder that never ran one - dual-listen's MC-DPSK
+    // decoder in a fallback spell - reports 0.0 that means "unmeasured", not "AWGN".
+    bool hasLastFadingIndex() const { return last_fading_index_valid_.load(); }
 
     // Channel coherence-TIME (Doppler) discriminator: separates Good (slow fading, high
     // score) from Moderate (fast, low score) where fading_index is blind. Trust the score
@@ -1164,6 +1172,7 @@ private:
         bool evm_snr_valid = false;
         float evm_snr_db = 0.0f;
         float fading_index = 0.0f;
+        bool fading_index_valid = false;
     } half_open_measurement_snapshot_;
 
     struct PendingHandshakeMCDPSKConnect {
@@ -1405,6 +1414,11 @@ private:
     std::atomic<int> rx_level_verdict_{0};
     std::atomic<uint32_t> rx_level_verdict_seq_{0};
     std::atomic<float> last_fading_index_{0.0f};
+    std::atomic<bool> last_fading_index_valid_{false};
+    void noteFadingIndex(float fading_index) {
+        last_fading_index_.store(fading_index, std::memory_order_relaxed);
+        last_fading_index_valid_.store(true, std::memory_order_relaxed);
+    }
     mutable std::atomic<float> last_doppler_coherence_score_{0.0f};
     mutable std::atomic<float> last_doppler_hz_{0.0f};
     mutable std::atomic<bool> last_doppler_coherence_valid_{false};
@@ -1416,8 +1430,14 @@ private:
     uint64_t overflow_events_ = 0;
 
     // Constellation cache (protected by buffer_mutex_)
+    // The GUI's constellation view: captured on the decode thread (captureConstellationSnapshot),
+    // which owns the waveform; the render thread reads only this, never the waveform, whose
+    // demodulator the decode thread may rebuild mid-decode without the buffer lock (render-thread
+    // SIGSEGV in OFDMDemodulator::getConstellationSymbols, 2026-11-09 and 2026-11-11).
     mutable std::vector<std::complex<float>> constellation_cache_;
     mutable std::chrono::steady_clock::time_point constellation_cache_time_{};
+    Modulation constellation_mod_cache_ = Modulation::QPSK;
+    bool constellation_mod_cache_valid_ = false;
     static constexpr int CONSTELLATION_CACHE_HOLD_MS = 1500;
 
     // Lifecycle

@@ -316,6 +316,13 @@ struct ConnectionAdaptiveTestAccess {
     static void startFile(Connection& c, const std::string& path) {
         CHECK(c.file_transfer_.startSend(path), "startSend should succeed");
     }
+    static void pumpFile(Connection& c) { c.sendNextFileChunk(); }
+    static uint32_t filePendingChunks(const Connection& c) {
+        return c.file_transfer_.pendingChunkCount();
+    }
+    static size_t fileRemainingBytes(const Connection& c) {
+        return c.file_transfer_.remainingTxBytes();
+    }
 
     static void acknowledgeModeChange(Connection& c) {
         auto ack = v2::ControlFrame::makeAck("K2DEF", "W1ABC",
@@ -6884,6 +6891,40 @@ void test_harq_provisional_context_carries_destination() {
 
 } // namespace
 
+// A data-mode change re-queues the file's pending chunks exactly when the ARQ abandons the frames
+// that carry them. A modulation-only move (32QAM R2/3 -> 16QAM R2/3, both 16 codewords) keeps the
+// ARQ's in-flight frames; a file layer rewound anyway re-sent their bytes as new frames, its
+// sent/acked ledger fell behind the ARQ's, the next real abort re-queued nothing and a chunk was
+// lost while the sender reported the file complete (GUI, ITU Good dip, seed 47).
+void test_mod_only_move_keeps_the_file_ledger_with_the_arq() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 22.0f, 0.10f,
+                                                    Modulation::QAM32);
+    ConnectionAdaptiveTestAccess::applyDataMode(c, Modulation::QAM32, CodeRate::R2_3, 16);
+    TempPayloadFile payload("mod_only_ledger", 20000);
+    CHECK(payload.dir.valid() && !payload.path.empty(), "temp payload file should be created");
+    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+    ConnectionAdaptiveTestAccess::pumpFile(c);
+    const uint32_t pending = ConnectionAdaptiveTestAccess::filePendingChunks(c);
+    const size_t in_flight = ConnectionAdaptiveTestAccess::arqInFlightBytes(c);
+    const size_t remaining = ConnectionAdaptiveTestAccess::fileRemainingBytes(c);
+    CHECK(pending > 0 && in_flight > 0, "fixture: file chunks are in flight in the ARQ");
+
+    ConnectionAdaptiveTestAccess::applyDataMode(c, Modulation::QAM16, CodeRate::R2_3, 16);
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == in_flight,
+          "a modulation-only move keeps the ARQ's in-flight frames (same payload capacity)");
+    CHECK(ConnectionAdaptiveTestAccess::filePendingChunks(c) == pending &&
+              ConnectionAdaptiveTestAccess::fileRemainingBytes(c) == remaining,
+          "so the file layer keeps them pending: no rewind, no second copy of their bytes");
+
+    ConnectionAdaptiveTestAccess::applyDataMode(c, Modulation::QAM16, CodeRate::R3_4, 16);
+    CHECK(ConnectionAdaptiveTestAccess::arqInFlightBytes(c) == 0,
+          "a rate change abandons the in-flight frames");
+    CHECK(ConnectionAdaptiveTestAccess::filePendingChunks(c) == 0 &&
+              ConnectionAdaptiveTestAccess::fileRemainingBytes(c) > remaining,
+          "and the file layer re-queues exactly their chunks");
+}
+
 int main() {
     // §RETX-PACING A/B knobs are latched ONCE via function-local statics — pin BOTH to
     // their disabled defaults BEFORE any Connection call so this binary deterministically
@@ -7018,6 +7059,7 @@ int main() {
     test_latent_candidate_geometry_matches_receiver_configured_wire_profile();
     test_8psk_long_ldpc_file_geometry_and_tail_safety();
     test_qpsk_r34_long_ldpc_file_geometry_and_lifecycle();
+    test_mod_only_move_keeps_the_file_ledger_with_the_arq();
 
     if (tests_failed != 0) {
         std::cout << "ConnectionAdaptive: " << tests_failed << "/" << tests_run

@@ -30,7 +30,7 @@ Gram matrix, image terms included) for the training channel, and the same leakag
 data-aided estimate; or the RRC pulse shaping of BUG-TX-SPLATTER-SYMBOL-EDGES, which makes the carriers
 orthogonal enough to remove the problem.
 
-### BUG-FOLLOW-DIP-COST (open, 2026-11-11) — P2: a two-minute dip costs ~9 % with follow on
+### BUG-FOLLOW-DIP-COST (open, 2026-11-11) — P3: a dip cost ~9 % with follow on (now -3 %, see below)
 
 GUI gate, ITU Good 20 -> 0 -> 20 dB (32-150 s), 20 KB, 6 seeds, dual-listen with the landing fix:
 237.7 s mean against 218.0 s with follow off (paired +19.7 s, sd 15.8; 5 of 6 seeds slower). Follow
@@ -43,6 +43,53 @@ throughput in a permanent drop), keeping the OFDM ladder state across a short sp
 outages (60 s outage: +12..+20 %) a down-crossing on probation (no ACK for the first MC-DPSK burst ->
 back to the OFDM rung). Worth it: the wins elsewhere are step-ups 3.3x and ramps/drops that fail or
 stall without follow.
+Part 1 (2026-11-11): one-frame bursts at the start of a fallback spell (transmit-side cap) and the
+up-crossing pick bounded to the burst being acknowledged. Part 2: the pick's physical bound from the
+same frames (the decoder's spell-wide ring held the dip: returned bursts at 10-15 dB selected at
+-3.4..4.4 dB). Also the crossing ACK's repeat rejected as a candidate, and the spell no longer reads
+the channel as AWGN. Most of the measured cost was other bugs (BUG-CCA-SILENCE-FLOOR,
+BUG-MCDPSK-RESEND-NO-TURN-END). After the fixes (GUI, CHANGELOG): dips -3.0 % (follow faster), dip
+length sweep -2.0 s, QSB even, 60 s outage +10 s (patience worst case). Remaining: the 60 s-outage
+case and BUG-POST-CROSSING-OVERCLIMB; downgraded to P3.
+
+### BUG-POST-CROSSING-OVERCLIMB (open, 2026-11-11) — P2: one group's EVM jumps the ladder three rungs
+
+After an up-crossing the OFDM ladder starts fresh (`resetOfdmLadderState`); the receiver authority
+commanded 8PSK R2/3 -> 32QAM R2/3 on the first group's EVM, and the next 9-frame 32QAM burst failed
+whole on ITU Good 20 dB (GUI, seeds 44 and 46: ~13-14 s each, then 16QAM). One group is one sample of
+a fading channel; a multi-rung climb on it bets the next burst on a fade crest. Direction: bound a
+climb by the confidence of the EVM estimate over the groups behind it, not by one group.
+
+### BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL (open, 2026-11-11) — P2: a dip's retries demote the returned link
+
+Follow off, ITU Good 20 -> 0 -> 20 dB, seed 46 (GUI, carrier sense fixed): the collapse escape's
+MODE_CHANGE retried into the dead channel (80-110 s, all lost); at the return a "frame stuck, 5 retx
+at current rate" escape fired on retries accumulated during the dip and demoted 8PSK R2/3 -> QPSK
+R3/4 although that same 8PSK burst decoded 4/4. Its MODE_CHANGE was queued behind the data burst;
+the receiver's ACK for the burst collided with it and the handshake took 22 s (167 -> 189 s, two
+timeouts). The follow-off arm is ~14 s slower on dips than before the carrier-sense fix because of
+it (the false busy used to hold those retries). Direction: retries made while nothing at all was
+heard are no evidence against the rung (the stale-evidence rule follow already has); a control
+frame must not queue behind a data burst whose ACK is due.
+
+### BUG-CHIRP-SEARCH-SEGV (open, 2026-11-11) — P1: decode-thread SIGSEGV in the chirp search
+
+Two GUI crashes (ips 2026-11-11 08:49 and 10:57, a single-decoder build): the decode thread in
+`ChirpSync::detectChirpTemplateFFT` (MC-DPSK `detectSync`) faulted at address 0 while the main thread
+built a new MC-DPSK waveform for the encoder (MC-DPSK rate fallback -> `ModemEngine::setMCDPSKConfig`).
+The two objects are distinct; the shared path is not identified. Hardened: `initFFT`'s
+double-checked flag is now an acquire/release atomic (a plain bool let ARM see it before the template
+data, which reads a null vector at address 0 exactly). No recurrence in the follow matrix since; keep
+open until a soak shows none.
+
+### BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR (suspected, latent, 2026-11-11) — P3
+
+`Connection::onToneBurstAck` consumes a flagged copy of the ACK that launched a latent startup probe
+("duplicate LATENT startup launch ACK consumed") after the tone-ACK monitor delivered it, and a
+delivered detection disarms the monitor. The waveform-follow crossing ACK showed what follows: the
+probe group's own ACK would go unheard until the RTO. Not exercised: no startup probe committed in
+any GUI run of the follow matrix (2026-11-11). Fix shape when it is: reject the copy in
+`isToneBurstAckCandidatePlausible`, as `isCrossingLaunchAckCopy` does.
 
 ### BUG-TX-SPLATTER-SYMBOL-EDGES (open, 2026-11-11) — P3: data symbols switch hard; their splatter shows on every waterfall
 
@@ -2535,6 +2582,47 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT (FIXED 2026-11-11) — P0 data loss: a mod-only move desynced the file ledger
+
+A modulation-only rung move (32QAM R2/3 <-> 16QAM R2/3, same rate and codeword count) re-queued the
+file's pending chunks while the ARQ kept and retransmitted the frames carrying them; the file
+ledger's sent/acked counts diverged and the next real abort re-queued nothing - a chunk was lost and
+the sender reported the transfer complete (GUI, seed 47). Reachable on the default ladder since
+v0.6.2. Fix: re-queue only when `txAbortGeneration` advances. Test
+`test_mod_only_move_keeps_the_file_ledger_with_the_arq`.
+
+### BUG-GUI-CONSTELLATION-RACE (FIXED 2026-11-11) — the render thread read the decoder's waveform
+
+`StreamingDecoder::getConstellationSymbols` (GUI render loop) called into `waveform_` while the decode
+thread may rebuild the waveform's demodulator mid-decode without the buffer lock: SIGSEGV in
+`OFDMDemodulator::getConstellationSymbols` (ips 2026-11-09 01:11, 2026-11-11 21:09 - the receiver of
+a GUI QSB run died, the sender retried to its cap). Fix: the render thread reads only the snapshot the
+decode thread captures (`captureConstellationSnapshot`, now also on every MC-DPSK delivery), the
+modulation included. Test `DualListenEngine` (a render-thread reader across decoding and crossings).
+
+### BUG-FOLLOW-SPELL-FADING-AWGN (FIXED 2026-11-11) — a fallback spell read the channel as AWGN
+
+Dual-listen's MC-DPSK decoder never measures a fading index; its 0.0 reached the connection as
+"AWGN", overwrote the session's measured class and sent the up-crossing pick down the AWGN branch
+(no fading basis, 6 dB floor on the raw reading). Fix: the decoder reports whether it measured one
+(`hasLastFadingIndex`); unmeasured reaches the protocol as absent. Tests `DualListenEngine`,
+`test_waveform_follow_spell_keeps_the_measured_channel_class`.
+
+### BUG-CCA-SILENCE-FLOOR (FIXED 2026-11-11) — carrier sense learned its own transmit silence as noise
+
+A half-duplex station's receive is digital silence while it transmits; the carrier-sense floor
+learned the zeros, went to 0 after any own burst longer than its 5 s window and then refused every
+real noise sample (0 x 2 admission gate): busy until the 25 s relearn, 75-95 % of a GUI session on
+the sender. Busy-gated egress waited for its deadlines (a MODE_CHANGE retry held 17 s). Fix:
+digital silence (`kDigitalSilenceRms`) never enters the floor. Test `ChannelBusyDetector`
+`testDigitalSilenceIsNotNoise`.
+
+### BUG-MCDPSK-RESEND-NO-TURN-END (FIXED 2026-11-11) — a one-frame MC-DPSK resend lacked the end-of-turn marker
+
+`transmitFrameBatch` sent a lone timeout resend unstamped; the receiver waited for a continuation
+and did not ACK until the next RTO (22 s per resend with one-frame fallback bursts). Fix:
+`mcDpskTurnEndWireCopy` on every single-frame path. Test `test_mcdpsk_one_frame_resend_ends_its_turn`.
 
 ### BUG-FOLLOW-MODE-CHANGE-STRADDLE (FIXED 2026-11-11, before follow shipped) — a MODE_CHANGE outlived the crossing and split connection from modem
 

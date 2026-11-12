@@ -2554,6 +2554,9 @@ bool Connection::isToneBurstAckCandidatePlausible(
     if (state_ != ConnectionState::CONNECTED || disconnect_teardown_active_) {
         return false;
     }
+    if (isCrossingLaunchAckCopy(payload)) {
+        return false;  // not an answer to the burst on air: keep listening for the one that is
+    }
 
     // The reserved WAITING-REBASE voice is intentionally outside the sender's
     // ordinary SACK support. It is the one legitimate NACK-typed tone accepted by
@@ -2730,6 +2733,13 @@ bool Connection::onToneBurstAck(
                 static_cast<uint8_t>((detection.payload.rate_hint & 0x7) |
                                      ((detection.payload.rung_cmd & 0x3) << 3)),
                 detection.payload.group_seq);
+            if (negotiated_mode_ == WaveformMode::OFDM_CHIRP && crossing_probe_active_ &&
+                !crossing_probe_rx_side_) {
+                // This ACK launched an up-crossing: its repeats must not open a second group.
+                crossing_launch_ack_valid_ = true;
+                crossing_launch_ack_seq_ = detection.payload.group_seq;
+                crossing_launch_ack_mask_ = detection.payload.frame_mask;
+            }
         } else if (rx_authority) {
             const uint8_t cmd_word = static_cast<uint8_t>(
                 (detection.payload.rate_hint & 0x7) |
@@ -6596,7 +6606,7 @@ void Connection::tick(uint32_t elapsed_ms) {
     // #58 increment 3: age the connect-SNR pool on the modem-time tick (elapsed_ms is
     // the same clock every timer here runs on — never Date/wall-clock). Ticks in ALL
     // states: handshake readings accumulate age while DISCONNECTED/CONNECTING too.
-    connect_snr_pool_.tick(elapsed_ms);
+    ageConnectSnrReadings(elapsed_ms);  // with the burst-verdict age (mcDpskBurstSpanMs)
     // The fading-freshness clock ages on the same tick (saturating).
     ms_since_fading_update_ =
         (ms_since_fading_update_ > 0x7FFFFFFF - elapsed_ms)
@@ -7559,6 +7569,7 @@ void Connection::tickModeChangeAckRepeats(uint32_t elapsed_ms) {
 void Connection::configureArqForCurrentDataMode() {
     // Each mode supplies its own in-flight timeout table below, or none (the scalar applies).
     arq_.setAckTimeoutTable(nullptr, 0);
+    arq_.setTxInFlightCap(0);  // only a young MC-DPSK fallback spell caps it (below)
     arq_.setCodeRate(data_code_rate_);
     const int physical_data_cw = physicalDataFrameCodewords();
     const int physical_data_z = selectBurstLiftingZ();
@@ -7582,6 +7593,9 @@ void Connection::configureArqForCurrentDataMode() {
             data_frame_cw_count_);
         const size_t window_size = connection_policy::mcDpskWindowSizeForTiming(timing);
         arq_.setWindowSize(window_size);
+        // A young fallback spell sends one frame per burst (followFallbackSmallWindowMs); the
+        // receive window stays the window (the peer acknowledges at the marked last frame).
+        arq_.setTxInFlightCap(followFallbackSmallWindowActive() ? 1 : 0);
         arq_.setSackDelay(connection_policy::kCarrierSenseSackCoalesceMs);
         arq_.setSackDelayShort(0);
         arq_.setAckBatchThroughMoreFrag(true);
@@ -8476,18 +8490,16 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // geometry (bits/symbol -> frame airtime; per-CW BYTE capacity is rate/CW-derived,
     // getFixedFramePayloadCapacity, and does NOT change with modulation) — so like a rate/CW
     // change it must trigger the re-encode + HARQ flush. Computed BEFORE data_modulation_ is overwritten
-    // below. NOTE: this drives requeuePendingChunks() + the soft_combine_harq_.clear() below (the
-    // load-bearing part — stale old-constellation LLRs would corrupt HARQ). The deeper ARQ-window
-    // byte-capacity rewind lives in setCodeRate()/setFixedFrameCodewords() (via
-    // configureArqForCurrentDataMode), which early-return on an unchanged rate/CW — so a PURE
-    // modulation-only transition (same rate AND same CW) is NOT yet fully ARQ-safe. That case does
-    // not occur on the DEFAULT path: the QAM16 climb (R3/4->R2/3) and demote (R2/3->R3/4) ALWAYS
-    // co-change the rate, so setCodeRate fires and the window rewinds correctly. EXCEPTION
-    // (ULTRA_QAM16_R34, default-OFF A/B): the stuck-frame escape QAM16 R3/4 -> QPSK R3/4 is
-    // mod-only at the SAME rate (and typically the same CW=8) — the setCodeRate rewind is skipped
-    // there. The per-CW BYTE capacity is rate/CW-derived (LDPC K x cw_count), not
-    // modulation-derived, so in-flight frame bytes stay geometry-valid and the requeue+HARQ flush
-    // above still fire; validate that transition on the faithful gate before the knob graduates.
+    // below. NOTE: this drives the soft_combine_harq_.clear() below (stale old-constellation LLRs
+    // would corrupt HARQ) and, only when the ARQ really abandons its in-flight frames, the file
+    // layer's requeuePendingChunks(). The ARQ-window rewind lives in setCodeRate() /
+    // setFixedFrameGeometry() (via configureArqForCurrentDataMode), which early-return on an
+    // unchanged rate/CW/Z: a modulation-only transition keeps the in-flight frames (their byte
+    // capacity is LDPC K x cw_count, not modulation-derived) and retransmits them at the new
+    // constellation. That transition IS on the default path - 32QAM R2/3 <-> 16QAM R2/3, both
+    // 16 codewords (the earlier note that it only occurred under ULTRA_QAM16_R34 was false since
+    // the 32QAM R2/3 rung shipped) - and rewinding the file layer for it lost a chunk
+    // (BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT).
     const Modulation old_mod_for_streak = data_modulation_;
     const CodeRate old_rate_for_streak = data_code_rate_;
     const bool mod_changed = mod != data_modulation_;
@@ -8604,16 +8616,21 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // Pending chunks must be re-encoded if rate OR CW OR modulation changed: the ARQ payload
     // capacity depends on all three, and chunks queued under the old geometry will
     // overflow / mis-align under the new one.
-    const bool requeue_file =
+    // The file layer re-queues its pending chunks only if the ARQ actually abandons the frames
+    // that carry them (below, after the ARQ is reconfigured). A change that leaves the frame
+    // payload capacity alone - modulation only, 32QAM R2/3 <-> 16QAM R2/3 at 16 codewords - keeps
+    // the ARQ's in-flight frames, which it retransmits at the new constellation; a file layer
+    // rewound anyway re-sent their bytes as new frames, its sent/acked ledger fell behind the
+    // ARQ's (acked 31 > sent 29), the next real abort re-queued nothing, and a 936-byte chunk was
+    // lost while the sender reported the file complete (GUI, ITU Good dip, seed 47).
+    const bool requeue_file_candidate =
         geometry_changed &&
         file_transfer_.getState() == FileTransferState::SENDING &&
         file_transfer_.hasPendingChunks();
     const bool refill_file =
         geometry_changed &&
         file_transfer_.getState() == FileTransferState::SENDING;
-    if (requeue_file) {
-        file_transfer_.requeuePendingChunks();
-    }
+    const uint32_t arq_aborts_before = arq_.txAbortGeneration();
 
     // [LADDER] telemetry: close the current rung segment on a real mid-transfer move.
     if ((rate_changed || mod_changed) && ladder_telemetry_active_) {
@@ -8628,6 +8645,9 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         ? rung_id
         : currentLadderRungId();
     configureArqForCurrentDataMode();
+    if (requeue_file_candidate && arq_.txAbortGeneration() != arq_aborts_before) {
+        file_transfer_.requeuePendingChunks();
+    }
     // MC-DPSK rate change: a negotiated data mode is a fresh start for the receiver's controller
     // (the peer begins at this constellation) and for the sender's command ordering.
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
@@ -8829,7 +8849,11 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
                       connection_policy::kMcDpskRungModulations[mcdpsk_rate_ctl_.command()]),
                   changed ? " (changed)" : "", mcdpsk_rate_ctl_.probeAfterCleanBursts());
         // Waveform follow: the same burst may say the channel now carries OFDM.
-        if (const uint8_t up = upCrossingWordForAck(clean); up != 0) {
+        const uint8_t up = upCrossingWordForAck(clean);
+        // The peer's next burst starts after this ACK: its readings are the ones younger than
+        // this verdict (mcDpskBurstSpanMs).
+        ms_since_rx_burst_verdict_ = 0;
+        if (up != 0) {
             return up;
         }
     } else if (rx_crossing_apply_pending_ || rx_dual_up_commanded_) {
@@ -8925,9 +8949,16 @@ Connection::SessionPick Connection::sessionLadderPick() const {
                                                    burst_ms))
             : entry_fading_raw;
     const bool data_aided = rateSelectionSnrDataAided(burst_ms);
+    // The physical evidence of the same frames: the decoder's ring spans the whole spell, so after
+    // a dip it held the dip (mean 0.4 dB) and capped every returned burst at 2.4 dB - two bursts
+    // reading 10-15 dB stayed on MC-DPSK (GUI, ITU Good dip, seed 44: +21 s).
     SessionPick pick;
+    pick.physical_db = connect_snr_pool_.physicalMeanDb(/*handshake_only=*/true, burst_ms,
+                                                        pick.physical_n);
+    pick.reading_db = snr_db;
     pick.selection_snr_db = connection_policy::connectSelectionSnrDb(
-        snr_db, entry_fading, data_aided, physical_channel_mean_db_, physical_channel_n_);
+        snr_db, entry_fading, data_aided, pick.physical_n > 0 ? pick.physical_db : 0.0f,
+        pick.physical_n);
     const float rate_fading = connection_policy::coherenceAdjustedFadingIndex(
         entry_fading, coherence_score_, coherence_valid_);
     const float papr_offset_db = txPaprOffsetDb();
@@ -8990,8 +9021,16 @@ uint64_t Connection::mcDpskBurstSpanMs() const {
         data_modulation_, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
         data_frame_cw_count_);
     const size_t window = std::max<size_t>(1, arq_.getWindowSize());
-    return static_cast<uint64_t>(window) * timing.data_ms + timing.ack_ms +
-           connection_policy::mcDpskPartialSackHoldMs(timing);
+    const uint64_t window_span = static_cast<uint64_t>(window) * timing.data_ms + timing.ack_ms +
+                                 connection_policy::mcDpskPartialSackHoldMs(timing);
+    // Half-duplex: the burst this ACK closes started after this end's previous burst verdict
+    // (its ACK), whatever the burst's length - one frame in a young fallback spell. A reading at
+    // or before that ACK belongs to an earlier burst; none of the peer's frames decodes within our
+    // own ACK's airtime, so readings younger than (verdict age - ACK airtime) are this burst's.
+    if (ms_since_rx_burst_verdict_ != UINT64_MAX && ms_since_rx_burst_verdict_ > timing.ack_ms) {
+        return std::min(window_span, ms_since_rx_burst_verdict_ - timing.ack_ms);
+    }
+    return window_span;
 }
 
 bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason) {
@@ -9003,6 +9042,7 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
         explicit CrossingScope(bool& f) : flag(f) { flag = true; }
         ~CrossingScope() { flag = false; }
     } crossing_scope(in_waveform_crossing_);
+    const double ofdm_delivered_bytes_per_s = followOfdmBytesPerSecond();
     const int mc_rung = connection_policy::decodeMcDpskRungCommand(session_word);
     const uint8_t ofdm_rung = connection_policy::decodeOfdmRungCommand(session_word);
     const WaveformMode from = negotiated_mode_;
@@ -9065,9 +9105,30 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
     // geometry change for the ARQ: unacked frames are re-cut at the new capacity under a new
     // move-epoch (applyDataMode), the peer's receive window follows the epoch.
     if (target == WaveformMode::OFDM_CHIRP) {
+        follow_fallback_spell_ = false;
         resetAdaptiveDecisionState();
         resetOfdmLadderState();
     } else {
+        // A fallback spell: one-frame bursts while a return is likely (the burst length is the
+        // return latency), the full window once the drop has lasted (followFallbackSmallWindowMs).
+        {
+            const auto fb_rung = connection_policy::ladderRungForId(LadderRungId::ROBUST_MID);
+            const auto fb_timing = connection_policy::mcDpskFrameTiming(
+                fb_rung.modulation, config_.mc_dpsk_num_carriers,
+                config_.mc_dpsk_samples_per_symbol, fb_rung.cw_count);
+            const size_t payload =
+                connection_policy::mcDpskCompactFrameEnabled()
+                    ? mcdpsk_frame::payloadCapacity(fb_rung.cw_count, fb_rung.code_rate)
+                    : v2::getVariableFramePayloadCapacity(fb_rung.code_rate, fb_rung.cw_count);
+            follow_fallback_small_window_ms_ = connection_policy::followFallbackSmallWindowMs(
+                ofdm_delivered_bytes_per_s, fb_timing.data_ms, fb_timing.ack_ms,
+                connection_policy::mcDpskWindowSizeForTiming(fb_timing), payload,
+                2 * static_cast<uint32_t>(connection_policy::kDefaultTxLeadInMs +
+                                          connection_policy::kDefaultTxTailMs));
+            follow_fallback_spell_ = follow_fallback_small_window_ms_ > 0;
+            follow_fallback_age_ms_ = 0;
+            ms_since_rx_burst_verdict_ = UINT64_MAX;  // no verdict in this spell yet
+        }
         // Down: what the session measured describes the channel that just collapsed. The way
         // back up is decided on what this MC-DPSK spell measures (BUG-FOLLOW-STALE-EVIDENCE): the
         // pool's 20 dB handshake reading and a physical cap still made of pre-fade frames lifted a
@@ -9121,10 +9182,11 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
                                   : kRungIdxNone;
     const uint8_t command = up_crossing_gate_.observe(clean, ofdm_rung);
     LOG_MODEM(INFO,
-              "Connection: WAVEFORM FOLLOW rx: burst %s, pick %s %s %s (sel %.1f dB) -> %s "
-              "(run %d)",
+              "Connection: WAVEFORM FOLLOW rx: burst %s, pick %s %s %s (sel %.1f dB; reading "
+              "%.1f, physical %.1f dB x%u) -> %s (run %d)",
               clean ? "clean" : "loss", pick.rung.name, modulationToString(pick.mod),
-              codeRateToString(pick.rate), pick.selection_snr_db,
+              codeRateToString(pick.rate), pick.selection_snr_db, pick.reading_db,
+              pick.physical_n > 0 ? pick.physical_db : 0.0f, pick.physical_n,
               command != kRungIdxNone ? "COMMAND OFDM" : "stay", up_crossing_gate_.run());
     if (command == kRungIdxNone) {
         return 0;
@@ -9205,11 +9267,28 @@ void Connection::maybeAbandonCrossingOnTimeout(uint32_t elapsed_ms) {
     applyWaveformCrossing(word, "no ACK for the first OFDM burst");
 }
 
+// The ACK that launched an up-crossing is repeated (MC-DPSK ACKs go out more than once). A copy heard
+// while the first OFDM group is still on air cannot answer that group (half-duplex). Read as an ACK
+// it was a turn boundary that queued a second group behind the first, and the receiver ACKed at the
+// first group's end over the second's head (GUI dip, ITU Good seed 44: 3/4 frames). Consuming it in
+// onToneBurstAck was worse: the monitor disarms on the detection it delivers, so the group's real
+// ACK went unheard and the crossing was abandoned. The acceptance predicate rejects it instead, so
+// the monitor keeps listening. A copy after the group's air end is a real report.
+bool Connection::isCrossingLaunchAckCopy(
+    const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const {
+    return crossing_launch_ack_valid_ && negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
+           crossing_probe_active_ && !crossing_probe_rx_side_ &&
+           payload.group_seq == crossing_launch_ack_seq_ &&
+           payload.frame_mask == crossing_launch_ack_mask_ && last_data_burst_end_valid_ &&
+           std::chrono::steady_clock::now() < last_data_burst_end_;
+}
+
 void Connection::endCrossingProbe(bool held) {
     if (!crossing_probe_active_) {
         return;
     }
     crossing_probe_active_ = false;
+    crossing_launch_ack_valid_ = false;
     crossing_probe_revert_ms_ = 0;
     if (crossing_probe_rx_side_) {
         if (held) {
@@ -9402,6 +9481,18 @@ void Connection::maybeCrossDownOnCollapse() {
 
 void Connection::tickWaveformFollow(uint32_t elapsed_ms) {
     follow_clock_ms_ += elapsed_ms;
+    if (follow_fallback_spell_ && negotiated_mode_ == WaveformMode::MC_DPSK) {
+        follow_fallback_age_ms_ += elapsed_ms;
+        if (follow_fallback_age_ms_ >= follow_fallback_small_window_ms_) {
+            // The drop has lasted: carry data with the full window.
+            follow_fallback_spell_ = false;
+            LOG_MODEM(INFO,
+                      "Connection: WAVEFORM FOLLOW: the MC-DPSK spell outlived %llu ms -> full "
+                      "window",
+                      static_cast<unsigned long long>(follow_fallback_small_window_ms_));
+            arq_.setTxInFlightCap(0);
+        }
+    }
     if (negotiated_mode_ == WaveformMode::OFDM_CHIRP &&
         (arq_.getTxInFlightBytes() > 0 ||
          file_transfer_.getState() == FileTransferState::RECEIVING ||
@@ -9821,6 +9912,10 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     rx_crossing_word_ = 0;
     rx_crossing_apply_pending_ = false;
     rx_dual_up_commanded_ = false;
+    follow_fallback_spell_ = false;
+    follow_fallback_age_ms_ = 0;
+    ms_since_rx_burst_verdict_ = UINT64_MAX;
+    crossing_launch_ack_valid_ = false;
     crossing_probe_active_ = false;
     crossing_probe_rx_side_ = false;
     crossing_probe_revert_ms_ = 0;
@@ -10209,17 +10304,7 @@ void Connection::flushBurstBuffer(bool retransmission_required,
         // logical frame stays byte-stable) — the receiver then ACKs it as a completed
         // turn instead of holding the ACK on decoder evidence until it is dropped
         // (BUG-MCDPSK-ACK-DROPPED). OFDM singletons keep their full-anchor provenance.
-        if (negotiated_mode_ == WaveformMode::MC_DPSK) {
-            if (auto frame = v2::DataFrame::deserialize(committed_frames[0]);
-                frame && v2::isDataFrame(frame->type) &&
-                frame->type != v2::FrameType::DATA_REPAIR) {
-                frame->flags = static_cast<uint8_t>(
-                    frame->flags | v2::Flags::PHYSICAL_BURST_END);
-                on_transmit_(frame->serialize());
-                return;
-            }
-        }
-        on_transmit_(committed_frames[0]);
+        on_transmit_(mcDpskTurnEndWireCopy(committed_frames[0]));
     } else if (on_transmit_burst_) {
         LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", committed_frames.size());
         // DESC-SWITCH §5.1 step 2: the first burst group after a descriptor-committed
@@ -10392,6 +10477,23 @@ void Connection::flushStagedArqTimeoutBatch() {
     }
 }
 
+// MC-DPSK: the frame that ends a physical turn carries the CRC-protected PHYSICAL_BURST_END marker,
+// on a private wire copy (the ARQ's logical frame stays byte-stable), so the receiver ACKs it as a
+// completed turn instead of holding the ACK on decoder evidence (BUG-MCDPSK-ACK-DROPPED). Bursts get
+// it from the encoder (shouldStampPhysicalBurstEnd); single frames from here, on every path.
+Bytes Connection::mcDpskTurnEndWireCopy(const Bytes& frame) const {
+    if (negotiated_mode_ != WaveformMode::MC_DPSK) {
+        return frame;
+    }
+    auto parsed = v2::DataFrame::deserialize(frame);
+    if (!parsed || !v2::isDataFrame(parsed->type) ||
+        parsed->type == v2::FrameType::DATA_REPAIR) {
+        return frame;
+    }
+    parsed->flags = static_cast<uint8_t>(parsed->flags | v2::Flags::PHYSICAL_BURST_END);
+    return parsed->serialize();
+}
+
 void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list,
                                     bool account_rto_round) {
     if (disconnect_teardown_active_ || frame_data_list.empty()) {
@@ -10444,8 +10546,13 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list,
     }
 
     if (physical_frames.size() == 1 || !on_transmit_burst_ || !burst_capable_mode) {
-        for (const auto& frame_data : physical_frames) {
-            transmitFrame(frame_data);
+        // The last frame ends the physical turn: an MC-DPSK resend of one frame without the
+        // marker left the receiver waiting for a continuation, with no ACK, until the next RTO
+        // (GUI 60 s outage, one-frame fallback bursts: two resends, 22 s each).
+        for (size_t i = 0; i < physical_frames.size(); ++i) {
+            transmitFrame(i + 1 == physical_frames.size()
+                              ? mcDpskTurnEndWireCopy(physical_frames[i])
+                              : physical_frames[i]);
         }
         return;
     }

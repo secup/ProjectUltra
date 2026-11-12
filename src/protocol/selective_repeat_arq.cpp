@@ -251,6 +251,7 @@ void SelectiveRepeatARQ::setCodeRate(CodeRate rate) {
     }
 
     if (aborted_unacked > 0 || cleared_acked > 0 || tx_in_flight_ > 0) {
+        ++tx_abort_generation_;  // in-flight frames abandoned (txAbortGeneration)
         tx_next_seq_ = tx_base_seq_;
         tx_in_flight_ = 0;
         last_ack_signature_valid_ = false;
@@ -617,6 +618,9 @@ bool SelectiveRepeatARQ::isReadyToSend() const {
 
 size_t SelectiveRepeatARQ::getAvailableSlots() const {
     size_t window = config_.window_size;
+    if (tx_in_flight_cap_ > 0) {
+        window = std::min(window, tx_in_flight_cap_);
+    }
     return (tx_in_flight_ < window) ? (window - tx_in_flight_) : 0;
 }
 
@@ -2844,6 +2848,9 @@ void SelectiveRepeatARQ::abortPendingTx(bool force_move_epoch_bump) {
 
     tx_base_seq_ = tx_next_seq_;
     tx_in_flight_ = 0;
+    if (dropped_payload) {
+        ++tx_abort_generation_;  // in-flight frames abandoned (txAbortGeneration)
+    }
 
     if (move_epoch_enabled_ && dropped_payload) {
         tx_epoch_ = static_cast<uint8_t>((tx_epoch_ + 1) & 0x3);

@@ -10,6 +10,8 @@
 #include "protocol/connection_policy.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -124,6 +126,11 @@ struct ConnectionAdaptiveTestAccess {
     static void feedMcDpskSnr(Connection& c, float snr_db, float fading) {
         c.setChannelQuality(snr_db, fading, SNRSource::MCDPSK_IN_BAND, /*data_aided=*/true);
     }
+    // A decoded MC-DPSK frame with its physical SNR (training-span power vs burst-time noise).
+    static void feedMcDpskFrame(Connection& c, float snr_db, float fading, float physical_db) {
+        c.setChannelQuality(snr_db, fading, SNRSource::MCDPSK_IN_BAND, /*data_aided=*/true,
+                            physical_db);
+    }
     static void noteOfdmGroup(Connection& c, bool delivered_any) {
         c.noteRxOfdmBurstAfterCrossing(delivered_any);
         c.noteRxOfdmGroupForFollow(delivered_any);
@@ -185,7 +192,27 @@ struct ConnectionAdaptiveTestAccess {
         c.pending_ladder_rung_id_ = LadderRungId::OFDM_CHIRP;
     }
     static bool modeChangePending(const Connection& c) { return c.mode_change_pending_; }
-    static void agePool(Connection& c, uint32_t ms) { c.connect_snr_pool_.tick(ms); }
+    static void agePool(Connection& c, uint32_t ms) { c.ageConnectSnrReadings(ms); }
+    static size_t arqWindow(const Connection& c) { return c.arq_.getWindowSize(); }
+    static size_t txCap(const Connection& c) { return c.arq_.getTxInFlightCap(); }
+    static bool sendFixedData(Connection& c, const Bytes& payload, uint8_t flags) {
+        return c.arq_.sendFixedDataWithFlags(payload, flags);
+    }
+    // The sender right after obeying an up-crossing launched by the ACK (seq, mask), its first
+    // OFDM group on air for another on_air_ms (negative: already off the air).
+    static void armCrossingLaunch(Connection& c, uint8_t seq, uint16_t mask, int on_air_ms) {
+        c.crossing_probe_active_ = true;
+        c.crossing_probe_rx_side_ = false;
+        c.crossing_launch_ack_valid_ = true;
+        c.crossing_launch_ack_seq_ = seq;
+        c.crossing_launch_ack_mask_ = mask;
+        c.last_data_burst_end_valid_ = true;
+        c.last_data_burst_end_ =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(on_air_ms);
+    }
+    static uint64_t fallbackSmallWindowMs(const Connection& c) {
+        return c.follow_fallback_small_window_ms_;
+    }
     static void applyDataMode(Connection& c, Modulation mod, CodeRate rate, LadderRungId rung) {
         c.applyDataMode(mod, rate, 0, rung);
     }
@@ -408,22 +435,24 @@ void test_waveform_follow_down_crossing_forgets_stale_evidence() {
               c, connection_policy::encodeMcDpskRungCommand(0)),
           "the collapse crosses down");
     for (int burst = 0; burst < 4; ++burst) {
-        ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, -1.0f, 0.6f);
+        ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, -1.0f, 0.6f);  // no physical reading
         const uint8_t word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
         CHECK(connection_policy::decodeOfdmRungCommand(word) == kRungIdxNone,
               "a fade read at -1 dB never commands OFDM, whatever the channel was before it");
+        ConnectionAdaptiveTestAccess::agePool(c, 19000);  // a 3-frame cycle
     }
     // The fade's own physical measurement bounds the boost the same way.
     c.setPhysicalChannelStats(1.5f, 2.0f, 3);
     for (int burst = 0; burst < 3; ++burst) {
-        ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, -1.0f, 0.6f);
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, -1.0f, 0.6f, 1.5f);
         const uint8_t word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
         CHECK(connection_policy::decodeOfdmRungCommand(word) == kRungIdxNone,
               "fresh physical evidence of the fade keeps the session in MC-DPSK");
+        ConnectionAdaptiveTestAccess::agePool(c, 19000);
     }
     // The channel comes back: fresh readings and a fresh physical measurement.
     c.setPhysicalChannelStats(20.0f, 1.5f, 4);
-    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 14.0f, 0.6f);
+    ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 14.0f, 0.6f, 20.0f);
     CHECK(connection_policy::decodeOfdmRungCommand(
               ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) != kRungIdxNone,
           "the first clean burst of the returned channel commands OFDM");
@@ -737,16 +766,217 @@ void test_waveform_follow_return_reads_the_latest_burst() {
               c, connection_policy::encodeMcDpskRungCommand(0)),
           "the fade crosses down");
     for (float fade : {-3.0f, -5.0f, -1.0f, -4.0f}) {  // the fade, a frame apart
-        ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, fade, 0.6f);
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, fade, 0.6f, fade + 0.5f);
         ConnectionAdaptiveTestAccess::agePool(c, 6000);
     }
     ConnectionAdaptiveTestAccess::agePool(c, 30000);  // the channel is back
     c.setPhysicalChannelStats(18.0f, 2.0f, 6);
-    for (int frame = 0; frame < 3; ++frame) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 14.0f, 0.6f);
+    for (int frame = 0; frame < 3; ++frame) {
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 14.0f, 0.6f, 18.0f);
+    }
     const uint8_t rung = connection_policy::decodeOfdmRungCommand(
         ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
     CHECK(rung >= kRungIdxQam8R23,
           "the return lands where the returned channel says (8PSK R2/3), not on the fade's floor");
+}
+
+// With one-frame bursts the burst being acknowledged is one frame. A full window's span (3 frames +
+// ACK + hold, ~24 s) still held the dip's last two one-frame bursts (a cycle is ~8.5 s), and the
+// return read the fade again; the readings since this end's previous verdict are the burst's own.
+void test_waveform_follow_return_reads_a_one_frame_burst() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    c.setPhysicalChannelStats(20.0f, 1.5f, 16);
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+              c, connection_policy::encodeMcDpskRungCommand(0)),
+          "the fade crosses down");
+    bool stayed = true;
+    for (float fade : {-3.0f, -5.0f, -1.0f}) {  // one-frame bursts in the fade, each acknowledged
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, fade, 0.6f, fade + 0.5f);
+        stayed = stayed && connection_policy::decodeOfdmRungCommand(
+                               ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) == kRungIdxNone;
+        ConnectionAdaptiveTestAccess::agePool(c, 8500);
+    }
+    CHECK(stayed, "the fade's bursts stay on MC-DPSK");
+    c.setPhysicalChannelStats(18.0f, 2.0f, 6);
+    ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 14.0f, 0.6f, 18.0f);  // the channel is back
+    const uint8_t rung = connection_policy::decodeOfdmRungCommand(
+        ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
+    CHECK(rung != kRungIdxNone && rung >= kRungIdxQam8R23,
+          "the first clean one-frame burst commands OFDM where the returned channel says");
+}
+
+// The physical cap reads the frames of the burst being acknowledged. The decoder's physical ring
+// spans the whole spell: after a dip it held the dip (mean 0.4 dB) and capped every returned burst at
+// 2.4 dB (GUI, ITU Good dip, seed 44: two bursts reading 10-15 dB stayed on MC-DPSK, +21 s).
+void test_waveform_follow_return_reads_the_burst_physical_evidence() {
+    for (const float burst_physical : {16.0f, 1.0f}) {
+        setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+        Connection c;
+        unsetenv("ULTRA_WAVEFORM_FOLLOW");
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                        Modulation::QAM8);
+        ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+        CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+                  c, connection_policy::encodeMcDpskRungCommand(0)),
+              "the fade crosses down");
+        for (float fade : {-3.0f, -5.0f, -1.0f}) {
+            ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, fade, 0.6f, fade + 0.5f);
+            (void)ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
+            ConnectionAdaptiveTestAccess::agePool(c, 8500);
+        }
+        c.setPhysicalChannelStats(0.4f, 1.5f, 8);  // the decoder's ring: the dip
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 12.0f, 0.6f, burst_physical);
+        const uint8_t rung = connection_policy::decodeOfdmRungCommand(
+            ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
+        if (burst_physical > 10.0f) {
+            CHECK(rung != kRungIdxNone,
+                  "a returned burst commands OFDM on its own physical evidence, not the spell's");
+        } else {
+            CHECK(rung == kRungIdxNone,
+                  "a burst whose own training sat in the fade stays (its physics caps the boost)");
+        }
+    }
+}
+
+// A fallback spell's MC-DPSK frames measure no fading index (dual-listen's MC-DPSK decoder never ran an
+// LTS): they carry none, and the pick keeps the session's measured channel class. Read as 0 (AWGN),
+// the returned frame at 5.7 dB (physical 17.6) stayed under the AWGN floor (GUI, ITU Good, seed 46).
+void test_waveform_follow_spell_keeps_the_measured_channel_class() {
+    for (const bool read_as_awgn : {false, true}) {
+        setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+        Connection c;
+        unsetenv("ULTRA_WAVEFORM_FOLLOW");
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                        Modulation::QAM8);
+        ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+        CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+                  c, connection_policy::encodeMcDpskRungCommand(0)),
+              "the fade crosses down");
+        const float spell_fading = read_as_awgn ? 0.0f : NAN;
+        for (float fade : {-3.0f, -5.0f}) {
+            ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, fade, spell_fading, fade + 0.5f);
+            (void)ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
+            ConnectionAdaptiveTestAccess::agePool(c, 8500);
+        }
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 5.7f, spell_fading, 17.6f);
+        const uint8_t rung = connection_policy::decodeOfdmRungCommand(
+            ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
+        if (!read_as_awgn) {
+            CHECK(rung != kRungIdxNone,
+                  "on the session's measured class (Good) the returned frame commands OFDM");
+        } else {
+            CHECK(rung == kRungIdxNone,
+                  "control: read as AWGN the same frame stays under the AWGN floor");
+        }
+    }
+}
+
+// A fallback spell sends one frame per burst while a return is likely (the burst length is the return
+// latency: dips cost 8-27 s waiting for a clean 3-frame burst), the full window once it has lasted; a
+// link that delivered nothing in OFDM gets the full window at once.
+void test_waveform_follow_fallback_spell_starts_with_single_frames() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection delivering;
+    Connection fresh;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(delivering, CodeRate::R2_3, 20.0f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(delivering);
+    ConnectionAdaptiveTestAccess::setRxReassembly(delivering, 600);
+    const uint32_t rto = ConnectionAdaptiveTestAccess::ackTimeoutMs(delivering);
+    for (int round = 0; round < 6; ++round) {
+        ConnectionAdaptiveTestAccess::tickFollow(delivering, rto);
+        ConnectionAdaptiveTestAccess::deliverOfdm(delivering, 8);
+    }
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+              delivering, connection_policy::encodeMcDpskRungCommand(0)),
+          "the delivering link crosses down");
+    const uint64_t span = ConnectionAdaptiveTestAccess::fallbackSmallWindowMs(delivering);
+    const size_t window = ConnectionAdaptiveTestAccess::arqWindow(delivering);
+    CHECK(span > 10 * 60000 && ConnectionAdaptiveTestAccess::txCap(delivering) == 1 && window > 1,
+          "its MC-DPSK spell sends one-frame bursts for minutes; the receive window stays whole");
+    ConnectionAdaptiveTestAccess::tickFollow(delivering, static_cast<uint32_t>(span - 1));
+    CHECK(ConnectionAdaptiveTestAccess::txCap(delivering) == 1, "still single frames");
+    ConnectionAdaptiveTestAccess::tickFollow(delivering, 2);
+    CHECK(ConnectionAdaptiveTestAccess::txCap(delivering) == 0 &&
+              ConnectionAdaptiveTestAccess::arqWindow(delivering) == window,
+          "the drop outlived the break-even: the full window");
+
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(fresh, CodeRate::R2_3, 20.0f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(fresh);
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
+              fresh, connection_policy::encodeMcDpskRungCommand(0)),
+          "a link that never delivered crosses down");
+    CHECK(ConnectionAdaptiveTestAccess::txCap(fresh) == 0,
+          "nothing to come back to: the full window at once");
+}
+
+// The ACK that launched an up-crossing comes again (MC-DPSK ACKs are repeated). While the first OFDM
+// group is on air a copy cannot answer it: read as a turn boundary it queued a second group behind the
+// first (GUI, seed 44). It must be rejected as a candidate, not consumed: the monitor disarms on the
+// detection it delivers, and the group's own ACK then went unheard (GUI, seed 42: crossing abandoned).
+void test_waveform_follow_crossing_ack_copy_is_not_a_candidate() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    std::vector<Bytes> sent;
+    c.setTransmitCallback([&](const Bytes& frame) { sent.push_back(frame); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                    Modulation::QAM8);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes{0x10}, 0),
+          "the first OFDM group's frame is in flight");
+    // The launching ACK closed the last MC-DPSK burst: base - 1, no progress for the OFDM frame.
+    ultra::waveform::tone_burst_ack::ToneBurstAckPayload copy;
+    copy.group_seq = 0x3F;
+    copy.frame_mask = 0;
+    copy.type = ultra::waveform::tone_burst_ack::AckType::Ack;
+    copy.move_epoch = 0;
+    const bool arq_verdict = c.isToneBurstAckCandidatePlausible(copy);
+    ultra::waveform::tone_burst_ack::ToneBurstAckPayload own = copy;
+    own.group_seq = 0;  // the group's own ACK: through the frame on air
+    CHECK(arq_verdict && c.isToneBurstAckCandidatePlausible(own),
+          "fixture: both are ARQ-plausible candidates");
+    ConnectionAdaptiveTestAccess::armCrossingLaunch(c, copy.group_seq, copy.frame_mask, 5000);
+    CHECK(!c.isToneBurstAckCandidatePlausible(copy),
+          "a copy heard while the group is on air is not a candidate: the monitor keeps listening");
+    CHECK(c.isToneBurstAckCandidatePlausible(own),
+          "the group's own ACK stays a candidate while the group is on air");
+    ConnectionAdaptiveTestAccess::armCrossingLaunch(c, copy.group_seq, copy.frame_mask, -1);
+    CHECK(c.isToneBurstAckCandidatePlausible(copy) == arq_verdict,
+          "after the group's air end the same ACK is the ARQ's call again (a real report)");
+    (void)sent;
+}
+
+// A one-frame MC-DPSK resend ends its physical turn and must say so: without PHYSICAL_BURST_END the
+// receiver waited for a continuation and sent no ACK until the next RTO (GUI 60 s outage, one-frame
+// fallback bursts: two resends lost 22 s each). The burst encoder stamps bursts; the timeout path
+// sent single frames unstamped.
+void test_mcdpsk_one_frame_resend_ends_its_turn() {
+    Connection c;
+    std::vector<Bytes> sent;
+    c.setTransmitCallback([&](const Bytes& frame) { sent.push_back(frame); });
+    // As the GUI and TNC wire it: the burst path owns timeout resends (handleArqTimeoutBatch).
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+        for (const auto& f : frames) sent.push_back(f);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    CHECK(ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes(40, 0x5A), 0),
+          "one MC-DPSK DATA frame in flight");
+    const size_t first = sent.size();
+    for (int ms = 0; ms < 120000 && sent.size() == first; ms += 100) c.tick(100);
+    CHECK(sent.size() > first, "the retransmission timeout resends it");
+    if (sent.size() > first) {
+        const auto resend = v2::DataFrame::deserialize(sent.back());
+        CHECK(resend && (resend->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+              "the one-frame resend carries the end-of-turn marker");
+    }
 }
 
 }  // namespace
@@ -778,6 +1008,12 @@ int main() {
     test_dual_listen_missed_up_crossing_backs_off();
     test_waveform_follow_crossing_supersedes_mode_change();
     test_waveform_follow_return_reads_the_latest_burst();
+    test_waveform_follow_return_reads_a_one_frame_burst();
+    test_waveform_follow_return_reads_the_burst_physical_evidence();
+    test_waveform_follow_spell_keeps_the_measured_channel_class();
+    test_waveform_follow_fallback_spell_starts_with_single_frames();
+    test_waveform_follow_crossing_ack_copy_is_not_a_candidate();
+    test_mcdpsk_one_frame_resend_ends_its_turn();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

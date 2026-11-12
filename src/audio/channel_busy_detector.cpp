@@ -1,4 +1,5 @@
 #include "audio/channel_busy_detector.hpp"
+#include "sync/signal_policy.hpp"
 
 #include "ultra/logging.hpp"
 
@@ -153,7 +154,14 @@ void ChannelBusyDetector::observeRmsLocked(float rms,
     const bool agc_dip_suspect =
         now < agc_holdoff_until_ && cached_noise_floor_valid_ &&
         current_rms_ < cached_noise_floor_rms_;
-    if (!agc_dip_suspect && shouldRecordNoiseFloorSampleLocked(current_rms_)) {
+    // Digital silence (below one 24-bit converter step) is no receiver, not channel noise: a
+    // half-duplex radio's receive while its own transmitter is keyed, a muted or unplugged input
+    // (INV-RX-LEVEL-001: the one absolute test). Learned as noise, an own burst longer than the
+    // floor window left only its zeros there: floor 0, the 0 x 2 admission gate then refused every
+    // real noise sample, and the channel read busy until the relearn (GUI half-duplex gate: the
+    // sender's threshold read 0 for 75-95 % of a session; a MODE_CHANGE retry was held 17 s).
+    const bool digital_silence = current_rms_ < ultra::sync::signal_policy::kDigitalSilenceRms;
+    if (!digital_silence && !agc_dip_suspect && shouldRecordNoiseFloorSampleLocked(current_rms_)) {
         noise_floor_window_.emplace_back(now, current_rms_);
         pruneNoiseFloorLocked(now);
     }

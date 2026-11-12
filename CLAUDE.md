@@ -130,8 +130,9 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
    then crosses between MC-DPSK and OFDM_CHIRP as the channel moves: the receiver commands the crossing in
    its tone ACK (session rung word 1..10 OFDM, 11/12 MC-DPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
    Dual-listen (the default, INV-DUAL-LISTEN-001): the receiver runs a second decoder on the other waveform
-   and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md). Open:
-   BUG-FOLLOW-DIP-COST (a two-minute dip ~9 % slower than follow off).
+   and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md). GUI
+   2026-11-11 vs follow off: 2-min dips -3 %, dip-length sweep even, QSB even, step-up 3.5x faster,
+   60 s outage +10 s (the patience's worst case). Open: BUG-POST-CROSSING-OVERCLIMB.
 5. `enterConnected()` → `configureArqForCurrentDataMode()` sets ARQ window per mode: MC-DPSK timing-derived 1–5, OFDM_NARROW 3, wideband OFDM 8 default / up to 16. (Only `BurstStopAndWaitController` on the burst-transport path is true window=1.)
 6. StreamingEncoder/Decoder check `mode_`; `isOFDMMode()` unifies the OFDM family.
 

@@ -9,7 +9,9 @@
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
 
+#include <atomic>
 #include <cstdio>
+#include <thread>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -60,6 +62,7 @@ SenderAudio senderAudio() {
 struct Heard {
     std::string text;
     WaveformMode receiver_waveform;
+    bool fading_measured;  // what the protocol is told about the frame's fading index
 };
 
 std::string payloadText(const Bytes& frame) {
@@ -71,7 +74,7 @@ std::string payloadText(const Bytes& frame) {
 // BRAVO connected on OFDM; the sender's MC-DPSK frame, then its OFDM frame, through feedAudio and
 // processRxBuffer 20 ms at a time (the GUI's synchronous receive loop).
 std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
-                           std::vector<WaveformMode>& reports) {
+                           std::vector<WaveformMode>& reports, bool render_reads = false) {
     setenv("ULTRA_WAVEFORM_FOLLOW", dual_listen ? "2" : "0", 1);
     ModemEngine rx;  // no callsign, no label: it hears every station (the CLI's prx does the same)
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
@@ -88,7 +91,7 @@ std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
         }
     });
     rx.setRawDataCallback([&](const Bytes& data, bool) {
-        heard.push_back({payloadText(data), rx.getWaveformMode()});
+        heard.push_back({payloadText(data), rx.getWaveformMode(), rx.hasFadingIndex()});
     });
     constexpr size_t kChunk = 960;
     const std::vector<float> silence(kChunk, 0.0f);
@@ -104,11 +107,32 @@ std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
     auto feedSilence = [&](size_t samples) {
         for (size_t i = 0; i < samples; i += kChunk) feed(silence.data(), kChunk);
     };
+    // The GUI's render loop reads the constellation on its own thread while the decoder runs and
+    // the session crosses waveforms (a render-thread read of the waveform's demodulator crashed the
+    // GUI, 2026-11-09 and 2026-11-11). Under the sanitizer build this is the race check.
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> reads{0};
+    std::thread render;
+    if (render_reads) {
+        render = std::thread([&] {
+            while (!stop.load()) {
+                const auto symbols = rx.getConstellationSymbols();
+                (void)rx.getConstellationModulation();
+                (void)symbols;
+                reads.fetch_add(1);
+            }
+        });
+    }
     feedSilence(24000);
     feedAll(audio.mcdpsk);
     feedSilence(48000);
     feedAll(audio.ofdm);
     feedSilence(3 * 48000);
+    stop.store(true);
+    if (render.joinable()) render.join();
+    if (render_reads) {
+        check(reads.load() > 0, "the render thread read the constellation throughout");
+    }
     return heard;
 }
 
@@ -119,13 +143,19 @@ int main() {
     check(!audio.mcdpsk.empty() && !audio.ofdm.empty(), "the sender produced both bursts");
 
     std::vector<WaveformMode> reports;
-    const auto heard = receive(/*dual_listen=*/true, audio, reports);
+    const auto heard = receive(/*dual_listen=*/true, audio, reports, /*render_reads=*/true);
     check(heard.size() == 2, "dual-listen: both frames delivered");
     if (heard.size() == 2) {
         check(heard[0].text == kMcText && heard[0].receiver_waveform == WaveformMode::MC_DPSK,
               "the MC-DPSK frame reached a receiver already on MC-DPSK");
         check(heard[1].text == kOfdmText && heard[1].receiver_waveform == WaveformMode::OFDM_CHIRP,
               "the OFDM frame reached a receiver back on OFDM");
+    }
+    if (heard.size() == 2) {
+        // The spell's MC-DPSK decoder never measured a fading index: its 0.0 is "unmeasured",
+        // and the protocol must not read it as AWGN; the OFDM frame's LTS measured one.
+        check(!heard[0].fading_measured && heard[1].fading_measured,
+              "fading is unmeasured on the MC-DPSK frame, measured on the OFDM frame");
     }
     check(reports.size() == 2 && reports[0] == WaveformMode::MC_DPSK &&
               reports[1] == WaveformMode::OFDM_CHIRP,

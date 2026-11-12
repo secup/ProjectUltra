@@ -1048,6 +1048,8 @@ bool StreamingDecoder::resetFalseOFDMStateAfterRecoveredConnect(
                                std::memory_order_relaxed);
         last_fading_index_.store(candidate.measurements.fading_index,
                                  std::memory_order_relaxed);
+        last_fading_index_valid_.store(candidate.measurements.fading_index_valid,
+                                       std::memory_order_relaxed);
     }
 
     pending_handshake_mcdpsk_connect_ = {};
@@ -1182,6 +1184,7 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
     resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
+    constellation_mod_cache_valid_ = false;
 
     // Clear burst interleave state on mode change
     burst_soft_buffer_.clear();
@@ -1290,6 +1293,8 @@ void StreamingDecoder::setHandshakeConfirmationPending(bool pending) {
             last_evm_snr_db_.load(std::memory_order_relaxed);
         half_open_measurement_snapshot_.fading_index =
             last_fading_index_.load(std::memory_order_relaxed);
+        half_open_measurement_snapshot_.fading_index_valid =
+            last_fading_index_valid_.load(std::memory_order_relaxed);
         half_open_measurement_snapshot_.valid = true;
         handshake_confirmation_pending_.store(true, std::memory_order_release);
     } else {
@@ -1518,6 +1523,7 @@ void StreamingDecoder::applyPendingConnectedOFDMMode() {
     resetFrameArrivalTrackingLocked();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
+    constellation_mod_cache_valid_ = false;
     mc_burst_pending_frame_ = false;
     mc_burst_pending_soft_bits_.clear();
     // MODE-HOP CURSOR FIX (2026-07-04, 16QAM zero-decode forensics): when this
@@ -1728,6 +1734,7 @@ bool StreamingDecoder::isSynced() const {
 }
 
 void StreamingDecoder::captureConstellationSnapshot() {
+    // Decode thread only: the waveform is quiescent between its own calls here.
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
     if (!waveform_) {
         return;
@@ -1737,72 +1744,21 @@ void StreamingDecoder::captureConstellationSnapshot() {
     if (!symbols.empty()) {
         constellation_cache_ = std::move(symbols);
         constellation_cache_time_ = std::chrono::steady_clock::now();
+        constellation_mod_cache_ = waveform_->getConstellationModulation();
+        constellation_mod_cache_valid_ = true;
     }
 }
 
 std::vector<std::complex<float>> StreamingDecoder::getConstellationSymbols() const {
+    // Render thread: the decode thread's snapshot only (see constellation_cache_). It holds the
+    // last decoded constellation until the next decode or a reset clears it.
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    auto now = std::chrono::steady_clock::now();
-
-    if (waveform_) {
-        auto symbols = waveform_->getConstellationSymbols();
-        if (!symbols.empty()) {
-            constellation_cache_ = symbols;
-            constellation_cache_time_ = now;
-        }
-        static int log_count = 0;
-        if (log_count < 10 && !symbols.empty()) {
-            // Phase histogram to diagnose constellation display
-            int bins[8] = {0}; // 45° bins: 0-45, 45-90, ..., 315-360
-            float mag_sum = 0, mag_min = 1e9, mag_max = 0;
-            for (const auto& s : symbols) {
-                float phase = std::atan2(s.imag(), s.real()) * 180.0f / 3.14159265f;
-                if (phase < 0) phase += 360.0f;
-                int bin = static_cast<int>(phase / 45.0f) % 8;
-                bins[bin]++;
-                float mag = std::abs(s);
-                mag_sum += mag;
-                if (mag < mag_min) mag_min = mag;
-                if (mag > mag_max) mag_max = mag;
-            }
-            float mag_avg = mag_sum / symbols.size();
-            LOG_MODEM(INFO, "getConstellationSymbols: %zu symbols (mode=%d) mag=[%.3f,%.3f,%.3f] phase_hist: %d %d %d %d %d %d %d %d",
-                      symbols.size(), static_cast<int>(mode_),
-                      mag_min, mag_avg, mag_max,
-                      bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6], bins[7]);
-            // Log first 10 symbols
-            if (log_count < 2) {
-                for (size_t i = 0; i < std::min(size_t(20), symbols.size()); i++) {
-                    float ph = std::atan2(symbols[i].imag(), symbols[i].real()) * 180.0f / 3.14159265f;
-                    LOG_MODEM(INFO, "  sym[%zu]: (%.4f, %.4f) mag=%.4f phase=%.1f°",
-                              i, symbols[i].real(), symbols[i].imag(), std::abs(symbols[i]), ph);
-                }
-            }
-            log_count++;
-        }
-        if (!symbols.empty()) {
-            return symbols;
-        }
-    }
-
-    // Hold last non-empty constellation briefly so GUI doesn't flicker to empty
-    // during control-profile reconfiguration between frames.
-    if (!constellation_cache_.empty()) {
-        auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - constellation_cache_time_).count();
-        if (age_ms <= CONSTELLATION_CACHE_HOLD_MS) {
-            return constellation_cache_;
-        }
-    }
-    return {};
+    return constellation_cache_;
 }
 
 Modulation StreamingDecoder::getConstellationModulation() const {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    if (waveform_) {
-        return waveform_->getConstellationModulation();
-    }
-    return Modulation::QPSK;
+    return constellation_mod_cache_valid_ ? constellation_mod_cache_ : current_modulation_;
 }
 
 // ============================================================================
@@ -1907,6 +1863,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     mc_burst_pending_soft_bits_.clear();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
+    constellation_mod_cache_valid_ = false;
     use_burst_interleave_ = false;
     new_data_available_ = false;
     last_decoded_sync_pos_ = SIZE_MAX;
@@ -1950,6 +1907,7 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     // chirp trust.
     cfo_tracker_.reset();
     last_fading_index_.store(0.0f);
+    last_fading_index_valid_.store(false);
     // Doppler-coherence disc: SLOW per-connection channel-state estimator (needs ~31 per-frame
     // |H|^2 snapshots to validate). It MUST survive the pre-TX clearRxBuffer() reset (called
     // before every half-duplex ACK turnaround for echo prevention) — otherwise its snapshot pool

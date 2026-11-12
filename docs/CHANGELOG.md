@@ -10,6 +10,236 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-11 — GUI: the follow matrix after the night's fixes (dual-listen follow vs follow off)
+
+Two real stations over OTASim, ITU Good unless noted, CFO 7.3 Hz, half-duplex radios; seconds, every
+cell file-CRC-checked. "on" = follow (the default), "off" = `ULTRA_WAVEFORM_FOLLOW=0`, same build
+(carrier-sense, resend-marker, one-frame fallback, burst-local pick evidence, crossing-ACK copy
+fixes); "old off" = follow off before tonight (the carrier-sense bug in both arms).
+
+| Cell | on | off | old off |
+|---|---|---|---|
+| Dip 20 -> 0 -> 20 dB (118 s), 20 KB, seeds 42/44/45/46/47/48 | 228/229/223/212/233/223 = 224.7 | 229/228/222/235/234/242 = 231.7 | 218.0 |
+| Dip length sweep 70/85/100/115/130/145 s, seed 44 | 171/178/187/225/231/238 | 162/172/215/223/229/241 | - |
+| QSB, 40 s dips to 2 dB every 90 s, 30 KB, seeds 44/45/46 | 212/205/212 | 213/200/216 | 312/331/334 |
+| Total outage 60 s, seeds 44/45 | 176/162 | 159/159 | 160/160 |
+| Steady ITU Good 20 / AWGN 20 dB, 4 KB | 46 / 53 | 46 / 52 | 55 / 59 |
+| Step-up 0 -> 20 dB at 60-70 s, 4 KB | 103 | 364 | 364 |
+
+Paired: dips -7.0 s (-3.0 %, 6 seeds), length sweep -2.0 s (6 lengths: +9/+6 just past the 60 s
+patience, -28 at 100 s), QSB even (40 s dips never cross now; before the carrier-sense fix OFDM's
+slow recovery pushed the silence past 60 s), 60 s outage +10 s (the crossing lands as the channel
+returns: the patience's worst case), step-up 3.5x faster. All PASS except one latest-code dip
+(seed 47) lost a 936-byte chunk to BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT (fixed below; not a follow
+bug - any 32QAM R2/3 <-> 16QAM R2/3 move with chunks in flight). The carrier-sense fix alone made
+steady transfers 10-16 % faster and QSB 36 % faster in both arms; it made follow-off dips ~14 s
+slower (BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL: the false busy used to hold the dip's escape retries).
+Seed 42 of the latest code (the fading fix, d11): 218 vs 228; the sender then climbed 8PSK R2/3 ->
+32QAM R2/3 on one group and cratered on two seeds (the OFDM controller's post-crossing climb, open).
+
+---
+
+## 2026-11-11 — FIX(file): the file layer re-queues only what the ARQ abandons (BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT)
+
+**What was broken (data loss).** `applyDataMode` re-queued the file's pending chunks on every
+geometry change, before reconfiguring the ARQ. A modulation-only move - 32QAM R2/3 <-> 16QAM R2/3,
+both 16 codewords, on the default ladder since the 32QAM R2/3 rung shipped (v0.6.2) - does not abort
+the ARQ's in-flight frames (`setCodeRate` / `setFixedFrameGeometry` early-return): the ARQ kept and
+retransmitted them while the file layer rewound and re-sent their bytes as new frames. Their acks
+then counted against the reset ledger (acked 31 > sent 29), so the next real abort (a rate change)
+saw "nothing pending" and re-queued nothing: a 936-byte chunk was never sent again, the sender
+reported the file complete and disconnected, the receiver held everything after the hole (GUI, ITU
+Good dip, seed 47: FAIL, no file). The code comment claiming the mod-only case never occurs on the
+default path was false; corrected.
+
+**Fix.** `SelectiveRepeatARQ::txAbortGeneration` advances whenever in-flight frames are abandoned
+(rate change, frame-geometry change, `abortPendingTx`); `applyDataMode` re-queues the file's pending
+chunks after `configureArqForCurrentDataMode`, and only if that generation moved. The HARQ flush on
+any geometry change is unchanged. The SACKed-frame salvage now runs before the re-queue, so the
+re-queue skips peer-confirmed ranges it reports.
+
+**Tests.** `ConnectionAdaptive` `test_mod_only_move_keeps_the_file_ledger_with_the_arq`: chunks in
+flight at 32QAM R2/3; a move to 16QAM R2/3 keeps the ARQ's frames and the file's pending count and
+remaining bytes; a move to 16QAM R3/4 abandons the frames and re-queues exactly their chunks (the
+second check fails with the old immediate re-queue). ConnectionAdaptive 861/861.
+
+---
+
+## 2026-11-11 — FIX(gui): the render thread reads only the decode thread's constellation snapshot (BUG-GUI-CONSTELLATION-RACE)
+
+**What was broken.** The GUI render loop's `getConstellationSymbols` called into the decoder's
+waveform; the decode thread may rebuild that waveform's demodulator (configure) mid-decode without
+the buffer lock, so the render thread locked a freed mutex: SIGSEGV in
+`OFDMDemodulator::getConstellationSymbols` (crash reports 2026-11-09 01:11 and 2026-11-11 21:09; the
+second killed the receiver of a GUI QSB run). Not new with dual-listen, but crossings add
+reconfigurations.
+
+**Fix.** `getConstellationSymbols` / `getConstellationModulation` return the snapshot the decode
+thread captures (`captureConstellationSnapshot`, which owns the waveform there), now also taken on
+every MC-DPSK delivery. The display holds the last decoded constellation until the next decode or a
+reset, as the live read did.
+
+**Also.** `ChirpSync::initFFT`'s double-checked flag is an acquire/release atomic (a plain bool let a
+weakly ordered CPU see it before the template data: a null vector read at address 0, the signature
+of two decode-thread crashes in `detectChirpTemplateFFT` this morning, BUG-CHIRP-SEARCH-SEGV, open).
+
+**Tests.** `DualListenEngine`: a second thread reads the constellation and its modulation throughout
+decoding and two crossings (the race check under the sanitizer build). Dev tree ctest 111/111.
+
+---
+
+## 2026-11-11 — FIX(follow): a fallback spell keeps the measured channel class (BUG-FOLLOW-SPELL-FADING-AWGN)
+
+**What was broken.** The decoder's fading index comes from OFDM LTS measurements (and the handshake's
+shared-chirp view); a decoder that never ran one reports 0.0. Dual-listen gives MC-DPSK its own
+decoder, so in a fallback spell every MC-DPSK frame told the connection "fading 0.0 = AWGN": the
+first frame overwrote the session's measured class (Good 0.52), and the up-crossing pick took the
+AWGN branch - the raw reading against the 6 dB AWGN floor, no fading basis, no physical bound (GUI,
+ITU Good dip, seed 46: the returned frame read 5.7 dB, physical 17.6, and stayed on MC-DPSK another
+cycle; every return landed on the raw reading's rung). The receiver's MODE_CHANGE log showed it:
+`local_fading=0.00 AWGN` on an ITU Good channel.
+
+**Fix.** `StreamingDecoder::hasLastFadingIndex` (set by every measurement, `noteFadingIndex`;
+cleared by `reset()`; carried by the half-open handshake snapshot) -> `ModemEngine::hasFadingIndex`
+-> the shared binding gives the protocol NAN (absent) when the frame's decoder never measured one.
+The connection keeps its measured class (`setChannelQuality` updates it only from finite values)
+and the pool readings carry no fading, so the pick falls back to the session's class. Doppler and
+delay spread are properties of the path, not of its level: a dip does not change them, and the
+pre-dip OFDM measurement is the best evidence a spell has. Frontend hooks keep the old value (the
+TNC prints it as a number).
+
+**Tests.** `DualListenEngine`: the MC-DPSK frame reaches the protocol with fading unmeasured, the
+OFDM frame with it measured. `WaveformFollow` `test_waveform_follow_spell_keeps_the_measured_channel_class`:
+with absent fading the returned 5.7 dB frame (physical 17.6) commands OFDM on the session's Good
+class; the control reading it as AWGN stays. Dev tree ctest 111/111. GUI: see the GUI matrix entry above (2026-11-11, after the night's fixes).
+
+---
+
+## 2026-11-11 — FIX(cca): digital silence is no noise observation (BUG-CCA-SILENCE-FLOOR)
+
+**What was broken.** Since the half-duplex simulator (6373991), a station's receive is digital
+silence while its own transmitter is keyed - what a real rig delivers when it mutes RX on TX. The
+carrier-sense detector (`ChannelBusyDetector`, its `local_rx_blackout` input never wired) learned
+those zeros as noise: an own burst longer than the 5 s floor window left only zeros there, the floor
+went to 0, the 0 x 2 admission gate refused every real noise sample afterwards, and the channel read
+busy until the 25 s relearn, then latched again at the next burst. GUI gate: the sender's threshold
+read 0 for 75-95 % of a session (follow off 162/213 one-second samples, on 209/220); every
+busy-gated egress waited for its own deadline - an escape-drop MODE_CHANGE retry was held 17 s (QSB,
+ITU Good, seed 44), long enough for follow's patience to cross down onto a channel already back.
+The receiver (short ACKs) kept a valid floor.
+
+**Fix.** `observeRmsLocked`: an observation under `signal_policy::kDigitalSilenceRms` (one 24-bit
+converter step, the one absolute level the receiver may test, INV-RX-LEVEL-001) never enters the
+floor window. The busy decision is unchanged (silence reads quiet).
+
+**Tests.** `ChannelBusyDetector` `testDigitalSilenceIsNotNoise`: 2 s of noise, 8 s of digital
+silence, noise again -> the threshold is unchanged and the channel reads idle at once (fails without
+the fix: the threshold learned the silence). GUI: in the follow entry below (o5/d10 arms).
+
+---
+
+## 2026-11-11 — FIX(mcdpsk): a one-frame resend ends its turn (BUG-MCDPSK-RESEND-NO-TURN-END)
+
+**What was broken.** Every MC-DPSK turn's last frame carries `PHYSICAL_BURST_END` (INV-ACK-TURN-001):
+the burst encoder stamps bursts, `flushBurstBuffer` stamps a singleton. A retransmission timeout
+with one frame due goes through `transmitFrameBatch`, which sent it through `transmitFrame`
+unstamped. The receiver decoded it as frame 1 of a continuing burst ("waiting for data-only
+continuation"), sent no ACK, and the sender's next RTO resent it (GUI, 60 s outage with one-frame
+fallback bursts: two resends, 22 s each). With 3-frame windows a lone-frame resend was rarer (a
+single hole), so the gap stayed hidden.
+
+**Fix.** `Connection::mcDpskTurnEndWireCopy` (one helper for both single-frame paths) stamps the
+frame that ends the physical turn: the singleton flush, and the last frame of a timeout batch sent
+frame by frame.
+
+**Tests.** `WaveformFollow` `test_mcdpsk_one_frame_resend_ends_its_turn`: an MC-DPSK frame in flight,
+wired like the GUI (burst callback), resent by the RTO carries the marker (fails without the fix).
+
+---
+
+## 2026-11-11 — FIX(follow): the way back up is bounded by the burst's own physical evidence (BUG-FOLLOW-DIP-COST, part 2)
+
+**What was broken.** The up-crossing pick (`sessionLadderPick`) read the readings of the burst being
+acknowledged (fc837a0) but bounded its fading boost by the decoder's physical ring
+(`boundByPhysicalEvidenceDb`: at most the physical mean + 2 dB). That ring holds the last 8 physical
+readings of the whole spell, so after a dip it held the dip: GUI, ITU Good dip, seed 44 (3-frame
+bursts): two returned bursts reading 10-15 dB were selected at -3.4 and 4.4 dB and stayed on MC-DPSK
+(+21 s); seed 42 (one-frame bursts): a returned frame reading 8.8 dB (training 16.4) selected 2.4 dB
+= the ring's 0.4 dB + 2. Seeds 45, 46 and 48 show the same.
+
+**Fix.** Each frame's physical SNR (training-span power vs its burst-time noise, the ring's own
+reading) rides with its SNR reading: `DecodeResult::physical_snr_db` -> `LoopbackStats` (one copy
+helper, `copyDecodeSnrMetrics`; the two leftover duplicates removed) -> the shared protocol binding ->
+`setChannelQuality(..., physical_db)` -> `ConnectSnrReading::physical_db`. The pick bounds itself by
+the linear mean of the physical readings of the same frames (`ConnectSnrPool::physicalMeanDb` over
+the burst span); none carried -> no boost (the raw reading, a lower bound). The connect-time pick
+keeps the ring.
+
+**Tests.** `WaveformFollow`: a returned burst with its own physical evidence (16 dB) commands OFDM
+although the ring holds the dip (fails with the ring: 2.4 dB, stays); a burst whose own training sat
+in the fade (1 dB) stays. The three older return tests now feed each frame's physical reading as the
+decoder does. GUI: see the GUI matrix entry above (2026-11-11, after the night's fixes).
+
+---
+
+## 2026-11-11 — FIX(follow): a copy of the crossing ACK is not a candidate while the first OFDM group is on air
+
+**What was broken.** MC-DPSK ACKs are repeated. The copy of the ACK that launched an up-crossing
+arrives ~0.1 s after it, while the sender's first OFDM group is queued or on air, so it cannot answer
+that group (half-duplex). The generic path read it as a turn boundary and queued a second group
+behind the first; the receiver ACKed at the first group's end and keyed over the second's head (GUI,
+ITU Good dip, seed 44: 3/4 frames of the second group). Consuming the copy in `onToneBurstAck` (the
+first try, like the startup-probe launch rule) was worse: the monitor disarms on the detection it
+delivers, so the first group's real ACK went unheard and the crossing was abandoned at its probation
+deadline (seed 42: 335 s vs 235 s).
+
+**Fix.** `isToneBurstAckCandidatePlausible` (the acceptance predicate the monitor consults before it
+commits and disarms) rejects a payload equal to the launching ACK's (group_seq, mask) while the
+crossing is on probation and the sender's last data burst is still on air by the air schedule
+(`last_data_burst_end_`). The monitor keeps listening; after the air end the same payload is the
+ARQ's call again.
+
+**Tests.** `WaveformFollow`: the copy is not a candidate while the group is on air, the group's own
+ACK still is, and after the air end the copy gets the ARQ's own verdict (the first check fails
+without the rule). GUI: with part 2, below.
+
+---
+
+## 2026-11-11 — FIX(follow): a fallback MC-DPSK spell starts with one-frame bursts (BUG-FOLLOW-DIP-COST, part 1)
+
+**What was costing.** Paired dips (ITU Good 20 -> 0 -> 20 dB, 6 seeds): with follow on, OFDM resumed
+8-27 s (mean 19.8 s) later than with follow off once the channel returned - the whole measured dip
+cost (+19.7 s). The way back up rides the ACK of the first MC-DPSK burst that starts after the
+return; a 3-frame DBPSK burst is 16 s on air, while follow-off OFDM resends at half an RTO.
+
+**Change.**
+- A fallback spell (crossed down from an OFDM link that was delivering) sends one frame per burst
+  until it outlives `followFallbackSmallWindowMs`, then the full window. Derivation: with bursts of B
+  and a cycle C = B + ACK + guards, a return at a uniform instant of the cycle waits C/2 for the next
+  burst start, then B + ACK, so E = C/2 + B + ack and W-frame bursts return 1.5 x (W - 1) x frame
+  later (16 s for DBPSK, W = 3). One frame costs r_m(W) - r_m(1) per second of spell (DBPSK: 1.7
+  B/s). Break-even ~33 min for a link that delivered 207 B/s, a tenth of that for 20.7 B/s, zero for a
+  link that delivered nothing.
+- Transmit side only: `SelectiveRepeatARQ::setTxInFlightCap` caps the frames this end puts in flight;
+  the receive window stays the window. The burst length is the sender's choice, and the receiver
+  acknowledges at the burst's marked last frame (PHYSICAL_BURST_END) whatever its length. A shrunken
+  receive window would have rejected frames 2-3 after a lost frame 1, or ACKed mid-burst, whenever
+  the two ends' spells aged differently (they start at different times: the sender crosses on its
+  own evidence, the receiver on the first MC-DPSK frame it decodes).
+- The up-crossing pick reads the burst being acknowledged: readings younger than this end's previous
+  burst verdict minus one ACK airtime (`mcDpskBurstSpanMs`, on the pool's clock), capped at the
+  window span. The window span (3 frames + ACK + hold, ~24 s) still held the dip's last two one-frame
+  bursts (a cycle is ~8.5 s), and the return read the fade again.
+
+**Tests.** `ConnectionPolicy` 539/539 (break-even: 20-45 min for a delivering link, scales with what
+OFDM delivered, zero for nothing delivered or a one-frame window). `WaveformFollow` 94/94: a
+delivering link's spell caps transmit at one frame with the receive window whole and lifts the cap
+after the break-even; a link that never delivered is not capped; the first clean one-frame burst
+after three acknowledged fade bursts commands OFDM at 8PSK R2/3 or above (fails with the window
+span: the fade's readings drag the pick to MC-DPSK). Dev tree ctest 111/111. GUI: see the GUI matrix entry above (2026-11-11, after the night's fixes).
+
+---
+
 ## 2026-11-11 — DEFAULT: waveform follow on, as dual-listen (ULTRA_WAVEFORM_FOLLOW unset = 2)
 
 **Decision.** Follow with dual-listen receivers is the default; `ULTRA_WAVEFORM_FOLLOW=0` turns it off,

@@ -350,6 +350,28 @@ void testRelearnsRisenNoiseFloorAfterLowSeed() {
     assert(!isIdleAtMs(detector, t));
 }
 
+// A half-duplex station hears digital silence while its own transmitter is keyed. Learned as noise,
+// an 8 s burst filled the 5 s floor window with zeros: floor 0, every real noise sample refused by
+// the 0 x 2 admission gate, busy until the 25 s relearn (GUI half-duplex gate, 2026-11-11).
+void testDigitalSilenceIsNotNoise() {
+    ChannelBusyDetectorConfig cfg = ultra::audio::ratiometricHfCarrierSenseConfig();
+    cfg.quiet_hold_ms = 30;
+    cfg.rms_window_ms = 30;
+    cfg.max_wait_for_idle_ms = 50;
+    ChannelBusyDetector detector(cfg);
+    int t = 0;
+    for (; t < 2000; t += 20) observe(detector, 0.030f, t);  // the band's noise
+    assert(isIdleAtMs(detector, t));
+    const float thr = detector.quietThreshold();
+    assert(thr > 0.05f && thr < 0.07f);
+    for (const int burst_end = t + 8000; t < burst_end; t += 20) {
+        observe(detector, 0.0f, t);  // our own 8 s burst: the receive is muted
+    }
+    assert(detector.quietThreshold() == thr);  // the floor never learned the silence
+    for (int k = 0; k < 5; ++k, t += 20) observe(detector, 0.030f, t);  // the band again
+    assert(isIdleAtMs(detector, t));  // idle at once, not after the relearn
+}
+
 void testWaitUntilIdleTimeoutAndGuard() {
     ChannelBusyDetector detector(testConfig());
     observe(detector, 0.050f, 0);
@@ -383,6 +405,7 @@ int main() {
     testRatiometricCarrierSenseAcrossLevelsAndSignal();
     testRatiometricFloorSurvivesLongBusySignal();
     testRelearnsRisenNoiseFloorAfterLowSeed();
+    testDigitalSilenceIsNotNoise();
     testWaitUntilIdleTimeoutAndGuard();
 
     std::cout << "ChannelBusyDetector tests passed\n";

@@ -916,9 +916,9 @@ SNRSource ProtocolEngine::getMeasuredSNRSource() const {
 }
 
 void ProtocolEngine::setChannelQuality(float snr_db, float fading_index,
-                                       SNRSource source, bool data_aided) {
+                                       SNRSource source, bool data_aided, float physical_db) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.setChannelQuality(snr_db, fading_index, source, data_aided);
+    connection_.setChannelQuality(snr_db, fading_index, source, data_aided, physical_db);
 }
 
 void ProtocolEngine::setChannelCoherence(float coherence_score, float doppler_hz,

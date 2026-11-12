@@ -17,6 +17,7 @@
 #include "ultra/types.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
+#include <atomic>
 #include <vector>
 #include <algorithm>
 #include <cmath>
@@ -664,15 +665,19 @@ private:
     mutable std::unique_ptr<FFT> fft_;          // Lazy-initialized
     mutable std::vector<Complex> up_template_fft_;    // FFT of complex up-chirp template
     mutable std::vector<Complex> down_template_fft_;  // FFT of complex down-chirp template
-    mutable bool fft_initialized_ = false;
+    // Double-checked lazy init: the flag is published with release after the templates are
+    // written and read with acquire, so a thread that sees it set sees them too. A plain bool
+    // let a weakly ordered CPU (ARM) observe the flag before the template data and read a null
+    // vector (two decode-thread SIGSEGVs at address 0 in detectChirpTemplateFFT, 2026-11-11).
+    mutable std::atomic<bool> fft_initialized_{false};
     mutable std::mutex fft_init_mutex_;  // Protects FFT initialization
 
     // Initialize FFT for fast correlation (lazy, thread-safe)
     void initFFT() const {
-        if (fft_initialized_) return;  // Fast path - already initialized
+        if (fft_initialized_.load(std::memory_order_acquire)) return;  // Fast path
 
         std::lock_guard<std::mutex> lock(fft_init_mutex_);
-        if (fft_initialized_) return;  // Double-check after acquiring lock
+        if (fft_initialized_.load(std::memory_order_relaxed)) return;  // Double-check
 
         fft_ = std::make_unique<FFT>(FFT_SIZE);
 
@@ -708,7 +713,7 @@ private:
             down_template_fft_[i] = std::conj(down_fft[i]);
         }
 
-        fft_initialized_ = true;
+        fft_initialized_.store(true, std::memory_order_release);
 
         // Debug: verify templates
         float up_energy = 0, down_energy = 0;

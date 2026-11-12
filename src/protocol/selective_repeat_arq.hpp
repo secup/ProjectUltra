@@ -252,6 +252,15 @@ public:
             config_.ack_batch_size, config_.window_size, MAX_WINDOW);
     }
     size_t getWindowSize() const { return config_.window_size; }
+    // Frames this end puts in flight at most (0 = the window). Transmit side only: the receive
+    // window stays the window, because the peer's burst length is the peer's choice and this end
+    // acknowledges at the burst's marked last frame whatever its length (PHYSICAL_BURST_END).
+    void setTxInFlightCap(size_t cap) { tx_in_flight_cap_ = cap; }
+    size_t getTxInFlightCap() const { return tx_in_flight_cap_; }
+    // Advances whenever in-flight frames are abandoned (a rate or frame-geometry change, an
+    // explicit abort). A caller that keeps a ledger of what those frames carried - the file
+    // layer - rewinds it exactly when this moves, never on a prediction of it.
+    uint32_t txAbortGeneration() const { return tx_abort_generation_; }
     uint16_t getRxBaseSeq() const { return rx_base_seq_; }
 
     // Keepalive ACK (BUG-ANCHOR-WAIT-NO-ACK-STALL, 2026-07-14): when we are
@@ -485,6 +494,8 @@ private:
     uint16_t tx_base_seq_ = 0;      // First unACKed sequence number
     uint16_t tx_next_seq_ = 0;      // Next sequence to assign
     size_t tx_in_flight_ = 0;       // Number of frames in flight
+    size_t tx_in_flight_cap_ = 0;   // setTxInFlightCap (0 = the window)
+    uint32_t tx_abort_generation_ = 0;  // txAbortGeneration
 
     // RX state
     std::array<RXSlot, MAX_WINDOW> rx_window_;

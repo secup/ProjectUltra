@@ -16,21 +16,6 @@
 namespace ultra {
 namespace gui {
 
-namespace {
-void copySNRMetrics(LoopbackStats& stats, const DecodeResult& result) {
-    stats.snr_db = result.snr_db;
-    stats.snr_source = result.snr_source;
-    stats.mcdpsk_snr_routed_data_aided = result.mcdpsk_snr_routed_data_aided;
-    stats.has_idle_in_band_snr_db = result.has_idle_in_band_snr_db;
-    stats.idle_in_band_snr_db = result.idle_in_band_snr_db;
-    stats.has_ofdm_broadband_snr_db = result.has_ofdm_broadband_snr_db;
-    stats.ofdm_broadband_snr_db = result.ofdm_broadband_snr_db;
-    stats.ofdm_internal_snr_db = result.ofdm_internal_snr_db;
-    stats.sync_quality_db = result.sync_quality_db;
-}
-
-}
-
 ModemEngine::ModemEngine()
     : ModemEngine(mc_dpsk_presets::robust_mid()) {
 }
@@ -1044,6 +1029,10 @@ float ModemEngine::getFadingIndex() const {
         return streaming_decoder_->getLastFadingIndex();
     }
     return 0.0f;
+}
+
+bool ModemEngine::hasFadingIndex() const {
+    return streaming_decoder_ && streaming_decoder_->hasLastFadingIndex();
 }
 
 std::vector<float> ModemEngine::getLastGroupEvmSnrFrames() const {

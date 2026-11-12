@@ -123,6 +123,8 @@ void StreamingDecoder::populateDecodeMetrics(DecodeResult& result, bool is_ofdm,
         last_physical_snr_db_.store(phys);
         last_physical_snr_valid_.store(true);
         notePhysicalSnrSample(phys);  // §5: distribution ring
+        result.has_physical_snr_db = std::isfinite(phys);
+        result.physical_snr_db = phys;
     }
     result.sync_correlation = sync_correlation_;
     result.sync_quality_db = result.snr_db;
