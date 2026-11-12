@@ -1423,6 +1423,18 @@ private:
     // burst at any SNR (BUG-MCDPSK-FALSE-TAIL). The test still decides after a lost frame, which may
     // have been the turn's last.
     bool mc_burst_next_slot_proven_ = false;
+    // A connected MC-DPSK receiver awaiting a fixed CONNECT frame demodulates it at the handshake's
+    // control profile (DBPSK R1/4, streaming_control_profile::profileForMCDPSK), whatever its
+    // session constellation: the sender pins CONNECT/CONNECT_ACK there (#72), and a responder whose
+    // CONNECT_ACK was lost must still hear the initiator's repeats to replay it
+    // (BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK). True while the waveform is on that profile for the
+    // pending candidate; decodeCurrentFrame restores the waveform's own constellation from before
+    // the swap (a first-frame retry may have moved it off current_modulation_) when it is consumed,
+    // or current_modulation_ if a session data-mode change landed meanwhile.
+    bool mc_handshake_profile_frame_ = false;
+    Modulation mc_handshake_saved_waveform_mod_ = Modulation::DBPSK;
+    Modulation mc_handshake_saved_session_mod_ = Modulation::DBPSK;
+    void restoreMcDpskSessionProfile();
     size_t mc_burst_compact_fail_pos_ = SIZE_MAX;
     size_t mc_burst_compact_fail_abs_ = 0;
     void noteMcDpskFrameLost(int modulation) {

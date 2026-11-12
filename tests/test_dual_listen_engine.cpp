@@ -286,6 +286,43 @@ std::vector<std::string> receiveBurstWithGapCrash() {
     return heard;
 }
 
+// BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK: a responder connected on a DQPSK session (4 codewords) has
+// lost its CONNECT_ACK; the initiator repeats its CONNECT, which rides the handshake's DBPSK control
+// profile (#72). The responder demodulated the repeat at its session constellation, never decoded
+// it and never replayed the CONNECT_ACK (GUI ITU Good 0 dB seed 47: "Connect failed after 10
+// attempts"). Returns whether the connected responder delivered the CONNECT.
+bool connectedDqpskResponderHearsConnect() {
+    ModemEngine initiator;  // not connected: the handshake profile
+    initiator.setLogPrefix("ALPHA");
+    const auto connect = v2::ConnectFrame::makeConnect("ALPHA", "BRAVO", 0xF0, 0xFF);
+    std::vector<float> burst = initiator.transmit(connect.serialize());
+
+    ModemEngine rx;
+    rx.setLogPrefix("BRAVO");
+    rx.setSynchronousMode(true);
+    rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DQPSK, CodeRate::R1_4, 4, 8, 1024);
+    bool heard = false;
+    rx.setRawDataCallback([&](const Bytes& data, bool) {
+        if (data.size() >= 3 && static_cast<v2::FrameType>(data[2]) == v2::FrameType::CONNECT) {
+            heard = true;
+        }
+    });
+    std::vector<float> air(24000, 0.0f);
+    air.insert(air.end(), burst.begin(), burst.end());
+    air.insert(air.end(), 4 * 48000, 0.0f);
+    std::mt19937 rng(23);
+    std::normal_distribution<double> bg(0.0, 1e-3);
+    for (auto& v : air) v += static_cast<float>(bg(rng));
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    return heard;
+}
+
 void checkGapCrashBurst(const char* path) {
     const auto heard = receiveBurstWithGapCrash();
     std::printf("static crash in the inter-chirp gap (%s frames): %zu of 3 frames\n", path,
@@ -308,6 +345,12 @@ int main(int argc, char** argv) {
         return failures == 0 ? 0 : 1;
     }
     checkGapCrashBurst("compact");
+    {
+        const bool heard = connectedDqpskResponderHearsConnect();
+        std::printf("connected DQPSK responder, repeated DBPSK CONNECT: %s\n",
+                    heard ? "decoded" : "missed");
+        check(heard, "a responder on a DQPSK session decodes the initiator's repeated CONNECT");
+    }
     {
         const auto with_repair = receiveBurstWithLostFirstFrame(true);
         const auto without = receiveBurstWithLostFirstFrame(false);

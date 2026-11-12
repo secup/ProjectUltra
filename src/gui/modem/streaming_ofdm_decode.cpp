@@ -847,6 +847,17 @@ void StreamingDecoder::decodeCurrentFrame() {
     std::unique_ptr<void, decltype(classic_long_cleanup)>
         classic_long_scope(classic_long_on_entry ? static_cast<void*>(this) : nullptr,
                            classic_long_cleanup);
+    // A fixed CONNECT awaited at the handshake profile: back to the session constellation once
+    // this decode has consumed the candidate (not while it still waits for samples).
+    auto handshake_profile_cleanup = [this](void*) {
+        if (mc_handshake_profile_frame_ &&
+            !(state_ == DecoderState::SYNC_FOUND && pending_total_cw_ > 0)) {
+            restoreMcDpskSessionProfile();
+        }
+    };
+    std::unique_ptr<void, decltype(handshake_profile_cleanup)>
+        handshake_profile_scope(mc_handshake_profile_frame_ ? static_cast<void*>(this) : nullptr,
+                                handshake_profile_cleanup);
 
     const uint32_t gen_at_start = reset_generation_.load(std::memory_order_acquire);
     const uint64_t geometry_session_epoch_at_start =
@@ -2619,6 +2630,16 @@ void StreamingDecoder::decodeCurrentFrame() {
             }();
             if (wait_for_fixed_connect) {
                 pending_total_cw_ = v2::kConnectFrameCodewords;
+                // The CONNECT rides the handshake's control profile (#72): size and demodulate it
+                // there, not at a connected session's constellation.
+                const auto handshake = streaming_control_profile::profileForMCDPSK();
+                if (auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+                    mc && connected_ && mc->getModulation() != handshake.modulation) {
+                    mc_handshake_saved_waveform_mod_ = mc->getModulation();
+                    mc_handshake_saved_session_mod_ = current_modulation_;
+                    mc->configure(handshake.modulation, handshake.rate);
+                    mc_handshake_profile_frame_ = true;
+                }
                 state_ = DecoderState::SYNC_FOUND;
                 LOG_MODEM(INFO,
                           "[%s] MC-DPSK CW0 failed with data energy; waiting for %d-CW fixed CONNECT frame (%d samples)",
@@ -4189,6 +4210,16 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
         last_decoded_sync_pos_ = sync_position_;
     }
     state_ = DecoderState::SEARCHING;
+}
+
+void StreamingDecoder::restoreMcDpskSessionProfile() {
+    mc_handshake_profile_frame_ = false;
+    if (auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get())) {
+        mc->configure(current_modulation_ != mc_handshake_saved_session_mod_
+                          ? current_modulation_
+                          : mc_handshake_saved_waveform_mod_,
+                      code_rate_);
+    }
 }
 
 void StreamingDecoder::publishMcDpskCompactAirEnd(bool burst_continues, uint64_t frame_end_abs,

@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(handshake): a connected receiver demodulates a repeated CONNECT at DBPSK (BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK)
+
+**What broke.** GUI ITU Good 0 dB seed 47 never connected: the responder decoded the CONNECT, picked
+a DQPSK session (an optimistic pick, BUG-CONNECT-PICK-LOW-SNR-FADING), and its CONNECT_ACK was lost
+in a fade. The initiator repeats the CONNECT at the handshake's DBPSK control profile (#72); the
+connected responder sized and demodulated each repeat at its DQPSK session constellation, decoded
+none, never replayed its cached CONNECT_ACK, and the initiator gave up after 10 attempts.
+
+**What changed.** When a connected MC-DPSK receiver starts waiting for a fixed CONNECT, its waveform
+switches to the control profile (DBPSK R1/4) for that candidate and back to its own constellation
+once the candidate is consumed (or to `current_modulation_` if a session data-mode change landed in
+between). New invariant INV-MCDPSK-HANDSHAKE-001.
+
+**Verification.** `DualListenEngine`: a responder joined to a DQPSK 4-codeword MC-DPSK session
+decodes an unconnected initiator's CONNECT (missed with the switch removed). ctest 120/120
+(UltraTncSimAudio run alone: it is real-time and shared the CPU with two GUI gates).
+
+---
+
 ## 2026-11-12 — FEAT(MC-DPSK): a measured retransmission timeout (ULTRA_MCDPSK_MEASURED_RTO, default off)
 
 **Why.** `computeMCDPSKAckTimeoutMs` budgets a serial decode as long as the burst (rx_decode =

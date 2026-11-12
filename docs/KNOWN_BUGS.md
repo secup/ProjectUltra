@@ -220,6 +220,10 @@ physical mean + 2 dB: `SNR=2.0 sel=8.1` is a 6.1 dB physical mean plus that marg
 Good OFDM floor (8) at a dial of 4-6 dB. That second case remains open; the margin is on the
 optimistic side of the physical measurement.
 
+**Update 2026-11-12.** Same lift on the MC-DPSK side: ITU Good 0 dB seed 47, `SNR=1.9 sel=7.2` picked
+MC-DPSK Robust (DQPSK, 4 codewords) for a 0 dB channel; with its CONNECT_ACK lost it exposed
+BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK (fixed), which turned a bad pick into a failed connection.
+
 ### BUG-BACKSTOP-RACES-RTO (open, 2026-11-10) — P2: the backstop's re-confirm ACK fires as the sender's resend starts
 
 **What.** The anchored-burst ACK backstop (`streaming_sync_acquisition.cpp`, F165) fires 14.6 s
@@ -2678,6 +2682,25 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK (FIXED 2026-11-12, decoder handshake profile) — was P1: a lost CONNECT_ACK made the handshake unrecoverable when the responder picked DQPSK
+
+GUI ITU Good 0 dB, seed 44-48 batch, seed 47: BRAVO decoded ALPHA's CONNECT at 19.0 s, connected,
+and its entry pick chose MC-DPSK DQPSK R1/4 with 4 codewords ("Adaptive ladder selected Robust
+(SNR=1.9 sel=7.2)", BUG-CONNECT-PICK-LOW-SNR-FADING). Its CONNECT_ACK (DBPSK, 4.85 s) was lost in a
+fade. ALPHA repeated the CONNECT nine times - always at DBPSK, the handshake's control profile
+(#72, `isHandshakeNegotiationFrameBytes`) - and BRAVO, now connected, waited for and demodulated each
+repeat at its DQPSK session constellation ("waiting for 2-CW fixed CONNECT frame (92160 samples)",
+half the DBPSK length): nothing decoded, the cached CONNECT_ACK was never replayed, "Connect failed
+after 10 attempts" at 216 s. The transmit side pinned handshake frames to the control profile; the
+receive side had no counterpart (the narrowband twin was BUG-NARROW-MCDPSK-CONNECT).
+
+Fix: a connected MC-DPSK receiver that starts waiting for a fixed CONNECT configures its waveform to
+the control profile (`streaming_control_profile::profileForMCDPSK`), so the frame is sized and
+demodulated at DBPSK, and restores its own constellation when the candidate is consumed
+(`mc_handshake_profile_frame_`, `restoreMcDpskSessionProfile`). Test: `DualListenEngine` - a
+responder on a DQPSK 4-codeword session decodes an unconnected initiator's CONNECT (missed with the
+switch removed).
 
 ### BUG-MCDPSK-FALSE-TAIL (FIXED 2026-11-12, mc_burst_next_slot_proven_) — was P1 at low SNR: a burst ended after frame 1 while its frames said more follow
 

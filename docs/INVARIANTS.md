@@ -860,6 +860,18 @@ ended bursts at any SNR; each false end lost the rest of the burst and cost a 25
 **Test:** `DualListenEngine` (compact) and `DualListenEngineV2GapCrash` (v2): a static crash in the
 gap, 3 of 3 frames.
 
+### INV-MCDPSK-HANDSHAKE-001: handshake frames ride the control profile on both ends
+**Rule:** CONNECT, CONNECT_ACK and CONNECT_NAK go out at the MC-DPSK control profile (DBPSK R1/4,
+`streaming_control_profile::profileForMCDPSK`; `StreamingEncoder::encodeFrame`,
+`isHandshakeNegotiationFrameBytes`, #72) whatever the session's data constellation, and a receiver
+that waits for a fixed CONNECT sizes and demodulates it at that profile too, connected or not
+(`StreamingDecoder::mc_handshake_profile_frame_`), restoring its own constellation afterwards.
+**Why:** after a lost CONNECT_ACK the responder is already on its session constellation while the
+initiator, unconnected, can only repeat the CONNECT at DBPSK; a responder demodulating the repeat at
+DQPSK never replayed its CONNECT_ACK and the connection failed after ten attempts
+(BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK; narrowband twin BUG-NARROW-MCDPSK-CONNECT).
+**Test:** `DualListenEngine` (connected DQPSK responder decodes a repeated CONNECT).
+
 ### INV-FOLLOW-001: a waveform crossing switches the modem's waveform before its data mode
 **Rule:** with `ULTRA_WAVEFORM_FOLLOW`, a session crosses between MC-DPSK and wideband OFDM only
 through `Connection::applyWaveformCrossing`, which fires the crossing callback (modem: waveform first,
