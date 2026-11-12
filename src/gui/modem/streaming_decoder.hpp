@@ -1405,6 +1405,12 @@ private:
     // window; trailing failures hand the search back their first position (the next burst's
     // chirp may sit there).
     bool mc_burst_compact_ = false;
+    // A compact first frame lost with data energy (ULTRA_MCDPSK_ACK_REPAIR): where its burst would
+    // go on (frame 2's slot) and the session's window, for decodeCurrentFrame's continuation.
+    bool mc_first_frame_lost_continue_ = false;
+    size_t mc_first_lost_next_pos_ = 0;
+    size_t mc_first_lost_next_abs_ = 0;
+    int mc_first_lost_window_ = 0;
     int mc_burst_compact_window_ = 0;
     size_t mc_burst_compact_fail_pos_ = SIZE_MAX;
     size_t mc_burst_compact_fail_abs_ = 0;

@@ -6,12 +6,15 @@
 // report must come before the frame, and the frame must reach a receiver already on its waveform.
 
 #include "gui/modem/modem_engine.hpp"
+#include "waveform/mc_dpsk_waveform.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
 
 #include <atomic>
 #include <cstdio>
 #include <thread>
+#include <cmath>
+#include <random>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -136,9 +139,82 @@ std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
     return heard;
 }
 
+// ULTRA_MCDPSK_ACK_REPAIR, decoder side: a compact MC-DPSK burst whose first frame is lost (its
+// data buried, its chirp and training intact) goes on at its stride, so frames 2 and 3 - which have
+// no chirp of their own - still decode. Without the knob they were lost with it.
+std::vector<std::string> receiveBurstWithLostFirstFrame(bool repair) {
+    ModemEngine tx;
+    tx.setLogPrefix("ALPHA");
+    tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    std::vector<Bytes> frames;
+    for (int i = 0; i < 3; ++i) {
+        auto f = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(i + 1),
+                                         "burst frame " + std::to_string(i + 1));
+        f.flags |= v2::Flags::MORE_FRAG;
+        frames.push_back(f.serialize());
+    }
+    std::vector<float> burst = tx.transmitBurst(frames);
+    // Frame 1 = chirp + training + data; bury its data under noise 10x the signal.
+    MultiCarrierDPSKConfig cfg;
+    cfg.num_carriers = 8;
+    cfg.samples_per_symbol = 1024;
+    MCDPSKWaveform geo(cfg);
+    geo.configure(Modulation::DBPSK, CodeRate::R1_4);
+    // Data frames have a fixed length; the preamble (dual chirp + training) is whatever the burst's
+    // audible span holds beyond its three data frames.
+    const size_t data_len = static_cast<size_t>(geo.getDataOnlySamplesForCWCount(3));
+    size_t start = 0;
+    while (start < burst.size() && std::abs(burst[start]) < 1e-6f) ++start;
+    size_t end = burst.size();
+    while (end > start && std::abs(burst[end - 1]) < 1e-6f) --end;
+    const size_t first_len = (end - start) - 2 * data_len;
+    double sum = 0.0;
+    for (size_t i = start; i < std::min(burst.size(), start + first_len); ++i) sum += burst[i] * burst[i];
+    const double rms = std::sqrt(sum / static_cast<double>(std::max<size_t>(1, first_len)));
+    std::mt19937 rng(5);
+    std::normal_distribution<double> nd(0.0, 10.0 * rms);
+    for (size_t i = start + first_len - data_len; i < std::min(burst.size(), start + first_len); ++i) {
+        burst[i] += static_cast<float>(nd(rng));
+    }
+
+    setenv("ULTRA_MCDPSK_ACK_REPAIR", repair ? "1" : "0", 1);
+    ModemEngine rx;
+    rx.setSynchronousMode(true);
+    rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    std::vector<std::string> heard;
+    rx.setRawDataCallback([&](const Bytes& data, bool) { heard.push_back(payloadText(data)); });
+    std::vector<float> air(24000, 0.0f);
+    air.insert(air.end(), burst.begin(), burst.end());
+    air.insert(air.end(), 4 * 48000, 0.0f);
+    // A little background noise: the burst-noise reference and the tail test need a floor.
+    std::normal_distribution<double> bg(0.0, 1e-3);
+    for (auto& v : air) v += static_cast<float>(bg(rng));
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    unsetenv("ULTRA_MCDPSK_ACK_REPAIR");
+    return heard;
+}
+
 }  // namespace
 
 int main() {
+    {
+        const auto with_repair = receiveBurstWithLostFirstFrame(true);
+        const auto without = receiveBurstWithLostFirstFrame(false);
+        std::printf("lost first frame: %zu frame(s) with repair, %zu without\n",
+                    with_repair.size(), without.size());
+        check(with_repair.size() == 2 && with_repair[0] == "burst frame 2" &&
+                  with_repair[1] == "burst frame 3",
+              "repair: frames 2 and 3 of a burst whose first frame is lost still decode");
+        check(without.empty(), "without repair they are lost with the first frame (the control)");
+    }
     const SenderAudio audio = senderAudio();
     check(!audio.mcdpsk.empty() && !audio.ofdm.empty(), "the sender produced both bursts");
 

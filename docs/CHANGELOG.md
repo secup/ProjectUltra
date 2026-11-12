@@ -22,20 +22,22 @@ tail, the channel back at 144 s, the sender's resend at 152 s, the up-crossing a
 **What the knob does (`ULTRA_MCDPSK_ACK_REPAIR=1`, latched per Connection, same on both stations).**
 - Sender: an MC-DPSK file burst starts with the frames still missing (`retransmitInFlightUnacked`),
   as the OFDM burst path does, then tops up with new chunks.
-- Receiver: the decoder reports a turn loss (`noteMcDpskTurnLoss`): a compact burst that ends - its
-  tail read as noise, or its full window seen - with its last frames lost (`turn_over`), or a
-  data-bearing first compact frame lost, with the burst's latest possible end, (window - 1) more
-  frames, published as its air end. `Connection::noteRxMcDpskTurnLoss` then sends one ACK of what
-  arrived (only while the peer is sending it an object): synchronous at a turn's end, asynchronous
-  after a lost first frame, so listen-before-ACK holds it while the burst may still be on the air
-  and drops it when later frames decode. Its burst verdict is a loss
+- Receiver: a compact burst whose first frame is lost with data energy goes on at its fixed stride
+  (`decodeCurrentFrame` enters the compact continuation from frame 2's slot,
+  `mc_first_frame_lost_continue_`): its other frames have no chirp of their own and were lost with
+  it. When a compact burst ends - its tail read as noise, or its full window seen - with its last
+  frames lost, the decoder reports the turn loss (`finishMCDPSKCompactBurst(turn_over)` ->
+  `noteMcDpskTurnLoss`) and `Connection::noteRxMcDpskTurnLoss` sends one end-of-turn ACK of what
+  arrived (only while the peer is sending it an object); a later frame that decodes ends the turn
+  with its own ACK, which reports the hole. Its burst verdict is a loss
   (`tone_ack_turn_loss_context_`): never a clean burst, never an up-crossing.
 
 **Verification.** `ConnectionAdaptive` 871/871 (new: with the knob the missing frame leads the next
-burst, without it it waits). `WaveformFollow` 151/151 (new: a turn-loss ACK at a turn's end and an
-asynchronous one after a lost first frame, none without an incoming object or with the knob off; a
-lossy burst commands no up-crossing - that check fails without the loss verdict). Dev ctest
-112/112. GUI A/B: below.
+burst, without it it waits). `WaveformFollow` 151/151 (new: a turn-loss ACK at a turn's end, none
+without an incoming object or with the knob off; a lossy burst commands no up-crossing - that check
+fails without the loss verdict). `DualListenEngine` (new: a 3-frame compact DBPSK burst whose first
+frame's data is buried under noise 10x the signal delivers frames 2 and 3 with the knob, nothing
+without it). Dev ctest 112/112. GUI A/B: below.
 
 ---
 

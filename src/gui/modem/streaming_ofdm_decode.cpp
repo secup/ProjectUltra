@@ -812,6 +812,9 @@ bool StreamingDecoder::classicLongGeometryEligibleForTesting(
 }
 
 void StreamingDecoder::decodeCurrentFrame() {
+    // Set only by this frame's own first-frame loss (retryMcDpskFirstFrameConstellation); an early
+    // return below must not carry it into the next frame.
+    mc_first_frame_lost_continue_ = false;
     if (!waveform_) {
         clearClassicLongGeometry();
         {
@@ -3537,10 +3540,37 @@ void StreamingDecoder::decodeCurrentFrame() {
         decodedFrameHasMoreFrag(result) &&
         !result.physical_turn_complete;
     if (can_continue_mc_dpsk) {
+        mc_first_frame_lost_continue_ = false;
         startMCDPSKBurstContinuation(next_block_pos, next_search_abs,
                                      sync_snr_, sync_cfo_);
         return;
     }
+    // A compact burst whose first frame was lost with data energy (retryMcDpskFirstFrameConstellation):
+    // go on at its stride from frame 2's slot. That slot is pre-marked as the first failure, so a
+    // burst that ends there (its tail, or its window) is a trailing loss and draws the turn-loss
+    // ACK; a later frame that decodes clears it and its own end-of-turn ACK reports the hole.
+    if (mc_first_frame_lost_continue_ && !result.success && connected_ &&
+        mode_ == protocol::WaveformMode::MC_DPSK && mcDpskCompactActive()) {
+        mc_first_frame_lost_continue_ = false;
+        auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+        if (mc) {
+            const int codewords = mcDpskCompactCodewords();
+            startMCDPSKBurstContinuation(mc_first_lost_next_pos_, mc_first_lost_next_abs_,
+                                         sync_snr_, sync_cfo_);
+            mc_burst_compact_ = true;
+            mc_burst_compact_window_ = mc_first_lost_window_;
+            mc_burst_compact_fail_pos_ = mc_first_lost_next_pos_;
+            mc_burst_compact_fail_abs_ = mc_first_lost_next_abs_;
+            publishMcDpskCompactAirEnd(
+                true, mc_first_lost_next_abs_,
+                static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords)),
+                mc_first_lost_window_ - 1);
+            LOG_MODEM(INFO, "[%s] MC-DPSK compact first frame lost: continuing the burst at its "
+                      "stride (window %d)", log_prefix_.c_str(), mc_first_lost_window_);
+            return;
+        }
+    }
+    mc_first_frame_lost_continue_ = false;
 
     // Burst over (or non-burst) - skip past everything we decoded and return to SEARCHING
     if (!is_ofdm) {
@@ -3932,21 +3962,27 @@ void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<floa
         if (!frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
                                                    sync_noise_ref_samples_, 2900.0, 48000.0)) {
             noteMcDpskFrameLost(-1);
-            if (mcDpskCompactActive()) {
-                // A compact burst whose first frame is lost: its remaining frames, up to the
-                // session's window, may still be on the air - publish that latest end so the
-                // turn-loss ACK waits it out (listen-before-ACK), then raise it.
+            if (mcDpskCompactActive() &&
+                protocol::connection_policy::mcDpskAckRepairFromEnvironment()) {
+                // A compact burst whose first frame is lost goes on at its fixed stride
+                // (ULTRA_MCDPSK_ACK_REPAIR): its remaining frames decode on their own - they were
+                // lost with it, having no chirp of their own - and the continuation's tail, or
+                // the last decoded frame's end-of-turn ACK, closes the turn for the protocol.
+                // decodeCurrentFrame enters the continuation when this frame's decode fails.
                 const int codewords = mcDpskCompactCodewords();
-                const int window = static_cast<int>(
+                const size_t consumed = static_cast<size_t>(mc->getMinSamplesForCWCount(codewords));
+                mc_first_lost_window_ = static_cast<int>(
                     protocol::connection_policy::mcDpskWindowSizeForTiming(
                         protocol::connection_policy::mcDpskFrameTiming(
                             mc->getModulation(), mc_dpsk_config_.num_carriers,
                             mc_dpsk_config_.samples_per_symbol, codewords)));
-                publishMcDpskCompactAirEnd(
-                    window > 1,
-                    frame_sync_abs + static_cast<size_t>(mc->getMinSamplesForCWCount(codewords)),
-                    static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords)), window - 1);
-                noteMcDpskTurnLoss(/*turn_over=*/false);
+                {
+                    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+                    mc_first_lost_next_pos_ =
+                        sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + consumed);
+                }
+                mc_first_lost_next_abs_ = frame_sync_abs + consumed;
+                mc_first_frame_lost_continue_ = mc_first_lost_window_ > 1;
             }
         }
     }
