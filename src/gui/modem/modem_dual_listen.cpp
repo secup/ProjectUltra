@@ -142,6 +142,11 @@ void ModemEngine::wireDecoderRoleCallbacks() {
                 mcdpsk_margin_cb_(upper_rung_margin);
             }
         });
+        d->setMcDpskGeometryCallback([this, d](int cw_count) {
+            if (mcdpsk_geometry_cb_ && streaming_decoder_.isPrimary(d)) {
+                mcdpsk_geometry_cb_(cw_count);
+            }
+        });
         d->setMcDpskFrameLostCallback([this, d](int modulation) {
             if (mcdpsk_frame_lost_cb_ && streaming_decoder_.isPrimary(d)) {
                 mcdpsk_frame_lost_cb_(modulation);

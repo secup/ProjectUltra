@@ -198,6 +198,9 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // the noise).
     modem.setMcDpskMarginCallback(
         [&protocol](bool upper_rung_margin) { protocol.noteRxMcDpskMargin(upper_rung_margin); });
+    // The peer's MC-DPSK frames arrived at another geometry than the session's (it fell back).
+    modem.setMcDpskGeometryCallback(
+        [&protocol](int cw_count) { protocol.noteRxMcDpskGeometry(cw_count); });
     // Compact MC-DPSK DATA frames: the session's addresses, set on every CONNECTED entry.
     protocol.setSessionAddressesCallback(
         [&modem](uint32_t local_hash, uint32_t remote_hash) {

@@ -884,6 +884,11 @@ void ProtocolEngine::noteRxMcDpskModulation(Modulation mod) {
     connection_.noteRxMcDpskModulation(mod);
 }
 
+void ProtocolEngine::noteRxMcDpskGeometry(int cw_count) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteRxMcDpskGeometry(cw_count);
+}
+
 void ProtocolEngine::noteRxMcDpskMargin(bool upper_rung_margin) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.noteRxMcDpskMargin(upper_rung_margin);

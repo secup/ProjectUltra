@@ -911,6 +911,36 @@ void test_dual_listen_missed_up_crossing_backs_off() {
           "the second clean burst of the longer run commands again");
 }
 
+// BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD: a receiver on the connect pick's MC-DPSK geometry (Robust,
+// DQPSK, 4 codewords) commanded OFDM; it never decoded the sender's OFDM burst, and the sender fell
+// back to the follow's down target (ROBUST_MID, DBPSK, 3 codewords). Once its decoder hears the peer
+// there (3 codewords), the receiver follows: same geometry as the sender, and the failed up-crossing
+// makes the next one wait longer.
+void test_receiver_follows_the_peer_to_the_fallback_geometry() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    ConnectionAdaptiveTestAccess::setDataFrameCodewords(c, 4);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
+    CHECK(connection_policy::decodeOfdmRungCommand(
+              ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) != kRungIdxNone &&
+              ConnectionAdaptiveTestAccess::dualUpCommanded(c),
+          "the receiver commanded OFDM");
+    c.noteRxMcDpskGeometry(4);
+    CHECK(ConnectionAdaptiveTestAccess::dataFrameCodewords(c) == 4,
+          "the session's own geometry changes nothing");
+    c.noteRxMcDpskGeometry(3);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
+              ConnectionAdaptiveTestAccess::dataFrameCodewords(c) == 3 &&
+              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK,
+          "the peer is on the fallback geometry: the receiver follows it (DBPSK, 3 codewords)");
+    CHECK(!ConnectionAdaptiveTestAccess::dualUpCommanded(c) &&
+              ConnectionAdaptiveTestAccess::upCrossingRun(c) == 2,
+          "the up-crossing it commanded failed: the next one waits a longer run");
+}
+
 // A crossing supersedes a pending MODE_CHANGE (a data mode of the waveform being left): kept, its
 // next retry went out on MC-DPSK, the peer acknowledged it and the sender committed it - its
 // connection back on OFDM while its modem stayed on MC-DPSK (GUI, dual-listen dip, seed 44).
@@ -1531,6 +1561,7 @@ int main() {
     test_waveform_follow_crossing_ack_copy_is_not_a_candidate();
     test_mcdpsk_one_frame_resend_ends_its_turn();
     test_ofdm_single_frame_ends_its_turn();
+    test_receiver_follows_the_peer_to_the_fallback_geometry();
     test_first_ofdm_group_climbs_one_rung();
     test_escape_needs_the_peer_heard();
     test_startup_probe_launch_copy_is_not_a_candidate();

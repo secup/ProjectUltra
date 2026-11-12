@@ -761,6 +761,12 @@ public:
     void setMcDpskMarginCallback(std::function<void(bool upper_rung_margin)> cb) {
         mc_dpsk_margin_callback_ = std::move(cb);
     }
+    // A connected MC-DPSK burst's first frame decoded at another frame size (codewords) than the
+    // session's: the peer changed geometry (e.g. fell back to the follow's down target). Decode
+    // thread, before the frame is delivered.
+    void setMcDpskGeometryCallback(std::function<void(int cw_count)> cb) {
+        mc_dpsk_geometry_callback_ = std::move(cb);
+    }
     // A marker-armed candidate was abandoned without trustworthy group geometry.
     // This is state-only provenance: consumers may cancel a pending experiment,
     // but must not synthesize an ACK, delivery outcome, or rate observation.
@@ -1058,6 +1064,9 @@ private:
     // Compact MC-DPSK DATA frames: active in a connected MC-DPSK session with both addresses set.
     bool mcDpskCompactActive() const;
     int mcDpskCompactCodewords() const;
+    // The frame sizes (codewords) a compact first frame is tried at: the session's, then the other
+    // MC-DPSK ladder geometries' (BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD).
+    std::vector<int> mcDpskCompactCodewordHypotheses() const;
     // The connected MC-DPSK first-frame look-ahead: one whole compact frame at the slowest
     // constellation when compact frames are active, else the waveform's control-frame span.
     size_t mcDpskControlPeekSamples() const;
@@ -1441,6 +1450,7 @@ private:
     std::function<void(int modulation)> mc_dpsk_frame_lost_callback_;
     std::function<void(bool turn_over)> mc_dpsk_turn_loss_callback_;
     std::function<void(bool upper_rung_margin)> mc_dpsk_margin_callback_;
+    std::function<void(int cw_count)> mc_dpsk_geometry_callback_;
     uint64_t mc_margin_rng_state_ = 0x6D617267696E5F31ull;
     bool mcDpskUpperRungMarginTest(const std::vector<float>& frame_buffer, float decode_cfo);
     std::atomic<uint32_t> mc_compact_local_hash_{0};

@@ -4100,10 +4100,27 @@ int StreamingDecoder::mcDpskCompactCodewords() const {
     return v2::sanitizeFixedFrameCodewords(fixed_frame_codewords_);
 }
 
+std::vector<int> StreamingDecoder::mcDpskCompactCodewordHypotheses() const {
+    // The session's geometry first, then every other MC-DPSK ladder geometry at this baud.
+    std::vector<int> cws{mcDpskCompactCodewords()};
+    for (const auto id : {protocol::LadderRungId::ROBUST_MID, protocol::LadderRungId::ROBUST}) {
+        const int cw = v2::sanitizeFixedFrameCodewords(
+            protocol::connection_policy::ladderRungForId(id).cw_count);
+        if (std::find(cws.begin(), cws.end(), cw) == cws.end()) cws.push_back(cw);
+    }
+    return cws;
+}
+
 size_t StreamingDecoder::mcDpskControlPeekSamples() const {
     if (mcDpskCompactActive()) {
         if (const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get())) {
-            return static_cast<size_t>(mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
+            // Long enough for the longest frame the peer may send (every geometry hypothesis at
+            // the slowest constellation).
+            int longest = 0;
+            for (const int cw : mcDpskCompactCodewordHypotheses()) {
+                longest = std::max(longest, mc->getSamplesForCWCountAtSlowest(cw));
+            }
+            return static_cast<size_t>(longest);
         }
     }
     return waveform_ ? static_cast<size_t>(waveform_->getMinSamplesForControlFrame()) : 0;
@@ -4136,14 +4153,38 @@ std::optional<DecodeResult> StreamingDecoder::decodeMcDpskCompactFirstFrame(
     if (!mc || frame_buffer.empty()) {
         return std::nullopt;
     }
-    const int codewords = mcDpskCompactCodewords();
+    const int configured_cw = mcDpskCompactCodewords();
     const uint32_t peer = mc_compact_peer_hash_.load();
     const uint32_t local = mc_compact_local_hash_.load();
-    auto attempt = [&](const std::vector<float>& bits) {
-        return protocol::mcdpsk_frame::decode(bits, codewords, code_rate_, peer, local);
+    // The frame sizes the peer may send (BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD): the session's, and
+    // the other MC-DPSK ladder geometries'. A sender whose OFDM burst went unacknowledged falls back
+    // to the follow's down target (ROBUST_MID: 3 codewords) whatever its MC-DPSK geometry was
+    // before; a receiver that never decoded that OFDM burst still listens at the session's
+    // geometry (Robust: 4 codewords) and heard nothing again (GUI ITU Good 5 dB seed 49: 13 resends,
+    // 22 s each, every one a chirp at 20 dB with no decode).
+    const auto codeword_hypotheses = mcDpskCompactCodewordHypotheses();
+    auto attempt = [&](const std::vector<float>& bits, int& decoded_cw) {
+        for (const int cw : codeword_hypotheses) {
+            auto d = protocol::mcdpsk_frame::decode(bits, cw, code_rate_, peer, local);
+            if (d.ok) {
+                decoded_cw = cw;
+                return d;
+            }
+        }
+        return protocol::mcdpsk_frame::DecodeResult{};
     };
-    auto decoded = attempt(soft_bits);
+    // A frame of another geometry: the burst continues at it, and the protocol follows the peer.
+    auto adoptGeometry = [&](int cw) {
+        if (cw == configured_cw) return;
+        LOG_MODEM(INFO, "[%s] MC-DPSK compact first frame is %d codewords (session %d): the "
+                  "sender changed geometry", log_prefix_.c_str(), cw, configured_cw);
+        setFixedFrameCodewords(cw);
+        if (mc_dpsk_geometry_callback_) mc_dpsk_geometry_callback_(cw);
+    };
+    int decoded_cw = configured_cw;
+    auto decoded = attempt(soft_bits, decoded_cw);
     if (decoded.ok) {
+        adoptGeometry(decoded_cw);
         return makeMcDpskCompactResult(std::move(decoded.v2_frame), sync_snr_, sync_cfo_);
     }
     const Modulation configured = mc->getModulation();
@@ -4158,12 +4199,13 @@ std::optional<DecodeResult> StreamingDecoder::decodeMcDpskCompactFirstFrame(
             continue;
         }
         std::vector<float> alt_bits = mc->getSoftBits();
-        decoded = attempt(alt_bits);
+        decoded = attempt(alt_bits, decoded_cw);
         if (decoded.ok) {
             LOG_MODEM(INFO, "[%s] MC-DPSK compact first frame decodes at %s (configured %s): "
                       "the sender changed constellation",
                       log_prefix_.c_str(), modulationToString(alt), modulationToString(configured));
             soft_bits = std::move(alt_bits);
+            adoptGeometry(decoded_cw);
             return makeMcDpskCompactResult(std::move(decoded.v2_frame), sync_snr_, sync_cfo_);
         }
     }

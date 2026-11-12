@@ -529,6 +529,10 @@ public:
         rx_mcdpsk_last_modulation_ = mod;
         ++rx_mcdpsk_frames_since_command_;
     }
+    // The peer's MC-DPSK frames arrived at cw_count codewords, not the session's
+    // (BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD): at the follow's down-target geometry the peer fell
+    // back - its OFDM burst went unacknowledged - and this end follows it there.
+    void noteRxMcDpskGeometry(int cw_count);
     // MC-DPSK rate change (receiver side): a frame the modem could not decode, with its burst's
     // constellation (static_cast<int>(Modulation), -1 = unknown). Loss evidence, applied at once.
     void noteRxMcDpskFrameLost(int modulation);

@@ -235,6 +235,8 @@ public:
     // MC-DPSK rate change: the constellation of the frame about to be passed to onRxData, and a
     // frame the modem could not decode (modulation as int, -1 when unknown).
     void noteRxMcDpskModulation(Modulation mod);
+    // The peer's MC-DPSK frames are cw_count codewords, not the session's (Connection::noteRxMcDpskGeometry).
+    void noteRxMcDpskGeometry(int cw_count);
     void noteRxMcDpskFrameLost(int modulation);
     void noteRxMcDpskTurnLoss(bool turn_over);
     void noteRxWaveform(WaveformMode mode);

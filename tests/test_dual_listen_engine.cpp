@@ -404,6 +404,51 @@ std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
     return heard;
 }
 
+// BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD: the receiver commanded OFDM, the sender's first OFDM burst was
+// lost, and the sender fell back to the follow's down target (ROBUST_MID: DBPSK, 3 codewords) - while
+// the receiver, which never decoded that burst, still listened at the session's MC-DPSK geometry
+// (Robust: DQPSK, 4 codewords) and decoded none of the 13 resends (GUI ITU Good 5 dB seed 49). Returns
+// the frames heard and the geometries (codewords) the decoder reported.
+struct FallbackHeard { std::vector<std::string> heard; std::vector<int> geometries; };
+FallbackHeard robustSessionHearsFallbackWithoutTheOfdmBurst() {
+    const std::string down_text = "the fallback's MC-DPSK frame";
+    ModemEngine tx;
+    tx.setLogPrefix("ALPHA");
+    tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    const auto down = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 2, down_text).serialize());
+
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    ModemEngine rx;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    rx.setLogPrefix("BRAVO");
+    rx.setSynchronousMode(true);
+    rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+    // The connect pick: MC-DPSK Robust; the session never left it (the OFDM burst was not heard).
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DQPSK, CodeRate::R1_4, 4, 8, 1024);
+    FallbackHeard out;
+    rx.setMcDpskGeometryCallback([&](int cw) { out.geometries.push_back(cw); });
+    rx.setRawDataCallback([&](const Bytes& data, bool) { out.heard.push_back(payloadText(data)); });
+    std::vector<float> air(24000, 0.0f);
+    air.insert(air.end(), down.begin(), down.end());
+    air.insert(air.end(), 4 * 48000, 0.0f);
+    std::mt19937 rng(37);
+    std::normal_distribution<double> bg(0.0, 1e-3);
+    for (auto& v : air) v += static_cast<float>(bg(rng));
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    std::printf("Robust session that never saw the OFDM burst, ROBUST_MID fallback: %zu frame(s) "
+                "heard, %zu geometry report(s)%s\n",
+                out.heard.size(), out.geometries.size(),
+                out.geometries.empty() ? "" : (" (cw " + std::to_string(out.geometries[0]) + ")").c_str());
+    return out;
+}
+
 // BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED: the MC-DPSK listener sits through the peer's OFDM traffic,
 // which it cannot lock; learning that audio as "idle" put its noise floor at signal level, and the
 // physical-SNR reference (max of the inter-chirp gap and that floor) then failed the 3 dB presence gate
@@ -506,6 +551,14 @@ int main(int argc, char** argv) {
         check(heard.size() == 2 && heard[1] == "the fallback's MC-DPSK frame",
               "a session that started on MC-DPSK Robust hears the sender's ROBUST_MID fallback "
               "after following it up to OFDM");
+    }
+    {
+        const auto fb = robustSessionHearsFallbackWithoutTheOfdmBurst();
+        check(fb.heard.size() == 1 && fb.heard[0] == "the fallback's MC-DPSK frame",
+              "a Robust session hears the sender's ROBUST_MID fallback without having seen the "
+              "OFDM burst");
+        check(fb.geometries.size() == 1 && fb.geometries[0] == 3,
+              "and reports the peer's new geometry (3 codewords) so the session follows it");
     }
     {
         const float physical = listenerThroughOfdmSpellMeasuresFallbackPhysical();

@@ -272,6 +272,11 @@ public:
         mcdpsk_margin_cb_ = std::move(callback);
         wireDecoderRoleCallbacks();
     }
+    // The primary MC-DPSK decoder heard the peer at another frame size than the session's.
+    void setMcDpskGeometryCallback(std::function<void(int cw_count)> callback) {
+        mcdpsk_geometry_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
+    }
     void setMcDpskFrameLostCallback(std::function<void(int modulation)> callback) {
         mcdpsk_frame_lost_cb_ = std::move(callback);
         wireDecoderRoleCallbacks();
@@ -636,6 +641,7 @@ private:
     bool dual_listen_enabled_ = false;  // set in the constructor from the knob
     std::function<void(bool)> anchored_no_group_cb_;
     std::function<void(bool)> mcdpsk_margin_cb_;
+    std::function<void(int)> mcdpsk_geometry_cb_;
     std::function<void(int)> mcdpsk_frame_lost_cb_;
     std::function<void(bool)> mcdpsk_turn_loss_cb_;
     std::function<void()> burst_outcome_unknown_cb_;

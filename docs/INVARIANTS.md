@@ -976,14 +976,22 @@ Robust (DQPSK, 4 codewords) otherwise slices every fallback burst wrong and neve
 down (BUG-LISTENER-KEEPS-SESSION-PROFILE). A listener never learns idle noise
 (`setIdleNoiseLearning(false)`): it cannot lock the session waveform's bursts, so it would learn the
 peer's traffic as noise and carry that floor into its next role as primary
-(BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED).
+(BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED). Every MC-DPSK decoder, primary or listener, tries a
+connected compact first frame at every MC-DPSK ladder geometry (`mcDpskCompactCodewordHypotheses`:
+the session's frame size first, then ROBUST_MID's and Robust's) and every constellation; a frame at
+another geometry sets the burst's frame size and is reported (`setMcDpskGeometryCallback`) before
+delivery, and the connection follows the peer to the down-target geometry
+(`Connection::noteRxMcDpskGeometry`, an up-crossing it commanded counted as failed). A sender whose
+OFDM burst went unacknowledged falls back there whatever geometry the receiver still listens at
+(BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD).
 **Why:** the MC-DPSK chirp and the OFDM anchor chirp are identical, so each decoder locks on the
 other's bursts and fails them: an OFDM listener would fire the anchored-burst backstop ACK on every
 MC-DPSK frame, an MC-DPSK listener would feed the constellation controller a loss per OFDM anchor.
 A frame processed before the switch would land in the wrong ARQ geometry and ACK semantics.
 **Test:** `DualListenEngine` (both frames delivered, each after its report, receiver already on its
 waveform; the control without dual-listen misses the MC-DPSK frame; a Robust session hears the
-ROBUST_MID fallback after following the sender up), `WaveformFollow` dual-listen
+ROBUST_MID fallback after following the sender up, and without having seen the OFDM burst),
+`WaveformFollow` (`test_receiver_follows_the_peer_to_the_fallback_geometry`) and its dual-listen
 cases (receiver commands but does not switch; a repeat ACK carries the same command; it follows what
 arrives; a missed up-crossing backs off).
 

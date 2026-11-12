@@ -2748,6 +2748,15 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD (FIXED 2026-11-12) — was P1: session death after a failed first up-crossing
+
+A session that connected on MC-DPSK Robust (DQPSK, 4 codewords) commanded OFDM; the sender's first
+OFDM burst was lost and it fell back to the follow's down target (ROBUST_MID: DBPSK, 3 codewords); the
+receiver, which never decoded the OFDM burst, still listened at 4 codewords and decoded none of the
+resends (GUI ITU Good 5 dB seed 49: 13 resends at 20 dB sync quality, FAIL at 582 s). MC-DPSK decoders
+now try every ladder geometry on a failed first frame and the connection follows the peer to the
+fallback geometry. Tests: DualListenEngine, WaveformFollow. CHANGELOG 2026-11-12.
+
 ### BUG-CONTROL-PRESCREEN-DROPS-DESCRIPTORS (FIXED 2026-11-12) — was P1 at the OFDM floor: 41 % of descriptors lost at ITU Good 5 dB
 
 A mean-|LLR| < 1.5 pre-screen skipped the decode of weak but real one-codeword control frames; at the

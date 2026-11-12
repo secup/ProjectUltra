@@ -9284,7 +9284,13 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
     CodeRate rate = from_rate;
     int cw = 0;
     LadderRungId rung_id = LadderRungId::UNKNOWN;
-    if (from == WaveformMode::OFDM_CHIRP && mc_rung >= 0) {
+    // An MC-DPSK session not at the down-target geometry re-profiles to it when its peer is seen
+    // there (noteRxMcDpskGeometry): the receiver side of a fallback it never saw start.
+    const bool mc_to_fallback_geometry =
+        from == WaveformMode::MC_DPSK && mc_rung >= 0 &&
+        data_frame_cw_count_ !=
+            connection_policy::ladderRungForId(LadderRungId::ROBUST_MID).cw_count;
+    if ((from == WaveformMode::OFDM_CHIRP || mc_to_fallback_geometry) && mc_rung >= 0) {
         // Down: the standard DBPSK geometry (8 carriers, 1024 samples/symbol, 3 codewords); the
         // in-session constellation change lifts it to DQPSK when the channel allows.
         const auto rung = connection_policy::ladderRungForId(LadderRungId::ROBUST_MID);
@@ -9408,6 +9414,33 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
         runDeferredArqRefill();
     }
     return true;
+}
+
+void Connection::noteRxMcDpskGeometry(int cw_count) {
+    if (state_ != ConnectionState::CONNECTED || negotiated_mode_ != WaveformMode::MC_DPSK ||
+        cw_count == data_frame_cw_count_) {
+        return;
+    }
+    const auto fallback = connection_policy::ladderRungForId(LadderRungId::ROBUST_MID);
+    if (cw_count != fallback.cw_count || !waveformFollowActive()) {
+        LOG_MODEM(WARN,
+                  "Connection: the peer's MC-DPSK frames are %d codewords (session %d) - not the "
+                  "fallback geometry, the session's stays",
+                  cw_count, data_frame_cw_count_);
+        return;
+    }
+    // The peer fell back from OFDM (its burst went unacknowledged) to the follow's down target
+    // while this end, which never decoded that burst, kept the session's geometry: an up-crossing
+    // this end commanded has failed, so the next one waits longer (as when the peer is seen back
+    // on MC-DPSK at the old geometry, upCrossingWordForAck).
+    if (rx_dual_up_commanded_) {
+        up_crossing_gate_.crossingFailed();
+        rx_dual_up_commanded_ = false;
+    }
+    rx_crossing_apply_pending_ = false;
+    rx_crossing_word_ = 0;
+    applyWaveformCrossing(connection_policy::encodeMcDpskRungCommand(0),
+                          "the peer fell back to the MC-DPSK down-target geometry");
 }
 
 uint8_t Connection::upCrossingWordForAck(bool clean) {

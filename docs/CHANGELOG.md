@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): an MC-DPSK receiver hears its peer's fallback geometry (BUG-MCDPSK-FALLBACK-GEOMETRY-UNHEARD)
+
+**What broke (session death).** A session that connected on MC-DPSK Robust (DQPSK, 4 codewords per
+frame) commanded an up-crossing; the sender's first OFDM burst was lost (its descriptor read |llr| 0.37)
+and the sender, with no ACK for it, fell back to the follow's down target, ROBUST_MID (DBPSK, 3
+codewords). The receiver had decoded nothing of the OFDM burst, so it never flipped and kept
+listening at the session's 4 codewords: every compact first frame failed at both constellations, and
+13 resends - chirps at 20-22 dB sync quality - went unheard until the ARQ gave up (GUI ITU Good 5 dB,
+seed 49, FAIL at 582 s). The receiver's other path to the fallback (a flipped MC-DPSK listener,
+BUG-LISTENER-KEEPS-SESSION-PROFILE) needs the OFDM burst decoded first.
+
+**What changed.**
+- `StreamingDecoder::decodeMcDpskCompactFirstFrame` tries a connected first frame at every MC-DPSK
+  ladder geometry (`mcDpskCompactCodewordHypotheses`: the session's frame size first, then ROBUST_MID's
+  and Robust's) at every constellation; the first-frame look-ahead covers the longest. A frame at
+  another size sets the burst's frame size and is reported before delivery
+  (`setMcDpskGeometryCallback` -> `ModemEngine` (primary only) -> `ProtocolEngine` ->
+  `Connection::noteRxMcDpskGeometry`).
+- `Connection::noteRxMcDpskGeometry`: at the down-target geometry the receiver follows the peer
+  (`applyWaveformCrossing` now also re-profiles an MC-DPSK session not at ROBUST_MID), and an
+  up-crossing it commanded counts as failed (the next one waits a longer run).
+
+**Verification.** `DualListenEngine` `robustSessionHearsFallbackWithoutTheOfdmBurst` (a Robust
+receiver that never saw the OFDM burst hears the ROBUST_MID frame and reports 3 codewords): 0 frames
+heard before (verified by disabling the hypotheses), 1 after. `WaveformFollow`
+`test_receiver_follows_the_peer_to_the_fallback_geometry` (geometry, constellation, failed-crossing
+backoff). ctest 123/123. GUI (with the
+other pending changes): hard follow cases (60 s outage, 0 -> 20 dB step, Moderate fade, AWGN ramp
+down) 4/4 PASS at 180/107/226/90 s (before 173/131/240/91); the 5 dB seed-49 case that died passes
+(298 s on the original seed's rerun).
+
+---
+
 ## 2026-11-12 — FEAT(ofdm): compact data frames that say where they sit in their burst (INV-OFDM-FRAME-001)
 
 **Why.** Inside the one-codeword turbo data frame, the v2 layout spent 19 bytes on framing the codec
