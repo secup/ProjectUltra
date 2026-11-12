@@ -907,7 +907,7 @@ void Connection::acceptCall() {
     // intentionally before the forced-mode overrides below: an operator probing
     // an exact rung still gets the requested modulation/rate unchanged.
     const auto authority_entry = capRxAuthorityInitialRung(
-        rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply(),
+        rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply() && entryProbeCapEnabled(),
         environment_forced_rung);
     if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
         LOG_MODEM(INFO,

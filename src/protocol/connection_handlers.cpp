@@ -491,7 +491,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // while QPSK R1/2 subsequently ran 24/24 groups clean.  The connect sample
         // is MC-DPSK-domain evidence, not a coherent-OFDM payload measurement.
         const auto authority_entry = capRxAuthorityInitialRung(
-            rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply(),
+            rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply() && entryProbeCapEnabled(),
             environment_forced_rung);
         if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
             LOG_MODEM(INFO,

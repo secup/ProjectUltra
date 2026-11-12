@@ -10,6 +10,18 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FEAT(rate): `ULTRA_ENTRY_PROBE=0` starts the first OFDM group at the connect pick (rig A/B knob)
+
+The receiver authority sends every session's first coherent group at QPSK R1/2
+(`capRxAuthorityInitialRung`). In the 2026-11-12 GUI matrices (245 sessions at 20-25 dB) that group
+supported the connect pick every time (243/243 with a verdict), at a cost of ~3-5 s per session; on
+the rig, five MPG@20 transfers that started at R3/4 had left every first group incomplete
+(BUG-ENTRY-PROBE-COST). The answer needs the rig, so this only adds the switch: `ULTRA_ENTRY_PROBE`
+(default ON = unchanged; `0` = the first group at the pick; lockstep), read at both call sites
+(`entryProbeCapEnabled`). Dev ctest 112/112 (the default path is the one the existing tests cover).
+
+---
+
 ## 2026-11-12 — FIX(follow): an up-crossing needs a reading from the burst it acknowledges (BUG-UPCROSS-STALE-SCALAR)
 
 **What was broken.** The receiver commands an MC-DPSK -> OFDM crossing from `sessionLadderPick`

@@ -507,6 +507,19 @@ inline bool environmentForcesDataProfile() {
     return forcedDataProfileFromEnvironment().forced();
 }
 
+// ULTRA_ENTRY_PROBE (default ON; "0" turns it off, lockstep - set the same on both stations): the
+// first coherent group at QPSK R1/2 (capRxAuthorityInitialRung). Off, the first group runs at the
+// connect pick. GUI 2026-11-12: at 20-25 dB the QPSK R1/2 first group supported the pick in 243/243
+// sessions (~3-5 s per session, BUG-ENTRY-PROBE-COST); on the rig, five MPG@20 transfers that
+// started at R3/4 left every first group incomplete. Off is for the rig A/B only.
+inline bool entryProbeCapEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("ULTRA_ENTRY_PROBE");
+        return e == nullptr || std::atoi(e) != 0;
+    }();
+    return on;
+}
+
 // The CONNECT measurement is made on MC-DPSK and does not predict the first
 // coherent-OFDM payload margin reliably on a fading channel.  RX authority has
 // no coherent observations yet, so its automatic bootstrap is deliberately the

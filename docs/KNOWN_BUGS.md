@@ -19,9 +19,15 @@ and the next command was at or above the pick in all of them (8PSK R2/3 x172, 16
 32QAM R2/3 x28, 16QAM R2/3 x4 on AWGN). At 20 dB the cap never saved a group; it costs one group at
 half the pick's bytes, ~3-5 s per session (5 % of a 20 KB transfer). Not measured where it matters:
 marginal SNR on fading (Good 12-16, Moderate 14-20), where the pick sits near its threshold.
-Direction: choose the first rung by the predicted first-group success at the connect reading's
-uncertainty for the measured class (the latent controller's seed posterior), not by a fixed rung;
-validate on a multi-seed GUI A/B at marginal SNR before changing it.
+Rig history (comment at `connection_handlers.cpp`): five real MPG@20 transfers disproved the former
+R3/4 first-group cap - every first group was incomplete (11/25 frames) despite healthy acquisition,
+while QPSK R1/2 then ran 24/24 groups clean. That predates the PAPR-corrected connect pick, the
+control-frame whitening, the LTS timing fix and the CFO session reference, and hardware effects
+(ALC/AGC settling on the first OFDM burst, the TX level gap) are not in the simulator - so the
+answer is a rig A/B, not a sim one. `ULTRA_ENTRY_PROBE=0` (lockstep, added 2026-11-12) starts the
+first group at the pick for that A/B. Direction if the rig agrees: choose the first rung by the
+predicted first-group success at the connect reading's uncertainty for the measured class (the
+latent controller's seed posterior), not by a fixed rung.
 
 ### BUG-HARNESS-BURST-CHUNK-STALE (open, 2026-11-12) — P3, measurement tooling: `measure_ack_fer --config burst_chunk` recovers nothing
 
