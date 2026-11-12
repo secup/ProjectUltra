@@ -142,7 +142,18 @@ std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
 // ULTRA_MCDPSK_ACK_REPAIR, decoder side: a compact MC-DPSK burst whose first frame is lost (its
 // data buried, its chirp and training intact) goes on at its stride, so frames 2 and 3 - which have
 // no chirp of their own - still decode. Without the knob they were lost with it.
+struct LossRun {
+    std::vector<std::string> heard;
+    std::vector<bool> turn_losses;  // turn_over flag of each turn-loss report
+};
+
+LossRun receiveBurstWithLostFrame(bool repair, int lost);
+
 std::vector<std::string> receiveBurstWithLostFirstFrame(bool repair) {
+    return receiveBurstWithLostFrame(repair, 1).heard;
+}
+
+LossRun receiveBurstWithLostFrame(bool repair, int lost) {
     ModemEngine tx;
     tx.setLogPrefix("ALPHA");
     tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
@@ -175,7 +186,9 @@ std::vector<std::string> receiveBurstWithLostFirstFrame(bool repair) {
     const double rms = std::sqrt(sum / static_cast<double>(std::max<size_t>(1, first_len)));
     std::mt19937 rng(5);
     std::normal_distribution<double> nd(0.0, 10.0 * rms);
-    for (size_t i = start + first_len - data_len; i < std::min(burst.size(), start + first_len); ++i) {
+    // Frame k's data: frame 1's after the preamble, frame k > 1's at the stride after it.
+    const size_t lost_begin = start + first_len - data_len + static_cast<size_t>(lost - 1) * data_len;
+    for (size_t i = lost_begin; i < std::min(burst.size(), lost_begin + data_len); ++i) {
         burst[i] += static_cast<float>(nd(rng));
     }
 
@@ -185,8 +198,9 @@ std::vector<std::string> receiveBurstWithLostFirstFrame(bool repair) {
     rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
     rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
-    std::vector<std::string> heard;
-    rx.setRawDataCallback([&](const Bytes& data, bool) { heard.push_back(payloadText(data)); });
+    LossRun run;
+    rx.setRawDataCallback([&](const Bytes& data, bool) { run.heard.push_back(payloadText(data)); });
+    rx.setMcDpskTurnLossCallback([&](bool turn_over) { run.turn_losses.push_back(turn_over); });
     std::vector<float> air(24000, 0.0f);
     air.insert(air.end(), burst.begin(), burst.end());
     air.insert(air.end(), 4 * 48000, 0.0f);
@@ -199,7 +213,7 @@ std::vector<std::string> receiveBurstWithLostFirstFrame(bool repair) {
         rx.processRxBuffer();
     }
     unsetenv("ULTRA_MCDPSK_ACK_REPAIR");
-    return heard;
+    return run;
 }
 
 }  // namespace
@@ -214,6 +228,14 @@ int main() {
                   with_repair[1] == "burst frame 3",
               "repair: frames 2 and 3 of a burst whose first frame is lost still decode");
         check(without.empty(), "without repair they are lost with the first frame (the control)");
+        // The burst's LAST frame lost: frames 1-2 decode, and the decoder reports one turn loss
+        // at the burst's end (its tail or full window), flagged as the end of the turn.
+        const auto last = receiveBurstWithLostFrame(true, 3);
+        check(last.heard.size() == 2 && last.heard[0] == "burst frame 1" &&
+                  last.heard[1] == "burst frame 2",
+              "a burst whose last frame is lost delivers frames 1 and 2");
+        check(last.turn_losses.size() == 1 && last.turn_losses[0],
+              "and reports one turn loss at the end of the turn");
     }
     const SenderAudio audio = senderAudio();
     check(!audio.mcdpsk.empty() && !audio.ofdm.empty(), "the sender produced both bursts");

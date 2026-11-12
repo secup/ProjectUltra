@@ -37,7 +37,8 @@ burst, without it it waits). `WaveformFollow` 151/151 (new: a turn-loss ACK at a
 without an incoming object or with the knob off; a lossy burst commands no up-crossing - that check
 fails without the loss verdict). `DualListenEngine` (new: a 3-frame compact DBPSK burst whose first
 frame's data is buried under noise 10x the signal delivers frames 2 and 3 with the knob, nothing
-without it). Dev ctest 112/112. GUI A/B: below.
+without it; with its last frame buried it delivers frames 1-2 and the decoder reports one turn loss,
+flagged as the end of the turn). Dev ctest 112/112. GUI A/B: below.
 
 ---
 
