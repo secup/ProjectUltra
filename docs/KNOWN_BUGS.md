@@ -77,8 +77,14 @@ delays the decode - and the end-of-turn ACK - by 5184 - 2624 = 2560 ms (GUI 2026
 122.0 s, decode 124.83 s; DBPSK bursts decode 0.33 s after their end). Multi-frame bursts recover
 (frame 2 is already buffered when frame 1 decodes). Costs: ~2.6 s per one-frame DQPSK turn, and a
 timeout guard that must allow it (`mcDpskFirstFrameLookaheadMs`, ULTRA_MCDPSK_MEASURED_RTO).
-Direction: try the decode at the commanded constellation as soon as its frame is complete, and
-only wait the slowest-rung length when that fails.
+Root cause (engine trace, 2026-11-12): after a crossing to MC-DPSK the decoder that hears the
+burst is the former listener slot, still configured at DBPSK (the follow's down target), and the
+receiver never reconfigures it to the DQPSK it commands - so every DQPSK first frame waits a
+DBPSK-length slice and decodes through the other-constellation retry ("decodes at DQPSK (configured
+DBPSK)"). Direction: configure the MC-DPSK decoder at the constellation this receiver commands, and
+size the first slice at it, waiting the slowest-rung length only when that decode fails (the second
+stage keeps a sender's rung fallback decodable). A two-stage slice alone does nothing while the
+decoder stays at DBPSK (tried and backed out; patch kept in the session scratchpad).
 
 ### BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (open, 2026-11-12) — P2, low SNR: an MC-DPSK session's tone ACK never lengthens
 
