@@ -1569,7 +1569,7 @@ private:
     SessionPick sessionLadderPick() const;
     uint64_t mcDpskBurstSpanMs() const;
     bool escapeHasPeerEvidence(const char* which);
-    Bytes mcDpskTurnEndWireCopy(const Bytes& frame) const;
+    Bytes physicalTurnEndWireCopy(const Bytes& frame) const;
     bool isCrossingLaunchAckCopy(
         const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const;
     // The connect-SNR pool and the verdict age share one clock (Connection::tick).

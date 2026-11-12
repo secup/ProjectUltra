@@ -454,9 +454,10 @@ switch; pricing one there is a ~25 % phantom penalty that kept the controller of
 ### INV-ACK-TURN-001: the ACK for a turn's last frame carries completed-turn provenance
 
 **Rule:** every physical DATA turn whose end the receiver must ACK carries a CRC-protected
-`PHYSICAL_BURST_END` on its last frame (EVERY OFDM turn, singletons included since 2026-11-12;
-EVERY MC-DPSK turn, singletons included, on EVERY transmit path: the burst encoder, the singleton
-flush and a timeout batch sent frame by frame, `Connection::mcDpskTurnEndWireCopy`), and the receiver reports
+`PHYSICAL_BURST_END` on its last frame (EVERY OFDM and EVERY MC-DPSK turn, singletons included,
+on EVERY transmit path: the burst encoder, the singleton flush and a timeout batch sent frame by
+frame, `Connection::physicalTurnEndWireCopy`; OFDM single frames since 2026-11-12,
+BUG-OFDM-SINGLETON-UNMARKED), and the receiver reports
 `physical_turn_complete` for it BEFORE the frame callback, so
 the ACK takes the completed-group path. An ACK without that provenance goes through
 listen-before-ACK's evidence-novelty rule (INV-TONE-ACK-005), which is right only for genuinely
@@ -859,7 +860,7 @@ eating the next burst, which the sender queues back to back.
 **Rule:** a continuation never runs the in-band burst-tail test on a slot the previous frame proved: a
 CRC-valid DATA frame with MORE_FRAG and without PHYSICAL_BURST_END means the sender's next frame is on
 the air (the marker is stamped on the last DATA frame of every MC-DPSK turn,
-`shouldStampPhysicalBurstEnd`, `Connection::mcDpskTurnEndWireCopy`). The test (window power against
+`shouldStampPhysicalBurstEnd`, `Connection::physicalTurnEndWireCopy`). The test (window power against
 the inter-chirp gap's noise, `inBandPowerReadsAsNoise`) decides only after a lost (compact) or partial
 (v2) frame, which may have been the turn's last. State: `StreamingDecoder::mc_burst_next_slot_proven_`,
 set by `startMCDPSKBurstContinuation(..., next_slot_proven)` and by each continuation frame.

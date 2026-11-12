@@ -10581,12 +10581,12 @@ void Connection::flushBurstBuffer(bool retransmission_required,
         // descriptor (encodeBurstLight:476-489), so the one-shot stays armed for the
         // next descriptor-bearing (multi-frame) burst.
         //
-        // MC-DPSK: this one frame IS the whole physical turn, so it carries the
-        // CRC-protected PHYSICAL_BURST_END marker (on a private wire copy; the ARQ's
-        // logical frame stays byte-stable) — the receiver then ACKs it as a completed
-        // turn instead of holding the ACK on decoder evidence until it is dropped
-        // (BUG-MCDPSK-ACK-DROPPED). OFDM singletons keep their full-anchor provenance.
-        on_transmit_(mcDpskTurnEndWireCopy(committed_frames[0]));
+        // This one frame IS the whole physical turn, so it carries the CRC-protected
+        // PHYSICAL_BURST_END marker (on a private wire copy; the ARQ's logical frame stays
+        // byte-stable) — the receiver then ACKs it as a completed turn instead of holding
+        // the ACK on decoder evidence until it is dropped (MC-DPSK: BUG-MCDPSK-ACK-DROPPED;
+        // OFDM: BUG-OFDM-SINGLETON-UNMARKED).
+        on_transmit_(physicalTurnEndWireCopy(committed_frames[0]));
     } else if (on_transmit_burst_) {
         LOG_MODEM(INFO, "Connection: Flushing burst of %zu frames", committed_frames.size());
         // DESC-SWITCH §5.1 step 2: the first burst group after a descriptor-committed
@@ -10759,12 +10759,17 @@ void Connection::flushStagedArqTimeoutBatch() {
     }
 }
 
-// MC-DPSK: the frame that ends a physical turn carries the CRC-protected PHYSICAL_BURST_END marker,
-// on a private wire copy (the ARQ's logical frame stays byte-stable), so the receiver ACKs it as a
-// completed turn instead of holding the ACK on decoder evidence (BUG-MCDPSK-ACK-DROPPED). Bursts get
-// it from the encoder (shouldStampPhysicalBurstEnd); single frames from here, on every path.
-Bytes Connection::mcDpskTurnEndWireCopy(const Bytes& frame) const {
-    if (negotiated_mode_ != WaveformMode::MC_DPSK) {
+// The frame that ends a physical turn carries the CRC-protected PHYSICAL_BURST_END marker, on a
+// private wire copy (the ARQ's logical frame stays byte-stable), so the receiver ACKs it as a
+// completed turn instead of holding the ACK on decoder evidence. Bursts get it from the encoder
+// (shouldStampPhysicalBurstEnd); single frames from here, on every path.
+// MC-DPSK: BUG-MCDPSK-ACK-DROPPED. OFDM (BUG-OFDM-SINGLETON-UNMARKED, 2026-11-12): a single frame
+// went out unmarked, and since frame-structure acquisition finds every frame (an accepted anchor
+// no longer proves a standalone frame), the receiver held its ACK to the descriptorless air
+// ceiling (~11 s) - past the sender's whole ACK window. GUI ITU Good 5 dB: the file's last frame
+// decoded three times, each ACK held 11 s and dropped on the resend.
+Bytes Connection::physicalTurnEndWireCopy(const Bytes& frame) const {
+    if (negotiated_mode_ != WaveformMode::MC_DPSK && !isOFDMMode(negotiated_mode_)) {
         return frame;
     }
     auto parsed = v2::DataFrame::deserialize(frame);
@@ -10830,10 +10835,11 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list,
     if (physical_frames.size() == 1 || !on_transmit_burst_ || !burst_capable_mode) {
         // The last frame ends the physical turn: an MC-DPSK resend of one frame without the
         // marker left the receiver waiting for a continuation, with no ACK, until the next RTO
-        // (GUI 60 s outage, one-frame fallback bursts: two resends, 22 s each).
+        // (GUI 60 s outage, one-frame fallback bursts: two resends, 22 s each); an OFDM one
+        // had its ACK held to the descriptorless air ceiling (BUG-OFDM-SINGLETON-UNMARKED).
         for (size_t i = 0; i < physical_frames.size(); ++i) {
             transmitFrame(i + 1 == physical_frames.size()
-                              ? mcDpskTurnEndWireCopy(physical_frames[i])
+                              ? physicalTurnEndWireCopy(physical_frames[i])
                               : physical_frames[i]);
         }
         return;

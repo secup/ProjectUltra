@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(ack): an OFDM single frame carries the end-of-turn marker on every path (BUG-OFDM-SINGLETON-UNMARKED)
+
+**What broke.** A wideband OFDM single frame (a file's last frame, a one-frame repair or RTO resend)
+left `Connection` through `on_transmit_` / the timeout batch unmarked: only the burst encoder
+stamped OFDM turns (`shouldStampPhysicalBurstEnd`), and those two single-frame paths stamped MC-DPSK
+only (`mcDpskTurnEndWireCopy`). The receiver's other proof of a standalone frame - "decoded at an
+accepted full anchor" - needs a dual chirp since frame-structure acquisition finds every frame
+(BUG-STRUCTURE-MEMBER-STANDALONE), so a decoded single frame kept the descriptorless air gate (~11 s)
+and its ACK waited past the sender's whole ACK window, then was dropped on the resend. GUI ITU Good
+5 dB, 16 runs at 5d566250/816a9c11: 47 single-frame rounds, 33 silent, 13 of those with the frame
+DECODED and its ACK held ("10957 ms of burst still arriving"); one file's last frame decoded three
+times in a row without an ACK getting through (g6 seed 45, 172-190 s).
+
+**What changed.** `Connection::physicalTurnEndWireCopy` (renamed from `mcDpskTurnEndWireCopy`) stamps
+`PHYSICAL_BURST_END` on the wire copy of a single DATA frame in MC-DPSK and in every OFDM mode, on the
+singleton flush and on the last frame of a frame-by-frame timeout batch. The receiver already ends the
+turn on that marker (`hasPhysicalBurstEndMarker`).
+
+**Verification.** `WaveformFollow` `test_ofdm_single_frame_ends_its_turn` (wide and narrow; first send
+through the real buffered flush, and the RTO resend) - fails before (`wide: the single frame carries
+the end-of-turn marker`), passes after. ctest 121/121. GUI ITU Good 5 dB batch g8 (same 8 cases as
+g6/g7): every decoded single frame answered (7 of 11 single-frame rounds answered, the other 4 not
+decoded) vs g6+g7 13 decoded-but-unanswered of 47; 8/8 PASS.
+
+---
+
 ## 2026-11-12 — FIX(ack): a deferred tone ACK that cannot end before the sender's resend is dropped (BUG-DEFERRED-ACK-INTO-RESEND)
 
 **What broke.** Listen-before-ACK defers an asynchronous ACK while the decoder's provisional air gate

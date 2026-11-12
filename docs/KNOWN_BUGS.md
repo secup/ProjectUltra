@@ -2748,6 +2748,14 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-OFDM-SINGLETON-UNMARKED (FIXED 2026-11-12) — was P1 at the OFDM floor: a decoded OFDM single frame's ACK held ~11 s, past the sender's ACK window
+
+The singleton flush and the frame-by-frame timeout batch stamped `PHYSICAL_BURST_END` for MC-DPSK only;
+with frame-structure acquisition an accepted anchor no longer proves a standalone frame, so the
+receiver held a decoded single frame's ACK to the descriptorless air ceiling and dropped it on the
+resend (GUI 5 dB: 13 of 47 single-frame rounds). `Connection::physicalTurnEndWireCopy` stamps every
+mode. Test `test_ofdm_single_frame_ends_its_turn`. CHANGELOG 2026-11-12.
+
 ### BUG-DEFERRED-ACK-INTO-RESEND (FIXED 2026-11-12) — was P2: a deferred tone ACK held to the provisional air ceiling keyed into the sender's resend
 
 With the descriptor lost, listen-before-ACK holds an asynchronous ACK until the provisional air gate's

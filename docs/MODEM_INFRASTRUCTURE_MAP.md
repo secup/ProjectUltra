@@ -213,10 +213,11 @@ CTest `CliLoopback`.
   (`connection.cpp` `setEmitToneBurstSackCallback` + `onToneBurstAck`). 🟢
 - **Physical-turn end marker** `Flags::PHYSICAL_BURST_END` (DATA-only reuse of the legacy URGENT
   bit, CRC-protected): stamped by the sender on the LAST frame of a physical DATA turn —
-  multi-frame non-interleaved OFDM bursts (`encodeBurstLight` →
-  `streaming_frame_policy::shouldStampPhysicalBurstEnd`), and since 2026-11-09 EVERY MC-DPSK turn,
-  singletons included (`Connection::mcDpskTurnEndWireCopy` on the singleton flush and on a timeout
-  batch sent frame by frame, 2026-11-11 BUG-MCDPSK-RESEND-NO-TURN-END). The receiver turns it
+  non-interleaved OFDM bursts (`encodeBurstLight` →
+  `streaming_frame_policy::shouldStampPhysicalBurstEnd`), and EVERY OFDM and MC-DPSK single frame
+  (`Connection::physicalTurnEndWireCopy` on the singleton flush and on a timeout batch sent frame by
+  frame; MC-DPSK since 2026-11-11 BUG-MCDPSK-RESEND-NO-TURN-END, OFDM since 2026-11-12
+  BUG-OFDM-SINGLETON-UNMARKED). The receiver turns it
   into `DecodeResult::physical_turn_complete` (`hasPhysicalBurstEndMarker` OFDM,
   `hasMcDpskTurnEndMarker` MC-DPSK), which makes `Connection::onFrameReceived` open a
   completed-group ACK context, so the frontend's listen-before-ACK does not hold the ACK on decoder

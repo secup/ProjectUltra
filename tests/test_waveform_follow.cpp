@@ -78,6 +78,24 @@ struct ConnectionAdaptiveTestAccess {
         c.configureArqForCurrentDataMode();
     }
 
+    static void makeConnectedNarrowOFDM(Connection& c) {
+        c.local_call_ = "W1ABC";
+        c.remote_call_ = "K2DEF";
+        c.state_ = ConnectionState::CONNECTED;
+        c.is_initiator_ = true;
+        c.handshake_confirmed_ = true;
+        c.negotiated_mode_ = WaveformMode::OFDM_NARROW;
+        c.data_modulation_ = Modulation::QPSK;
+        c.data_code_rate_ = CodeRate::R1_2;
+        c.data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
+        c.config_.fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
+        c.measured_snr_db_ = 12.0f;
+        c.fading_index_ = 0.30f;
+        makeLocalIss(c);
+        c.arq_.setCallsigns(c.local_call_, c.remote_call_);
+        c.configureArqForCurrentDataMode();
+    }
+
     static void makeConnectedMCDPSK(Connection& c) {
         c.local_call_ = "W1ABC";
         c.remote_call_ = "K2DEF";
@@ -96,6 +114,16 @@ struct ConnectionAdaptiveTestAccess {
         makeLocalIss(c);
         c.arq_.setCallsigns(c.local_call_, c.remote_call_);
         c.configureArqForCurrentDataMode();
+    }
+
+    // One physical round as the file/message pump builds it: buffered, then flushed.
+    static bool sendBufferedSingleFrame(Connection& c, const Bytes& payload) {
+        c.burst_mode_active_ = true;
+        c.burst_tx_buffer_.clear();
+        const bool ok = c.arq_.sendFixedDataWithFlags(payload, 0);
+        c.flushBurstBuffer();
+        c.burst_mode_active_ = false;
+        return ok;
     }
 
     // ── Waveform follow ──
@@ -1170,6 +1198,45 @@ void test_mcdpsk_one_frame_resend_ends_its_turn() {
     }
 }
 
+// An OFDM single frame is its whole physical turn and must say so, first send and resend alike
+// (BUG-OFDM-SINGLETON-UNMARKED): frame-structure acquisition finds every frame, so an anchor no
+// longer proves a standalone frame and the receiver held the unmarked frame's ACK to the
+// descriptorless air ceiling (~11 s), past the sender's ACK window (GUI ITU Good 5 dB: the file's
+// last frame decoded three times, its ACK dropped on each resend). Wide and narrow OFDM alike.
+void test_ofdm_single_frame_ends_its_turn() {
+    for (int narrow = 0; narrow < 2; ++narrow) {
+        Connection c;
+        std::vector<Bytes> sent;
+        c.setTransmitCallback([&](const Bytes& frame) { sent.push_back(frame); });
+        c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            for (const auto& f : frames) sent.push_back(f);
+        });
+        if (narrow) {
+            ConnectionAdaptiveTestAccess::makeConnectedNarrowOFDM(c);
+        } else {
+            ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 8.0f, 0.4f,
+                                                            Modulation::QPSK);
+        }
+        const char* which = narrow ? "narrow" : "wide";
+        CHECK(ConnectionAdaptiveTestAccess::sendBufferedSingleFrame(c, Bytes(40, 0x5A)),
+              "one OFDM DATA frame in flight");
+        CHECK(sent.size() == 1, "the single frame goes out on its own");
+        if (!sent.empty()) {
+            const auto first = v2::DataFrame::deserialize(sent.back());
+            CHECK(first && (first->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+                  std::string(which) + ": the single frame carries the end-of-turn marker");
+        }
+        const size_t before = sent.size();
+        for (int ms = 0; ms < 120000 && sent.size() == before; ms += 100) c.tick(100);
+        CHECK(sent.size() > before, "the retransmission timeout resends it");
+        if (sent.size() > before) {
+            const auto resend = v2::DataFrame::deserialize(sent.back());
+            CHECK(resend && (resend->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+                  std::string(which) + ": the one-frame resend carries the end-of-turn marker");
+        }
+    }
+}
+
 // After a crossing the EVM window starts empty, and one group is one fade realization: it may lift
 // the rung by one, not by three. One group certified 8PSK R2/3 -> 32QAM R2/3 and the next 32QAM group
 // failed whole (GUI, ITU Good 20 dB, two seeds). A second group that agrees may jump.
@@ -1463,6 +1530,7 @@ int main() {
     test_waveform_follow_fallback_spell_starts_with_single_frames();
     test_waveform_follow_crossing_ack_copy_is_not_a_candidate();
     test_mcdpsk_one_frame_resend_ends_its_turn();
+    test_ofdm_single_frame_ends_its_turn();
     test_first_ofdm_group_climbs_one_rung();
     test_escape_needs_the_peer_heard();
     test_startup_probe_launch_copy_is_not_a_candidate();
