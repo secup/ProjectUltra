@@ -137,7 +137,12 @@ on the old retry count). `ConnectionAdaptive` 861/861. Dev ctest 112/112. GUI: b
 **Verification.** `WaveformFollow` 140/140 (new: past the crossing time but mid-round no crossing,
 then at the round's timeout it crosses; under the authority two silent rounds and an empty ACK
 hold the rung; each check fails with its fix removed). `ConnectionAdaptive` 861/861 (authority
-off). Dev ctest 112/112. GUI: below.
+off). Dev ctest 112/112. GUI (7fb494a, follow on, ITU Good,
+7.3 Hz, half-duplex): 40 s QSB 221/201/198 s against 311/200/198 at 2c3be02 (the seed-44 run that
+showed both defects); 2-minute 0 dB dips 215/213/210/229/214/226 (217.8 mean; 219.8 at 2c3be02);
+dip-length sweep 70-145 s, seed 44, 159/187/210/218/225/238; interleaved with follow off on the same
+build, seed 45: 161/171/192/205/221/237 against 163/192/183/224/239/255 (197.8 vs 209.3 s, follow on
+ahead at 5 of 6 lengths); Good 20 dB 20 KB 97/77, AWGN 20 dB 66/65 (unchanged). All PASS, CRC OK.
 
 ---
 
@@ -173,7 +178,10 @@ fails, the run stays). The log says "none from this burst, no evidence".
 
 **Verification.** `WaveformFollow` 137/137 (new: a receiver that followed the peer down does not
 command OFDM on the pre-fade 18.6 dB, its run stays 1, and a burst reading 22 dB then commands it;
-the check fails without the fix). Dev ctest 112/112. GUI: below.
+the check fails without the fix). Dev ctest 112/112. GUI (7fb494a, which includes it): seed 42's
+2-minute dip 215 s against 228 at 2c3be02, no up-crossing commanded in the dip; seeds 45 and 47 hit
+the same pattern and were held ("none from this burst, no evidence"); seed 46 commanded OFDM from a
+reading that reached the pool after the clear - the listener over-read fixed in the entry above.
 
 ---
 
