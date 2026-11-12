@@ -899,6 +899,11 @@ void ProtocolEngine::noteRxMcDpskFrameLost(int modulation) {
     connection_.noteRxMcDpskFrameLost(modulation);
 }
 
+void ProtocolEngine::noteRxMcDpskTurnLoss(bool turn_over) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteRxMcDpskTurnLoss(turn_over);
+}
+
 void ProtocolEngine::setPhysicalChannelStats(float mean_db, float spread_db,
                                              uint32_t n) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);

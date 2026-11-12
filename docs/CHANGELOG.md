@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FEAT(mcdpsk): `ULTRA_MCDPSK_ACK_REPAIR` - a lost MC-DPSK frame is repaired at the next turn (default off, A/B pending)
+
+**What is slow today.** Every tone ACK is a turn boundary that triggers the sender's refill, but
+the refill resends holes only on OFDM (`sendNextFileChunk`, `is_ofdm && kUnifiedSeqEnabled()`): an
+MC-DPSK frame the receiver's ACK reports missing waits out its retransmission timeout (22-43 s at
+DBPSK 3 codewords). And when a burst's last frame - or its first - is lost, the receiver sends no
+ACK at all. GUI, follow on, ITU Good 100 s dip, seed 44: a DQPSK frame lost at 141 s in the dip's
+tail, the channel back at 144 s, the sender's resend at 152 s, the up-crossing at 160 s.
+
+**What the knob does (`ULTRA_MCDPSK_ACK_REPAIR=1`, latched per Connection, same on both stations).**
+- Sender: an MC-DPSK file burst starts with the frames still missing (`retransmitInFlightUnacked`),
+  as the OFDM burst path does, then tops up with new chunks.
+- Receiver: the decoder reports a turn loss (`noteMcDpskTurnLoss`): a compact burst that ends - its
+  tail read as noise, or its full window seen - with its last frames lost (`turn_over`), or a
+  data-bearing first compact frame lost, with the burst's latest possible end, (window - 1) more
+  frames, published as its air end. `Connection::noteRxMcDpskTurnLoss` then sends one ACK of what
+  arrived (only while the peer is sending it an object): synchronous at a turn's end, asynchronous
+  after a lost first frame, so listen-before-ACK holds it while the burst may still be on the air
+  and drops it when later frames decode. Its burst verdict is a loss
+  (`tone_ack_turn_loss_context_`): never a clean burst, never an up-crossing.
+
+**Verification.** `ConnectionAdaptive` 871/871 (new: with the knob the missing frame leads the next
+burst, without it it waits). `WaveformFollow` 151/151 (new: a turn-loss ACK at a turn's end and an
+asynchronous one after a lost first frame, none without an incoming object or with the knob off; a
+lossy burst commands no up-crossing - that check fails without the loss verdict). Dev ctest
+112/112. GUI A/B: below.
+
+---
+
 ## 2026-11-12 — FIX(follow): an up-crossing needs a physically bounded reading
 
 **What was broken.** The dual-listen listener's first MC-DPSK frame after following the peer down

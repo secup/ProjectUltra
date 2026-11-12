@@ -5884,6 +5884,52 @@ void test_normal_message_turn_yield_periodically_rearms_full_anchor() {
           "normal message turn reversal must keep rearming until peer DATA arrives");
 }
 
+// ULTRA_MCDPSK_ACK_REPAIR: an MC-DPSK frame the peer's ACK reports missing goes out at the front of
+// the next burst (stop-and-wait, as on OFDM); without the knob it waits for its retransmission
+// timeout (22-43 s) - the old behavior.
+void test_mcdpsk_ack_repair_resends_the_hole_at_the_next_burst() {
+    auto seqsOf = [](const std::vector<Bytes>& frames) {
+        std::vector<uint16_t> seqs;
+        for (const auto& f : frames) {
+            const auto h = v2::parseHeader(f);
+            if (h.valid) seqs.push_back(h.seq);
+        }
+        return seqs;
+    };
+    for (const bool repair : {true, false}) {
+        setenv("ULTRA_MCDPSK_ACK_REPAIR", repair ? "1" : "0", 1);
+        Connection c;
+        unsetenv("ULTRA_MCDPSK_ACK_REPAIR");
+        std::vector<std::vector<Bytes>> bursts;
+        c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
+            bursts.push_back(frames);
+        });
+        ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+        TempPayloadFile payload(repair ? "mc_repair_on" : "mc_repair_off", 4 * 1024);
+        CHECK(payload.dir.valid() && !payload.path.empty(), "temp payload file");
+        ConnectionAdaptiveTestAccess::startFile(c, payload.path);
+        ConnectionAdaptiveTestAccess::pumpFile(c);
+        CHECK(!bursts.empty() && seqsOf(bursts.back()).size() >= 2,
+              "the first MC-DPSK burst carries a window of frames");
+        const auto first = seqsOf(bursts.back());
+        // The receiver's ACK: seq 0 in order, seq 1 missing, seq 2 received (SACK bit 1).
+        CHECK(ConnectionAdaptiveTestAccess::applyToneAckToArqOnly(c, /*group_seq=*/0,
+                                                                  first.size() >= 3 ? 0x2u : 0x0u),
+              "the ACK is accepted");
+        bursts.clear();
+        ConnectionAdaptiveTestAccess::pumpFile(c);  // the refill every tone ACK triggers
+        bool hole_resent = false;
+        for (const auto& b : bursts) {
+            for (uint16_t s : seqsOf(b)) hole_resent = hole_resent || s == 1;
+        }
+        if (repair) {
+            CHECK(hole_resent, "repair on: the missing frame leads the next burst");
+        } else {
+            CHECK(!hole_resent, "repair off: the missing frame waits for its timeout");
+        }
+    }
+}
+
 void test_tone_ack_callback_marks_only_group_boundary_as_physically_complete() {
     Connection c;
     std::vector<bool> group_complete_contexts;
@@ -7052,6 +7098,7 @@ int main() {
     test_normal_ofdm_ack_arms_full_anchor_expectation();
     test_normal_message_turn_yield_periodically_rearms_full_anchor();
     test_tone_ack_callback_marks_only_group_boundary_as_physically_complete();
+    test_mcdpsk_ack_repair_resends_the_hole_at_the_next_burst();
     test_software_alc_uses_current_partial_group_delivery_provenance();
     test_partial_sack_provenance_marks_only_exact_group_geometry();
     test_physical_tail_acks_prior_orphan_payload_cumulatively();

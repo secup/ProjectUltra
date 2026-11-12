@@ -268,6 +268,11 @@ public:
         mcdpsk_frame_lost_cb_ = std::move(callback);
         wireDecoderRoleCallbacks();
     }
+    // A burst whose last frames (turn_over) or first frame the primary decoder lost.
+    void setMcDpskTurnLossCallback(std::function<void(bool turn_over)> callback) {
+        mcdpsk_turn_loss_cb_ = std::move(callback);
+        wireDecoderRoleCallbacks();
+    }
     void setBurstOutcomeUnknownCallback(std::function<void()> callback) {
         burst_outcome_unknown_cb_ = std::move(callback);
         wireDecoderRoleCallbacks();
@@ -624,6 +629,7 @@ private:
     std::function<void(bool)> anchored_no_group_cb_;
     std::function<void(bool)> mcdpsk_margin_cb_;
     std::function<void(int)> mcdpsk_frame_lost_cb_;
+    std::function<void(bool)> mcdpsk_turn_loss_cb_;
     std::function<void()> burst_outcome_unknown_cb_;
     DescriptorModeChangeCallback descriptor_mode_change_cb_;
     ToneBurstAckCallback tone_ack_cb_;

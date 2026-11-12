@@ -334,6 +334,7 @@ Connection::Connection(const ConnectionConfig& config)
     if (const char* ds = std::getenv("ULTRA_DESCRIPTOR_MODE_SWITCH"); !(ds && ds[0] == '0')) {  // DEFAULT-ON 2026-07-05
         descriptor_mode_switch_enabled_ = true;
     }
+    mcdpsk_ack_repair_enabled_ = connection_policy::mcDpskAckRepairFromEnvironment();
 
     // RX-RATE-CMD Phase 2 (design §5.2, knob ULTRA_RX_RATE_CMD, read once per
     // Connection; default ON since 2026-07-05). The tone-ACK codec must use the
@@ -2487,7 +2488,12 @@ void Connection::sendNextFileChunk() {
     // as a lonely 1-frame resend, and the rest of the key-down carries new data. (Unified
     // OFDM only; the resend buffers into the open burst via transmitFrame.)
     size_t retransmitted_frames = 0;
-    if (is_ofdm && kUnifiedSeqEnabled() && burst_mode_active_) {
+    // MC-DPSK too under ULTRA_MCDPSK_ACK_REPAIR: every tone ACK is a turn boundary there as well,
+    // and a frame it reports missing otherwise waited out its 22-43 s retransmission timeout.
+    const bool repair_holes_on_ack =
+        (is_ofdm && kUnifiedSeqEnabled()) ||
+        (is_mc_dpsk && mcdpsk_ack_repair_enabled_);
+    if (repair_holes_on_ack && burst_mode_active_) {
         retransmitted_frames = arq_.retransmitInFlightUnacked(burst_frame_cap);
         if (deferred_arq_failure_abort_) {
             // retransmitInFlightUnacked can reach max_retries synchronously. Do not
@@ -8913,7 +8919,8 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
     if (rx_mcdpsk_frames_since_command_ > 0 && (closes_turn || reports_hole)) {
         const int rung = connection_policy::mcDpskRungIndexFor(rx_mcdpsk_last_modulation_);
         // Clean: the synchronous end-of-turn ACK (the burst's last frame decoded) with no hole.
-        const bool clean = closes_turn && !reports_hole;
+        // A turn-loss ACK closes a turn whose last frames were lost: never clean.
+        const bool clean = closes_turn && !reports_hole && !tone_ack_turn_loss_context_;
         // -1: no margin test ran (v2 frames): the up-step falls back to the clean run alone.
         const bool upper_margin = rx_mcdpsk_margin_ != 0;
         const bool changed = mcdpsk_rate_ctl_.observe(rung, clean, upper_margin);
@@ -8941,6 +8948,38 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
         return rx_crossing_word_;
     }
     return connection_policy::encodeMcDpskRungCommand(mcdpsk_rate_ctl_.command());
+}
+
+void Connection::noteRxMcDpskTurnLoss(bool turn_over) {
+    if (!mcdpsk_ack_repair_enabled_ ||
+        negotiated_mode_ != WaveformMode::MC_DPSK || state_ != ConnectionState::CONNECTED ||
+        disconnect_teardown_active_) {
+        return;
+    }
+    // Only a receiver the peer is sending to: a file in progress or a payload partly reassembled.
+    if (file_transfer_.getState() != FileTransferState::RECEIVING &&
+        rx_reassembly_buffer_.empty()) {
+        return;
+    }
+    // The turn's last frames (or its first) did not decode, so no end-of-turn ACK left: the sender
+    // waited out its whole retransmission timeout, often on a channel already back (GUI, ITU Good
+    // 100 s dip, seed 44: a frame lost at 141 s, the channel back at 144 s, the resend at 152 s).
+    // One ACK of what did arrive ends the turn; the sender resends the holes at once. It is scored
+    // as a lossy burst. turn_over: the burst's tail or full window was seen - the turn is
+    // physically over; otherwise (a lost first frame) it leaves asynchronously and listen-before-
+    // ACK holds it while the burst's remaining frames may be on the air.
+    LOG_MODEM(INFO, "Connection: MC-DPSK %s lost - ACK of what arrived (%s)",
+              turn_over ? "burst's last frame" : "burst's first frame",
+              turn_over ? "end of turn" : "held while the peer may still be on the air");
+    tone_ack_group_complete_context_ = turn_over;
+    tone_ack_turn_loss_context_ = true;
+    rx_level_verdict_pending_for_group_ = false;
+    tone_ack_alc_group_context_ = false;
+    tone_ack_group_has_decoded_data_context_ = false;
+    tone_ack_exact_group_geometry_context_ = false;
+    arq_.endGroupReceiveAndAck();
+    tone_ack_turn_loss_context_ = false;
+    tone_ack_group_complete_context_ = false;
 }
 
 void Connection::noteRxMcDpskFrameLost(int modulation) {

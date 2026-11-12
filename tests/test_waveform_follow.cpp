@@ -226,6 +226,13 @@ struct ConnectionAdaptiveTestAccess {
     static void setZeroProgressRounds(Connection& c, int n) { c.zero_progress_rounds_ = n; }
     static void pollCollapseEscape(Connection& c) { c.maybeCollapseEscape(); }
     static void pollStuckEscape(Connection& c) { c.maybeEscapeStuckFrame(); }
+    static void turnLoss(Connection& c, bool turn_over) { c.noteRxMcDpskTurnLoss(turn_over); }
+    // Frames of the current burst decoded since this end's last command (no ACK formed yet).
+    static void framesDecoded(Connection& c, int n) {
+        c.rx_mcdpsk_last_modulation_ = c.data_modulation_;
+        c.rx_mcdpsk_frames_since_command_ += n;
+    }
+    static bool dualUpCommanded(const Connection& c) { return c.rx_dual_up_commanded_; }
     // One retransmission timeout inside the ARQ (no ACK heard).
     static void arqTimeoutRound(Connection& c) { c.arq_.tick(c.arq_.getAckTimeout() + 1); }
     // One heard ACK round in which seq `missing` (the base) did not arrive: an empty ACK.
@@ -1207,6 +1214,51 @@ void test_stuck_frame_escape_counts_heard_misses() {
           "missing from five ACKs the peer sent: the stuck-frame escape drops a rung");
 }
 
+// ULTRA_MCDPSK_ACK_REPAIR, receiver side: a burst whose last frames were lost (the decoder saw its
+// tail) gets one end-of-turn ACK, scored as a loss - never a clean burst, so never an up-crossing;
+// a lost first frame gets an asynchronous one (listen-before-ACK holds it while the burst may still
+// be on the air). Only a receiver the peer is sending to; nothing with the knob off.
+void test_mcdpsk_turn_loss_ack() {
+    struct Sent { bool group_complete; uint8_t word; };
+    auto build = [](bool knob, std::vector<Sent>& sent) {
+        setenv("ULTRA_MCDPSK_ACK_REPAIR", knob ? "1" : "0", 1);
+        auto c = std::make_unique<Connection>();
+        unsetenv("ULTRA_MCDPSK_ACK_REPAIR");
+        c->setTransmitToneBurstAckCallback(
+            [&sent](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& p, bool complete) {
+                sent.push_back({complete, p.rate_hint});
+            });
+        ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(*c);
+        ConnectionAdaptiveTestAccess::allowWaveformFollow(*c);
+        return c;
+    };
+    std::vector<Sent> sent;
+    auto c = build(true, sent);
+    ConnectionAdaptiveTestAccess::turnLoss(*c, true);
+    CHECK(sent.empty(), "no incoming object: no turn-loss ACK");
+    ConnectionAdaptiveTestAccess::setRxReassembly(*c, 600);
+    // Two frames of the burst decoded with readings that would command OFDM on a clean burst; its
+    // last frame lost.
+    for (int i = 0; i < 3; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(*c, 22.0f, 0.05f, 23.0f);
+    ConnectionAdaptiveTestAccess::framesDecoded(*c, 2);
+    sent.clear();
+    ConnectionAdaptiveTestAccess::turnLoss(*c, true);
+    CHECK(sent.size() == 1 && sent[0].group_complete,
+          "the burst's last frames lost: one end-of-turn ACK");
+    CHECK(!ConnectionAdaptiveTestAccess::dualUpCommanded(*c),
+          "a burst with lost frames is no clean burst: no up-crossing command");
+    ConnectionAdaptiveTestAccess::turnLoss(*c, false);
+    CHECK(sent.size() == 2 && !sent[1].group_complete,
+          "a lost first frame: one asynchronous ACK");
+
+    std::vector<Sent> sent_off;
+    auto off = build(false, sent_off);
+    ConnectionAdaptiveTestAccess::setRxReassembly(*off, 600);
+    ConnectionAdaptiveTestAccess::turnLoss(*off, true);
+    ConnectionAdaptiveTestAccess::turnLoss(*off, false);
+    CHECK(sent_off.empty(), "knob off: no turn-loss ACK");
+}
+
 // A copy of the ACK that launched a latent startup probe is not a monitor candidate while the probe
 // group is airborne: consumed after delivery, it had already disarmed the monitor, and the probe's
 // own verdict would have gone unheard (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR; the crossing ACK's
@@ -1264,6 +1316,7 @@ int main() {
     test_waveform_follow_sender_silence_ends_when_the_peer_is_heard();
     test_dual_listen_up_crossing_needs_a_reading_from_the_burst();
     test_stuck_frame_escape_counts_heard_misses();
+    test_mcdpsk_turn_loss_ack();
     test_dual_listen_receiver_commands_up_and_follows_the_peer();
     test_dual_listen_receiver_commands_down_and_follows_the_peer();
     test_dual_listen_missed_up_crossing_backs_off();

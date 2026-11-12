@@ -2154,7 +2154,7 @@ void StreamingDecoder::decodeCurrentFrame() {
                 return;
             }
         }
-        retryMcDpskFirstFrameConstellation(frame_buffer, decode_cfo, soft_bits);
+        retryMcDpskFirstFrameConstellation(frame_buffer, decode_cfo, soft_bits, frame_sync_abs);
     }
     if (soft_bits.empty()) {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
@@ -3876,7 +3876,8 @@ bool StreamingDecoder::mcDpskCw0IsFrameHeader(const std::vector<float>& soft_bit
 
 void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<float>& frame_buffer,
                                                           float decode_cfo,
-                                                          std::vector<float>& soft_bits) {
+                                                          std::vector<float>& soft_bits,
+                                                          size_t frame_sync_abs) {
     auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
     if (!mc || frame_buffer.empty() || mcDpskCw0IsFrameHeader(soft_bits, code_rate_)) {
         return;
@@ -3931,6 +3932,22 @@ void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<floa
         if (!frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
                                                    sync_noise_ref_samples_, 2900.0, 48000.0)) {
             noteMcDpskFrameLost(-1);
+            if (mcDpskCompactActive()) {
+                // A compact burst whose first frame is lost: its remaining frames, up to the
+                // session's window, may still be on the air - publish that latest end so the
+                // turn-loss ACK waits it out (listen-before-ACK), then raise it.
+                const int codewords = mcDpskCompactCodewords();
+                const int window = static_cast<int>(
+                    protocol::connection_policy::mcDpskWindowSizeForTiming(
+                        protocol::connection_policy::mcDpskFrameTiming(
+                            mc->getModulation(), mc_dpsk_config_.num_carriers,
+                            mc_dpsk_config_.samples_per_symbol, codewords)));
+                publishMcDpskCompactAirEnd(
+                    window > 1,
+                    frame_sync_abs + static_cast<size_t>(mc->getMinSamplesForCWCount(codewords)),
+                    static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords)), window - 1);
+                noteMcDpskTurnLoss(/*turn_over=*/false);
+            }
         }
     }
 }
@@ -4145,14 +4162,19 @@ void StreamingDecoder::publishMcDpskCompactAirEnd(bool burst_continues, uint64_t
         std::memory_order_relaxed);
 }
 
-void StreamingDecoder::finishMCDPSKCompactBurst() {
+void StreamingDecoder::finishMCDPSKCompactBurst(bool turn_over) {
     burst_air_end_abs_.store(0, std::memory_order_relaxed);
+    const bool trailing_loss = mc_burst_compact_fail_pos_ != SIZE_MAX;
     if (mc_burst_compact_fail_pos_ != SIZE_MAX) {
         // Trailing frames failed: hand the search back their first position, where the next
         // burst's chirp may already sit (bursts are queued back to back).
         finishMCDPSKBurstContinuation(mc_burst_compact_fail_pos_, mc_burst_compact_fail_abs_);
     } else {
         finishMCDPSKBurstContinuation(mc_burst_next_pos_, mc_burst_next_abs_);
+    }
+    if (turn_over && trailing_loss) {
+        // The turn ended on lost frames: no end-of-turn ACK left this receiver.
+        noteMcDpskTurnLoss(/*turn_over=*/true);
     }
 }
 
@@ -4213,7 +4235,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
                                                   static_cast<double>(kSampleRateHz))) {
             LOG_MODEM(INFO, "[%s] MC-DPSK compact burst tail after %d frame(s)",
                       log_prefix_.c_str(), mc_burst_frames_decoded_);
-            finishMCDPSKCompactBurst();
+            finishMCDPSKCompactBurst(/*turn_over=*/true);
             return;
         }
     }
@@ -4289,7 +4311,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
         mc_burst_frames_decoded_ >= MC_DPSK_MAX_BURST_FRAMES) {
         LOG_MODEM(INFO, "[%s] MC-DPSK compact burst complete: %d frame(s), window %d",
                   log_prefix_.c_str(), mc_burst_frames_decoded_, mc_burst_compact_window_);
-        finishMCDPSKCompactBurst();
+        finishMCDPSKCompactBurst(/*turn_over=*/true);
     }
 }
 

@@ -874,6 +874,17 @@ private:
     int streak_ = 0;
 };
 
+// ULTRA_MCDPSK_ACK_REPAIR (default OFF until its GUI A/B; "1" turns it on, same setting on both
+// stations): an MC-DPSK frame the peer's ACK reports missing is resent at the front of the sender's
+// next burst - stop-and-wait, as the OFDM burst path does - instead of at its retransmission
+// timeout (22-43 s), and the receiver ACKs a turn whose last frames, or whose first frame, it lost
+// (no ACK left that turn otherwise, and the sender waited out its timeout on a returned channel).
+// Read once per Connection (its constructor latches it), so tests can build both kinds.
+inline bool mcDpskAckRepairFromEnvironment() {
+    const char* e = std::getenv("ULTRA_MCDPSK_ACK_REPAIR");
+    return e != nullptr && e[0] == '1' && e[1] == '\0';
+}
+
 // ULTRA_MCDPSK_RATE_ADAPT (default ON; "0" turns it off, same setting on both stations): the
 // receiver's commands, the sender's obedience and its timeout fallback. The receiver's
 // first-frame retry at the other constellation (StreamingDecoder) stays on either way.

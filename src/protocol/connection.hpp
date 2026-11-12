@@ -532,6 +532,9 @@ public:
     // MC-DPSK rate change (receiver side): a frame the modem could not decode, with its burst's
     // constellation (static_cast<int>(Modulation), -1 = unknown). Loss evidence, applied at once.
     void noteRxMcDpskFrameLost(int modulation);
+    // ULTRA_MCDPSK_ACK_REPAIR: the decoder lost a burst's last frames (turn_over: its tail or full
+    // window seen) or its first frame (the rest possibly still on the air): ACK what arrived.
+    void noteRxMcDpskTurnLoss(bool turn_over);
     // MC-DPSK rate change (receiver side): this burst's first frame still decoded with 4x the
     // noise (the next rung's handicap). Without a test (v2 frames) the up-step stays evidence-free.
     void noteRxMcDpskMargin(bool upper_rung_margin) {
@@ -938,6 +941,8 @@ private:
     // ULTRA_DESCRIPTOR_MODE_SWITCH, read ONCE in the ctor like ULTRA_ARQ_MOVE_EPOCH;
     // default OFF = byte-identical; SEMANTICS-BREAKING lockstep when ON — both ends).
     bool descriptor_mode_switch_enabled_ = false;
+    // ULTRA_MCDPSK_ACK_REPAIR, latched per Connection (connection_policy.hpp).
+    bool mcdpsk_ack_repair_enabled_ = false;
     // One-shot §2.6-arm-3 mitigation: the first burst after a descriptor-committed
     // switch MUST carry a full chirp+LTS anchor (fresh |H| under the new pilot/carrier
     // geometry). Armed by commitLocalModeSwitch, consumed by flushBurstBuffer's
@@ -1897,6 +1902,9 @@ private:
     TransmitInfoCallback on_transmit_info_;
     TransmitToneBurstAckCallback on_transmit_tone_burst_ack_;
     bool tone_ack_group_complete_context_ = false;
+    // The ACK being formed closes a turn whose last (or first) frames were lost (noteRxMcDpskTurnLoss):
+    // its MC-DPSK burst verdict is a loss whatever the bitmap shows.
+    bool tone_ack_turn_loss_context_ = false;
     // Software-ALC provenance exists only while onBurstGroupReceived is processing
     // the current decoder callback. `has_decoded_data` is derived from that
     // callback's CRC-valid, locally-addressed frame vector -- never from the ARQ's

@@ -147,6 +147,11 @@ void ModemEngine::wireDecoderRoleCallbacks() {
                 mcdpsk_frame_lost_cb_(modulation);
             }
         });
+        d->setMcDpskTurnLossCallback([this, d](bool turn_over) {
+            if (mcdpsk_turn_loss_cb_ && streaming_decoder_.isPrimary(d)) {
+                mcdpsk_turn_loss_cb_(turn_over);
+            }
+        });
         d->setBurstOutcomeUnknownCallback([this, d]() {
             if (burst_outcome_unknown_cb_ && streaming_decoder_.isPrimary(d)) {
                 burst_outcome_unknown_cb_();

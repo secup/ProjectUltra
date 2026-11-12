@@ -236,6 +236,7 @@ public:
     // frame the modem could not decode (modulation as int, -1 when unknown).
     void noteRxMcDpskModulation(Modulation mod);
     void noteRxMcDpskFrameLost(int modulation);
+    void noteRxMcDpskTurnLoss(bool turn_over);
     void noteRxWaveform(WaveformMode mode);
     void noteRxMcDpskMargin(bool upper_rung_margin);
     float getMeasuredSNR() const;

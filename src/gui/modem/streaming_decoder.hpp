@@ -717,6 +717,9 @@ public:
     // MC-DPSK rate change: a connected MC-DPSK data frame this decoder could not decode, with the
     // constellation its burst was at (static_cast<int>(Modulation)), or -1 when the burst's first
     // frame failed at every constellation. Decode thread; same class as the frame callback.
+    void setMcDpskTurnLossCallback(std::function<void(bool turn_over)> cb) {
+        mc_dpsk_turn_loss_callback_ = std::move(cb);
+    }
     void setMcDpskFrameLostCallback(std::function<void(int modulation)> cb) {
         mc_dpsk_frame_lost_callback_ = std::move(cb);
     }
@@ -1011,7 +1014,8 @@ private:
     // configured constellation is re-demodulated at the other data constellations; on success the
     // waveform stays there (the rest of the burst shares it) and soft_bits are replaced.
     void retryMcDpskFirstFrameConstellation(const std::vector<float>& frame_buffer,
-                                            float decode_cfo, std::vector<float>& soft_bits);
+                                            float decode_cfo, std::vector<float>& soft_bits,
+                                            size_t frame_sync_abs);
     // Compact MC-DPSK DATA frames: active in a connected MC-DPSK session with both addresses set.
     bool mcDpskCompactActive() const;
     int mcDpskCompactCodewords() const;
@@ -1028,7 +1032,9 @@ private:
     void deliverMcDpskCompactFirstFrame(DecodeResult result, size_t frame_sync_abs,
                                         uint32_t gen_at_start);
     void continueMCDPSKCompactBurst();
-    void finishMCDPSKCompactBurst();
+    // turn_over: the burst's tail or full window was seen - the sender's turn is physically over.
+    // A burst that ends so with its last frames lost raises the turn-loss ACK (noteMcDpskTurnLoss).
+    void finishMCDPSKCompactBurst(bool turn_over = false);
     // Compact bursts publish their air end (the burst's latest possible end - frames left in the
     // sender's window - while it continues, 0 at its end) for the GUI's listen-before-ACK gates.
     void publishMcDpskCompactAirEnd(bool burst_continues, uint64_t frame_end_abs,
@@ -1389,6 +1395,7 @@ private:
     bool anchored_burst_payload_seen_ = false;
     std::function<void(bool payload_seen)> anchored_burst_no_group_callback_;
     std::function<void(int modulation)> mc_dpsk_frame_lost_callback_;
+    std::function<void(bool turn_over)> mc_dpsk_turn_loss_callback_;
     std::function<void(bool upper_rung_margin)> mc_dpsk_margin_callback_;
     uint64_t mc_margin_rng_state_ = 0x6D617267696E5F31ull;
     bool mcDpskUpperRungMarginTest(const std::vector<float>& frame_buffer, float decode_cfo);
@@ -1404,6 +1411,11 @@ private:
     void noteMcDpskFrameLost(int modulation) {
         if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK && mc_dpsk_frame_lost_callback_) {
             mc_dpsk_frame_lost_callback_(modulation);
+        }
+    }
+    void noteMcDpskTurnLoss(bool turn_over) {
+        if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK && mc_dpsk_turn_loss_callback_) {
+            mc_dpsk_turn_loss_callback_(turn_over);
         }
     }
     std::function<void()> burst_outcome_unknown_callback_;

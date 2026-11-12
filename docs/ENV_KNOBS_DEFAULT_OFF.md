@@ -798,3 +798,9 @@ So nobody re-proposes them from the name alone:
 * **`ULTRA_MEASURE_BURST_FULL_ANCHOR` as the harness default** — it reproduces the resend
   regime, not the shipped warm handoff; the harness's real defect is its descriptor-off
   default.
+
+## `ULTRA_MCDPSK_ACK_REPAIR` (added 2026-11-12)
+`1` on both stations: an MC-DPSK frame the peer's ACK reports missing is resent at the next burst
+instead of at its retransmission timeout, and the receiver ACKs a turn whose last frames or first
+frame it lost. Default off until a GUI A/B at low SNR (MC-DPSK sessions) shows it does not hurt;
+see CHANGELOG 2026-11-12.

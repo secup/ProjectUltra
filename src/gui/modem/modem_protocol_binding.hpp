@@ -192,6 +192,8 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // loss evidence (-1 = the burst's first frame failed at every constellation).
     modem.setMcDpskFrameLostCallback(
         [&protocol](int modulation) { protocol.noteRxMcDpskFrameLost(modulation); });
+    modem.setMcDpskTurnLossCallback(
+        [&protocol](bool turn_over) { protocol.noteRxMcDpskTurnLoss(turn_over); });
     // MC-DPSK rate change: the up-step's evidence (a burst's first frame still decodes with 4x
     // the noise).
     modem.setMcDpskMarginCallback(
