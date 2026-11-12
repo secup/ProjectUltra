@@ -923,13 +923,18 @@ frame is processed. Decoder threads are bound to slots (objects), never to roles
 from the moment the session exists (`connected_`), not from handshake confirmation: a responder
 confirms on the first frame it decodes from the initiator, and when the session started on a waveform
 the channel cannot carry, that frame is the initiator's follow crossing, which only the listener
-hears (BUG-LISTENER-WAITS-FOR-CONFIRMATION).
+hears (BUG-LISTENER-WAITS-FOR-CONFIRMATION). A decoder that BECOMES the MC-DPSK listener by a flip
+(the session crossed up to OFDM) is configured exactly as a new one (`configureListener`): the
+down-crossing target ROBUST_MID, never the session's own MC-DPSK profile - a session that connected on
+Robust (DQPSK, 4 codewords) otherwise slices every fallback burst wrong and never follows the sender
+down (BUG-LISTENER-KEEPS-SESSION-PROFILE).
 **Why:** the MC-DPSK chirp and the OFDM anchor chirp are identical, so each decoder locks on the
 other's bursts and fails them: an OFDM listener would fire the anchored-burst backstop ACK on every
 MC-DPSK frame, an MC-DPSK listener would feed the constellation controller a loss per OFDM anchor.
 A frame processed before the switch would land in the wrong ARQ geometry and ACK semantics.
 **Test:** `DualListenEngine` (both frames delivered, each after its report, receiver already on its
-waveform; the control without dual-listen misses the MC-DPSK frame), `WaveformFollow` dual-listen
+waveform; the control without dual-listen misses the MC-DPSK frame; a Robust session hears the
+ROBUST_MID fallback after following the sender up), `WaveformFollow` dual-listen
 cases (receiver commands but does not switch; a repeat ACK carries the same command; it follows what
 arrives; a missed up-crossing backs off).
 

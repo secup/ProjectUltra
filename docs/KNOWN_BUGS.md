@@ -2734,6 +2734,21 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-LISTENER-KEEPS-SESSION-PROFILE (FIXED 2026-11-12) — was P1: after following the sender up to OFDM, the MC-DPSK listener kept the session's profile and never heard the sender's fallback - the session died
+
+GUI ITU Good 5 dB seed 48 (follow on, baseline build): connect pick MC-DPSK Robust (DQPSK, 4
+codewords); the sender crossed up to OFDM QPSK R1/4 and the receiver followed (its OFDM listener
+decoded the burst, the decoders flipped). The OFDM attempt failed and the sender fell back to the
+down-crossing target ROBUST_MID (DBPSK, 3 codewords). The flipped decoder - now the MC-DPSK listener -
+still had the session's Robust profile: it found every fallback burst (chirp at 20 dB sync quality)
+and sliced it as a 4-codeword DQPSK frame, for 330 s, until the sender's ARQ gave up ("Terminal ARQ
+FILE failure"). A new listener is configured for ROBUST_MID (`configureListener`); a flipped one was
+not. Fix: `setWaveformMode` configures a decoder that becomes the MC-DPSK listener by a flip exactly
+as a new listener. Only sessions that connect on an MC-DPSK profile other than ROBUST_MID, cross up and
+must come back down are affected. Test: `DualListenEngine` (Robust session, OFDM frame then the
+ROBUST_MID fallback: 1 of 2 heard before, 2 of 2 after). CHANGELOG 2026-11-12.
+
+
 ### BUG-MCDPSK-PHYSICAL-REPUBLISHED (FIXED 2026-11-12, updateDataSpanPhysicalSNR) — was P2: a compact burst's continuation frames re-published the first frame's physical SNR
 
 Continuation frames (no training span) kept the demodulator's latch from the burst's first frame, so

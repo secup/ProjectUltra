@@ -327,6 +327,67 @@ bool connectedDqpskResponderHearsConnect() {
     return heard;
 }
 
+// BUG-LISTENER-KEEPS-SESSION-PROFILE: a session that connected on MC-DPSK Robust (DQPSK, 4 codewords)
+// follows the sender up to OFDM - the MC-DPSK decoder flips to listener - and the sender's OFDM
+// attempt fails: it falls back to the down-crossing target, ROBUST_MID (DBPSK, 3 codewords). The
+// listener kept the session's Robust profile, sliced every fallback burst as a 4-codeword DQPSK frame
+// and never decoded one (GUI ITU Good 5 dB seed 48: 330 s of fallback bursts found at 20 dB sync and
+// lost, then a terminal ARQ failure). Returns the payloads heard, in order.
+std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
+    const std::string up_text = "the up-crossing's OFDM frame";
+    const std::string down_text = "the fallback's MC-DPSK frame";
+    ModemEngine tx;
+    tx.setLogPrefix("ALPHA");
+    tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
+    const int cw = protocol::connection_policy::recommendCWCount(Modulation::QPSK, CodeRate::R1_4,
+                                                                 WaveformMode::OFDM_CHIRP);
+    tx.crossConnectedWaveform(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4, cw, 0, 0);
+    const int ofdm_cw = tx.getFixedFrameCodewords();
+    const auto up = tx.transmit(v2::makeFixedDataFrame("ALPHA", "BRAVO", 1,
+                                                       Bytes(up_text.begin(), up_text.end()),
+                                                       CodeRate::R1_4, ofdm_cw)
+                                    .serialize());
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    const auto down = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 2, down_text).serialize());
+
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    ModemEngine rx;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    rx.setLogPrefix("BRAVO");
+    rx.setSynchronousMode(true);
+    rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+    // The connect pick: MC-DPSK Robust.
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DQPSK, CodeRate::R1_4, 4, 8, 1024);
+    rx.setRxWaveformObservedCallback([&](WaveformMode mode) {
+        if (mode == WaveformMode::MC_DPSK) {
+            rx.crossConnectedWaveform(mode, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+        } else {
+            rx.crossConnectedWaveform(mode, Modulation::QPSK, CodeRate::R1_4, ofdm_cw, 0, 0);
+        }
+    });
+    std::vector<std::string> heard;
+    rx.setRawDataCallback([&](const Bytes& data, bool) { heard.push_back(payloadText(data)); });
+    std::vector<float> air(24000, 0.0f);
+    air.insert(air.end(), up.begin(), up.end());
+    air.insert(air.end(), 48000, 0.0f);
+    air.insert(air.end(), down.begin(), down.end());
+    air.insert(air.end(), 4 * 48000, 0.0f);
+    std::mt19937 rng(31);
+    std::normal_distribution<double> bg(0.0, 1e-3);
+    for (auto& v : air) v += static_cast<float>(bg(rng));
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    const bool ok = heard.size() == 2 && heard[0] == up_text && heard[1] == down_text;
+    std::printf("Robust session, OFDM then the ROBUST_MID fallback: %zu frame(s) heard%s\n",
+                heard.size(), ok ? "" : " (expected both)");
+    return heard;
+}
+
 void checkGapCrashBurst(const char* path) {
     const auto heard = receiveBurstWithGapCrash();
     std::printf("static crash in the inter-chirp gap (%s frames): %zu of 3 frames\n", path,
@@ -349,6 +410,12 @@ int main(int argc, char** argv) {
         return failures == 0 ? 0 : 1;
     }
     checkGapCrashBurst("compact");
+    {
+        const auto heard = robustSessionHearsFallbackAfterUpCrossing();
+        check(heard.size() == 2 && heard[1] == "the fallback's MC-DPSK frame",
+              "a session that started on MC-DPSK Robust hears the sender's ROBUST_MID fallback "
+              "after following it up to OFDM");
+    }
     {
         const bool heard = connectedDqpskResponderHearsConnect();
         std::printf("connected DQPSK responder, repeated DBPSK CONNECT: %s\n",

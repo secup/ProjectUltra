@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): a flipped MC-DPSK listener listens for the fallback profile (BUG-LISTENER-KEEPS-SESSION-PROFILE)
+
+**What broke.** Found as the one FAIL of the ITU Good 5 dB batch (seed 48, follow on): the session
+connected on MC-DPSK Robust (DQPSK, 4 codewords), crossed up to OFDM and the receiver followed - its
+OFDM listener decoded the burst and the decoders flipped, the old MC-DPSK primary becoming the
+listener. The sender's OFDM attempt then failed and it fell back to ROBUST_MID (DBPSK, 3 codewords),
+the target of every down-crossing. The flipped listener still had the session's Robust profile: it
+found each fallback burst (sync quality 20 dB) and sliced it as a 4-codeword DQPSK frame
+("MC-DPSK CW0 failed with data energy"), 15 bursts over 330 s, until the sender's ARQ abandoned the
+file and disconnected. `updateDualListen` configures a NEW listener for ROBUST_MID; `setWaveformMode`'s
+flip reused the old primary as is.
+
+**What changed.** `ModemEngine::setWaveformMode`: when a flip makes the MC-DPSK decoder the listener,
+it is configured as a new listener (`applyStoredDecoderSettings` + `configureListener(MC_DPSK)`).
+
+**Verification.** `DualListenEngine` `robustSessionHearsFallbackAfterUpCrossing`: a receiver on MC-DPSK
+Robust hears the sender's OFDM frame, follows, then must hear its ROBUST_MID fallback frame - 1 of 2
+heard before the fix, 2 of 2 after. ctest and GUI: see the commit.
+
+---
+
 ## 2026-11-12 — FIX(MC-DPSK SNR): every burst frame measures its own physical SNR (BUG-MCDPSK-PHYSICAL-REPUBLISHED)
 
 **What broke.** The physical SNR (power of the frame's span over the burst-time noise reference,

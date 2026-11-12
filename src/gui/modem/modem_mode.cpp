@@ -57,6 +57,21 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
                   protocol::waveformModeToString(waveform_mode_));
     }
     waveform_mode_ = mode;
+    if (flip && listener_waveform_.load(std::memory_order_acquire) ==
+                    protocol::WaveformMode::MC_DPSK) {
+        // The decoder that now listens for MC-DPSK kept the SESSION's MC-DPSK profile - the connect
+        // pick, e.g. Robust (DQPSK, 4 codewords) - but a sender leaving OFDM always lands on the
+        // down-crossing target, ROBUST_MID (DBPSK, 3 codewords, 8 carriers, 1024 samples/symbol),
+        // whatever profile the session started on. Sliced at the old profile, no fallback burst ever
+        // decoded and the receiver never followed the sender down (BUG-LISTENER-KEEPS-SESSION-PROFILE,
+        // GUI ITU Good 5 dB seed 48: 330 s of fallback bursts found at 20 dB sync and lost, then a
+        // terminal ARQ failure). Configure it exactly as a new listener (updateDualListen).
+        StreamingDecoder* listener = streaming_decoder_.slot(1 - streaming_decoder_.primaryIndex());
+        if (listener != nullptr) {
+            applyStoredDecoderSettings(listener);
+            configureListener(listener, protocol::WaveformMode::MC_DPSK);
+        }
+    }
     applyOfdmGeometryFor(mode);
     // Tone-burst ACKs follow the session's channel: a narrowband session keeps them inside its
     // 500 Hz (tone_burst_constants.hpp, band plan). Same decision on both stations.
