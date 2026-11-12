@@ -471,7 +471,7 @@ public:
         }
 
         // DEBUG: Check template and signal energy
-        static int debug_count = 0;
+        static std::atomic<int> debug_count{0};
         if (++debug_count % 10 == 1) {  // Log occasionally
             float tmpl_energy = 0.0f;
             for (float s : up_chirp_template_) tmpl_energy += s * s;
@@ -804,7 +804,7 @@ private:
         }
 
         // Debug: show FFT correlation result and check for signal
-        static int fft_debug_count = 0;
+        static std::atomic<int> fft_debug_count{0};
         if (++fft_debug_count % 20 == 1 || best_corr >= threshold) {
             // Check RMS at a few positions to find where signal is
             float rms_start = 0, rms_mid = 0;
@@ -882,7 +882,7 @@ private:
         }
 
         // Debug: print search results and check correlation at different positions
-        static int td_debug_count = 0;
+        static std::atomic<int> td_debug_count{0};
         if (++td_debug_count % 10 == 1 || best_corr > 0.3f) {
             float corr_at_0 = computeComplexTemplateCorrelation(samples, 0, tmpl_sin, tmpl_cos, tmpl_energy);
             float corr_at_7200 = search_len > 7200 ? computeComplexTemplateCorrelation(samples, 7200, tmpl_sin, tmpl_cos, tmpl_energy) : 0;

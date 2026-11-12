@@ -43,7 +43,7 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
     if (waveform_mode_ == mode) return;
 
     LOG_MODEM(INFO, "Switching waveform mode: %d -> %d",
-              static_cast<int>(waveform_mode_), static_cast<int>(mode));
+              static_cast<int>(waveform_mode_.load()), static_cast<int>(mode));
 
     // Dual-listen: the listener already runs `mode` with live state - it becomes the primary and
     // the primary the listener, no decoder is rebuilt (docs/DUAL_LISTEN_DESIGN_2026_11_11.md).
@@ -352,7 +352,7 @@ void ModemEngine::setHandshakeComplete(bool complete) {
 
     if (complete) {
         LOG_MODEM(INFO, "Handshake complete, TX now uses waveform_mode_=%d",
-                  static_cast<int>(waveform_mode_));
+                  static_cast<int>(waveform_mode_.load()));
     }
     updateDualListen();
 }

@@ -663,7 +663,7 @@ bool StreamingDecoder::lateJoinBurstAccumulation(size_t frame_sync_abs) {
     LOG_MODEM(WARN,
               "[%s] [LATE-JOIN] descriptor-armed accumulation from mid-group member "
               "(member_decode=%d cw=%d declared_group=%d) — head erasure-filled at finalize",
-              log_prefix_.c_str(), ok ? 1 : 0, fixed_frame_codewords_,
+              log_prefix_.c_str(), ok ? 1 : 0, fixed_frame_codewords_.load(),
               std::max(2, burst_group_size_));
     // BUG-BURST-STALE-GEOMETRY: a late-join IS a group start. Without this stamp a
     // late-joined group leaves a stale cadence reference and the next missed
@@ -1576,7 +1576,7 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
                   "z=%d cw=%d bytes_per_cw=%d expected_bits_per_frame=%d "
                   "n_frames=%d soft_buffer_min=%zu max=%zu — failing closed",
                   log_prefix_.c_str(), e.what(),
-                  ldpc_z_for_burst, fixed_frame_codewords_, bytes_per_cw_rx,
+                  ldpc_z_for_burst, fixed_frame_codewords_.load(), bytes_per_cw_rx,
                   expected_bits, n_frames, min_size, max_size);
         fail_deinterleave_group("deinterleave_size_mismatch");
         return;

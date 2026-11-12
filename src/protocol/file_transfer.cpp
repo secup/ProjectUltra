@@ -1,4 +1,5 @@
 #include "file_transfer.hpp"
+#include <atomic>
 #include "compression.hpp"
 #include "ultra/logging.hpp"
 #include <filesystem>
@@ -305,7 +306,7 @@ void FileTransferController::maybeCompleteSend() {
     // the host re-invokes this on ack/base-advance events until the flight
     // drains.
     if (completion_gate_ && !completion_gate_()) {
-        static int defer_log = 0;
+        static std::atomic<int> defer_log{0};
         if (++defer_log % 5 == 1) {
             LOG_MODEM(WARN,
                       "FileTransfer: chunk ledger complete but ARQ still has "

@@ -166,20 +166,23 @@ inline std::vector<float> demapQAM32(Complex sym, float noise_var) {
         Complex pos;
         int bits;
     };
-    static Point constellation[32];
-    static bool initialized = false;
-
-    if (!initialized) {
+    // Built once, thread-safely (a function-local static's initializer runs exactly once).
+    struct Table {
+        Point p[32];
+    };
+    static const Table table = [&] {
+        Table built{};
         for (int qi = 0; qi < 8; ++qi) {
             for (int ii = 0; ii < 4; ++ii) {
                 int idx = qi * 4 + ii;
-                constellation[idx].pos = Complex(I_LEVELS[ii] * QAM32_SCALE,
-                                                  Q_LEVELS[qi] * QAM32_SCALE);
-                constellation[idx].bits = (Q_GRAY[qi] << 2) | I_GRAY[ii];
+                built.p[idx].pos = Complex(I_LEVELS[ii] * QAM32_SCALE,
+                                           Q_LEVELS[qi] * QAM32_SCALE);
+                built.p[idx].bits = (Q_GRAY[qi] << 2) | I_GRAY[ii];
             }
         }
-        initialized = true;
-    }
+        return built;
+    }();
+    const Point* constellation = table.p;
 
     std::vector<float> llrs(5);
     float scale_factor = 2.0f / noise_var;

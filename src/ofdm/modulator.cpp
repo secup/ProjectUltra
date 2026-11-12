@@ -1,5 +1,6 @@
 #define _USE_MATH_DEFINES  // For M_PI on MSVC
 #include <cmath>
+#include <atomic>
 #include "ultra/ofdm.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
@@ -121,7 +122,7 @@ Complex mapBits(uint32_t bits, Modulation mod) {
 } // anonymous namespace
 
 // Flag to log TX pilots only once per transmission (reset in generatePreamble)
-static bool g_logged_tx_pilots = false;
+static std::atomic<bool> g_logged_tx_pilots{false};
 
 struct OFDMModulator::Impl {
     ModemConfig config;
@@ -470,10 +471,10 @@ Samples OFDMModulator::modulate(ByteSpan data, Modulation mod,
             }
 
             // Debug: log first few symbols' bit extraction
-            static size_t symbol_count = 0;
+            static std::atomic<size_t> symbol_count{0};
             if (symbol_count < 5 && c < 3) {
                 LOG_DEBUG("MOD", "Sym %zu Car %zu: bits=%d (0x%02x) from byte=%d idx=%zu",
-                         symbol_count, c, bits, bits,
+                         symbol_count.load(), c, bits, bits,
                          data_idx > 0 ? (int)data[data_idx-1] : (int)data[0],
                          bit_idx);
             }

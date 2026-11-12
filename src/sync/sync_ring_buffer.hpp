@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <mutex>
@@ -51,7 +52,10 @@ public:
     size_t search_floor_abs_ = 0;     // Earliest absolute sample search may inspect
     bool search_floor_abs_valid_ = false;
     float noise_floor_ = 0.001f;
-    size_t total_fed_ = 0;            // Total samples fed (per-instance)
+    // Total samples fed (per-instance). Written under the buffer mutex by the audio thread; read
+    // under it for every buffer computation, and without it only for logging and progress (the
+    // decode thread's search log raced: ThreadSanitizer, EngineConcurrency) - atomic for those.
+    std::atomic<size_t> total_fed_{0};
 
 private:
     static size_t validateCapacity(size_t capacity);

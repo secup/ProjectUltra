@@ -1304,7 +1304,9 @@ private:
     // environment — deliberately NOT a function-local `static const`, so a test can
     // toggle the knob in-process. Read once per group, never on a hot path.
     bool data_aided_chest_enabled_ = false;
-    int fixed_frame_codewords_ = v2::kDefaultFixedFrameCodewords;
+    // Written by the engine's thread (setFixedFrameCodewords), read by the decode thread to size
+    // every fixed and compact frame (ThreadSanitizer: a plain int raced, EngineConcurrency).
+    std::atomic<int> fixed_frame_codewords_{v2::kDefaultFixedFrameCodewords};
     bool fixed_frame_header_discovery_ = false;
 
     // Burst descriptor / z-state (§14.17) now lives in sync_controller_ (refactor

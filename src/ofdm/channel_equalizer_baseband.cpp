@@ -102,10 +102,10 @@ const std::vector<Complex>& OFDMDemodulator::Impl::toBaseband(SampleSpan samples
     float phase_increment = -2.0f * M_PI * freq_offset_hz / config.sample_rate;
 
     // Log CFO correction
-    static int tb_call_count = 0;
+    static std::atomic<int> tb_call_count{0};
     if (std::abs(freq_offset_hz) > 0.01f && tb_call_count < 5) {
         LOG_DEMOD(DEBUG, "toBaseband #%d: CFO=%.2f Hz, phase_inc=%.6f, start_phase=%.2f rad (%.1f deg), samples=%zu",
-                  tb_call_count, freq_offset_hz, phase_increment, freq_correction_phase,
+                  tb_call_count.load(), freq_offset_hz, phase_increment, freq_correction_phase,
                   freq_correction_phase * 180.0f / M_PI, samples.size());
         tb_call_count++;
     }

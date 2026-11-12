@@ -79,8 +79,11 @@ Two GUI crashes (ips 2026-11-11 08:49 and 10:57, a single-decoder build): the de
 built a new MC-DPSK waveform for the encoder (MC-DPSK rate fallback -> `ModemEngine::setMCDPSKConfig`).
 The two objects are distinct; the shared path is not identified. Hardened: `initFFT`'s
 double-checked flag is now an acquire/release atomic (a plain bool let ARM see it before the template
-data, which reads a null vector at address 0 exactly). No recurrence in the follow matrix since; keep
-open until a soak shows none.
+data, which reads a null vector at address 0 exactly). 2026-11-12: a ThreadSanitizer sweep of the
+engine (BUG-DECODER-THREAD-RACES) fixed the frame interleaver's lazily built static tables - two
+threads resizing the same vectors corrupt the heap, which can fault anywhere later, the chirp search
+included - and five other cross-thread races; the stress test is now race-free. No recurrence in the
+follow matrix since; keep open until a soak shows none.
 
 ### BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR (suspected, latent, 2026-11-11) — P3
 
@@ -2582,6 +2585,14 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-DECODER-THREAD-RACES (FIXED 2026-11-12) — cross-thread races in the receiving engine
+
+ThreadSanitizer on the new `EngineConcurrency` stress test (decode threads + the GUI main thread's
+mode changes + a render reader + decode-thread ACK encoding): the frame interleaver's lazy static
+tables (heap-corruption risk at first use), the QAM32 demap table, the decoder's frame codeword count,
+the ring's fed counter, the engine's waveform mode and 24 shared log-throttle statics. Fixed with
+`call_once`, a function-local static initializer and atomics; zero reports after.
 
 ### BUG-FILE-REQUEUE-WITHOUT-ARQ-ABORT (FIXED 2026-11-11) — P0 data loss: a mod-only move desynced the file ledger
 

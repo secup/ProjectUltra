@@ -1,5 +1,6 @@
 #include "frame_interleaver.hpp"
 #include <algorithm>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -52,7 +53,15 @@ void FrameInterleaver::buildTables(int codeword_count,
 }
 
 void FrameInterleaver::ensureTablesInitialized() {
-    if (tables_initialized_) return;
+    // Built once for the process, from whichever thread gets here first (the encoder and the decoder
+    // both do); every caller waits for the build and then sees the finished tables. A plain bool let
+    // two first callers resize the same static vectors at once, and a weakly ordered CPU show a
+    // reader the flag before the table data.
+    static std::once_flag once;
+    std::call_once(once, [] { buildDefaultTables(); });
+}
+
+void FrameInterleaver::buildDefaultTables() {
 
     // Build permutation tables for rotating round-robin interleaving.
     //

@@ -1650,7 +1650,7 @@ void StreamingDecoder::setCodecType(fec::CodecType type) {
 
 float StreamingDecoder::getBufferFillPercent() const {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    size_t used = std::min(sync_controller_.ring_.total_fed_, sync_controller_.ring_.buffer_capacity_samples_);
+    size_t used = std::min(sync_controller_.ring_.total_fed_.load(), sync_controller_.ring_.buffer_capacity_samples_);
     return 100.0f * used / sync_controller_.ring_.buffer_capacity_samples_;
 }
 
@@ -1723,7 +1723,7 @@ StreamingDecoder::DecoderConfig StreamingDecoder::getConfig() const {
 
 size_t StreamingDecoder::samplesInBuffer() const {
     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
-    return std::min(sync_controller_.ring_.total_fed_, sync_controller_.ring_.buffer_capacity_samples_);
+    return std::min(sync_controller_.ring_.total_fed_.load(), sync_controller_.ring_.buffer_capacity_samples_);
 }
 
 bool StreamingDecoder::isSynced() const {

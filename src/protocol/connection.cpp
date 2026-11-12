@@ -2,6 +2,7 @@
 // Frame handlers are in connection_handlers.cpp
 
 #include <chrono>
+#include <atomic>
 #include "connection.hpp"
 #include "mcdpsk_frame.hpp"
 #include "connection_policy.hpp"
@@ -6288,7 +6289,7 @@ void Connection::processArqFrame(const Bytes& frame_data) {
         return e ? std::atol(e) : -1L;
     }();
     if (kDropRxSeq >= 0) {
-        static bool dropped_once = false;
+        static std::atomic<bool> dropped_once{false};
         auto hdr = v2::parseHeader(frame_data);
         if (!dropped_once && hdr.valid && !hdr.is_control &&
             hdr.seq == static_cast<uint16_t>(kDropRxSeq)) {

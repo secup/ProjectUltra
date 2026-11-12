@@ -1,4 +1,5 @@
 #include "sync/sync_controller.hpp"
+#include <atomic>
 
 #include "ultra/logging.hpp"   // LOG_MODEM (shared logging header; src/sync already uses LOG_SYNC)
 
@@ -398,11 +399,11 @@ SearchWindowResult SyncController::acquireSearchWindow(
             correlation_step);
 
         if (warm_plan.wait_for_more_samples) {
-            static int warm_wait_count = 0;
+            static std::atomic<int> warm_wait_count{0};
             if (++warm_wait_count % 50 == 1) {
                 LOG_MODEM(INFO,
                           "[%s] warm-sync: wait for expected window, need_abs=%zu total=%zu expected=%zu",
-                          log_prefix_.c_str(), warm_plan.search_end_abs, ring_.total_fed_,
+                          log_prefix_.c_str(), warm_plan.search_end_abs, ring_.total_fed_.load(),
                           next_expected_frame_sample_);
             }
             return result;
@@ -446,7 +447,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
 
         // Need minimum samples before we can search
         if (ring_.total_fed_ < min_search) {
-            static int skip_count = 0;
+            static std::atomic<int> skip_count{0};
             if (++skip_count % 50 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: SKIP not enough samples, total=%.2fs, need=%.2fs",
                           log_prefix_.c_str(), audio_sec, min_search / 48000.0f);
@@ -480,14 +481,14 @@ SearchWindowResult SyncController::acquireSearchWindow(
             unsearched = ring_.buffer_capacity_samples_ - ring_.correlation_pos_ + ring_.write_pos_;
         }
         if (unsearched > ring_.total_fed_) {
-            static int cursor_ahead_count = 0;
+            static std::atomic<int> cursor_ahead_count{0};
             if (++cursor_ahead_count % 20 == 1) {
                 LOG_MODEM(ERROR,
                           "[%s] searchForSync: CURSOR AHEAD OF LIVE — unsearched=%zu > "
                           "total_fed=%zu (corr_pos=%zu write_pos=%zu). Impossible state; "
                           "re-anchoring to the write head (x%d)",
-                          log_prefix_.c_str(), unsearched, ring_.total_fed_,
-                          ring_.correlation_pos_, ring_.write_pos_, cursor_ahead_count);
+                          log_prefix_.c_str(), unsearched, ring_.total_fed_.load(),
+                          ring_.correlation_pos_, ring_.write_pos_, cursor_ahead_count.load());
             }
             ring_.correlation_pos_ = ring_.write_pos_;
             unsearched = 0;
@@ -516,20 +517,20 @@ SearchWindowResult SyncController::acquireSearchWindow(
             ring_.correlation_pos_ =
                 ring_.wrapRingIndexLocked(ring_.correlation_pos_ + shed);
             unsearched = backlog_cap;
-            static int shed_log_count = 0;
+            static std::atomic<int> shed_log_count{0};
             if (++shed_log_count % 5 == 1) {
                 LOG_MODEM(WARN,
                           "[%s] searchForSync: LOAD-SHED %zu samples (%.1f s) — "
                           "search fell behind live; staying within %.1f s of the "
                           "antenna (x%d)",
                           log_prefix_.c_str(), shed, shed / 48000.0f,
-                          backlog_cap / 48000.0f, shed_log_count);
+                          backlog_cap / 48000.0f, shed_log_count.load());
             }
         }
 
         // Need at least min_search unsearched samples
         if (!used_warm_timed_window && unsearched < min_search) {
-            static int skip_count2 = 0;
+            static std::atomic<int> skip_count2{0};
             if (++skip_count2 % 50 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: SKIP unsearched=%zu < min=%zu, total=%.2fs, corr_pos=%zu",
                           log_prefix_.c_str(), unsearched, min_search, audio_sec, ring_.correlation_pos_);
@@ -597,7 +598,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
         // Only digital silence is skipped: no converter delivers a live input below its LSB.
         if (rms < signal_policy::kDigitalSilenceRms) {
             // No input at all - advance by one search step (100 ms = 4800 samples)
-            static int rms_skip_count = 0;
+            static std::atomic<int> rms_skip_count{0};
             if (++rms_skip_count % 10 == 1)
                 LOG_MODEM(INFO, "[%s] searchForSync: silence skip, rms=%.2g, corr_pos=%zu, total=%.2fs",
                           log_prefix_.c_str(), rms, ring_.correlation_pos_, audio_sec);
@@ -606,7 +607,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
         }
 
         // Signal detected - log before running correlation (only occasionally to reduce spam)
-        static int run_log_count = 0;
+        static std::atomic<int> run_log_count{0};
         if (++run_log_count % 10 == 1) {
             LOG_MODEM(INFO, "[%s] searchForSync: RUNNING correlation, rms=%.4f, corr_pos=%zu, total=%.2fs",
                       log_prefix_.c_str(), rms, ring_.correlation_pos_, audio_sec);
@@ -657,7 +658,7 @@ SearchWindowResult SyncController::acquireSearchWindow(
                                          : ring_.search_floor_abs_;
             if (search_start_abs < floor_abs) {
                 if (ring_.total_fed_ - floor_abs < min_search) {
-                    static int floor_wait_count = 0;
+                    static std::atomic<int> floor_wait_count{0};
                     if (++floor_wait_count % 50 == 1) {
                         LOG_MODEM(INFO,
                                   "[%s] searchForSync: SKIP post-frame floor, available=%zu < min=%zu",
@@ -853,7 +854,7 @@ FullAnchorFallbackResult SyncController::detectFullAnchorFallback(
             "[%s] s16-phase5: detectSync MISS chirp_peak=%.3f (thr=%.2f) "
             "corr_pos=%zu total=%zu search_start=%zu min_search=%zu",
             log_prefix_.c_str(), sync_result.correlation,
-            corr_detect_threshold, ring_.correlation_pos_, ring_.total_fed_,
+            corr_detect_threshold, ring_.correlation_pos_, ring_.total_fed_.load(),
             search_start, min_search);
     }
     SyncResult light_sync_result;

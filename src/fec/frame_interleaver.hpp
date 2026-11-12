@@ -82,6 +82,7 @@ public:
 private:
     // Permutation tables (computed once, used many times)
     static void ensureTablesInitialized();
+    static void buildDefaultTables();
     static void buildTables(int codeword_count,
                             int bits_per_codeword,
                             std::vector<int>& interleave_table,

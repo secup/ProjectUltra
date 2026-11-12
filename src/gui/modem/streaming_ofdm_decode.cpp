@@ -925,7 +925,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         std::fprintf(stderr,
                      "[eqtrace] >>> decodeCurrentFrame sync_pos=%zu pending_cw=%d fixed_cw=%d "
                      "req_mode=%d req_samples=%zu ctrl_samples=%zu burst_regime=%d latched=%d\n",
-                     sync_position_, pending_total_cw_, fixed_frame_codewords_,
+                     sync_position_, pending_total_cw_, fixed_frame_codewords_.load(),
                      static_cast<int>(requirement.mode), requirement.samples,
                      control_frame_samples, burst_regime_active ? 1 : 0,
                      burst_latched ? 1 : 0);
@@ -4708,7 +4708,7 @@ DecodeResult StreamingDecoder::decodeFrame(const std::vector<float>& soft_bits, 
             ? pending_total_cw_
             : (probed_fixed_cw_count > 0)
                 ? probed_fixed_cw_count
-            : fixed_frame_codewords_;
+            : fixed_frame_codewords_.load();
         size_t bps = static_cast<size_t>(ofdm_data_carriers_) * getBitsPerSymbol(current_modulation_);
         const int active_lifting_z = activeBurstLiftingZ();
         const int active_codeword_bits =

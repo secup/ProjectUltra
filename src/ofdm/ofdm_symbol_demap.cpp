@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -230,7 +231,7 @@ void OFDMDemodulator::Impl::appendConstellationSymbols(
     }
 
     if (constellationDiagEnabled()) {
-        static int append_log_count = 0;
+        static std::atomic<int> append_log_count{0};
         if (append_log_count < 80) {
             const auto update_stats = constellationDiagStats(update);
             const auto buffer_stats = constellationDiagStats(constellation_symbols);
@@ -456,7 +457,7 @@ void OFDMDemodulator::Impl::demodulateSymbol(const std::vector<Complex>& equaliz
 
     // Store constellation symbols (raw equalized; coherent-only OFDM)
     if (constellationDiagEnabled()) {
-        static int demod_log_count = 0;
+        static std::atomic<int> demod_log_count{0};
         if (demod_log_count < 120) {
             size_t erased = 0;
             for (uint8_t flag : carrier_erasure_flags_) {

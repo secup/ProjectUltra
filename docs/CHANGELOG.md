@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(threads): a ThreadSanitizer sweep of the receiving engine (BUG-DECODER-THREAD-RACES)
+
+**Why.** Two decode-thread crashes in the MC-DPSK chirp search (BUG-CHIRP-SEARCH-SEGV) coincided with
+the main thread rebuilding an MC-DPSK waveform, and dual-listen runs two decode threads. New CTest
+`EngineConcurrency`: an asynchronous engine decodes MC-DPSK and then OFDM frames on its decode
+threads while the main thread replays the GUI's mode-change callback (setMCDPSKProfile / setDataMode
+/ setFixedFrameCodewords, ~300 times), transmits OFDM data in the gaps, crosses waveforms, and a
+render thread reads the constellation, the stats and carrier sense; the delivery callback encodes
+a tone ACK on the decode thread as the protocol does. Built with `-fsanitize=thread` (a local
+`build_tsan`; CI runs ASan/UBSan only).
+
+**Races found and fixed.**
+- `FrameInterleaver::ensureTablesInitialized`: static permutation tables built lazily behind a plain
+  bool; the encoder (TX) and the decoder (deinterleave) could both build them at first use (two
+  threads resizing the same vectors = heap corruption, which can fault anywhere later), or a reader
+  see the flag before the data. Now `std::call_once`.
+- `demapQAM32`'s constellation table: the same pattern; now a function-local static initializer.
+- `StreamingDecoder::fixed_frame_codewords_` (written by the engine's thread, read to size every
+  frame on the decode thread), `SyncRingBuffer::total_fed_` (read without the lock for logging and
+  progress), `ModemEngine::waveform_mode_` (written by a crossing - on a sender from the tone-ACK
+  path on the decode thread - read by carrier sense and the display): atomics.
+- 24 function-level `static int`/`bool` log throttles in the sync, equalizer, demap, modulator and
+  file paths, shared by both decode threads and the TX path: atomics.
+
+**Tests.** `EngineConcurrency` and `DualListenEngine` run with zero ThreadSanitizer reports (three
+before the fixes; one more appeared once the OFDM phase was added). Plain build: 8 frames decoded
+across 296 reconfigurations, 4 of them OFDM with this station keying in every gap. Dev tree ctest
+112/112.
+
+---
+
 ## 2026-11-11 — GUI verification of 94d0fa4 (the night's fixes, file-ledger fix included)
 
 Same rig as the matrix entry below, both arms on the committed build. Every cell PASS with the file

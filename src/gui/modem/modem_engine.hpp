@@ -571,7 +571,10 @@ private:
     std::string filter_callsign_;
 
     // Waveform mode state
-    protocol::WaveformMode waveform_mode_ = protocol::WaveformMode::OFDM_CHIRP;
+    // Written by a crossing (on a sender, from the tone-ACK path on the decode thread) and by mode
+    // changes; read by carrier sense, the display and the TX path on other threads (ThreadSanitizer,
+    // EngineConcurrency).
+    std::atomic<protocol::WaveformMode> waveform_mode_{protocol::WaveformMode::OFDM_CHIRP};
     protocol::WaveformMode connect_waveform_ = protocol::WaveformMode::MC_DPSK;
 
     // Per-burst LDPC lifting Z, pushed from the connection policy (default 27).

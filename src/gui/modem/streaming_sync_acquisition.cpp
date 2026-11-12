@@ -582,10 +582,10 @@ void StreamingDecoder::searchForSync() {
     }
 
     // DEBUG: Dump the search buffer on first few searches
-    static int search_dump_count = 0;
+    static std::atomic<int> search_dump_count{0};
     if (g_debug_dumps_enabled && search_dump_count < 5) {
         char label[64];
-        snprintf(label, sizeof(label), "search_%d_pos%zu", search_dump_count, search_start);
+        snprintf(label, sizeof(label), "search_%d_pos%zu", search_dump_count.load(), search_start);
 
         // Dump search buffer to file
         char filename[256];
@@ -605,7 +605,7 @@ void StreamingDecoder::searchForSync() {
             rms = std::sqrt(rms / std::min(search_buffer.size(), size_t(10000)));
 
             LOG_MODEM(DEBUG, "StreamingDecoder: Search #%d: dumped %zu samples to %s (start=%zu, RMS=%.4f, peak=%.4f)",
-                      search_dump_count, search_buffer.size(), filename, search_start, rms, max_val);
+                      search_dump_count.load(), search_buffer.size(), filename, search_start, rms, max_val);
         }
         search_dump_count++;
     }
@@ -759,7 +759,7 @@ void StreamingDecoder::searchForSync() {
                       "(abs=%zu total_fed=%zu missing=%zu); deferring exact-window "
                       "replay",
                       log_prefix_.c_str(), training_start.detected_abs,
-                      sync_controller_.ring_.total_fed_,
+                      sync_controller_.ring_.total_fed_.load(),
                       training_start.samples_missing);
             return;
         }

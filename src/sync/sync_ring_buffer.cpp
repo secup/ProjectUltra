@@ -57,11 +57,11 @@ size_t SyncRingBuffer::ringPosToAbsoluteLocked(size_t ring_pos) const {
 
 size_t SyncRingBuffer::absoluteToRingLocked(size_t abs_pos) const {
     if (total_fed_ < buffer_capacity_samples_) {
-        return wrapRingIndexLocked(std::min(abs_pos, total_fed_));
+        return wrapRingIndexLocked(std::min(abs_pos, total_fed_.load()));
     }
 
     const size_t oldest_abs = total_fed_ - buffer_capacity_samples_;
-    abs_pos = std::clamp(abs_pos, oldest_abs, total_fed_);
+    abs_pos = std::clamp(abs_pos, oldest_abs, total_fed_.load());
     return wrapRingIndexLocked(write_pos_ + (abs_pos - oldest_abs));
 }
 
@@ -69,7 +69,7 @@ void SyncRingBuffer::setSearchFloorLocked(size_t abs_pos) {
     const size_t oldest_abs = (total_fed_ > buffer_capacity_samples_)
         ? (total_fed_ - buffer_capacity_samples_)
         : 0;
-    search_floor_abs_ = std::clamp(abs_pos, oldest_abs, total_fed_);
+    search_floor_abs_ = std::clamp(abs_pos, oldest_abs, total_fed_.load());
     search_floor_abs_valid_ = true;
 }
 

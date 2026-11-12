@@ -732,6 +732,18 @@ tones and reports the carrier offset without the shift.
 (BUG-NARROW-ACK-OUT-OF-BAND).
 **Test:** `ToneBurstAckRoundTrip` (`test_narrowband_band_plan`); GUI gate `--rx-filter 1250-1750`.
 
+### INV-THREAD-001: state shared between the engine's threads is atomic or locked (2026-11-12)
+**Rule:** the receiving engine runs one decode thread per decoder (two under dual-listen), the GUI's
+main thread (protocol tick, mode changes, TX) and its render reads. Anything two of them touch is an
+atomic or is read and written under one mutex; a lazily built table is built by `std::call_once`
+or a function-local static initializer, never behind a plain flag; a function-level `static` on a
+decode, demap, sync or TX path is atomic (or `const`). The render thread reads decoder snapshots
+only (`captureConstellationSnapshot`), never the waveform.
+**Why:** a plain-flag lazy table let two threads resize the same vectors (heap corruption); plain
+fields raced between the engine's thread and the decode thread; the render thread's waveform read
+crashed the GUI (BUG-DECODER-THREAD-RACES, BUG-GUI-CONSTELLATION-RACE).
+**Test:** `EngineConcurrency` under `-fsanitize=thread` (zero reports), `DualListenEngine`.
+
 ### INV-FILE-LEDGER-001: the file ledger rewinds exactly when the ARQ abandons frames (2026-11-11)
 **Rule:** the file transfer re-queues its pending chunks (`requeuePendingChunks`) if and only if
 the ARQ abandoned the in-flight frames that carry them - `SelectiveRepeatARQ::txAbortGeneration`

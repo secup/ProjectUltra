@@ -85,7 +85,7 @@ ModemEngine::ModemEngine(const MultiCarrierDPSKConfig& mc_dpsk_config) {
     // Sync StreamingDecoder with initial waveform mode
     // When disconnected, use MC_DPSK for PING detection (chirp-based sync)
     // When connected, use the negotiated waveform
-    protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_ : protocol::WaveformMode::MC_DPSK;
+    protocol::WaveformMode decoder_mode = connected_ ? waveform_mode_.load() : protocol::WaveformMode::MC_DPSK;
     if (connected_ || decoder_mode != protocol::WaveformMode::MC_DPSK) {
         streaming_decoder_->setMode(decoder_mode, connected_);
     } else {
@@ -1201,7 +1201,7 @@ void ModemEngine::clearRxBuffer(bool for_tx_echo) {
             return;  // an idle slot is not fed
         }
         const protocol::WaveformMode mode =
-            streaming_decoder_.isPrimary(d) ? waveform_mode_
+            streaming_decoder_.isPrimary(d) ? waveform_mode_.load()
                                             : listener_waveform_.load(std::memory_order_acquire);
         if (for_tx_echo && !kWarmTurnaroundOff && connected_ && protocol::isOFDMMode(mode)) {
             return;  // preserve warm-sync state + ring timeline across the turnaround

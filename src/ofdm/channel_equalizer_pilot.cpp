@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -194,7 +195,7 @@ void OFDMDemodulator::Impl::rereferenceCarriedHistoryPhase() {
     if (!(mag > 0.0f) || overlap == 0) return;
     const Complex rot = acc / mag;
 
-    static int log_count = 0;
+    static std::atomic<int> log_count{0};
     if (log_count < 12) {
         LOG_DEMOD(INFO,
                   "ITERATIVE_CHEST: re-referencing %zu carried carriers by %+.1f deg "
@@ -288,7 +289,7 @@ void OFDMDemodulator::Impl::applyDiagnosticTwoPathChannelOracle(
         channel_estimate[idx] = model_h(idx);
     }
 
-    static int log_count = 0;
+    static std::atomic<int> log_count{0};
     if (log_count < 8) {
         LOG_DEMOD(WARN,
                   "DIAG genie-channel two-path LS applied: delay=%d samples "
@@ -752,7 +753,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
                 for (int idx : pilot_carrier_indices) {
                     channel_estimate[idx] *= cpe_correction;
                 }
-                static int cpe_log_count = 0;
+                static std::atomic<int> cpe_log_count{0};
                 if (cpe_log_count < 10) {
                     LOG_DEMOD(DEBUG, "CPE correction: %.2f° (from %zu pilots)",
                               cpe_phase * 180.0f / M_PI, pilot_carrier_indices.size());
@@ -1097,7 +1098,7 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
         delay_domain_window_ = ofdm_cir::chooseDelayWindow(
             span_s, config.sample_rate, config.fft_size,
             config.pilot_spacing, config.getCyclicPrefix());
-        static int window_log_count = 0;
+        static std::atomic<int> window_log_count{0};
         if (window_log_count < 3) {
             LOG_DEMOD(INFO,
                       "Delay-domain pilot interp: span=%.2f ms -> W=%d taps "

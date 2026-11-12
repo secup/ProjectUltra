@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -703,7 +704,7 @@ const std::vector<Complex>& OFDMDemodulator::Impl::equalize(const std::vector<Co
     }
 
     if (null_diag && diag_mean_h_power > 0.0f) {
-        static int nd_symcount = 0;
+        static std::atomic<int> nd_symcount{0};
         if ((++nd_symcount % 20) == 1) {  // throttle ~every 20th symbol
             std::ostringstream oss;
             const char* nm[5] = {"deep", "null", "fade", "norm", "strong"};

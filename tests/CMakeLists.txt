@@ -799,6 +799,28 @@ target_link_libraries(test_dual_listen_engine PRIVATE ultra_core ota_channel_cor
 add_test(NAME DualListenEngine COMMAND test_dual_listen_engine)
 set_tests_properties(DualListenEngine PROPERTIES TIMEOUT 300)
 
+# The GUI main thread reconfiguring a receiving engine while its decode thread runs (the race check
+# under ThreadSanitizer; a smoke test otherwise).
+add_executable(test_engine_concurrency
+    test_engine_concurrency.cpp
+    ../src/gui/modem/modem_engine.cpp
+    ../src/gui/modem/modem_rx.cpp
+    ../src/gui/modem/modem_rx_decode.cpp
+    ../src/gui/modem/modem_mode.cpp
+    ../src/gui/modem/modem_dual_listen.cpp
+    ../src/gui/modem/modem_carrier_sense.cpp
+    ../src/gui/adaptive_mode.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_engine_concurrency PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+)
+target_link_libraries(test_engine_concurrency PRIVATE ultra_core ota_channel_core)
+add_test(NAME EngineConcurrency COMMAND test_engine_concurrency)
+set_tests_properties(EngineConcurrency PROPERTIES TIMEOUT 300)
+
 # Idle-noise SNR calibration — needs the idle-noise estimator, not SimulatedStation.
 add_executable(test_idle_noise_snr_calibration
     test_idle_noise_snr_calibration.cpp
