@@ -446,9 +446,13 @@ void StreamingDecoder::searchForSync() {
         // DERIVED from the burst policy (GROUP-SIZE co-fix #1): the ceiling
         // clamp maxes at 12,000 ms of group air + 1,410 ms full descriptor +
         // ~1.2 s margin ≈ 14.6 s. A fixed 600k (12.5 s) fired MID-BURST once
-        // groups exceed ~10 frames — the adaptivity-bug class. Still beats the
-        // sender RTO (~air-end + 11.4 s) by ~9 s.
-        constexpr size_t kBackstopWindowSamples = 48 * (12000 + 1410 + 1200);
+        // groups exceed ~10 frames — the adaptivity-bug class. It does NOT beat
+        // the sender's RTO for short groups (INFLIGHT-RTO table, 8-16 s): the
+        // connection withholds a re-confirm that cannot end before the resend
+        // (anchoredBackstopReconfirmFits, BUG-BACKSTOP-RACES-RTO).
+        constexpr size_t kBackstopWindowSamples =
+            static_cast<size_t>(protocol::connection_policy::kOFDMSampleRate / 1000) *
+            protocol::connection_policy::kAnchoredBackstopWindowMs;
         if (fed_now > anchored_burst_backstop_arm_abs_ + kBackstopWindowSamples) {
             const bool payload_seen = anchored_burst_payload_seen_;
             anchored_burst_backstop_armed_ = false;
@@ -792,12 +796,11 @@ void StreamingDecoder::searchForSync() {
             last_sync_expected_full_anchor_ = true;
             anchored_burst_backstop_armed_ = true;
             anchored_burst_payload_seen_ = false;
-            {
-                std::lock_guard<std::mutex> lock(
-                    sync_controller_.ring_.buffer_mutex_);
-                anchored_burst_backstop_arm_abs_ =
-                    sync_controller_.ring_.total_fed_;
-            }
+            // Timed from the anchor's training start on the sample clock - where
+            // the sender's group begins - not from the moment this search accepted
+            // it (0.5-1.5 s of search latency later): the window and the
+            // connection's fit test against the sender's RTO both assume it.
+            anchored_burst_backstop_arm_abs_ = training_start.detected_abs;
         }
         if (connected_data_preamble && data_sync_accepted_callback_) {
             data_sync_accepted_callback_(sync_result.correlation);
@@ -1060,9 +1063,18 @@ void StreamingDecoder::searchForSync() {
             // gate to that duplicate — its deadline stays anchored to the original
             // physical turn. A genuine new chirp lock (`last_sync_expected...`) may
             // replace it. Thus one early decode cannot key an ACK mid-burst.
+            // Only a dual chirp proves a STANDALONE frame at the anchor: a single OFDM
+            // frame always goes out behind a full chirp (StreamingEncoder::encodeBurst),
+            // while the frame-structure detector locks on any frame's LTS pair - after a
+            // fade took a group's head, on a member in mid-burst. Treated as chirp proof,
+            // that member's decode cleared this gate and its ACK keyed into the rest of
+            // the burst (GUI ITU Good 5 dB seed 44: anchor on the third of four frames,
+            // ACK 2.3 s before the sender's key-down; the fourth frame's sync was 47 ms
+            // away). The burst's last frame still ends the turn by its CRC-protected
+            // PHYSICAL_BURST_END (INV-ACK-TURN-001).
             armProvisionalBurstAirGate(
                 static_cast<uint64_t>(abs_training_pos),
-                /*proven_full_chirp=*/last_sync_expected_full_anchor_);
+                /*proven_full_chirp=*/last_sync_expected_full_anchor_ && !used_structure_anchor);
         }
 
         // CFO handling: On fading channels, chirp-based CFO measurement can be corrupted

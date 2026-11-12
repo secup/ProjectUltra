@@ -534,8 +534,9 @@ std::vector<float> StreamingEncoder::encodeBurstLight(
 
     // The ARQ owns logical frames; physical grouping belongs to this encoder call.
     // Sanitize a private copy on every emission so a seq regrouped by selective
-    // retry cannot retain stale tail status. Only a multi-frame, independently
-    // decodable OFDM burst gets the zero-airtime end marker in Phase 1.
+    // retry cannot retain stale tail status. Every independently decodable OFDM
+    // turn, singletons included, gets the zero-airtime end marker on its last frame
+    // (shouldStampPhysicalBurstEnd).
     const bool stamp_physical_end =
         streaming_frame_policy::shouldStampPhysicalBurstEnd(
             frame_data_list.size(), mode_, waveform_->supportsDataPreamble(),

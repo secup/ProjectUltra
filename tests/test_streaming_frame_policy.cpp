@@ -270,9 +270,9 @@ void test_physical_burst_end_wire_policy() {
               2, ultra::protocol::WaveformMode::OFDM_CHIRP,
               /*supports_data_preamble=*/true, /*burst_interleave=*/false),
           "multi-frame non-interleaved OFDM should stamp a physical tail");
-    CHECK(!shouldStampPhysicalBurstEnd(
-               1, ultra::protocol::WaveformMode::OFDM_CHIRP, true, false),
-          "singleton keeps its existing full-anchor physical proof");
+    CHECK(shouldStampPhysicalBurstEnd(
+              1, ultra::protocol::WaveformMode::OFDM_CHIRP, true, false),
+          "an OFDM singleton stamps too: a structure-acquired anchor cannot prove it standalone");
     CHECK(!shouldStampPhysicalBurstEnd(
                2, ultra::protocol::WaveformMode::OFDM_CHIRP, true, true),
           "cross-frame interleave must keep the descriptor/group callback boundary");

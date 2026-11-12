@@ -295,7 +295,11 @@ inline bool shouldStampPhysicalBurstEnd(size_t frame_count,
     // the ACK was classified asynchronous, held for a whole maximum OFDM turn of decoder
     // evidence and dropped at its 2.5 s deadline every time (BUG-MCDPSK-ACK-DROPPED).
     if (mode == protocol::WaveformMode::MC_DPSK) return frame_count >= 1;
-    return frame_count > 1 && protocol::isOFDMMode(mode) &&
+    // OFDM singletons too (2026-11-12): their only other proof was the anchor - a frame decoded
+    // at an accepted full anchor read as standalone - and since frame-structure acquisition finds
+    // EVERY connected group start (no chirp search), an anchor can be a member that survived a
+    // lost head; that proof now needs a dual chirp (searchForSync), so the wire carries it.
+    return frame_count >= 1 && protocol::isOFDMMode(mode) &&
            supports_data_preamble && !burst_interleave;
 }
 

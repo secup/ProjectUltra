@@ -5803,6 +5803,11 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         if (quality >= 0.0f) {
             last_group_quality_ = quality;
         }
+        // The size of the group this end last framed: the backstop's estimate of a group whose
+        // descriptor is lost (noteAnchoredBurstNoGroup).
+        if (geometry_proven && group_size > 0) {
+            last_rx_group_frames_ = group_size;
+        }
         // Waveform follow: the first OFDM group after an up-crossing settles it, before this
         // group's ACK is stamped (a group that delivered nothing calls the crossing off in it).
         noteRxOfdmBurstAfterCrossing(all_ok || frame_mask != 0);
@@ -6351,6 +6356,36 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     tone_ack_alc_group_context_ = false;
     tone_ack_group_has_decoded_data_context_ = false;
     tone_ack_exact_group_geometry_context_ = false;
+    // BUG-BACKSTOP-RACES-RTO: a pure re-confirm (nothing decoded since the anchor) that cannot
+    // end before the sender resends this group is withheld. Those gates cannot stop it: the
+    // backstop fires as the resend keys, before the resend has produced any decoder evidence,
+    // and the energy CCA does not see a marginal burst (busy = 6 dB over the floor; a 5 dB
+    // signal reads 6.2 dB) - every GUI backstop at ITU Good 5 dB keyed 0.85 s into the resend.
+    // The group is unknown (its descriptor is what was lost): the last group this end framed
+    // stands for it, the window before any. The ACK's airtime is the LONGEST staircase rung: the
+    // frontend picks the duration at keying time from its own median of in-band readings, which
+    // this end does not see - an estimate from measured_snr_db_ read 0.85 s where the frontend
+    // keyed 3.4 s and let a re-confirm through into the resend (GUI ITU Good 5 dB seed 47). The
+    // crater verdict above rides the next ACK, the one this end sends for the resend it now hears
+    // whole.
+    if (!payload_seen) {
+        namespace tba = ultra::waveform::tone_burst_ack;
+        const size_t frames_est =
+            last_rx_group_frames_ > 0 ? last_rx_group_frames_ : arq_.getWindowSize();
+        const uint32_t sender_rto_ms = arq_.ackTimeoutForFrameCount(frames_est);
+        constexpr uint32_t kLongestAckMs = tba::kTotalSymbols * tba::kSymbolMsMargSNR;
+        const bool fits =
+            connection_policy::anchoredBackstopReconfirmFits(sender_rto_ms, kLongestAckMs);
+        LOG_MODEM(INFO,
+                  "Connection: ANCHORED-BURST BACKSTOP — re-confirm %s: the sender resends a "
+                  "%zu-frame group %u ms after its key-up; a %u ms ACK keyed now %s "
+                  "(BUG-BACKSTOP-RACES-RTO)",
+                  fits ? "sent" : "withheld", frames_est, sender_rto_ms, kLongestAckMs,
+                  fits ? "ends before it" : "could not end before it - the verdict rides the next ACK");
+        if (!fits) {
+            return;
+        }
+    }
     arq_.endGroupReceiveAndAck();
 }
 
@@ -10927,6 +10962,7 @@ void Connection::reset() {
     desc_switch_full_anchor_pending_ = false;
     partial_sack_last_round_ = {};
     partial_sack_descriptor_repair_scope_ = false;
+    last_rx_group_frames_ = 0;
     mode_change_ack_repeat_jobs_.clear();
     data_modulation_ = Modulation::DQPSK;
     data_code_rate_ = CodeRate::R1_4;

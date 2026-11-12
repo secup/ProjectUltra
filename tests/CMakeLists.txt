@@ -618,6 +618,11 @@ target_include_directories(test_burst_stale_geometry PRIVATE
 )
 target_link_libraries(test_burst_stale_geometry PRIVATE ultra_core ota_channel_core)
 add_test(NAME BurstStaleGeometry COMMAND test_burst_stale_geometry)
+# A member found by frame-structure acquisition (the production default) after a lost group head
+# is not a standalone frame: it keeps the air gate; the marked tail ends the turn.
+add_test(NAME BurstStructureMemberAnchor COMMAND test_burst_stale_geometry --structure-member-only)
+set_tests_properties(BurstStructureMemberAnchor PROPERTIES TIMEOUT 120
+    ENVIRONMENT "ULTRA_BURST_ACQ=structure")
 set_tests_properties(BurstStaleGeometry PROPERTIES TIMEOUT 180
     # Exercises the chirp-per-group receive path and per-codeword LDPC decode accounting: the
     # ULTRA_FAST=0 baseline arm, still shipped behind the switch until the rig A/B.

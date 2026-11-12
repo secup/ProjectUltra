@@ -336,6 +336,9 @@ public:
         }
     }
     uint32_t getAckTimeout() const { return config_.ack_timeout_ms; }
+    // The retransmission timeout for a burst of `frames` in flight (the INFLIGHT-RTO table): both
+    // ends build it for the rung, so a receiver can predict when the sender resends a group.
+    uint32_t ackTimeoutForFrameCount(size_t frames) const { return ackTimeoutForFrames(frames); }
 
     // Commit an explicit deadline to the exact DATA frame identities that physically
     // went on air in one half-duplex round. Padding contributes to the Connection's

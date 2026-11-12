@@ -1837,6 +1837,24 @@ void test_tone_ack_defer_uses_independent_rx_evidence() {
 
 // BUG-ASYNC-ACK-ALWAYS-DROPPED: a pending ACK is held by decoder evidence NEWER than the decode
 // that produced it, never by that decode itself (its age outlasted every deadline).
+// BUG-BACKSTOP-RACES-RTO: the backstop's re-confirm must END before the sender keys its resend:
+// key-up -> anchor training start <= lead-in + full chirp anchor (150 + 1200 ms), then the 14.6 s
+// window, the ACK and a 500 ms guard. A 4-frame QPSK R1/2 group (RTO 15.7 s) never fits; an
+// 8-frame one at R1/2 (24.4 s) fits a 3.4 s ACK.
+void test_anchored_backstop_reconfirm_fit() {
+    CHECK(kAnchoredBackstopWindowMs == 14610, "backstop window = 12 s ceiling + descriptor + margin");
+    const uint32_t threshold = static_cast<uint32_t>(kDefaultTxLeadInMs) +
+                               kWideOFDMFullAnchorExtraMs + kAnchoredBackstopWindowMs + 3400 +
+                               kBackstopReconfirmGuardMs;
+    CHECK(threshold == 19860, "fit threshold for a 3.4 s ACK");
+    CHECK(!anchoredBackstopReconfirmFits(15728, 3400), "4-frame R1/2 group: the ACK lands on the resend");
+    CHECK(anchoredBackstopReconfirmFits(24398, 3400), "8-frame R1/2 group: the ACK ends before the resend");
+    CHECK(anchoredBackstopReconfirmFits(threshold, 3400), "ending exactly at the guard fits");
+    CHECK(!anchoredBackstopReconfirmFits(threshold - 1, 3400), "one ms short does not");
+    CHECK(anchoredBackstopReconfirmFits(18590, 850) && !anchoredBackstopReconfirmFits(18590, 3400),
+          "a shorter ACK fits where the 100 ms rung does not");
+}
+
 void test_deferred_tone_ack_policy() {
     using A = DeferredAckAction;
     // Evidence novelty for a decode-driven ACK.
@@ -2016,6 +2034,7 @@ int main() {
     test_silent_ack_repeat_broad_signal_hold_is_waveform_independent();
     test_tone_ack_defer_uses_independent_rx_evidence();
     test_deferred_tone_ack_policy();
+    test_anchored_backstop_reconfirm_fit();
     test_silent_ack_repeat_is_explicit_opt_in();
     test_anchored_backstop_payload_evidence_forbids_fake_crater();
     test_scripted_disconnect_quit_requires_protocol_completion();

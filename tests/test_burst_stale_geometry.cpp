@@ -52,6 +52,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cmath>
 #include <thread>
 #include <vector>
 
@@ -1092,6 +1094,92 @@ bool learnedRungGeometrySessionBoundarySynchronizationTrial() {
 // A detected expected anchor with an unreadable body is the precondition for
 // later light duplicates taking the classic callback path. Pin both the initial
 // provisional arm and its reset lifecycle with a real chirp/LTS encode.
+// Frame-structure acquisition (ULTRA_BURST_ACQ=structure, the production default) locks on ANY
+// frame's LTS pair: after a fade takes a group's head, on a member in mid-burst. Only a dual chirp
+// proves a STANDALONE frame at the anchor (a single OFDM frame always goes out behind one), so a
+// member decoded at a structure anchor must keep the physical air gate - no immediate ACK - and the
+// burst's last frame, stamped PHYSICAL_BURST_END, ends the turn. GUI ITU Good 5 dB seed 44: the lock
+// landed on the third of four frames and its ACK keyed 2.3 s before the sender's key-down.
+struct StructureMemberResult {
+    int member_callbacks = 0;
+    bool member_turn_complete = true;
+    uint64_t member_air_remaining = 0;
+    int tail_callbacks = 0;
+    bool tail_turn_complete = false;
+};
+
+StructureMemberResult runStructureMemberAnchorTrial() {
+    constexpr int kGroup = 4;
+    constexpr int kCw = 4;
+    ModemConfig geom = presets::balanced();  // production: MEDIUM CP
+    geom.modulation = Modulation::QPSK;
+    geom.code_rate = CodeRate::R1_2;
+    geom.use_pilots = true;
+    geom.pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_2);
+
+    StreamingEncoder enc;
+    enc.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    enc.setOFDMConfig(geom);
+    enc.setDataMode(Modulation::QPSK, CodeRate::R1_2);
+    enc.setFixedFrameCodewords(kCw);
+    enc.setBurstInterleave(false);
+    const auto frames = makeGroupFrames(kGroup, CodeRate::R1_2, kCw);
+    auto burst = enc.encodeBurstLight(
+        frames, BurstAnchorOptions{/*force_full_group_start=*/false,
+                                   /*keep_skip_streak=*/false});
+    const size_t member_samples = static_cast<size_t>(
+        enc.getWaveform()->getMinSamplesForCWCount(kCw));
+    EXPECT(burst.size() > 2 * member_samples);
+    // The fade: the descriptor and the first two members never arrive.
+    std::fill(burst.begin(), burst.end() - static_cast<std::ptrdiff_t>(2 * member_samples), 0.0f);
+    auto audio = withSilence(burst);
+    // A receiver's own noise floor, 30 dB under the burst (deterministic).
+    double power = 0.0;
+    for (size_t i = audio.size() - 2 * member_samples - 192000; i < audio.size() - 192000; ++i) {
+        power += static_cast<double>(audio[i]) * audio[i];
+    }
+    const float sigma = static_cast<float>(
+        std::sqrt(power / static_cast<double>(2 * member_samples)) * 0.0316);
+    uint64_t state = 0x5EEDu;
+    for (auto& x : audio) {
+        float sum = 0.0f;  // Irwin-Hall(12) - 6: unit variance
+        for (int k = 0; k < 12; ++k) {
+            state = state * 6364136223846793005ull + 1442695040888963407ull;
+            sum += static_cast<float>(state >> 40) / 16777216.0f;
+        }
+        x += sigma * (sum - 6.0f);
+    }
+
+    StreamingDecoder dec;
+    dec.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP, geom, Modulation::QPSK,
+                             CodeRate::R1_2);
+    dec.setFixedFrameCodewords(kCw);
+    dec.setBurstInterleave(false);
+    dec.applyPendingConfigForTesting();
+    dec.expectFullOFDMAnchorOnce();
+
+    StructureMemberResult r;
+    dec.setFrameCallback([&](const DecodeResult& got) {
+        if (!got.success) return;
+        if (sameLogicalDataFrame(got.frame_data, frames[2])) {
+            ++r.member_callbacks;
+            r.member_turn_complete = got.physical_turn_complete;
+            r.member_air_remaining = dec.burstAirSamplesRemaining();
+        } else if (sameLogicalDataFrame(got.frame_data, frames[3])) {
+            ++r.tail_callbacks;
+            r.tail_turn_complete = got.physical_turn_complete;
+        }
+    });
+    constexpr size_t kChunk = 4800;
+    for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
+        const size_t len = std::min(kChunk, audio.size() - pos);
+        dec.feedAudio(audio.data() + pos, len);
+        dec.processBuffer();
+    }
+    return r;
+}
+
 FailedAnchorGateResult runFailedAnchorResetGateTrial() {
     constexpr int kCw = 4;
     auto frame = v2::makeFixedDataFrame(
@@ -1193,12 +1281,31 @@ void report(const char* name, const BurstResult& r) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     LogLevel level = LogLevel::ERROR;
     if (const char* env = std::getenv("ULTRA_LOG_LEVEL")) {
         parseLogLevel(env, level);
     }
     setLogLevel(level);
+
+    // Own CTest entry (BurstStructureMemberAnchor) with ULTRA_BURST_ACQ=structure: the mode is
+    // read once per process, and every other trial here runs the chirp-per-group path.
+    if (argc > 1 && std::strcmp(argv[1], "--structure-member-only") == 0) {
+        const StructureMemberResult sm = runStructureMemberAnchorTrial();
+        std::fprintf(stderr,
+                     "structure member anchor: member callbacks=%d turn_complete=%d "
+                     "air_remaining=%llu | tail callbacks=%d turn_complete=%d\n",
+                     sm.member_callbacks, sm.member_turn_complete ? 1 : 0,
+                     static_cast<unsigned long long>(sm.member_air_remaining),
+                     sm.tail_callbacks, sm.tail_turn_complete ? 1 : 0);
+        EXPECT(sm.member_callbacks == 1);
+        EXPECT(!sm.member_turn_complete);
+        EXPECT(sm.member_air_remaining > 0);
+        EXPECT(sm.tail_callbacks == 1);
+        EXPECT(sm.tail_turn_complete);
+        std::fprintf(stderr, "%s\n", g_failures == 0 ? "PASS" : "FAIL");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     // Both environment arms run IN ONE PROCESS. For (A), both must exercise the
     // unconditional alignment guard. For (B), the off/on pair remains live

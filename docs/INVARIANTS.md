@@ -362,7 +362,9 @@ every such ACK through its deadline (BUG-ASYNC-ACK-ALWAYS-DROPPED). Never count 
 noise false-lock attempts set it (F147). The anchored-burst backstop's re-confirm (recognized by
 the decoder's backstop stamp, `toneAckIsTimerReconfirm`) keeps the age rule: it fires about when
 the sender's RTO resend starts, before that resend has produced any evidence
-(BUG-BACKSTOP-RACES-RTO). `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
+(BUG-BACKSTOP-RACES-RTO). For the same reason the connection withholds a pure re-confirm that could
+not END before the sender's resend of the last framed group (`anchoredBackstopReconfirmFits`; the
+window is timed from the anchor's training start): no sensor here sees a resend's first ~1.5 s. `ULTRA_ASYNC_ACK_NOVELTY=0` applies the age rule to every ACK (and the
 TNC's immediate drop). **Test:** `ConnectionPolicy` (`test_deferred_tone_ack_policy`).
 
 ---
@@ -449,15 +451,20 @@ switch; pricing one there is a ~25 % phantom penalty that kept the controller of
 ### INV-ACK-TURN-001: the ACK for a turn's last frame carries completed-turn provenance
 
 **Rule:** every physical DATA turn whose end the receiver must ACK carries a CRC-protected
-`PHYSICAL_BURST_END` on its last frame (multi-frame OFDM bursts; EVERY MC-DPSK turn, singletons
-included, on EVERY transmit path: the burst encoder, the singleton flush and a timeout batch sent
-frame by frame, `Connection::mcDpskTurnEndWireCopy`), and the receiver reports
+`PHYSICAL_BURST_END` on its last frame (EVERY OFDM turn, singletons included since 2026-11-12;
+EVERY MC-DPSK turn, singletons included, on EVERY transmit path: the burst encoder, the singleton
+flush and a timeout batch sent frame by frame, `Connection::mcDpskTurnEndWireCopy`), and the receiver reports
 `physical_turn_complete` for it BEFORE the frame callback, so
 the ACK takes the completed-group path. An ACK without that provenance goes through
 listen-before-ACK's evidence-novelty rule (INV-TONE-ACK-005), which is right only for genuinely
 asynchronous ACKs (timer backstops, descriptor loss): it waits out a peer that is still on the air.
-Never infer the end of an MC-DPSK turn from MORE_FRAG: it says the FILE continues.
-**Test:** `StreamingFramePolicy` (`test_physical_burst_end_wire_policy`); GUI gate AWGN@7 MC-DPSK.
+Never infer the end of an MC-DPSK turn from MORE_FRAG: it says the FILE continues. A frame decoded
+at an accepted anchor proves a standalone turn only when a DUAL CHIRP found that anchor: the
+frame-structure detector locks on any frame's LTS pair, a mid-burst member after a lost head included
+(`armProvisionalBurstAirGate(..., proven_full_chirp = !used_structure_anchor)`,
+BUG-STRUCTURE-MEMBER-STANDALONE).
+**Test:** `StreamingFramePolicy` (`test_physical_burst_end_wire_policy`), `BurstStructureMemberAnchor`;
+GUI gate AWGN@7 MC-DPSK.
 
 ### INV-GUI-LOOP-001: the GUI loop never waits on the display
 

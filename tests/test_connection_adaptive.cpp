@@ -113,6 +113,14 @@ struct ConnectionAdaptiveTestAccess {
         c.configureArqForCurrentDataMode();
     }
 
+    // A flat retransmission timeout for every in-flight count (the sender's INFLIGHT-RTO table).
+    static void setFlatAckTimeout(Connection& c, uint32_t timeout_ms) {
+        c.arq_.setAckTimeout(timeout_ms);
+        uint32_t table[selective_repeat_arq_policy::kMaxWindow + 1] = {};
+        for (auto& t : table) t = timeout_ms;
+        c.arq_.setAckTimeoutTable(table, selective_repeat_arq_policy::kMaxWindow + 1);
+    }
+
     static void makeConnectedNarrowOFDM(Connection& c) {
         c.local_call_ = "W1ABC";
         c.remote_call_ = "K2DEF";
@@ -6019,6 +6027,9 @@ void test_tone_ack_callback_marks_only_group_boundary_as_physically_complete() {
     }
 
     const size_t before_anchored_backstop = group_complete_contexts.size();
+    // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
+    // this check is about the ACK's content, not its timing.
+    ConnectionAdaptiveTestAccess::setFlatAckTimeout(c, 30000);
     c.noteAnchoredBurstNoGroup();
     CHECK(group_complete_contexts.size() > before_anchored_backstop,
           "an anchored no-group burst must emit its recovery tone feedback");
@@ -6037,6 +6048,50 @@ void test_tone_ack_callback_marks_only_group_boundary_as_physically_complete() {
         CHECK(!group_complete_contexts[i],
               "payload-aware timer ACK remains asynchronous despite selector suppression");
     }
+}
+
+// BUG-BACKSTOP-RACES-RTO: the anchored-burst backstop fires 14.6 s after the anchor; a pure
+// re-confirm keyed then lands on the sender's resend of a short group (RTO 8-16 s) and is heard by
+// nobody, while blanking this end's receive of the resend's head. Withheld when it cannot end
+// before the resend; sent when it can; a backstop that decoded payload still acknowledges it.
+void test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend() {
+    // Marginal fading channel: 4-frame QPSK R1/2 groups at 5 dB (the 100 ms ACK rung, 3.4 s).
+    Connection marginal;
+    std::vector<ToneBurstAckPayload> marginal_acks;
+    marginal.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { marginal_acks.push_back(ack); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        marginal, CodeRate::R1_2, 5.0f, 0.45f, Modulation::QPSK);
+    std::vector<Bytes> group;
+    for (uint16_t seq = 0; seq < 4; ++seq) {
+        auto frame = v2::makeFixedDataFrame("K2DEF", "W1ABC", seq,
+                                            Bytes{static_cast<uint8_t>(0x30 + seq)},
+                                            CodeRate::R1_2);
+        frame.flags |= v2::Flags::MORE_FRAG;
+        group.push_back(frame.serialize());
+    }
+    marginal.onBurstGroupReceived(/*group_seq=*/0, group, /*all_ok=*/true, /*quality=*/0.9f,
+                                  /*frame_mask=*/0xF, /*interleaved=*/false,
+                                  /*group_size=*/4, /*geometry_proven=*/true);
+    const size_t before = marginal_acks.size();
+    marginal.noteAnchoredBurstNoGroup();
+    CHECK(marginal_acks.size() == before,
+          "a re-confirm that would still be on the air at the sender's resend must be withheld");
+    marginal.noteAnchoredBurstNoGroup(/*payload_seen=*/true);
+    CHECK(marginal_acks.size() > before,
+          "a backstop that decoded payload must still acknowledge it");
+
+    // A sender whose resend comes 24.4 s after key-up (an 8-frame QPSK R1/2 group at the
+    // production defaults): even the longest staircase ACK (3.4 s) ends before it.
+    Connection strong;
+    std::vector<ToneBurstAckPayload> strong_acks;
+    strong.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { strong_acks.push_back(ack); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        strong, CodeRate::R1_2, 22.0f, 0.05f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setFlatAckTimeout(strong, 24398);
+    strong.noteAnchoredBurstNoGroup();
+    CHECK(!strong_acks.empty(), "a re-confirm that fits before the sender's resend must be sent");
 }
 
 void test_software_alc_uses_current_partial_group_delivery_provenance() {
@@ -6090,6 +6145,9 @@ void test_software_alc_uses_current_partial_group_delivery_provenance() {
     // The LOW streak is intentionally still armed, but this timer/backstop ACK has
     // no current decoder callback. It must not turn old evidence into a new UP step.
     const size_t before_async = acks.size();
+    // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
+    // this check is about the ACK's content, not its timing.
+    ConnectionAdaptiveTestAccess::setFlatAckTimeout(c, 30000);
     c.noteAnchoredBurstNoGroup();
     CHECK(acks.size() > before_async,
           "anchored no-group backstop must emit a cumulative tone ACK");
@@ -6132,6 +6190,9 @@ void test_software_alc_uses_current_partial_group_delivery_provenance() {
               ultra::waveform::tone_burst_ack::kDriveAdvisoryDown,
           "fresh CLIPPED group must retain immediate ALC DOWN behavior");
     const size_t before_clipped_async = acks.size();
+    // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
+    // this check is about the ACK's content, not its timing.
+    ConnectionAdaptiveTestAccess::setFlatAckTimeout(c, 30000);
     c.noteAnchoredBurstNoGroup();
     CHECK(acks.size() > before_clipped_async,
           "post-CLIPPED backstop must still emit its cumulative ACK");
@@ -6220,6 +6281,9 @@ void test_partial_sack_provenance_marks_only_exact_group_geometry() {
         [&](const ToneBurstAckPayload& ack, bool) { backstop_acks.push_back(ack); });
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         backstop, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
+    // this check is about the ACK's content, not its timing.
+    ConnectionAdaptiveTestAccess::setFlatAckTimeout(backstop, 30000);
     backstop.noteAnchoredBurstNoGroup();
     CHECK(!backstop_acks.empty() &&
               backstop_acks.back().drive_advisory != kDriveAdvisoryReserved,
@@ -7099,6 +7163,7 @@ int main() {
     test_normal_message_turn_yield_periodically_rearms_full_anchor();
     test_tone_ack_callback_marks_only_group_boundary_as_physically_complete();
     test_mcdpsk_ack_repair_resends_the_hole_at_the_next_burst();
+    test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend();
     test_software_alc_uses_current_partial_group_delivery_provenance();
     test_partial_sack_provenance_marks_only_exact_group_geometry();
     test_physical_tail_acks_prior_orphan_payload_cumulatively();

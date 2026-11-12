@@ -31,6 +31,48 @@ heard before the fix, 2 of 2 after. ctest and GUI: see the commit.
 
 ---
 
+## 2026-11-12 — FIX(ack): a receiver never ACKs into the sender's own transmission at marginal SNR (BUG-BACKSTOP-RACES-RTO, BUG-STRUCTURE-MEMBER-STANDALONE)
+
+**What broke.** Two ways a receiver keyed a tone ACK while the sender was transmitting (half-duplex:
+the sender cannot hear it, and the receiver blanks its own receive over what the sender is sending).
+Both were found tracing the ITU Good 5 dB stalls (GUI, follow on): the energy CCA cannot stop either
+at that SNR - busy is 6 dB over the learned floor and a 5 dB signal reads 6.2 dB.
+1. The anchored-burst backstop (an accepted group start whose descriptor never decoded) fires 14.61 s
+   after the anchor and asks for a re-confirm ACK. Since the INFLIGHT-RTO table the sender resends a
+   short group 8-17.6 s after its key-up, so the re-confirm landed on the resend: in twelve GUI runs at
+   ITU Good 5 dB every backstop keyed 0.4-2.1 s into the resend (typically 0.85 s: the decoder also
+   timed the window from its search's acceptance, 0.5-1.5 s after the anchor).
+2. A frame decoded at an accepted full anchor counted as a STANDALONE turn (its ACK keyed at once).
+   That proof was meant for a dual chirp, but frame-structure acquisition (the default since
+   `ULTRA_FAST`) finds every connected group start - including a member that survived a lost head.
+   GUI ITU Good 5 dB seed 44: the lock landed on the third of four frames; the ACK keyed 2.3 s before
+   the sender's key-down (the fourth frame's sync was 47 ms later), was lost, and cost a 15.7 s RTO.
+
+**What changed.**
+1. `connection_policy::kAnchoredBackstopWindowMs` (14 610 ms, one constant for the decoder's timer and
+   the fit test) and `anchoredBackstopReconfirmFits(sender_rto_ms, ack_ms)`: lead-in + full chirp
+   anchor + window + ACK + 500 ms guard must end by the sender's RTO. `Connection::noteAnchoredBurstNoGroup`
+   withholds a pure re-confirm (nothing decoded since the anchor) that does not fit: the group is the
+   last one this end framed (`last_rx_group_frames_`, the window before any), its RTO the INFLIGHT-RTO
+   table both ends build (`SelectiveRepeatARQ::ackTimeoutForFrameCount`), the ACK the LONGEST staircase
+   rung (3.4 s: the frontend picks the duration at keying time from readings this end does not see - an
+   estimate from the connection's SNR read 0.85 s where 3.4 s was keyed, GUI seed 47). The crater verdict still updates the receiver's command; it rides
+   the next ACK. The decoder times the window from the anchor's training start (`detected_abs`).
+2. `armProvisionalBurstAirGate(..., proven_full_chirp)` is true only for a dual-chirp lock
+   (`!used_structure_anchor`); and every OFDM turn's last frame carries `PHYSICAL_BURST_END`, singletons
+   included (`shouldStampPhysicalBurstEnd`: OFDM `frame_count >= 1`), so a single frame - always sent
+   behind a full chirp - keeps its immediate ACK whichever detector found it.
+
+**Verification.** `ConnectionPolicy` `test_anchored_backstop_reconfirm_fit`; `ConnectionAdaptive`
+`test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend` (marginal 4-frame R1/2 group
+withheld, payload-seen still ACKs, a 24.4 s RTO sends) - fails with the withhold disabled;
+`BurstStructureMemberAnchor` (new CTest, `ULTRA_BURST_ACQ=structure`): head and first two members of a
+4-frame burst lost, the third decoded at the structure anchor keeps the air gate (11.3 s remaining), the
+marked fourth ends the turn - with the old proof the third read turn-complete and cleared the gate;
+`StreamingFramePolicy` (singletons stamp). ctest and GUI: see the commit.
+
+---
+
 ## 2026-11-12 — FIX(MC-DPSK SNR): every burst frame measures its own physical SNR (BUG-MCDPSK-PHYSICAL-REPUBLISHED)
 
 **What broke.** The physical SNR (power of the frame's span over the burst-time noise reference,

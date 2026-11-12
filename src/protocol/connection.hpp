@@ -1769,6 +1769,9 @@ private:
     uint16_t burst_rx_group_seq_ = 0;
     bool burst_rx_group_open_ = false;
     std::vector<Bytes> burst_rx_group_frames_;
+    // Size of the last group this end framed with proven geometry (0 = none yet): the
+    // anchored-burst backstop's estimate of a group whose descriptor was lost.
+    size_t last_rx_group_frames_ = 0;
 
     // Live "incoming burst" status for the GUI (see BurstActivity above).
     BurstActivity burst_activity_;

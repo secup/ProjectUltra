@@ -275,7 +275,7 @@ physical estimate read ~1.5 dB over the dial here and the cap adds 2 dB: the sel
 bound where the decision wants a lower one. Changing it moves every OFDM entry and crossing - for
 review, with a Good 4-10 dB sweep.
 
-### BUG-BACKSTOP-RACES-RTO (open, 2026-11-10) — P2: the backstop's re-confirm ACK fires as the sender's resend starts
+### BUG-BACKSTOP-RACES-RTO (MITIGATED 2026-11-12: a re-confirm that cannot end before the resend is withheld) — P3: the backstop's re-confirm ACK fires as the sender's resend starts
 
 **What.** The anchored-burst ACK backstop (`streaming_sync_acquisition.cpp`, F165) fires 14.6 s
 after an accepted anchor that framed no group and asks for a re-confirm ACK. Its comment says this
@@ -309,6 +309,15 @@ run and its re-confirm is lost to the channel anyway; the race matters at margin
 (Moderate@10), where a campaign is needed to judge any change. The MC-DPSK counterpart (a lost
 compact burst draws no ACK) is handled by `ULTRA_MCDPSK_ACK_REPAIR` (turn-loss ACK at the burst's
 tail).
+
+**Update 2026-11-12 (mitigated).** Measured: in twelve GUI runs at ITU Good 5 dB every backstop keyed
+0.4-2.1 s into the resend - the 14.61 s window (timed, besides, from the search's acceptance, 0.5-1.5 s
+late) exceeds the INFLIGHT-RTO of most groups (QPSK R1/2 x4: 15.7 s; 16QAM R3/4 x16: 15.5 s), so the
+re-confirm almost never fitted. Now timed from the anchor's training start, and withheld unless it
+can end before the resend of the last framed group (`anchoredBackstopReconfirmFits`); the crater
+verdict rides the next ACK. Remaining: an EARLIER re-confirm (at the expected group's air end) would
+reach the sender a round sooner - it needs the descriptor-lost group's size and the novelty rule for
+the timer re-confirm (the age rule drops any re-confirm younger than 13 s).
 
 ### BUG-TX-LEVEL-HANDSET (open, 2026-11-10) — P3 cleanup: the OFDM data level is a hand-set number
 
@@ -2748,6 +2757,13 @@ as a new listener. Only sessions that connect on an MC-DPSK profile other than R
 must come back down are affected. Test: `DualListenEngine` (Robust session, OFDM frame then the
 ROBUST_MID fallback: 1 of 2 heard before, 2 of 2 after). CHANGELOG 2026-11-12.
 
+### BUG-STRUCTURE-MEMBER-STANDALONE (FIXED 2026-11-12) — was P2: a member found by structure acquisition after a lost head was taken for a standalone frame, and its ACK keyed into the rest of the burst
+
+A frame decoded at an accepted full anchor proved a standalone turn - a dual chirp's meaning - but
+frame-structure acquisition finds every connected group start, a mid-burst member included. GUI ITU
+Good 5 dB seed 44: ACK 2.3 s before the sender's key-down, lost, a 15.7 s RTO. Only a dual-chirp lock
+proves it now, and every OFDM turn's last frame (singletons included) carries PHYSICAL_BURST_END.
+Test: `BurstStructureMemberAnchor`. CHANGELOG 2026-11-12.
 
 ### BUG-MCDPSK-PHYSICAL-REPUBLISHED (FIXED 2026-11-12, updateDataSpanPhysicalSNR) — was P2: a compact burst's continuation frames re-published the first frame's physical SNR
 

@@ -169,6 +169,31 @@ inline constexpr int kDefaultTxTailMs = 50;
 // FT-891 ~20 ms; 5-30 ms range) must never switch under RF.
 inline constexpr int kTxRelaySilentFloorMs = 30;
 
+// ANCHORED-BURST BACKSTOP (F165): an accepted anchor that frames no group (its descriptor lost)
+// fires this long after the anchor's TRAINING START on the sample clock - the longest group a
+// sender may key (kMaxBurstAirtimeCeilingMs) after a full descriptor (1410 ms) plus a margin
+// (1200 ms) - and asks for a re-confirm ACK. One constant for the decoder's timer and the
+// connection's fit test below. Until 2026-11-12 the decoder timed it from the moment its search
+// ACCEPTED the anchor (~0.5-1.5 s of search latency later), which the derivation never assumed.
+inline constexpr uint32_t kAnchoredBackstopWindowMs = kMaxBurstAirtimeCeilingMs + 1410 + 1200;
+// The sender's half of the re-confirm's timing. It resends the group the anchor opened at its
+// key-up + RTO(n), from the INFLIGHT-RTO table both ends build for the rung; the anchor's training
+// starts at most a lead-in and a full chirp anchor after that key-up. A re-confirm that is still on
+// the air when the resend keys is heard by nobody: the sender is transmitting (half-duplex), and
+// this end blanks its own receive over the resend's head - descriptor lost again, the next
+// backstop, the same race (BUG-BACKSTOP-RACES-RTO: in six GUI runs at ITU Good 5 dB every backstop
+// fired 0.84-0.86 s into the resend of a 4-frame group, RTO 15.7 s). The guard covers the sender's
+// tail, its T/R recovery and decode scheduling.
+inline constexpr uint32_t kBackstopReconfirmGuardMs = 500;
+inline constexpr bool anchoredBackstopReconfirmFits(uint32_t sender_rto_ms,
+                                                    uint32_t ack_airtime_ms) {
+    const uint64_t anchor_after_keyup_ms =
+        static_cast<uint64_t>(kDefaultTxLeadInMs) + kWideOFDMFullAnchorExtraMs;
+    const uint64_t ack_end_ms = anchor_after_keyup_ms + kAnchoredBackstopWindowMs +
+                                ack_airtime_ms + kBackstopReconfirmGuardMs;
+    return ack_end_ms <= sender_rto_ms;
+}
+
 inline int configuredTxLeadInMs() {
     static const int value = [] {
         const char* e = std::getenv("ULTRA_TX_LEADIN_MS");
