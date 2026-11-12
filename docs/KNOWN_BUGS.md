@@ -223,6 +223,13 @@ optimistic side of the physical measurement.
 **Update 2026-11-12.** Same lift on the MC-DPSK side: ITU Good 0 dB seed 47, `SNR=1.9 sel=7.2` picked
 MC-DPSK Robust (DQPSK, 4 codewords) for a 0 dB channel; with its CONNECT_ACK lost it exposed
 BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK (fixed), which turned a bad pick into a failed connection.
+The same selection SNR drives follow up-crossings: ITU Good +5 dB seed 46 (2 KB), "sel 8.5 dB;
+reading 2.9, physical 6.5 dB x3 -> COMMAND OFDM" crossed a 5 dB session up to OFDM (Good floor 8),
+which failed and crossed back (331 s vs 136 s for the arm that held the crossing); seed 44 entered
+OFDM at `SNR=4.0 sel=8.3` and, before BUG-LISTENER-WAITS-FOR-CONFIRMATION was fixed, died. The
+physical estimate read ~1.5 dB over the dial here and the cap adds 2 dB: the selection is an upper
+bound where the decision wants a lower one. Changing it moves every OFDM entry and crossing - for
+review, with a Good 4-10 dB sweep.
 
 ### BUG-BACKSTOP-RACES-RTO (open, 2026-11-10) — P2: the backstop's re-confirm ACK fires as the sender's resend starts
 
