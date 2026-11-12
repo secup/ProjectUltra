@@ -2770,6 +2770,16 @@ demodulated at DBPSK, and restores its own constellation when the candidate is c
 responder on a DQPSK 4-codeword session decodes an unconnected initiator's CONNECT (missed with the
 switch removed).
 
+**Second half (2026-11-12, 07:40).** The GUI re-run (Good 0 dB seed 47, measured timeout on) failed
+the same way with the fix built: the wait was now sized at DBPSK ("waiting for 2-CW fixed CONNECT
+frame (175104 samples)"), and the very next line was "Frame timeout after 7072 ms (need=175104
+samples, timeout=5648 ms)". The readiness check tested the frame clock (from the sync) before the
+samples: the first-frame slice of a 4-codeword session is 340992 samples (7.1 s), so a CONNECT
+re-armed after it read as late with every sample in the ring, and was never decoded - at either
+constellation, so this also blocked the pre-fix DQPSK attempt. The engine test runs synchronously
+and could not see it. Fix (92e8a26a): `streaming_decode_policy::frameWaitTimedOut` - a wait times
+out only while its samples are missing (test `StreamingDecodePolicy`).
+
 ### BUG-MCDPSK-FALSE-TAIL (FIXED 2026-11-12, mc_burst_next_slot_proven_) — was P1 at low SNR: a burst ended after frame 1 while its frames said more follow
 
 The receiver ended an MC-DPSK burst continuation whenever the next frame's window read as noise

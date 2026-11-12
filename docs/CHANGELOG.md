@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(decoder): a frame wait times out only while its samples are missing
+
+**What broke.** `checkIfReadyToDecode` tested the frame clock (elapsed since the sync) before
+checking whether the required samples were in the ring. When the requirement shrank after a long
+wait - a connected MC-DPSK receiver's first-frame slice of a 4-codeword session is 340992 samples
+(7.1 s), and the frame turns out to be a 2-CW fixed CONNECT (175104 samples at DBPSK) - the 5.6 s
+budget of the smaller requirement had already passed: "Frame timeout after 7072 ms (need=175104
+samples, timeout=5648 ms)", the candidate dropped with every sample present. A responder whose
+CONNECT_ACK was lost therefore never decoded the initiator's repeats (GUI ITU Good 0 dB seed 47,
+"Connect failed after 10 attempts", again after the DBPSK-profile fix of BUG-MCDPSK-CONNECT-AFTER-
+DQPSK-PICK). The synchronous engine test could not see it (no wall-clock wait).
+
+**What changed (92e8a26a).** `streaming_decode_policy::frameWaitTimedOut(available, required,
+elapsed, timeout)` - true only when samples are missing and the budget is spent; the readiness
+check uses it.
+
+**Verification.** `StreamingDecodePolicy` (present -> decode whatever the clock; missing past the
+budget -> give up; missing within it -> wait). ctest 120/120. GUI: below.
+
+---
+
 ## 2026-11-12 — GUI verification of the morning's fixes at HEAD (v22)
 
 ITU Good / AWGN, 7.3 Hz, half-duplex radios, follow on (default), all 9 PASS with both files CRC-clean:
