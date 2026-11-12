@@ -2804,6 +2804,20 @@ inline uint32_t mcDpskPartialSackHoldMs(const MCDPSKFrameTiming& timing) {
 // the upper rung's window burst plus its retransmission timeout (the sender hears nothing back and
 // falls back only then); a clean cycle at the lower rung is its window burst plus the ACK. The run
 // is the first divided by the second, so probing never spends more airtime than the evidence took.
+// How long a receiver may hold a burst's first frame before decoding it, beyond the frame itself: it
+// buffers a whole frame at the slowest constellation (it cannot know which one the sender used), so a
+// one-frame burst at a faster rung is decoded - and acknowledged - that much later. GUI 2026-11-12:
+// a one-frame DQPSK burst was decoded 2.8 s after it ended; 5184 - 2624 = 2560 ms of it is this.
+// 0 at the slowest rung. Part of the ACK latency a sender must allow (ULTRA_MCDPSK_MEASURED_RTO).
+inline uint32_t mcDpskFirstFrameLookaheadMs(Modulation mod, int num_carriers,
+                                            int samples_per_symbol, int cw_count) {
+    const auto self = mcDpskFrameTiming(mod, num_carriers, samples_per_symbol, cw_count);
+    const auto slowest = mcDpskFrameTiming(kMcDpskRungModulations[0], num_carriers,
+                                           samples_per_symbol, cw_count);
+    return slowest.data_only_ms > self.data_only_ms ? slowest.data_only_ms - self.data_only_ms
+                                                    : 0u;
+}
+
 // Frames in an MC-DPSK up-step probe: the lower rung's window when the upper rung's is larger,
 // so a failed probe costs no more airtime than a burst at the rung it leaves (the sender caps its
 // bursts until the rung is confirmed, Connection::mcdpsk_probe_cap_active_). Equal to both

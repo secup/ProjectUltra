@@ -68,6 +68,18 @@ the other constellation with the same waveform), the listener's demodulator stat
 false MC-DPSK syncs on OFDM bursts. Mitigated: an up-crossing needs a physical reading in the burst
 (2026-11-12), and the crossing's pool clear usually drops the reading.
 
+### BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY (open, 2026-11-12) — P3: a one-frame DQPSK burst is acknowledged 2.6 s late
+
+A receiver buffers a whole frame at the slowest MC-DPSK constellation (DBPSK) before decoding a
+burst's first frame, because it cannot know which one the sender used (the compact first-frame
+decode then tries the configured constellation and the other). For a one-frame burst at DQPSK that
+delays the decode - and the end-of-turn ACK - by 5184 - 2624 = 2560 ms (GUI 2026-11-12: burst end
+122.0 s, decode 124.83 s; DBPSK bursts decode 0.33 s after their end). Multi-frame bursts recover
+(frame 2 is already buffered when frame 1 decodes). Costs: ~2.6 s per one-frame DQPSK turn, and a
+timeout guard that must allow it (`mcDpskFirstFrameLookaheadMs`, ULTRA_MCDPSK_MEASURED_RTO).
+Direction: try the decode at the commanded constellation as soon as its frame is complete, and
+only wait the slowest-rung length when that fails.
+
 ### BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (open, 2026-11-12) — P2, low SNR: an MC-DPSK session's tone ACK never lengthens
 
 `app.cpp` sizes the tone-burst ACK by the staircase (`symbolMsForSNR`: 12/25/50/100 ms symbols by

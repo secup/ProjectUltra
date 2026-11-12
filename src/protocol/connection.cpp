@@ -7738,18 +7738,24 @@ void Connection::configureArqForCurrentDataMode() {
                       win, table[1], table[win], ack_timeout_ms,
                       table[win] == ack_timeout_ms ? "OK" : "MISMATCH");
             // ULTRA_MCDPSK_MEASURED_RTO: that table becomes the ceiling and the value before the
-            // first measured burst. Guard = one ACK airtime of this geometry; with the ACK repair,
-            // a turn that lost its last frame is acknowledged one frame after the burst (the
-            // continuation's tail decision), so that frame is budgeted too.
+            // first measured burst. Guard = one ACK airtime of this geometry plus the receiver's
+            // first-frame look-ahead (a one-frame burst at a faster rung is decoded a slowest-rung
+            // frame later: the guard of ack_ms alone let the timeout key over that late ACK, GUI
+            // 2026-11-12); with the ACK repair, a turn that lost its last frame is acknowledged
+            // one frame after the burst (the continuation's tail decision), so that frame too.
             if (connection_policy::mcDpskMeasuredRtoEnabled()) {
                 const uint32_t overhead_ms =
                     connection_policy::kMCDPSKDualChirpPreambleMs + timing.overhead_ms;
+                const uint32_t guard_ms =
+                    timing.ack_ms + connection_policy::mcDpskFirstFrameLookaheadMs(
+                                        data_modulation_, config_.mc_dpsk_num_carriers,
+                                        config_.mc_dpsk_samples_per_symbol, data_frame_cw_count_);
                 const uint32_t extra_ms = mcdpsk_ack_repair_enabled_ ? timing.data_only_ms : 0;
-                arq_.setMeasuredBurstTimeouts(overhead_ms, timing.data_only_ms, timing.ack_ms,
+                arq_.setMeasuredBurstTimeouts(overhead_ms, timing.data_only_ms, guard_ms,
                                               extra_ms);
                 LOG_MODEM(INFO, "Connection: MC-DPSK measured timeout: burst = %u + n x %u ms, "
                           "guard %u ms, extra %u ms (latency srtt %.0f ms%s)",
-                          overhead_ms, timing.data_only_ms, timing.ack_ms, extra_ms,
+                          overhead_ms, timing.data_only_ms, guard_ms, extra_ms,
                           arq_.postBurstLatencySrttMs(),
                           arq_.haveMeasuredPostBurstLatency() ? "" : ", not yet measured");
             }

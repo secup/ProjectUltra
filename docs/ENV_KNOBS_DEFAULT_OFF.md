@@ -820,5 +820,7 @@ burst is 13 % faster per frame, but the probe schedule then waited 4 clean DBPSK
 `1` on the sending station: an MC-DPSK burst's retransmission timeout is its airtime plus the
 post-burst ACK latency measured on earlier bursts (RFC 6298, back-off on silent rounds, the formula
 as ceiling) instead of the formula's 43.6 s for a 3-frame DBPSK burst (measured round trip 18.4 s).
-Saves ~23 s per lost tone ACK. Default off until a GUI A/B on fading channels; on a rig the peer's
-decode speed and CAT latency are measured, not assumed.
+Saves ~23 s per lost tone ACK. GUI 2026-11-12: Good 0 dB 5 seeds 197 vs 228 s mean; follow matrix
+9/9 PASS, but a one-frame DQPSK burst's ACK (2.8 s late, the receiver's first-frame look-ahead)
+collided with the 3.0 s timeout - the guard now includes that look-ahead; re-run before any flip.
+On a rig the peer's decode speed and CAT latency are measured, not assumed.

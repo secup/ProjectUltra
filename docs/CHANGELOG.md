@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(MC-DPSK measured timeout, knob off): the guard covers the receiver's first-frame look-ahead
+
+**What broke (GUI, ULTRA_MCDPSK_MEASURED_RTO=1, follow matrix dip seed 42).** A one-frame DQPSK burst
+ended at 122.0 s; the receiver decoded it at 124.83 s and sent its ACK - 2.8 s after the burst, where
+ACKs normally come 0.33 s after. The sender's measured timeout (srtt 1.07 s + max(4 rttvar 0.49 s,
+ACK 1.07 s) = 3.0 s after the burst) fired 0.14 s into that ACK, keyed the resend over it and lost
+it; with back-off the frame cost two timeout rounds (MC-DPSK spell: 4 timeouts in 4 bursts, against
+0 in 8 without the knob). Cause: a receiver buffers a whole frame at the slowest constellation before
+decoding a first frame (it cannot know which one the sender used), so a one-frame burst at DQPSK is
+acknowledged 5184 - 2624 = 2560 ms late.
+
+**What changed.** `connection_policy::mcDpskFirstFrameLookaheadMs` (slowest rung's frame time minus
+this rung's: 0 at DBPSK, 2560 ms at DQPSK) is added to the measured timeout's guard. A 3-frame DQPSK
+burst: 9264 + 1430 + 3627 = 14.3 s (formula 24.8 s). The receiver-side latency itself is filed
+(BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY). The knob stays off until a GUI re-run.
+
+**Verification.** `ConnectionPolicy` (look-ahead 0 / 2560 ms); SelectiveRepeatARQ, WaveformFollow,
+ConnectionAdaptive green. Follow matrix with the knob before this fix: 9/9 PASS
+(f21: dips 240/229/228, QSB 285/200, dip lengths 191/230, Good 20 92, AWGN 20 65 s).
+
+---
+
 ## 2026-11-12 — FIX(follow): the dual-listen listener runs from connection, not handshake confirmation (BUG-LISTENER-WAITS-FOR-CONFIRMATION)
 
 **What broke.** GUI ITU Good +5 dB seed 44 failed in both arms of an A/B: the session started on OFDM

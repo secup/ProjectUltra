@@ -1183,6 +1183,12 @@ void test_mcdpsk_rate_controller() {
     // 4 codewords the DBPSK window is 2 and DQPSK's 3; the probe goes with the lower rung's window
     // (mcDpskProbeBurstFrames): 2 x 3.69 s + its 23.5 s timeout = 30.9 s over 2 x 7.10 s + 1.92 s =
     // 16.1 s -> 2 (a full 3-frame probe priced 42.0 s -> 3).
+    // A receiver buffers a slowest-rung frame before decoding a first frame: a DQPSK burst's ACK
+    // can come 5184 - 2624 = 2560 ms later than its own frame time (the measured timeout's guard).
+    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DBPSK, 8, 1024, 3) == 0,
+          "no first-frame look-ahead at the slowest rung");
+    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DQPSK, 8, 1024, 3) == 2560,
+          "a DQPSK first frame waits a DBPSK frame: 2560 ms at the production geometry");
     CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 3) == 2,
           "first probe after 2 clean DBPSK bursts at the production 3-codeword geometry");
     CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 4) == 2,
