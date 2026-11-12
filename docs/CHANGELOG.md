@@ -10,6 +10,19 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(decoder): ring positions are converted under the lock that copied the samples
+
+Two decode paths copied ring samples under the buffer mutex and converted the ring position to an
+absolute sample afterwards, reading `total_fed_` and `write_pos_` unlocked: audio fed in between
+moves both, so the burst block (`tryDemodulateNextBurstFrame`) or the sync-recovery retry buffer
+(`decodeCurrentFrame`) could be stamped with another position than the samples it holds (its CFO
+pre-correction phase and training position follow that stamp). Both now take the position from the
+same locked ring state as the copy. Found reviewing the ThreadSanitizer sweep (the atomic fed
+counter had made those reads defined, not consistent). Dev ctest 112/112; EngineConcurrency clean
+under ThreadSanitizer.
+
+---
+
 ## 2026-11-12 — FIX(ack): a startup probe's launch-ACK copy is not a monitor candidate (BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR)
 
 The same mechanism as the crossing ACK's copy (2026-11-11): a CRC-valid detection the tone-ACK

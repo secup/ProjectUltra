@@ -941,21 +941,24 @@ StreamingDecoder::BurstFrameResult StreamingDecoder::tryDemodulateNextBurstFrame
     // Copy samples from circular buffer
     std::vector<float> block(burst_min_block_);
     size_t block_start_pos = burst_next_pos_;
+    // The block and its absolute position from ONE ring state: audio fed after the copy moves
+    // total_fed_ and write_pos_, and converting with the later pair placed the block elsewhere.
+    size_t abs_burst = burst_next_pos_;
     {
         std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
         for (size_t i = 0; i < burst_min_block_; i++) {
             block[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(burst_next_pos_ + i)];
         }
-    }
-
-    size_t abs_burst = burst_next_pos_;
-    if (sync_controller_.ring_.total_fed_ >= sync_controller_.ring_.buffer_capacity_samples_) {
-        const size_t oldest_abs = sync_controller_.ring_.total_fed_ - sync_controller_.ring_.buffer_capacity_samples_;
-        const size_t oldest_pos = sync_controller_.ring_.write_pos_;
-        const size_t offset = (burst_next_pos_ >= oldest_pos)
-            ? (burst_next_pos_ - oldest_pos)
-            : (sync_controller_.ring_.buffer_capacity_samples_ - oldest_pos + burst_next_pos_);
-        abs_burst = oldest_abs + offset;
+        const size_t fed = sync_controller_.ring_.total_fed_;
+        const size_t capacity = sync_controller_.ring_.buffer_capacity_samples_;
+        if (fed >= capacity) {
+            const size_t oldest_abs = fed - capacity;
+            const size_t oldest_pos = sync_controller_.ring_.write_pos_;
+            const size_t offset = (burst_next_pos_ >= oldest_pos)
+                ? (burst_next_pos_ - oldest_pos)
+                : (capacity - oldest_pos + burst_next_pos_);
+            abs_burst = oldest_abs + offset;
+        }
     }
 
     // Energy check. In a marked burst-interleaved group, a weak/missing

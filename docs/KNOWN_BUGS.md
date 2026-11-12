@@ -52,26 +52,6 @@ BUG-MCDPSK-RESEND-NO-TURN-END). After the fixes (GUI, CHANGELOG): dips -3.0 % (f
 length sweep -2.0 s, QSB even, 60 s outage +10 s (patience worst case). Remaining: the 60 s-outage
 case and BUG-POST-CROSSING-OVERCLIMB; downgraded to P3.
 
-### BUG-POST-CROSSING-OVERCLIMB (FIXED 2026-11-12, kMinGroupsForMultiRungClimb) — P2: one group's EVM jumps the ladder three rungs
-
-After an up-crossing the OFDM ladder starts fresh (`resetOfdmLadderState`); the receiver authority
-commanded 8PSK R2/3 -> 32QAM R2/3 on the first group's EVM, and the next 9-frame 32QAM burst failed
-whole on ITU Good 20 dB (GUI, seeds 44 and 46: ~13-14 s each, then 16QAM). One group is one sample of
-a fading channel; a multi-rung climb on it bets the next burst on a fade crest. Direction: bound a
-climb by the confidence of the EVM estimate over the groups behind it, not by one group.
-
-### BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL (FIXED 2026-11-12, escapeHasPeerEvidence) — P2: a dip's retries demote the returned link
-
-Follow off, ITU Good 20 -> 0 -> 20 dB, seed 46 (GUI, carrier sense fixed): the collapse escape's
-MODE_CHANGE retried into the dead channel (80-110 s, all lost); at the return a "frame stuck, 5 retx
-at current rate" escape fired on retries accumulated during the dip and demoted 8PSK R2/3 -> QPSK
-R3/4 although that same 8PSK burst decoded 4/4. Its MODE_CHANGE was queued behind the data burst;
-the receiver's ACK for the burst collided with it and the handshake took 22 s (167 -> 189 s, two
-timeouts). The follow-off arm is ~14 s slower on dips than before the carrier-sense fix because of
-it (the false busy used to hold those retries). Direction: retries made while nothing at all was
-heard are no evidence against the rung (the stale-evidence rule follow already has); a control
-frame must not queue behind a data burst whose ACK is due.
-
 ### BUG-CHIRP-SEARCH-SEGV (open, 2026-11-11) — P1: decode-thread SIGSEGV in the chirp search
 
 Two GUI crashes (ips 2026-11-11 08:49 and 10:57, a single-decoder build): the decode thread in
@@ -783,7 +763,7 @@ bias (the |eq|-EMA instability detector reading 16QAM's three rings as channel i
 and LLR scale conventions reported as ~4x (8PSK) and ~3.16x (16QAM) overconfident versus the
 QPSK-exact convention, which advances the +/-20 clip and erases CSI dynamic range.
 
-### BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (open, 2026-07-29) — P2, ATTRIBUTION UNRESOLVED
+### BUG-DISCONNECT-WAVEFORM-SWAP-SIGSEGV (FIXED 2026-07-29 in 79fe287: deferred waveform reclamation; title corrected 2026-11-12) — was P2
 
 **Symptom.** `ultra_gui` segfaults in the RX decode thread during DISCONNECT teardown.
 Crash report `~/Library/Logs/DiagnosticReports/ultra_gui-2026-07-28-220448.ips`:
@@ -2576,6 +2556,26 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-POST-CROSSING-OVERCLIMB (FIXED 2026-11-12, kMinGroupsForMultiRungClimb) — P2: one group's EVM jumps the ladder three rungs
+
+After an up-crossing the OFDM ladder starts fresh (`resetOfdmLadderState`); the receiver authority
+commanded 8PSK R2/3 -> 32QAM R2/3 on the first group's EVM, and the next 9-frame 32QAM burst failed
+whole on ITU Good 20 dB (GUI, seeds 44 and 46: ~13-14 s each, then 16QAM). One group is one sample of
+a fading channel; a multi-rung climb on it bets the next burst on a fade crest. Direction: bound a
+climb by the confidence of the EVM estimate over the groups behind it, not by one group.
+
+### BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL (FIXED 2026-11-12, escapeHasPeerEvidence) — P2: a dip's retries demote the returned link
+
+Follow off, ITU Good 20 -> 0 -> 20 dB, seed 46 (GUI, carrier sense fixed): the collapse escape's
+MODE_CHANGE retried into the dead channel (80-110 s, all lost); at the return a "frame stuck, 5 retx
+at current rate" escape fired on retries accumulated during the dip and demoted 8PSK R2/3 -> QPSK
+R3/4 although that same 8PSK burst decoded 4/4. Its MODE_CHANGE was queued behind the data burst;
+the receiver's ACK for the burst collided with it and the handshake took 22 s (167 -> 189 s, two
+timeouts). The follow-off arm is ~14 s slower on dips than before the carrier-sense fix because of
+it (the false busy used to hold those retries). Direction: retries made while nothing at all was
+heard are no evidence against the rung (the stale-evidence rule follow already has); a control
+frame must not queue behind a data burst whose ACK is due.
 
 ### BUG-STARTUP-PROBE-COPY-DISARMS-MONITOR (FIXED 2026-11-12, latent) — a probe's launch-ACK copy disarmed the monitor
 

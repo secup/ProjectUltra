@@ -2938,15 +2938,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                       frame_policy::kMinSyncRecoveryCorrelation);
         }
 
-        auto ringPosToAbsolute = [this](size_t ring_pos) -> size_t {
-            if (sync_controller_.ring_.total_fed_ < sync_controller_.ring_.buffer_capacity_samples_) {
+        // Ring position -> absolute sample; call with the buffer mutex held, so the copied
+        // samples and their position come from one ring state.
+        auto ringPosToAbsoluteLocked = [this](size_t ring_pos) -> size_t {
+            const size_t fed = sync_controller_.ring_.total_fed_;
+            const size_t capacity = sync_controller_.ring_.buffer_capacity_samples_;
+            if (fed < capacity) {
                 return ring_pos;
             }
-            const size_t oldest_abs = sync_controller_.ring_.total_fed_ - sync_controller_.ring_.buffer_capacity_samples_;
+            const size_t oldest_abs = fed - capacity;
             const size_t oldest_pos = sync_controller_.ring_.write_pos_;
             const size_t offset = (ring_pos >= oldest_pos)
                 ? (ring_pos - oldest_pos)
-                : (sync_controller_.ring_.buffer_capacity_samples_ - oldest_pos + ring_pos);
+                : (capacity - oldest_pos + ring_pos);
             return oldest_abs + offset;
         };
 
@@ -2962,6 +2966,7 @@ void StreamingDecoder::decodeCurrentFrame() {
 
                 std::vector<float> retry_buffer;
                 size_t retry_len = frame_len;
+                size_t retry_abs = 0;
                 {
                     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
                     size_t available;
@@ -2978,15 +2983,16 @@ void StreamingDecoder::decodeCurrentFrame() {
                     for (size_t i = 0; i < retry_len; ++i) {
                         retry_buffer[i] = sync_controller_.ring_.buffer_[sync_controller_.ring_.wrapRingIndexLocked(retry_sync + i)];
                     }
+                    retry_abs = ringPosToAbsoluteLocked(retry_sync);
                 }
 
                 // Pre-correct CFO on retry buffer too
                 if (is_ofdm && std::abs(frame_demodulator_.preCorrectionCfo()) > 0.01f) {
-                    frame_demodulator_.applyCFOPreCorrection(retry_buffer, sync_cfo_, ringPosToAbsolute(retry_sync), log_prefix_.c_str());
+                    frame_demodulator_.applyCFOPreCorrection(retry_buffer, sync_cfo_, retry_abs, log_prefix_.c_str());
                 }
 
                 waveform_->reset();
-                waveform_->setAbsoluteTrainingPosition(ringPosToAbsolute(retry_sync));
+                waveform_->setAbsoluteTrainingPosition(retry_abs);
                 waveform_->setFrequencyOffset(decode_cfo);
                 const int retry_expected_codewords =
                     expectedOFDMCodewordsForSamples(retry_buffer.size());
