@@ -67,7 +67,9 @@ unboosted (`boundByPhysicalEvidenceDb`). A burst with no qualifying reading name
 (`SessionPick::burst_reading`, 2026-11-12): the pool's fallback is the session's scalar SNR, which
 the crossing does not clear - the first ACK of a dual-listen receiver that followed the peer down
 (its pool cleared with the triggering frame's reading) commanded OFDM at 0 dB on the pre-fade 18.6 dB
-and doubled the run (BUG-UPCROSS-STALE-SCALAR).
+and doubled the run (BUG-UPCROSS-STALE-SCALAR). Nor does a burst whose readings carry no physical SNR:
+nothing holds the usable reading under the channel, and the listener's first frame once read a
+data-aided 40 dB at 0 dB (BUG-LISTENER-DATA-AIDED-OVERREAD).
 
 Probation until the first OFDM burst:
 - receiver: no OFDM burst by `upCrossingRevertMs` (its ACK at the slowest staircase rung + TX lead-in

@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): an up-crossing needs a physically bounded reading
+
+**What was broken.** The dual-listen listener's first MC-DPSK frame after following the peer down
+(mid-dip, 0 dB) reported a data-aided SNR of 40.2 dB (three seeds) or 18.4 dB while its own
+training estimate read -5..+5 dB (BUG-LISTENER-DATA-AIDED-OVERREAD, root cause open). Usually the
+crossing's pool clear drops that reading and BUG-UPCROSS-STALE-SCALAR's rule holds the command;
+when the reading reaches the pool after the clear it stands: GUI, ITU Good 2-minute 0 dB dip,
+seed 46 - "pick OFDM_CHIRP 8PSK R2/3 (sel 18.4 dB; reading 18.4, physical 0.0 dB x0) -> COMMAND
+OFDM" at 109.4 s, a failed probation (no ACK for the first OFDM burst), a doubled run, and the
+return to OFDM 4 s later and two rungs lower (229 s against 213 s).
+
+**What changed.** `upCrossingWordForAck` names an OFDM rung only when the burst's readings include
+a physical SNR (training-span power over burst-time noise): without one nothing holds the usable
+reading under the channel (usable <= channel). In every GUI run tonight, 167 of 170 up-crossing
+commands carried a physical reading; the three without one were the false ones.
+
+**Verification.** `WaveformFollow` 146/146 (new: a 40.2 dB reading with no physical SNR commands
+nothing; fixtures that expect an up-crossing now feed a physical reading; the check fails without
+the rule). Dev ctest 112/112. GUI: below.
+
+---
+
 ## 2026-11-12 — FIX(sim fidelity): a transmission queued behind one on the air keeps the station keyed (BUG-SIM-TX-KEYED-EARLY)
 
 **What was broken.** The GUI's sim TX path (`doQueueRealTxSamples`, OTASim) set

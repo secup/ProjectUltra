@@ -9267,8 +9267,15 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
     // the peer down, its first MC-DPSK ACK commanded OFDM 8PSK R2/3 on an 18.6 dB reading from
     // before the fade, the crossing failed and doubled the run, and the real return waited one
     // MC-DPSK round longer (8 s).
+    // And the reading must be physically bounded: a burst with no physical SNR (training-span power
+    // over burst-time noise) has nothing to hold its usable reading under the channel (usable <=
+    // channel). GUI, ITU Good 2-minute 0 dB dip: the dual-listen listener's first MC-DPSK frame read
+    // a data-aided 40.2 dB (three seeds) and 18.4 dB at 0 dB while its own training estimate read
+    // -5..+5, with no physical reading in the burst ("physical 0.0 dB x0"); each commanded OFDM
+    // into the dip and the failed crossing doubled the run. Every genuine return carried one.
     const uint8_t ofdm_rung =
-        (pick.burst_reading && pick.rung.waveform == WaveformMode::OFDM_CHIRP)
+        (pick.burst_reading && pick.physical_n > 0 &&
+         pick.rung.waveform == WaveformMode::OFDM_CHIRP)
             ? coherentRungIndexFor(pick.mod, pick.rate)
             : kRungIdxNone;
     const uint8_t command = up_crossing_gate_.observe(clean, ofdm_rung);
@@ -9277,7 +9284,8 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
               "%.1f%s, physical %.1f dB x%u) -> %s (run %d)",
               clean ? "clean" : "loss", pick.rung.name, modulationToString(pick.mod),
               codeRateToString(pick.rate), pick.selection_snr_db, pick.reading_db,
-              pick.burst_reading ? "" : " - none from this burst, no evidence",
+              !pick.burst_reading ? " - none from this burst, no evidence"
+                                  : (pick.physical_n == 0 ? " - not physically bounded" : ""),
               pick.physical_n > 0 ? pick.physical_db : 0.0f, pick.physical_n,
               command != kRungIdxNone ? "COMMAND OFDM" : "stay", up_crossing_gate_.run());
     if (command == kRungIdxNone) {

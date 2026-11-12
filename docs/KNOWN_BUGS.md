@@ -50,6 +50,19 @@ Listen-before-ACK holds a deferred ACK on new decoder evidence (INV-TONE-ACK-005
 has no such hold. Rare since the escapes need evidence (MODE_CHANGE now comes almost only from
 them and the startup-probe rollback).
 
+### BUG-LISTENER-DATA-AIDED-OVERREAD (open, 2026-11-12; mitigated) — P2: the dual-listen listener's first MC-DPSK frame reads an absurd data-aided SNR
+
+GUI, ITU Good 2-minute 0 dB dip, follow on: the first MC-DPSK frame the receiver's dual-listen
+listener decodes after the peer crosses down (mid-dip) reported `data_aided` 40.2 dB (seeds 42,
+45, 47) and 18.4 dB (seed 46) while the same frame's training estimate read -4.9..+5.5 dB. Only the
+listener, only that first frame (in 342 routed data-aided readings tonight, the other large gaps
+are frames straddling the channel's return, which is physical). Not reproduced offline: `ultra prx`
+on MC-DPSK v2 frames at 0/6/12 dB AWGN with 7.3 Hz reads 0.2/6.3/12.5 dB. Candidates not yet ruled
+out: the compact first-frame constellation retry (`decodeMcDpskCompactFirstFrame` re-demodulates at
+the other constellation with the same waveform), the listener's demodulator state after a minute of
+false MC-DPSK syncs on OFDM bursts. Mitigated: an up-crossing needs a physical reading in the burst
+(2026-11-12), and the crossing's pool clear usually drops the reading.
+
 ### BUG-MCDPSK-SNR-HIGH-SNR-MODEL (open, 2026-11-11) — P3: both MC-DPSK SNR estimates drift above ~18 dB when the channel is not ideal
 
 The MC-DPSK carriers are not orthogonal on the symbol grid (10.67, 16.76, ... cycles per 1024-sample

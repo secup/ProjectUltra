@@ -340,7 +340,7 @@ void test_waveform_follow_knob_off_ignores_crossing_words() {
     CHECK(!ConnectionAdaptiveTestAccess::obeyCrossing(c, kRungIdxQam8R23) && crossings == 0 &&
               ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK,
           "knob off: an OFDM rung does not move an MC-DPSK session");
-    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     for (int i = 0; i < 4; ++i) {
         const uint8_t word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
         CHECK(connection_policy::decodeOfdmRungCommand(word) == kRungIdxNone,
@@ -357,7 +357,7 @@ void test_waveform_follow_receiver_commands_up_and_reverts() {
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
     ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
-    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
 
     const uint8_t first = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
     const uint8_t rung = connection_policy::decodeOfdmRungCommand(first);
@@ -388,7 +388,7 @@ void test_waveform_follow_receiver_commands_up_and_reverts() {
     // UpCrossingGate::kHeldGroups delivering groups.
     uint8_t word = 0;
     for (int i = 0; i < 2; ++i) {
-        ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
         word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
     }
     CHECK(connection_policy::decodeOfdmRungCommand(word) != kRungIdxNone,
@@ -412,7 +412,7 @@ void test_waveform_follow_first_ofdm_group_settles_probation() {
         unsetenv("ULTRA_WAVEFORM_FOLLOW");
         ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
         ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
-        for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+        for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
         (void)ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
         ConnectionAdaptiveTestAccess::tickFollow(c, 10);
         CHECK(ConnectionAdaptiveTestAccess::crossingProbeActive(c), "on probation after crossing");
@@ -550,7 +550,7 @@ void test_waveform_follow_mid_burst_acks_are_no_verdict() {
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
     ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
     ConnectionAdaptiveTestAccess::failUpCrossing(c);  // a backed-off run of 2 bursts
-    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     CHECK(connection_policy::decodeOfdmRungCommand(
               ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) == kRungIdxNone,
           "first clean burst of a run of 2: no command yet");
@@ -569,7 +569,7 @@ void test_waveform_follow_mid_burst_acks_are_no_verdict() {
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(holes_rx);
     ConnectionAdaptiveTestAccess::allowWaveformFollow(holes_rx);
     ConnectionAdaptiveTestAccess::failUpCrossing(holes_rx);
-    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(holes_rx, 22.0f, 0.05f);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(holes_rx, 22.0f, 0.05f, 23.0f);
     (void)ConnectionAdaptiveTestAccess::mcDpskAckWord(holes_rx, true);
     (void)ConnectionAdaptiveTestAccess::mcDpskMidBurstAckWord(holes_rx, 0x2);
     CHECK(connection_policy::decodeOfdmRungCommand(
@@ -744,7 +744,7 @@ void test_dual_listen_receiver_commands_up_and_follows_the_peer() {
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
     ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
     CHECK(ConnectionAdaptiveTestAccess::dualListen(c), "knob 2 latches dual-listen");
-    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     const uint8_t word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
     const uint8_t rung = connection_policy::decodeOfdmRungCommand(word);
     CHECK(rung != kRungIdxNone, "a clean burst at 22 dB commands OFDM");
@@ -782,7 +782,13 @@ void test_dual_listen_up_crossing_needs_a_reading_from_the_burst() {
     CHECK(connection_policy::decodeOfdmRungCommand(first) == kRungIdxNone,
           "no reading from this burst: the pre-fade 18.6 dB does not command OFDM");
     CHECK(ConnectionAdaptiveTestAccess::upCrossingRun(c) == 1, "and nothing failed: the run stays 1");
-    for (int i = 0; i < 3; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    // The listener's first frame read a data-aided 40.2 dB in a 0 dB dip, with no physical reading:
+    // not physically bounded, no command.
+    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 40.2f, 0.05f);
+    CHECK(connection_policy::decodeOfdmRungCommand(
+              ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) == kRungIdxNone,
+          "a reading with no physical SNR in its burst commands no OFDM");
+    for (int i = 0; i < 3; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     const uint8_t next = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
     CHECK(connection_policy::decodeOfdmRungCommand(next) != kRungIdxNone,
           "a clean burst reading 22 dB commands OFDM at once");
@@ -824,16 +830,16 @@ void test_dual_listen_missed_up_crossing_backs_off() {
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
     ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
-    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    for (int i = 0; i < 4; ++i) ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     CHECK(connection_policy::decodeOfdmRungCommand(
               ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) != kRungIdxNone,
           "commanded OFDM");
-    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     CHECK(connection_policy::decodeOfdmRungCommand(
               ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) == kRungIdxNone &&
               ConnectionAdaptiveTestAccess::upCrossingRun(c) == 2,
           "MC-DPSK came again: backed off to a run of 2, no command on this burst");
-    ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, 22.0f, 0.05f);
+    ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 22.0f, 0.05f, 23.0f);
     CHECK(connection_policy::decodeOfdmRungCommand(
               ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true)) != kRungIdxNone,
           "the second clean burst of the longer run commands again");
