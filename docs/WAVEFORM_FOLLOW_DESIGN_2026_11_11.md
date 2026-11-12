@@ -95,12 +95,14 @@ Measured before this rule (GUI, crossing after 25-40 s): ITU Good 40 s QSB dips 
   R1/4), or at the same rung or higher than the first (the sender did not step down) -> commands
   MC-DPSK DBPSK in that ACK. While the ladder is still stepping down it keeps its chance. The floor
   delivering even one frame in eight roughly matches MC-DPSK's best, so only empty groups count.
-- Sender: two retransmission timeouts without progress at one rung (`maybeCrossDownOnCollapse`,
-  `kFollowRoundsWithoutProgressToCross`) - the collapse escape's own evidence
-  (`zero_progress_rounds_`: under receiver authority only rounds with no ACK at all count, an empty
-  ACK neither counts nor resets it; progress or a rung change resets it). Polled before the escapes,
-  so it replaces them: their MODE_CHANGE rides OFDM control frames, which do not get through a link
-  this dead (fade run: four MODE_CHANGE retries, 40 s, at 0 dB).
+- Sender: two retransmission timeouts in a row in which the peer was not heard
+  (`maybeCrossDownOnCollapse`, `kFollowRoundsWithoutProgressToCross`, follow's own count
+  `follow_silent_rounds_`; the collapse escapes consume theirs). Any ACK - an empty one is the peer
+  answering, the receiver's to judge - and any CRC-valid frame from the peer end the silence
+  (2026-11-12: a MODE_CHANGE ACK arrived after a 40 s QSB trough and the sender crossed 0.2 s later
+  on the trough's rounds). Polled before the escapes, so it replaces them: their MODE_CHANGE rides
+  OFDM control frames, which do not get through a link this dead (fade run: four MODE_CHANGE
+  retries, 40 s, at 0 dB).
 - Receiver hears nothing while an object is incoming - a file in progress, or a payload partly
   reassembled (the TNC's messages travel as payloads, not files): 1.5 sender rounds of silence
   (`followReceiverSilenceMs`) -> crosses by itself, before the sender's rule, so the sender's first

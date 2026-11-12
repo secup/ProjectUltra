@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(follow): hearing the peer ends the sender's silence
+
+The sender's down-crossing (OFDM -> MC-DPSK) fires on two retransmission timeouts without an ACK
+(`follow_silent_rounds_`) once the patience has run out. Only a round with progress reset that count;
+an empty tone ACK and the peer's control frames did not. GUI, ITU Good 40 s QSB, seed 44 (climb-cap
+build, 294 s against 210 s for the build without it): during the second trough an escape's
+MODE_CHANGE went out and was lost twice; its third copy was ACKed after the channel came back, the
+sender applied 8PSK R2/3 and flushed a burst, and 0.2 s later crossed to MC-DPSK on the two silent
+rounds from inside the trough ("silent 60014 ms"). It spent 15 s on MC-DPSK at 20 dB and met the
+third trough with data left. (The faster run had drawn an empty ACK with a demote command in the
+trough instead; the climb cap only moved the bursts by a fraction of a second.)
+
+Now any ACK round (`noteArqRoundOutcome`, empty or not) and any CRC-valid frame from the peer
+(`onFrameReceived`, beside the receiver's own silence reset) clear the count: the crossing needs two
+timeouts in a row with nothing heard. An empty ACK means the peer decoded the descriptor; whether
+its data fails is the receiver's call (two empty groups at the floor command MC-DPSK). The escape
+evidence (`rto_rounds_since_peer_ack_`) stays tied to ARQ rounds: resetting it on a control frame
+would let retry counts from the trough demote the returned link (BUG-ESCAPE-STALE-AFTER-DEAD-CHANNEL).
+
+Tests: `WaveformFollow` 133/133 (new: two timeouts then a peer frame, or then an empty ACK, do not
+cross; two more timeouts do). Each half fails its check when removed. Dev ctest 112/112.
+
+---
+
 ## 2026-11-12 — FIX(decoder): ring positions are converted under the lock that copied the samples
 
 Two decode paths copied ring samples under the buffer mutex and converted the ring position to an

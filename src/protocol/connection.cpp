@@ -5177,6 +5177,10 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
             ++rto_rounds_since_peer_ack_;
         } else {
             rto_rounds_since_peer_ack_ = 0;
+            // The down-crossing's evidence is silence: an empty ACK is the peer answering (its
+            // descriptor decoded), which is the receiver's to judge (two empty groups at the floor
+            // command MC-DPSK), not a dead link.
+            follow_silent_rounds_ = 0;
         }
     }
     if (progress_frames > 0) {
@@ -6121,9 +6125,14 @@ void Connection::onFrameReceived(const Bytes& frame_data,
             "first CRC-valid classic frame from established initiator");
     }
 
-    // Waveform follow: any CRC-valid frame from the peer ends this receiver's silence.
+    // Waveform follow: any CRC-valid frame from the peer ends this end's silence, as a receiver
+    // (rx_follow_silence_ms_) and as a sender (the down-crossing's silent rounds): a link that
+    // carries the peer's frames is not dead. GUI, ITU Good QSB, seed 44: an escape's MODE_CHANGE ACK
+    // arrived after a 40 s trough and the sender crossed to MC-DPSK 0.2 s later on two silent rounds
+    // from inside the trough, then spent 15 s there at 20 dB.
     if (!remote_call_.empty() && v2::hashCallsign(remote_call_) == header.src_hash) {
         rx_follow_silence_ms_ = 0;
+        follow_silent_rounds_ = 0;
     }
 
     // Resolve source callsign from hash if possible

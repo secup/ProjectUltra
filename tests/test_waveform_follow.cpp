@@ -8,6 +8,7 @@
 
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
+#include "protocol/frame_v2.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 
 #include <chrono>
@@ -185,6 +186,9 @@ struct ConnectionAdaptiveTestAccess {
     }
     // The collapse escape consumed the shared counter: follow keeps its own.
     static void escapeConsumesEvidence(Connection& c) { c.zero_progress_rounds_ = 0; }
+    // The sender's poll on the evidence the rounds left (no override).
+    static void senderPollCrossing(Connection& c) { c.maybeCrossDownOnCollapse(); }
+    static int followSilentRounds(const Connection& c) { return c.follow_silent_rounds_; }
     static void setPendingModeChange(Connection& c, Modulation mod, CodeRate rate) {
         c.mode_change_pending_ = true;
         c.pending_modulation_ = mod;
@@ -660,6 +664,47 @@ void test_waveform_follow_sender_waits_out_a_fade() {
           "silent past the crossing time: MC-DPSK");
 }
 
+// Sender: the down-crossing counts rounds in which the peer was not heard. An ACK of any kind, or
+// any CRC-valid frame from the peer, ends that silence: two timeouts, then a MODE_CHANGE ACK, is a
+// live link (GUI QSB seed 44 crossed 0.2 s after one); two more timeouts in a row cross.
+void test_waveform_follow_sender_silence_ends_when_the_peer_is_heard() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "1", 1);
+    Connection framed;
+    Connection acked;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    for (Connection* c : {&framed, &acked}) {
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(*c, CodeRate::R2_3, 20.0f, 0.6f,
+                                                        Modulation::QAM8);
+        ConnectionAdaptiveTestAccess::allowWaveformFollow(*c);
+        CHECK(ConnectionAdaptiveTestAccess::putDataInFlight(*c), "data in flight");
+        ConnectionAdaptiveTestAccess::noteRound(*c, 0, "rto");
+        ConnectionAdaptiveTestAccess::noteRound(*c, 0, "rto");
+        CHECK(ConnectionAdaptiveTestAccess::followSilentRounds(*c) == 2,
+              "two retransmission timeouts are two silent rounds");
+    }
+    // The peer's control frame (an ACK of an older request): CRC-valid, from the peer.
+    framed.onFrameReceived(v2::ControlFrame::makeAck("K2DEF", "W1ABC", 0x7FF0).serialize(), false);
+    CHECK(ConnectionAdaptiveTestAccess::followSilentRounds(framed) == 0,
+          "a frame from the peer ends the silence");
+    ConnectionAdaptiveTestAccess::senderPollCrossing(framed);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(framed) == WaveformMode::OFDM_CHIRP,
+          "a link that just carried the peer's frame does not cross");
+    // An empty tone ACK: the peer decoded the descriptor and answered.
+    ConnectionAdaptiveTestAccess::noteRound(acked, 0, "toneburst-ack");
+    ConnectionAdaptiveTestAccess::senderPollCrossing(acked);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(acked) == WaveformMode::OFDM_CHIRP,
+          "an empty ACK is the peer answering: no crossing");
+    // Silence again: two timeouts in a row, and the link that never delivered crosses.
+    ConnectionAdaptiveTestAccess::noteRound(framed, 0, "rto");
+    ConnectionAdaptiveTestAccess::senderPollCrossing(framed);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(framed) == WaveformMode::OFDM_CHIRP,
+          "one timeout after the peer was heard: no crossing");
+    ConnectionAdaptiveTestAccess::noteRound(framed, 0, "rto");
+    ConnectionAdaptiveTestAccess::senderPollCrossing(framed);
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(framed) == WaveformMode::MC_DPSK,
+          "two timeouts in a row after it: MC-DPSK");
+}
+
 // Dual-listen (ULTRA_WAVEFORM_FOLLOW=2): the receiver hears both waveforms. It commands an
 // up-crossing but does not switch; a repeat of that ACK carries the same command; it switches when
 // OFDM arrives, to the commanded rung; two delivering groups hold the crossing.
@@ -1117,6 +1162,7 @@ int main() {
     test_waveform_follow_delivering_link_rides_out_a_silence();
     test_waveform_follow_empty_groups_follow_the_economics();
     test_waveform_follow_sender_waits_out_a_fade();
+    test_waveform_follow_sender_silence_ends_when_the_peer_is_heard();
     test_dual_listen_receiver_commands_up_and_follows_the_peer();
     test_dual_listen_receiver_commands_down_and_follows_the_peer();
     test_dual_listen_missed_up_crossing_backs_off();
