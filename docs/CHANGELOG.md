@@ -42,7 +42,8 @@ up-step still waits for a clean boundary (nothing in flight), so it is unchanged
 
 **Verification.** `WaveformFollow` `test_tail_demote_commits_by_descriptor` (all chunks of a 1.1 KB
 file in flight, a QPSK R2/3 command: descriptor commit, no MODE_CHANGE; a MODE_CHANGE without the
-fix). ctest 120/120.
+fix). ctest 120/120. GUI QSB seed 44 (30 KB): 296 s -> 220 s; MODE_CHANGE requests 1 (4 retries)
+-> 0, every switch by descriptor.
 
 ---
 
