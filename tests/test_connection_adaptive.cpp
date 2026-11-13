@@ -93,6 +93,10 @@ struct ConnectionAdaptiveTestAccess {
         c.turn_request_holdoff_ms_ = 0;
     }
 
+    // The peer holds the DATA turn: this end only receives - a data receiver's real state (the
+    // anchored-burst backstop applies only there; BUG-SENDER-BACKSTOP-STEALS-ACK).
+    static void makePeerIss(Connection& c) { c.local_data_turn_ = false; }
+
     static void makeConnectedOFDM(Connection& c,
                                   CodeRate rate,
                                   float snr = 15.0f,
@@ -2419,6 +2423,49 @@ void test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso() {
               !ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c) &&
               ConnectionAdaptiveTestAccess::latentBootstrapRung(c) == automatic_rung,
           "connected entry must clear outcome state while preserving this QSO's pre-cap seed");
+}
+
+// BUG-UNPROVEN-HOLD-REVERSES-STEPDOWN (2026-11-12): the receiver commanded a step-down, the
+// sender obeyed, and the switch's descriptor was lost, so the receiver still believes the old rung.
+// A verdict with no proven geometry (the anchored-burst backstop's) carries no evidence and must
+// keep the command this end issued - holding the physical rung re-commanded the rung that had
+// just failed (GUI ITU Good 20 -> 5 dB drop: idx 2 commanded, then idx 3 again).
+void test_latent_unproven_verdict_keeps_the_last_command() {
+    const uint8_t r23 = coherentRungIndexFor(Modulation::QPSK, CodeRate::R2_3);
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    c.setBurstChannelObservation(5.0f, 0.50f, 0.8f, true, 0.1f);
+    for (int i = 0; i < 3; ++i) {
+        const uint8_t cmd = ConnectionAdaptiveTestAccess::rxAuthorityCommand(c);
+        if (cmd != kRungIdxNone && cmd < r23) break;
+        ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+            c, /*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/true,
+            /*delivered_fraction=*/0.0f, /*delivered_frames=*/0, /*group_size=*/4);
+    }
+    const uint8_t down = ConnectionAdaptiveTestAccess::rxAuthorityCommand(c);
+    CHECK(down != kRungIdxNone && down < r23,
+          "proven 0/4 craters at QPSK R2/3 must command a lower rung (got idx "
+              << static_cast<int>(down) << ")");
+    // The sender obeys; the descriptor announcing it is lost, so the physical rung this end
+    // believes in stays QPSK R2/3.  The next verdict has no proven geometry.
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        c, /*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/false,
+        /*delivered_fraction=*/-1.0f, /*delivered_frames=*/0, /*group_size=*/0,
+        /*geometry_proven=*/false);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(c) == down,
+          "an unproven verdict must keep the step-down (got idx "
+              << static_cast<int>(ConnectionAdaptiveTestAccess::rxAuthorityCommand(c))
+              << ", commanded " << static_cast<int>(down) << ")");
+    // With no command issued yet, the hold falls back to the physical rung.
+    Connection fresh;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        fresh, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    fresh.setBurstChannelObservation(5.0f, 0.50f, 0.8f, true, 0.1f);
+    ConnectionAdaptiveTestAccess::updateRxAuthorityExact(
+        fresh, false, 0.0f, false, -1.0f, 0, 0, /*geometry_proven=*/false);
+    CHECK(ConnectionAdaptiveTestAccess::rxAuthorityCommand(fresh) == r23,
+          "an unproven first verdict holds the physical rung");
 }
 
 void test_latent_startup_probe_is_one_group_and_fails_closed() {
@@ -6030,6 +6077,7 @@ void test_tone_ack_callback_marks_only_group_boundary_as_physically_complete() {
     // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
     // this check is about the ACK's content, not its timing.
     ConnectionAdaptiveTestAccess::setFlatAckTimeout(c, 30000);
+    ConnectionAdaptiveTestAccess::makePeerIss(c);
     c.noteAnchoredBurstNoGroup();
     CHECK(group_complete_contexts.size() > before_anchored_backstop,
           "an anchored no-group burst must emit its recovery tone feedback");
@@ -6074,6 +6122,7 @@ void test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend() 
                                   /*frame_mask=*/0xF, /*interleaved=*/false,
                                   /*group_size=*/4, /*geometry_proven=*/true);
     const size_t before = marginal_acks.size();
+    ConnectionAdaptiveTestAccess::makePeerIss(marginal);
     marginal.noteAnchoredBurstNoGroup();
     CHECK(marginal_acks.size() == before,
           "a re-confirm that would still be on the air at the sender's resend must be withheld");
@@ -6090,12 +6139,33 @@ void test_anchored_backstop_withholds_reconfirm_that_cannot_end_before_resend() 
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         strong, CodeRate::R1_2, 22.0f, 0.05f, Modulation::QPSK);
     ConnectionAdaptiveTestAccess::setFlatAckTimeout(strong, 24398);
+    ConnectionAdaptiveTestAccess::makePeerIss(strong);
     strong.noteAnchoredBurstNoGroup();
     CHECK(!strong_acks.empty(), "a re-confirm that fits before the sender's resend must be sent");
     const size_t before_payload = strong_acks.size();
     strong.noteAnchoredBurstNoGroup(/*payload_seen=*/true);
     CHECK(strong_acks.size() > before_payload,
           "a backstop with decoded payload that fits acknowledges it");
+}
+
+// BUG-SENDER-BACKSTOP-STEALS-ACK (2026-11-12): while this end holds the DATA turn the peer sends no
+// group, so an anchored no-group event is a false chirp lock. The station must not answer it: its
+// "re-confirm" would key as its own burst ends - on top of the peer's ACK of that burst.
+void test_anchored_backstop_ignored_while_holding_the_data_turn() {
+    Connection sender;
+    std::vector<ToneBurstAckPayload> acks;
+    sender.setTransmitToneBurstAckCallback(
+        [&](const ToneBurstAckPayload& ack, bool) { acks.push_back(ack); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        sender, CodeRate::R3_4, 20.0f, 0.05f, Modulation::QPSK);  // the ISS: holds the DATA turn
+    ConnectionAdaptiveTestAccess::setFlatAckTimeout(sender, 30000);
+    sender.noteAnchoredBurstNoGroup();
+    sender.noteAnchoredBurstNoGroup(/*payload_seen=*/true);
+    CHECK(acks.empty(), "a station holding the DATA turn must not re-confirm on a false anchor");
+    // The same event at the receiving station (the peer holds the turn) is answered.
+    ConnectionAdaptiveTestAccess::makePeerIss(sender);
+    sender.noteAnchoredBurstNoGroup();
+    CHECK(!acks.empty(), "the receiving station still re-confirms an anchored no-group burst");
 }
 
 void test_software_alc_uses_current_partial_group_delivery_provenance() {
@@ -6152,6 +6222,7 @@ void test_software_alc_uses_current_partial_group_delivery_provenance() {
     // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
     // this check is about the ACK's content, not its timing.
     ConnectionAdaptiveTestAccess::setFlatAckTimeout(c, 30000);
+    ConnectionAdaptiveTestAccess::makePeerIss(c);
     c.noteAnchoredBurstNoGroup();
     CHECK(acks.size() > before_async,
           "anchored no-group backstop must emit a cumulative tone ACK");
@@ -6197,6 +6268,7 @@ void test_software_alc_uses_current_partial_group_delivery_provenance() {
     // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
     // this check is about the ACK's content, not its timing.
     ConnectionAdaptiveTestAccess::setFlatAckTimeout(c, 30000);
+    ConnectionAdaptiveTestAccess::makePeerIss(c);
     c.noteAnchoredBurstNoGroup();
     CHECK(acks.size() > before_clipped_async,
           "post-CLIPPED backstop must still emit its cumulative ACK");
@@ -6288,6 +6360,7 @@ void test_partial_sack_provenance_marks_only_exact_group_geometry() {
     // A sender whose resend leaves room for the longest re-confirm (anchoredBackstopReconfirmFits):
     // this check is about the ACK's content, not its timing.
     ConnectionAdaptiveTestAccess::setFlatAckTimeout(backstop, 30000);
+    ConnectionAdaptiveTestAccess::makePeerIss(backstop);
     backstop.noteAnchoredBurstNoGroup();
     CHECK(!backstop_acks.empty() &&
               backstop_acks.back().drive_advisory != kDriveAdvisoryReserved,
@@ -7111,6 +7184,8 @@ int main() {
     test_stale_epoch_tone_ack_has_no_connection_side_effects();
     test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso();
     test_latent_startup_probe_is_one_group_and_fails_closed();
+    test_latent_unproven_verdict_keeps_the_last_command();
+    test_anchored_backstop_ignored_while_holding_the_data_turn();
     test_forced_connect_ack_conflict_fails_closed();
     test_startup_probe_sender_guards_and_timeout_rollback();
     test_authority_climb_prices_the_real_file_tail();

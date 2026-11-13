@@ -3709,10 +3709,19 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                 startup_note = " startup-probe-rollback-pending";
             }
         } else if (!geometry_known) {
-            // No fresh selector evidence: hold the physical rung.  The rollback branch
-            // above deliberately has priority so an unknown result cannot erase a safety
-            // landing that is already in progress.
-            lat_cmd = cur;
+            // No fresh selector evidence: no new decision.  Keep the command this end
+            // issued last - the sender may already be on it behind a descriptor this end
+            // lost - and fall back to the physical rung only when there is none.  Holding
+            // the physical rung instead reversed this end's own step-down whenever the
+            // switch's descriptor was lost: GUI ITU Good 20 -> 5 dB drop, idx 2 commanded and
+            // obeyed, its descriptor lost, and the next unproven verdict commanded idx 3 -
+            // the rung that had just failed (4 of 5 such reversals in 45 runs were upward).
+            // The rollback branch above deliberately has priority so an unknown result
+            // cannot erase a safety landing that is already in progress.
+            lat_cmd = (rx_authority_cmd_ != kRungIdxNone &&
+                       snapRungIndexDownToEnabled(rx_authority_cmd_) == rx_authority_cmd_)
+                          ? rx_authority_cmd_
+                          : cur;
             latent_startup_probe_clean_groups_ = 0;
             startup_note = " geometry-unproven-hold";
         } else if (latent_startup_probe_waiting_) {
@@ -6320,6 +6329,21 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     if (disconnect_teardown_active_ ||
         state_ != ConnectionState::CONNECTED || !use_burst_transport_ ||
         !kUnifiedSeqEnabled()) {
+        return;
+    }
+    // The peer originates DATA only while it holds the DATA turn (one ISS at a time). While this
+    // end holds it, an anchor that framed no group is not a lost peer group - it is a false chirp
+    // lock (on band-limited noise, or on the peer's own tone ACK) - and every consequence below
+    // would be wrong: receiver-side rate and follow evidence at the sending station, and a
+    // "re-confirm" keyed as its own burst ends, exactly when the peer ACKs that burst. Half-duplex,
+    // the sender then cannot hear the ACK it is waiting for (GUI narrowband behind a 500 Hz IF
+    // filter: 20 false locks at the sending station, 15 such ACKs, every round expired, the 4 KB
+    // transfer FAILED while the receiver had decoded every group; BUG-SENDER-BACKSTOP-STEALS-ACK).
+    if (local_data_turn_) {
+        LOG_MODEM(INFO,
+                  "Connection: ANCHORED-BURST BACKSTOP ignored - this end holds the DATA turn, "
+                  "the peer originates no group to re-confirm (payload_seen=%d)",
+                  payload_seen ? 1 : 0);
         return;
     }
     LOG_MODEM(WARN,

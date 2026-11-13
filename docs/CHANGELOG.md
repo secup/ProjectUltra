@@ -10,6 +10,56 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(ack): the station holding the DATA turn ignores the anchored-burst backstop (BUG-SENDER-BACKSTOP-STEALS-ACK)
+
+**What broke.** The anchored-burst backstop (`Connection::noteAnchoredBurstNoGroup`: "an anchor framed
+no group") is receiver machinery - a re-confirm ACK, a crater verdict, follow evidence. It also ran at
+the station holding the DATA turn, where the peer originates no group and every such event is a false
+chirp lock. GUI narrowband behind a 500 Hz IF filter (`--rx-filter 1250-1750`, AWGN 20 dB, 4 KB): the
+sending station took 20 false locks (normalized correlation 0.16-0.21 against 0.99 for real anchors;
+the IF filter puts all the noise in the chirp's band, where the fixed 0.15 threshold sits inside the
+noise maxima) and keyed 15 re-confirms, each queued behind its own burst and so on the air exactly
+when the receiver ACKed that burst. Half-duplex, the sender heard none of them while the receiver
+decoded every group 4/4: FAIL at 361 s (measured at 340 bps on 2026-11-10, before OTASim modelled
+half-duplex stations). The same sender-side backstop fired once or twice in 4 of 694 other GUI runs.
+
+**What changed.** The handler returns while `local_data_turn_` (one ISS at a time: the peer cannot be
+sending a group). The receiver-side backstop tests now build the receiver as the non-ISS it is
+(`makePeerIss`). Open: the narrowband chirp threshold is not referenced to the in-band noise
+(BUG-NB-CHIRP-FALSE-LOCK-FILTERED).
+
+**Verification.** ctest 125/125 on this commit's tree; ConnectionAdaptive
+`test_anchored_backstop_ignored_while_holding_the_data_turn` fails without the guard. GUI (two
+`ultra_gui -sim` stations over OTASim): narrowband behind the 500 Hz filter, AWGN 20 dB seeds 44 and
+45 and ITU Good 20 dB seed 44 - PASS in 123, 123 and 110 s (370-440 bps; the same case FAILED at 361 s
+the hour before); narrowband AWGN 22 dB 139 s, ITU Good 20 -> 5 dB drop seed 47 289 s, ITU Good 20 dB
+93 s - as before.
+
+---
+
+## 2026-11-12 — FIX(rate): a verdict with no evidence keeps the receiver's last command (BUG-UNPROVEN-HOLD-REVERSES-STEPDOWN)
+
+**What broke.** The receiver's latent rate path answers a group whose geometry is unproven (the
+anchored-burst backstop's re-confirm; a group whose descriptor and members both died) with a "hold".
+It held the physical rung - the one the receiver last saw announced. After a step-down whose
+descriptor it lost, that is the old rung: GUI ITU Good 20 -> 5 dB drop, seed 44, idx 2 commanded and
+obeyed, the QPSK R1/2 group's descriptor lost, and the backstop's verdict re-commanded idx 3, the rung
+that had just failed (9 unproven holds in 45 GUI runs at 5 dB; 5 changed the previous command, 4 up).
+
+**What changed.** `Connection::updateRxAuthorityCommand`: with no proven geometry the command is the
+one this end issued last (`rx_authority_cmd_`, when it names an enabled rung); the physical rung only
+when it has issued none. No new evidence, no new decision - and the standing decision keeps riding
+the ACKs (ACK diversity for a command the sender may not have heard).
+
+**Verification.** ctest 125/125 on this commit's tree; ConnectionAdaptive
+`test_latent_unproven_verdict_keeps_the_last_command` fails without the change (idx 3 where idx 2
+was commanded). GUI regression set with it (13 cases): ITU Good 20 dB 92/75 s, AWGN 20/25 dB 65/79 s,
+fade 219 s, QSB 225 s, 60 s outage 180 s, 0 -> 20 dB step-up 101 s, Moderate fade 226 s, AWGN ramp
+91 s, narrowband AWGN 22 / Good 22 139/139 s - each within a few seconds of its earlier run; the 13th,
+narrowband behind a 500 Hz filter, failed on BUG-SENDER-BACKSTOP-STEALS-ACK (fixed in this commit).
+
+---
+
 ## 2026-11-12 — FIX(arq): every burst descriptor names the sender's window; the receiver anchors to it (BUG-STEPDOWN-ANSWER-DISCARDED, BUG-ERA-HEAD-LOST-SILENCE)
 
 **What broke.** A rate change that re-cuts the sender's ARQ window starts a new move epoch, and the

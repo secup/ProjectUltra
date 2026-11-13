@@ -8,6 +8,22 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-NB-CHIRP-FALSE-LOCK-FILTERED (open, 2026-11-12) — P3: behind a 500 Hz IF filter the dual-chirp detector locks onto noise
+
+`ChirpSync::detectDualChirp` accepts a normalized correlation >= 0.15 (fixed). The statistic's
+spread under noise depends on how much of the noise lies in the chirp's band: white noise over the
+24 kHz stream leaves the 500 Hz narrowband chirp's noise maxima near 0.03, but a radio's 500 Hz IF
+filter (`gui_qso_scenario.sh --rx-filter 1250-1750`) puts all of it there - noise maxima 0.16-0.21
+(about 1/sqrt(2BT) = 0.045 per lag, times sqrt(2 ln N) over ~1000 lags), so each station took 16-21
+false "anchors" during a 4 KB AWGN 20 dB transfer, against 0.99 for every real one. Harmless since
+BUG-SENDER-BACKSTOP-STEALS-ACK was fixed (the receiver decodes every group regardless), but wasted
+decode attempts and an anchor state that is wrong ~20 times a session. Direction (receive decisions
+relative to measured noise, INV-RX-LEVEL-001): a CFAR floor from the correlator's own lag
+distribution - the median |c| gives the Rayleigh scale, the floor is the level for a fixed
+false-alarm probability per search window (about 0.26 behind the filter, about 0.04 in white noise,
+so the 0.15 floor and every wideband/unfiltered decision stay as they are). Needs the handshake and
+MC-DPSK floors re-checked (the detector serves every waveform).
+
 ### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
 
 GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
@@ -2768,6 +2784,37 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-SENDER-BACKSTOP-STEALS-ACK (FIXED 2026-11-12) — was P1: a false chirp lock at the sending station made it key an ACK on top of the peer's
+
+The anchored-burst backstop (`Connection::noteAnchoredBurstNoGroup`) answers "an anchor framed no
+group" with a re-confirm ACK, a crater verdict and follow evidence - all receiver-side. It ran at
+the station holding the DATA turn too, where the peer originates no group and every such event is a
+false chirp lock. GUI narrowband behind a 500 Hz IF filter (`--rx-filter 1250-1750`, AWGN 20, 4 KB):
+the sending station locked onto 20 weak "anchors" (correlation 0.18-0.19, one at -85.8 Hz CFO -
+band-limited noise or the peer's own tone ACK), keyed 15 re-confirms queued behind its own bursts,
+so each went out exactly as the receiver ACKed the burst; half-duplex, the sender heard none of the
+receiver's ACKs (the receiver decoded all 14 groups 4/4) and the transfer FAILED at 361 s. Since the
+OTASim half-duplex model (2026-11-11) a keyed station cannot hear through its own ACK, which is
+plausibly why this case, measured at 340 bps on 2026-11-10, now failed. The same sender-side
+backstop fired once or twice in 4 of 694 other GUI runs today. Fix: the handler returns while
+`local_data_turn_` (one ISS at a time - the peer cannot be sending a group). ConnectionAdaptive
+`test_anchored_backstop_ignored_while_holding_the_data_turn` (fails without the guard); the
+receiver-side backstop tests now model the receiver as the non-ISS it is.
+
+### BUG-UNPROVEN-HOLD-REVERSES-STEPDOWN (FIXED 2026-11-12) — was P2: a no-evidence verdict re-commanded the rung that had just failed
+
+The receiver (rate authority) answers every group with an absolute rung command. A verdict with no
+proven geometry - the anchored-burst backstop's re-confirm, a group whose descriptor and members
+both died - was meant to "hold": no new evidence, no new decision. It held the PHYSICAL rung, the
+one the receiver last saw in a descriptor. After a step-down whose descriptor the receiver lost,
+that rung is the old one: GUI ITU Good 20 -> 5 dB drop (seed 44 in four batches), idx 2 commanded at
+45.6 s and obeyed, the QPSK R1/2 group's descriptor lost, and the backstop's verdict commanded idx 3
+- the rung that had just failed. 9 unproven holds in 45 runs, 5 changed the previous command, 4 of
+them upward. Fix (`updateRxAuthorityCommand`, latent path): an unproven verdict keeps the command
+this end issued last (`rx_authority_cmd_`, when it names an enabled rung) and falls back to the
+physical rung only when there is none. ConnectionAdaptive
+`test_latent_unproven_verdict_keeps_the_last_command` (fails without the fix: idx 3 for 2).
 
 ### BUG-STEPDOWN-ANSWER-DISCARDED + BUG-ERA-HEAD-LOST-SILENCE (FIXED 2026-11-12) — was P1: after a rate step-down the receiver's answers were lost for a minute
 
