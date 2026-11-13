@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <cmath>
 
 namespace ultra {
@@ -1592,6 +1593,11 @@ inline float ofdmEntryFloorFor(ChannelClassification channel) {
     return 10.0f;
 }
 
+// The MC-DPSK sub-ladder: the rung for snr_db among the MC-DPSK rungs alone, laid out below an
+// OFDM entry floor of ofdm_floor (+infinity = the rungs on their own floors, for a pick made
+// after OFDM was ruled out at an SNR above its floor - selectLadderRungPaprCorrected).
+inline LadderRung mcDpskLadderRung(float snr_db, ChannelClassification channel, float ofdm_floor);
+
 inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) {
     // DIAGNOSTIC force (ULTRA_FORCE_MCDPSK_RUNG=LOW|MID|ROBUST|STANDARD): pin the
     // MC-DPSK rung, bypassing the SNR thresholds, to MEASURE each rung's real floor
@@ -1606,6 +1612,13 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
         if (s == "STANDARD") return ladderRungForId(LadderRungId::STANDARD);
     }
     const float ofdm_floor = ofdmEntryFloorFor(channel);
+    if (snr_db >= ofdm_floor) {
+        return ladderRungForId(LadderRungId::OFDM_CHIRP);
+    }
+    return mcDpskLadderRung(snr_db, channel, ofdm_floor);
+}
+
+inline LadderRung mcDpskLadderRung(float snr_db, ChannelClassification channel, float ofdm_floor) {
     float robust_mid_floor = 5.0f;  // DBPSK R1/4 floor (the robust MC-DPSK fallback)
 
     // OFDM entry floors are the SINGLE source in waveform_selection.hpp
@@ -1676,9 +1689,6 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
             break;
     }
 
-    if (snr_db >= ofdm_floor) {
-        return ladderRungForId(LadderRungId::OFDM_CHIRP);
-    }
     if (snr_db >= robust_dqpsk_floor) {
         return ladderRungForId(LadderRungId::ROBUST);  // DQPSK R1/4 — ~2x DBPSK
     }
@@ -1733,8 +1743,11 @@ inline LadderRung selectLadderRungPaprCorrected(float snr_db, float fading_index
     if (!(ofdm_offset_db > 0.0f) || !isOFDMMode(measured.waveform)) return measured;
     const LadderRung corrected = selectLadderRung(snr_db - ofdm_offset_db, channel);
     if (isOFDMMode(corrected.waveform)) return corrected;
-    // OFDM would land below its floor: the best MC-DPSK rung at the MEASURED SNR.
-    return selectLadderRung(std::min(snr_db, ofdmEntryFloorFor(channel) - 0.01f), channel);
+    // OFDM would land below its floor: the best MC-DPSK rung at the MEASURED SNR, on the MC-DPSK
+    // rungs' own floors. (Capping the SNR just under the OFDM floor instead threw the reading away
+    // once that floor sat below the MC-DPSK floors: AWGN floor 4 picked the deepest DBPSK fallback
+    // for a measured 5 dB.)
+    return mcDpskLadderRung(snr_db, channel, std::numeric_limits<float>::infinity());
 }
 
 inline uint8_t modeToCapabilityBit(WaveformMode mode) {

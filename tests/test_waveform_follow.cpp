@@ -1067,7 +1067,8 @@ void test_waveform_follow_return_reads_the_burst_physical_evidence() {
 
 // A fallback spell's MC-DPSK frames measure no fading index (dual-listen's MC-DPSK decoder never ran an
 // LTS): they carry none, and the pick keeps the session's measured channel class. Read as 0 (AWGN),
-// the returned frame at 5.7 dB (physical 17.6) stayed under the AWGN floor (GUI, ITU Good, seed 46).
+// the returned frame at 5.7 dB (physical 17.6) stayed under the AWGN floor (GUI, ITU Good, seed 46;
+// the test places it just under whichever AWGN floor is active).
 void test_waveform_follow_spell_keeps_the_measured_channel_class() {
     for (const bool read_as_awgn : {false, true}) {
         setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
@@ -1085,7 +1086,12 @@ void test_waveform_follow_spell_keeps_the_measured_channel_class() {
             (void)ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
             ConnectionAdaptiveTestAccess::agePool(c, 8500);
         }
-        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, 5.7f, spell_fading, 17.6f);
+        // The returned frame reads just under the AWGN floor (5.7 dB in the GUI run, against the
+        // 6 dB floor of the time), so the class it is judged in decides the crossing.
+        const float returned_reading = connection_policy::ofdmEntryFloorFor(
+                                           connection_policy::ChannelClassification::AWGN) -
+                                       0.3f;
+        ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, returned_reading, spell_fading, 17.6f);
         const uint8_t rung = connection_policy::decodeOfdmRungCommand(
             ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true));
         if (!read_as_awgn) {

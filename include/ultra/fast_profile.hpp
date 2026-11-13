@@ -4,9 +4,9 @@
 // (docs/EVM_RATE_SELECTION_2026_11_08.md §4), ON BY DEFAULT since 2026-11-09:
 // preamble-less burst acquisition (ULTRA_BURST_ACQ=structure), the measured latent rate anchors
 // (ULTRA_LATENT_ANCHORS=measured), the frame-level turbo code (ULTRA_DATA_FEC=turbo), the
-// effective-SNR climb (ULTRA_RATE_EVM=climb), the measured 6 dB AWGN OFDM entry floor
-// (ULTRA_OFDM_FLOOR_AWGN_DB=6) and, since 2026-11-12, the measured 5 dB ITU Good one
-// (ULTRA_OFDM_FLOOR_GOOD_DB=5).
+// effective-SNR climb (ULTRA_RATE_EVM=climb) and the measured OFDM entry floors: AWGN 4 dB
+// (ULTRA_OFDM_FLOOR_AWGN_DB; 6 from 2026-11-09, 4 since 2026-11-12) and ITU Good 5 dB
+// (ULTRA_OFDM_FLOOR_GOOD_DB, since 2026-11-12).
 //
 // ULTRA_FAST=0 restores every member's pre-2026-11-09 default (chirp per burst, July anchors,
 // LDPC data frames, no EVM climb, 8 dB AWGN and Good floors) — the baseline arm of the pending

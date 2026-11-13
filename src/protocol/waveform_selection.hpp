@@ -47,10 +47,16 @@ inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
 // 4 KB: OFDM entered at AWGN@6/7 passes 10/10 at 510-1170 bps (plain stack and ULTRA_FAST),
 // against MC-DPSK's 45-90 bps there (8 dB floor: AWGN@7 90 bps, AWGN@6 too slow to finish 4 KB in
 // 480 s). At AWGN@5 the data passes (4/5) but one ULTRA_FAST run lost every ACK to the async-ACK
-// hold (BUG-ASYNC-ACK-ALWAYS-DROPPED) and a true 4 dB entry stalled — hence 6, not 5. Rig-dependent
-// (a real radio's distortion moves the OFDM waterfall): a member of ULTRA_FAST (default since
-// 2026-11-09; ULTRA_FAST=0 restores 8 dB). ULTRA_OFDM_FLOOR_AWGN_DB overrides. Read once.
-inline constexpr float kOFDMEntryFloorAwgnMeasuredDb = 6.0f;
+// hold (BUG-ASYNC-ACK-ALWAYS-DROPPED) and a true 4 dB entry stalled — hence 6, not 5.
+// LOWERED 6 -> 4 (2026-11-12): both reasons for the 2 dB margin are gone - the ACK bug is fixed and
+// the control plane at the edge decodes every acquired descriptor with its 82 fixed bits pinned
+// (~2 dB, INV-DESC-KNOWN-001), so the floor is the data rung's own 10 %-FER point. GUI A/B, one build,
+// floor 4 against 6 interleaved, AWGN, 7.3 Hz: a true 4-5 dB (5 runs, 4 KB) 400 s against 1833 s -
+// OFDM QPSK R1/2 at 420-1030 bps where MC-DPSK delivered 100; a true 2-3 dB (3 runs, 2 KB) 623 vs
+// 625 s, the reading (accurate on AWGN) stays under 4 and both stay on MC-DPSK; 16/16 PASS.
+// Rig-dependent (a real radio's distortion moves the OFDM waterfall): a member of ULTRA_FAST
+// (default since 2026-11-09; ULTRA_FAST=0 restores 8 dB). ULTRA_OFDM_FLOOR_AWGN_DB overrides. Read once.
+inline constexpr float kOFDMEntryFloorAwgnMeasuredDb = 4.0f;
 inline float ofdmEntryFloorAwgnDb() {
     static const float v = [] {
         if (const char* e = std::getenv("ULTRA_OFDM_FLOOR_AWGN_DB")) {

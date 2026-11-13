@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — TUNE(policy): AWGN OFDM entry floor 6 -> 4 dB under ULTRA_FAST, measured; the MC-DPSK sub-ladder has its own floors
+
+**What changed and why.** The 6 dB AWGN floor (2026-11-09) was QPSK R1/4's measured 10 %-FER point
+(4.0 dB) plus 2 dB "for the connect estimate and for the control plane, which is weaker than the data
+rung at the edge", after one AWGN@5 run lost every ACK to BUG-ASYNC-ACK-ALWAYS-DROPPED. That bug is
+fixed and the edge control plane now decodes every acquired descriptor with its 82 fixed bits pinned
+(~2 dB, INV-DESC-KNOWN-001); the AWGN selection SNR is accurate (no fading bias), so the floor is now
+the data rung's own point: `kOFDMEntryFloorAwgnMeasuredDb` = 4 under `ULTRA_FAST` (`ULTRA_FAST=0` keeps
+8). The MC-DPSK rungs below the OFDM floor move to `mcDpskLadderRung(snr, class, ofdm_floor)`;
+`selectLadderRung` is unchanged in effect, and the PAPR-corrected pick (OFDM ruled out on a
+peak-limited TX at an SNR above its floor) now evaluates the MC-DPSK rungs at the measured SNR on their
+own floors - capping the reading just under the OFDM floor picked the deepest DBPSK fallback for a
+measured 5 dB once that floor sat at 4. The ladder boundary tests check the shape for whichever floor
+is active (OFDM at the floor, MC-DPSK just under it, monotone, DQPSK never under DBPSK-mid); the
+spell-class follow test places its returned frame just under the active AWGN floor.
+
+**Verification.** ctest 126/126 on this commit's tree. GUI A/B (two `ultra_gui -sim` stations over
+OTASim, one build, floor 4 in one checkout and the old 6 in the other, run side by side; AWGN,
+`--cfo-hz 7.3`): a true 4 dB, 4 KB, seeds 44-46 - 107/87/85 s against 367/366/366 s; 5 dB, seeds 44-45 -
+60/61 s against 366/368 s (OFDM QPSK R1/2 at 420-1030 bps where MC-DPSK delivered 100); 3 dB seeds
+44-45 and 2 dB seed 44, 2 KB - 207/208/208 s against 207/209/209 s (the reading stays under 4, both
+stay on MC-DPSK, no crossing); 16/16 PASS. Below a true 2 dB unchanged by construction.
+
+---
+
 ## 2026-11-12 — FIX(sync): the chirp detector's threshold is referenced to the noise in the chirp's band (BUG-NB-CHIRP-FALSE-LOCK-FILTERED)
 
 **What broke.** `ChirpSync::detectDualChirp` accepted a normalized matched-filter correlation >= 0.15,
