@@ -8,6 +8,18 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-FOLLOW-CLIMB-NO-HYSTERESIS (open, 2026-11-12) — P3: at a true 0-1 dB on ITU Good the follow can climb to OFDM on one high reading
+
+The waveform follow's up-crossing compares one MC-DPSK reading with the same class floor as the
+connect pick. Since the Good floor moved 8 -> 5 (a8a2b58c), a single reading over 5 dB at a true 0-1 dB
+is common enough to climb onto a channel where OFDM cannot hold (one reading's spread on ITU Good:
+p10..p90 = 4.5..8.8 dB at a true 5 dB, sigma ~1.7 dB). GUI: Good 1 dB seed 46 climbed and fell back
+twice (415 s against 340 s at floor 8), Good 0 dB seed 44 once (322 s against 244 s earlier); the same
+lower threshold climbed Good 3 dB seed 46 at 48 s instead of 394 s. Net over the 1 dB set floor 5 still
+won (-24 %). Direction: an up-crossing threshold above the connect floor by the reading's dispersion
+(z sigma for a chosen false-climb rate per reading - ~2 dB on Good, well under 1 dB on AWGN where the
+reading carries no fading bias), A/B'd over a true 0-5 dB with enough seeds to see a 10 % effect.
+
 ### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
 
 GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
