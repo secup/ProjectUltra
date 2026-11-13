@@ -8,22 +8,6 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-NB-CHIRP-FALSE-LOCK-FILTERED (open, 2026-11-12) — P3: behind a 500 Hz IF filter the dual-chirp detector locks onto noise
-
-`ChirpSync::detectDualChirp` accepts a normalized correlation >= 0.15 (fixed). The statistic's
-spread under noise depends on how much of the noise lies in the chirp's band: white noise over the
-24 kHz stream leaves the 500 Hz narrowband chirp's noise maxima near 0.03, but a radio's 500 Hz IF
-filter (`gui_qso_scenario.sh --rx-filter 1250-1750`) puts all of it there - noise maxima 0.16-0.21
-(about 1/sqrt(2BT) = 0.045 per lag, times sqrt(2 ln N) over ~1000 lags), so each station took 16-21
-false "anchors" during a 4 KB AWGN 20 dB transfer, against 0.99 for every real one. Harmless since
-BUG-SENDER-BACKSTOP-STEALS-ACK was fixed (the receiver decodes every group regardless), but wasted
-decode attempts and an anchor state that is wrong ~20 times a session. Direction (receive decisions
-relative to measured noise, INV-RX-LEVEL-001): a CFAR floor from the correlator's own lag
-distribution - the median |c| gives the Rayleigh scale, the floor is the level for a fixed
-false-alarm probability per search window (about 0.26 behind the filter, about 0.04 in white noise,
-so the 0.15 floor and every wideband/unfiltered decision stay as they are). Needs the handshake and
-MC-DPSK floors re-checked (the detector serves every waveform).
-
 ### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
 
 GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
@@ -2784,6 +2768,22 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-NB-CHIRP-FALSE-LOCK-FILTERED (FIXED 2026-11-12) — was P3: behind a 500 Hz IF filter the dual-chirp detector locked onto noise
+
+`ChirpSync::detectDualChirp` accepted a normalized correlation >= 0.15 (fixed). The statistic's
+spread under noise depends on how much of the noise lies in the chirp's band: white noise over the
+24 kHz stream leaves the 500 Hz narrowband chirp's noise maxima near 0.03, but a radio's 500 Hz IF
+filter (`gui_qso_scenario.sh --rx-filter 1250-1750`) puts all of it there - noise maxima 0.16-0.21,
+so each station took 16-21 false "anchors" during a 4 KB AWGN 20 dB transfer, against 0.99 for every
+real one (the sending station's ones caused BUG-SENDER-BACKSTOP-STEALS-ACK). Fix: in the FFT
+correlator a peak must also clear `noiseReferencedCorrelationFloor` - the Rayleigh scale from the
+median lag (sampled once per quarter of the template's coherence length) times sqrt(2 ln N), N = one
+correlation cell per 1 / bandwidth over an hour of audio (one false lock per hour). It is 0.24 for the
+narrowband chirp behind the filter, 0.035-0.037 in white noise and ~0.11 for the wideband chirp behind
+an SSB filter, so the fixed 0.15 still decides everywhere but a narrow filter. CTest `ChirpCfar`:
+band-limited noise 13/30 false locks before, 0 after; real narrowband chirps at 0 and -6 dB in-band
+6/6 found; white-noise floors under 0.15; the wideband chirp's reach unchanged.
 
 ### BUG-SENDER-BACKSTOP-STEALS-ACK (FIXED 2026-11-12) — was P1: a false chirp lock at the sending station made it key an ACK on top of the peer's
 

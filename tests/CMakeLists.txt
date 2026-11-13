@@ -769,6 +769,12 @@ target_include_directories(test_descriptor_known_bits PRIVATE
 target_link_libraries(test_descriptor_known_bits PRIVATE ultra_core ota_channel_core)
 add_test(NAME DescriptorKnownBits COMMAND test_descriptor_known_bits)
 
+# BUG-NB-CHIRP-FALSE-LOCK-FILTERED: the chirp threshold is referenced to the noise in its band.
+add_executable(test_chirp_cfar test_chirp_cfar.cpp)
+target_include_directories(test_chirp_cfar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_chirp_cfar PRIVATE ultra_core)
+add_test(NAME ChirpCfar COMMAND test_chirp_cfar)
+
 # INV-DESC-WINDOW-001: the descriptor carries the sender's window anchor (codec, decoder, ARQ).
 add_executable(test_descriptor_window_anchor
     test_descriptor_window_anchor.cpp

@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — FIX(sync): the chirp detector's threshold is referenced to the noise in the chirp's band (BUG-NB-CHIRP-FALSE-LOCK-FILTERED)
+
+**What broke.** `ChirpSync::detectDualChirp` accepted a normalized matched-filter correlation >= 0.15,
+a fixed number. A ratio, but its distribution under noise is not fixed: it is set by how much of the
+noise lies inside the template's band. White noise over the 24 kHz stream leaves the 500 Hz narrowband
+chirp's noise maxima near 0.03; behind a radio's 500 Hz IF filter all of the noise is in that band and
+the maxima rise to 0.16-0.21 - GUI narrowband behind `--rx-filter 1250-1750`: 16-21 false "anchors" per
+station per 4 KB transfer against 0.99 for every real one (the sending station's false locks were what
+BUG-SENDER-BACKSTOP-STEALS-ACK turned into a failed transfer).
+
+**What changed.** `detectChirpTemplateFFT` measures the noise in the window it searches: the lags,
+sampled once per quarter of the template's coherence length (1 / bandwidth), give the Rayleigh scale
+from their median (median = s sqrt(2 ln 2), robust to the few lags a real chirp occupies); a peak must
+clear s sqrt(2 ln N), N = one correlation cell per 1 / bandwidth over an hour of audio - one false lock
+per hour of noise. The fixed 0.15 stays as the floor: the noise-referenced level is 0.035-0.037 in white
+noise and ~0.11 for the wideband chirp behind an SSB filter, so it decides only behind a narrow filter
+(0.24 for the narrowband chirp there). A refused peak above the fixed threshold is logged (1st, then
+every 100th). The time-domain fallback for short buffers keeps the fixed threshold.
+
+**Verification.** ctest 126/126 on this commit's tree; new CTest `ChirpCfar`: noise filtered to the
+narrowband chirp's band gave 13 false locks in 30 search windows at the fixed threshold and 0 with the
+floor; real narrowband chirps at 0 and -6 dB in-band 6/6 found; in white noise the floor reads
+0.035-0.037 and nothing locks; the wideband chirp at -4 dB in-band 6/6 found. GUI (two `ultra_gui -sim`
+stations over OTASim), 8/8 PASS: narrowband behind the 500 Hz filter AWGN 20 / Good 20 dB 124 / 110 s
+with no false anchor at either station (the run before: 2-3; the original failing run: 20) and all 5
+real ones found; narrowband AWGN 22 dB 140 s; ITU Good 20 dB 92 s, AWGN 20 dB 66 s, ITU Good 5 dB
+124 s, MC-DPSK AWGN -3 dB 136 s and ITU Good 0 dB 322 s - the floor refused no peak in any of these
+(their times are their earlier runs' within scatter; the Good 0 dB session lost time to an OFDM
+up-crossing that failed, see the next entry).
+
+---
+
 ## 2026-11-12 — TUNE(policy): ITU Good OFDM entry floor 8 -> 5 dB under ULTRA_FAST, measured
 
 **What changed and why.** The connect pick and the waveform-follow pick compare a selection SNR with a

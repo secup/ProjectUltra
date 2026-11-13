@@ -784,6 +784,13 @@ private:
         // Peak at position k means template starts at position k in signal
         float best_corr = 0.0f;
         int best_pos = -1;
+        // Noise reference for the threshold (BUG-NB-CHIRP-FALSE-LOCK-FILTERED): the same lags,
+        // sampled once per quarter of the template's coherence length (1 / bandwidth).
+        const float band_hz = std::max(1.0f, std::fabs(config_.f_end - config_.f_start));
+        const size_t noise_stride = std::max<size_t>(
+            1, static_cast<size_t>(config_.sample_rate / (4.0f * band_hz)));
+        std::vector<float> noise_cells;
+        noise_cells.reserve(search_len / noise_stride + 1);
 
         for (size_t pos = 0; pos < search_len; pos++) {
             // Correlation magnitude (CFO-invariant)
@@ -801,7 +808,10 @@ private:
                 best_corr = norm_corr;
                 best_pos = static_cast<int>(pos);
             }
+            if (pos % noise_stride == 0) noise_cells.push_back(norm_corr);
         }
+        const float noise_floor = noiseReferencedCorrelationFloor(noise_cells, band_hz);
+        last_noise_floor_correlation_.store(noise_floor, std::memory_order_relaxed);
 
         // Debug: show FFT correlation result and check for signal
         static std::atomic<int> fft_debug_count{0};
@@ -819,12 +829,53 @@ private:
                      samples.size(), best_corr, best_pos, rms_start, rms_mid);
         }
 
-        if (best_corr < threshold) {
+        // The fixed threshold stays the floor; the noise-referenced one rules only where the noise
+        // in the chirp's band would otherwise put its peaks above it (a narrow IF filter).
+        if (best_corr < std::max(threshold, noise_floor)) {
+            if (best_corr >= threshold) {
+                static std::atomic<uint32_t> refused{0};
+                const uint32_t n = ++refused;
+                if (n == 1 || n % 100 == 0) {
+                    LOG_SYNC(INFO,
+                             "ChirpSync: peak %.3f refused under the noise-referenced floor %.3f "
+                             "(fixed %.2f, %u refused so far)",
+                             best_corr, noise_floor, threshold, n);
+                }
+            }
             return {-1, best_corr};
         }
 
         return {best_pos, best_corr};
     }
+
+    // The correlation a peak must clear for the noise in THIS window to produce it about once per
+    // hour of audio (BUG-NB-CHIRP-FALSE-LOCK-FILTERED). Under noise the complex correlation is
+    // circular Gaussian, so its normalized magnitude is Rayleigh: the median of the lags gives the
+    // scale (median = s sqrt(2 ln 2), robust to the few lags a real chirp occupies) and
+    // P(|c| > x) = exp(-x^2 / 2s^2) per independent cell, one cell per 1 / bandwidth of audio.
+    // Its value depends on how much of the noise lies in the chirp's band: about 0.04 for the
+    // 500 Hz chirp in white noise over the 24 kHz stream, about 0.27 behind a 500 Hz IF filter.
+    static float noiseReferencedCorrelationFloor(std::vector<float>& cells, float band_hz) {
+        if (cells.size() < 64) return 0.0f;
+        const auto mid = cells.begin() + static_cast<std::ptrdiff_t>(cells.size() / 2);
+        std::nth_element(cells.begin(), mid, cells.end());
+        const double rayleigh_scale =
+            static_cast<double>(*mid) / std::sqrt(2.0 * std::log(2.0));
+        constexpr double kFalseLocksPerHour = 1.0;
+        const double cells_per_false_lock =
+            std::max(2.0, static_cast<double>(band_hz) * 3600.0 / kFalseLocksPerHour);
+        return static_cast<float>(rayleigh_scale *
+                                  std::sqrt(2.0 * std::log(cells_per_false_lock)));
+    }
+
+public:
+    // The noise-referenced correlation floor of the last FFT correlation (diagnostics, tests).
+    float lastNoiseFloorCorrelation() const {
+        return last_noise_floor_correlation_.load(std::memory_order_relaxed);
+    }
+
+private:
+    mutable std::atomic<float> last_noise_floor_correlation_{0.0f};
 
     // Detect chirp using COMPLEX correlation (CFO-tolerant!)
     // Uses FFT-based correlation for speed, falls back to time-domain for small buffers
