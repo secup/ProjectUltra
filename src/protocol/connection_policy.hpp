@@ -1585,7 +1585,7 @@ inline float evidenceBoundedDialEquivalentSnrDb(float reading_db, float fading_i
 inline float ofdmEntryFloorFor(ChannelClassification channel) {
     switch (channel) {
         case ChannelClassification::AWGN: return ofdmEntryFloorAwgnDb();
-        case ChannelClassification::GOOD: return kOFDMEntryFloorGoodDb;
+        case ChannelClassification::GOOD: return ofdmEntryFloorGoodDb();
         case ChannelClassification::MODERATE: return kOFDMEntryFloorModerateDb;
         case ChannelClassification::POOR: return kOFDMEntryFloorPoorDb;
     }
@@ -1657,7 +1657,14 @@ inline LadderRung selectLadderRung(float snr_db, ChannelClassification channel) 
             // floor) is supported by the data but needs MPG@8/7 floor-finding + a
             // fade-AVERAGED connect SNR (task #58) — the single-snapshot reading is noisy,
             // so dial-9 auto-selection is not yet deterministic.
-            robust_dqpsk_floor = std::min(robust_mid_floor + 1.0f, ofdm_floor - 0.5f);
+            //
+            // Never below the DBPSK floor it is a margin over: when the OFDM entry floor sits
+            // under it (Good 5 dB under ULTRA_FAST, 2026-11-12), the clamp would put DQPSK 2.5 dB
+            // under its own floor and below DBPSK-mid; the sub-band is then DBPSK (deepest
+            // fallback) up to the OFDM floor. Changes nothing where the floors leave room (AWGN
+            // 5.5, Good 7 at the 8 dB floor).
+            robust_dqpsk_floor = std::max(
+                robust_mid_floor, std::min(robust_mid_floor + 1.0f, ofdm_floor - 0.5f));
             break;
         case ChannelClassification::MODERATE:
             robust_dqpsk_floor = 15.0f;  // UNCHANGED (old robust_floor): > ofdm 14 ->

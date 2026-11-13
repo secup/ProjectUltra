@@ -122,21 +122,41 @@ void test_ladder_rung_selection() {
                   LadderRungId::OFDM_CHIRP,
               "AWGN at the OFDM entry floor selects OFDM_CHIRP");
     }
-    // Good entry floor lowered 12->10 (R1/2 reliable @ Good 10, measured).
-    // #71: Good robust_mid_floor=6 -> dqpsk_floor=min(6+1.0, 9.5)=7.0, ofdm_floor=10
-    // (lowered from +2.5=8.5: DQPSK window spiral fixed + rig-validated DQPSK>=DBPSK @MPG9).
-    CHECK(selectLadderRung(6.9f, ChannelClassification::GOOD).id ==
-              LadderRungId::ROBUST_MID,
-          "Good below DQPSK floor stays Robust-Mid (DBPSK)");
-    CHECK(selectLadderRung(7.0f, ChannelClassification::GOOD).id ==
-              LadderRungId::ROBUST,
-          "Good at DQPSK floor selects Robust (DQPSK) — rig-validated clean @MPG9");
-    CHECK(selectLadderRung(7.9f, ChannelClassification::GOOD).id ==
-              LadderRungId::ROBUST,
-          "Good fading below OFDM floor (8, 2026-07-07 sweep) selects Robust (DQPSK)");
-    CHECK(selectLadderRung(8.0f, ChannelClassification::GOOD).id ==
-              LadderRungId::OFDM_CHIRP,
-          "Good fading in-band 8 dB boundary selects OFDM_CHIRP");
+    // Good OFDM entry floor = ofdmEntryFloorGoodDb(): 5 dB under ULTRA_FAST (GUI-measured
+    // 2026-11-12), 8 dB with ULTRA_FAST=0. #71: Good robust_mid_floor=6 ->
+    // dqpsk_floor=min(6+1.0, ofdm_floor-0.5) (7.0 at the 8 dB floor, 4.5 at 5 dB). The checks
+    // follow whichever floor is active.
+    {
+        const float good_ofdm_floor = ofdmEntryFloorGoodDb();
+        CHECK(selectLadderRung(good_ofdm_floor, ChannelClassification::GOOD).id ==
+                  LadderRungId::OFDM_CHIRP,
+              "Good fading at the OFDM entry floor selects OFDM_CHIRP");
+        CHECK(selectLadderRung(good_ofdm_floor - 0.1f, ChannelClassification::GOOD).waveform ==
+                  WaveformMode::MC_DPSK,
+              "Good fading just below the OFDM entry floor stays MC-DPSK");
+        // Below the OFDM floor the MC-DPSK rungs only get more robust as the reading falls, and
+        // DQPSK (a margin over DBPSK-mid) is never picked under the DBPSK-mid floor (6 dB).
+        auto robustness_order = [](LadderRungId id) {
+            switch (id) {
+                case LadderRungId::ROBUST_LOW: return 0;
+                case LadderRungId::ROBUST_MID: return 1;
+                case LadderRungId::ROBUST: return 2;
+                case LadderRungId::OFDM_CHIRP: return 3;
+                default: return -1;
+            }
+        };
+        bool monotone = true, dqpsk_above_dbpsk = true;
+        int previous = -1;
+        for (float snr = 0.0f; snr <= good_ofdm_floor + 1.0f; snr += 0.1f) {
+            const LadderRungId id = selectLadderRung(snr, ChannelClassification::GOOD).id;
+            const int order = robustness_order(id);
+            monotone = monotone && order >= previous && order >= 0;
+            previous = order;
+            if (id == LadderRungId::ROBUST && snr < 6.0f - 1e-4f) dqpsk_above_dbpsk = false;
+        }
+        CHECK(monotone, "Good ladder: the rung never gets more aggressive as the SNR falls");
+        CHECK(dqpsk_above_dbpsk, "Good ladder: DQPSK is never picked below the DBPSK-mid floor");
+    }
     CHECK(selectLadderRung(16.9f, ChannelClassification::POOR).id ==
               LadderRungId::ROBUST_MID,
           "Poor fading keeps extra margin before Robust");
@@ -562,9 +582,9 @@ void test_auto_data_mode_boundaries() {
 
     waveform = selectNegotiatedMode(
         all, all, WaveformMode::AUTO, WaveformMode::AUTO, WaveformMode::AUTO,
-        7.9f, 0.30f);
+        ofdmEntryFloorGoodDb() - 0.1f, 0.30f);
     CHECK(waveform == WaveformMode::MC_DPSK,
-          "GOOD fading below the OFDM floor (8) keeps MC-DPSK");
+          "GOOD fading below the OFDM entry floor keeps MC-DPSK");
     recommendDataMode(9.9f, waveform, mod, rate, 0.30f);
     CHECK(mod == Modulation::DQPSK && rate == CodeRate::R1_4,
           "MC-DPSK floor still uses DQPSK R1/4");
@@ -1974,9 +1994,9 @@ void test_ladder_papr_correction() {
           "PAPR correction: AWGN 1 dB over the OFDM floor with a 3.4 dB offset stays MC-DPSK DQPSK");
     CHECK(selectLadderRungPaprCorrected(awgn_floor + 3.5f, awgn, 3.4f).id == LadderRungId::OFDM_CHIRP,
           "PAPR correction: OFDM still entered once it clears its floor after the offset");
-    CHECK(selectLadderRungPaprCorrected(kOFDMEntryFloorGoodDb + 2.0f, good, 3.4f).waveform ==
+    CHECK(selectLadderRungPaprCorrected(ofdmEntryFloorGoodDb() + 2.0f, good, 3.4f).waveform ==
                   WaveformMode::MC_DPSK &&
-              selectLadderRungPaprCorrected(kOFDMEntryFloorGoodDb + 4.0f, good, 3.4f).waveform ==
+              selectLadderRungPaprCorrected(ofdmEntryFloorGoodDb() + 4.0f, good, 3.4f).waveform ==
                   WaveformMode::OFDM_CHIRP,
           "PAPR correction: the Good floor shifts by the offset the same way");
     CHECK(selectLadderRungPaprCorrected(awgn_floor - 2.0f, awgn, 3.4f).id ==

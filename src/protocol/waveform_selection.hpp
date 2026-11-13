@@ -61,6 +61,30 @@ inline float ofdmEntryFloorAwgnDb() {
     }();
     return v;
 }
+// The Good-class OFDM entry floor consulted by the two entry decisions (and the waveform-follow
+// pick, which goes through selectLadderRung). As for AWGN, below the ladder's lowest anchor
+// selectCoherentOFDM returns QPSK R1/4 anyway, so this moves only the OFDM-vs-MC-DPSK boundary.
+//
+// MEASURED FLOOR (2026-11-12, GUI gate, ITU Good, 32 sessions): the selection SNR at a true 5 dB
+// reads 4.5/5.2/6.6/7.8/8.8 dB (p10..p90, 277 MC-DPSK follow picks), so the 8 dB floor sent most
+// marginal sessions to MC-DPSK, where they spent 150-370 s before climbing - while OFDM QPSK R1/2
+// holds at a true 1-5 dB (after the descriptor window anchor, the turbo and compact frames). Floor
+// 5 against 8, same build, interleaved: true 5 dB 6 seeds 879 vs 992 s (-11 %), 3 dB 3 seeds 789 vs
+// 1325 s (-40 %), 2 dB 2 seeds 375 vs 1255 s, 1 dB 3 seeds 809 vs 1060 s; 32/32 PASS. The one
+// regression: a 1 dB seed whose follow crossed 5 times (415 vs 340 s). Below the floor the follow
+// still catches every reading that clears it. A member of ULTRA_FAST like the AWGN floor
+// (ULTRA_FAST=0 keeps 8 dB for the pending rig A/B); ULTRA_OFDM_FLOOR_GOOD_DB overrides. Read once.
+inline constexpr float kOFDMEntryFloorGoodMeasuredDb = 5.0f;
+inline float ofdmEntryFloorGoodDb() {
+    static const float v = [] {
+        if (const char* e = std::getenv("ULTRA_OFDM_FLOOR_GOOD_DB")) {
+            const float f = std::strtof(e, nullptr);
+            if (f >= 0.0f && f <= 20.0f) return f;
+        }
+        return fastProfileEnabled() ? kOFDMEntryFloorGoodMeasuredDb : kOFDMEntryFloorGoodDb;
+    }();
+    return v;
+}
 // Poor HF (fading >= 1.10: fast Doppler / heavy multipath) routes to MC-DPSK, NEVER
 // OFDM (thread A, 2026-05-31). Coherent OFDM phase tracking breaks on fast fading and
 // the OFDM band is now coherent-only; the decision doc + the long-standing "Poor HF:
@@ -1196,7 +1220,7 @@ inline WaveformRecommendation recommendWaveformAndRate(float snr_db, float fadin
     WaveformRecommendation rec;
     const float ofdm_floor =
         (fading_index < kFadingAwgnMax) ? ofdmEntryFloorAwgnDb() :
-        (fading_index < kFadingGoodMax) ? kOFDMEntryFloorGoodDb :
+        (fading_index < kFadingGoodMax) ? ofdmEntryFloorGoodDb() :
         (fading_index < kFadingModerateMax) ? kOFDMEntryFloorModerateDb : kOFDMEntryFloorPoorDb;
 
     if (snr_db < ofdm_floor) {

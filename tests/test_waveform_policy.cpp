@@ -403,15 +403,15 @@ void test_waveform_recommendations() {
     CHECK(awgn.waveform == WaveformMode::OFDM_CHIRP, "AWGN in-band SNR10 should use OFDM_CHIRP");
     CHECK(awgn.rate == CodeRate::R1_2, "AWGN in-band SNR10 promotes to R1/2 (monotonicity, was R1/4)");
 
-    // Good entry floor lowered to 8 (2026-07-07 measured sweep: QPSK R1/4
-    // Good@8 FER 17% = ARQ-viable; entry lands on the R1/4 floor rung and the
-    // predictive climb owns promotion).
-    auto good_below_floor = recommendWaveformAndRate(7.9f, 0.30f);
+    // Good entry floor = ofdmEntryFloorGoodDb(): 5 dB under ULTRA_FAST (GUI-measured 2026-11-12),
+    // 8 dB with ULTRA_FAST=0 (2026-07-07 sweep). Entry lands on the R1/4 floor rung either way.
+    const float good_ofdm_floor = ofdmEntryFloorGoodDb();
+    auto good_below_floor = recommendWaveformAndRate(good_ofdm_floor - 0.1f, 0.30f);
     CHECK(good_below_floor.waveform == WaveformMode::MC_DPSK,
-          "good fading below in-band SNR8 should keep MC-DPSK margin");
-    auto good_at_floor8 = recommendWaveformAndRate(8.0f, 0.30f);
-    CHECK(good_at_floor8.waveform == WaveformMode::OFDM_CHIRP,
-          "good fading at the measured 8 dB floor enters OFDM");
+          "good fading below the OFDM entry floor should keep MC-DPSK");
+    auto good_at_floor = recommendWaveformAndRate(good_ofdm_floor, 0.30f);
+    CHECK(good_at_floor.waveform == WaveformMode::OFDM_CHIRP,
+          "good fading at the OFDM entry floor enters OFDM");
 
     auto moderate_floor = recommendWaveformAndRate(14.0f, 0.90f);
     CHECK(moderate_floor.waveform == WaveformMode::OFDM_CHIRP,

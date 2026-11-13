@@ -10,6 +10,34 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — TUNE(policy): ITU Good OFDM entry floor 8 -> 5 dB under ULTRA_FAST, measured
+
+**What changed and why.** The connect pick and the waveform-follow pick compare a selection SNR with a
+per-class OFDM entry floor; on ITU Good it was 8 dB (2026-07-07 `measure_ack_fer` sweep, LDPC frames).
+At a true 5 dB ITU Good that selection SNR reads 4.5/5.2/6.6/7.8/8.8 dB (p10..p90, 277 follow picks),
+so most marginal sessions started on MC-DPSK and spent 150-370 s there before the follow climbed - while
+OFDM QPSK R1/2 now holds at a true 1-5 dB (turbo data frames, compact frames, the descriptor fixes of
+this evening). `ofdmEntryFloorGoodDb()` returns 5 dB under `ULTRA_FAST` (`kOFDMEntryFloorGoodMeasuredDb`),
+8 dB with `ULTRA_FAST=0` (the rig A/B baseline arm); `ULTRA_OFDM_FLOOR_GOOD_DB` overrides. The QPSK
+R1/4 ladder anchor keeps the old constant (below the lowest anchor the OFDM pick is R1/4 anyway, as
+for AWGN). The MC-DPSK DQPSK floor under it - `min(DBPSK-mid + 1, OFDM floor - 0.5)` - would have
+fallen to 4.5 dB, below the DBPSK-mid floor it is a margin over; it is now bounded by that floor, so
+on Good the sub-band below 5 dB is DBPSK (no change where the floors leave room: AWGN 5.5, Good 7 at
+the 8 dB floor). Boundary tests follow the active floor; the Good ladder test checks monotonicity and
+that DQPSK is never picked under DBPSK-mid.
+
+**Verification.** ctest 125/125 on this commit's tree. GUI A/B (two `ultra_gui -sim` stations over
+OTASim, one build, floor 5 in one checkout and the old 8 in the other, run side by side; ITU Good,
+`--cfo-hz 7.3`): true 5 dB, 8 KB, seeds 44-49 - 879 s against 992 s (-11 %); 3 dB, 8 KB, seeds 44-46 -
+789 against 1325 s (-40 %); 2 dB, 4 KB, seeds 44-45 - 375 against 1255 s; 1 dB, 2 KB, seeds 44-46 - 809
+against 1060 s; 32/32 PASS. Every gain is a session that floor 5 starts on OFDM (seed 49 at 5 dB 157 vs
+285 s; 3 dB seed 45 143 vs 519 s; 2 dB seed 45 145 vs 661 s); where both floors start the same way the
+times agree within scatter. One loss: a 1 dB seed whose follow crossed five times (415 against 340 s).
+Below 1 dB not measured; the follow still falls back to MC-DPSK after 60 s without progress. Those
+runs predate the DQPSK bound, which none of them reached (every MC-DPSK start was DBPSK).
+
+---
+
 ## 2026-11-12 — FIX(ack): the station holding the DATA turn ignores the anchored-burst backstop (BUG-SENDER-BACKSTOP-STEALS-ACK)
 
 **What broke.** The anchored-burst backstop (`Connection::noteAnchoredBurstNoGroup`: "an anchor framed
