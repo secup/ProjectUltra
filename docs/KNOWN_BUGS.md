@@ -8,18 +8,6 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
-### BUG-FOLLOW-CLIMB-NO-HYSTERESIS (open, 2026-11-12) — P3: at a true 0-1 dB on ITU Good the follow can climb to OFDM on one high reading
-
-The waveform follow's up-crossing compares one MC-DPSK reading with the same class floor as the
-connect pick. Since the Good floor moved 8 -> 5 (a8a2b58c), a single reading over 5 dB at a true 0-1 dB
-is common enough to climb onto a channel where OFDM cannot hold (one reading's spread on ITU Good:
-p10..p90 = 4.5..8.8 dB at a true 5 dB, sigma ~1.7 dB). GUI: Good 1 dB seed 46 climbed and fell back
-twice (415 s against 340 s at floor 8), Good 0 dB seed 44 once (322 s against 244 s earlier); the same
-lower threshold climbed Good 3 dB seed 46 at 48 s instead of 394 s. Net over the 1 dB set floor 5 still
-won (-24 %). Direction: an up-crossing threshold above the connect floor by the reading's dispersion
-(z sigma for a chosen false-climb rate per reading - ~2 dB on Good, well under 1 dB on AWGN where the
-reading carries no fading bias), A/B'd over a true 0-5 dB with enough seeds to see a 10 % effect.
-
 ### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
 
 GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
@@ -2797,6 +2785,21 @@ the gate by 3 dB (`gap_test_informative`) - else the full CONNECT is decoded fir
 after it; first contact keeps the immediate PONG. Shared decoder: GUI, TNC, CLI. GUI, seeds 61-70: 30/30 low-SNR
 handshakes (28/30 before), CONNECTs read as PINGs 1 against 21, first contact as fast as before (connect 17 s at
 AWGN 0 / -3 dB); TNC at AWGN 0 dB connects in 19 s (never before).
+
+### BUG-FOLLOW-CLIMB-NO-HYSTERESIS (CLOSED 2026-11-13, not a defect) — was P3: at a true 0-1 dB on ITU Good the follow can climb to OFDM on one high reading
+
+The 2026-11-12 evidence was single-seed pairs (Good 1 dB 415 vs 340 s, Good 0 dB 322 vs 244 s), and
+the GUI's run-to-run spread at 0-1 dB on Good is larger than that: in the 2026-11-13 A/B the same
+effective code ran Good 0 dB seed 62 in 245 and 616 s, seed 64 in 481 and 267 s (on AWGN the same
+spread is +/-2 s). Across the five-seed campaign the time at 0-1 dB went into OFDM spells that
+delivered about what MC-DPSK's floor does (~3-6 B/s against DBPSK's 3.6 B/s model), not into the
+climbs: at a true 0-1 dB on ITU Good OFDM and MC-DPSK carry about the same, so neither hysteresis nor a
+crossing rule has time to win on average. A receiver rule that commands MC-DPSK when an OFDM spell's
+goodput trails MC-DPSK's (and backs the up-crossing gate off) was built and A/B'd (Good 0/1/2/3/5 dB,
+AWGN 2 dB x 5 seeds, five moving channels x 2 seeds): 37/37 pass in both arms, the rule never fired
+(OFDM never fell under MC-DPSK's floor rate), 22/37 pairs faster (p = 0.32). Not shipped - kept as
+`git stash` "follow goodput down-rule" for a link where OFDM does trickle below MC-DPSK (interference
+the simulator does not model). Judge 0-1 dB fading changes on many seeds per arm, never on pairs.
 
 ### BUG-NB-CHIRP-FALSE-LOCK-FILTERED (FIXED 2026-11-12) — was P3: behind a 500 Hz IF filter the dual-chirp detector locked onto noise
 

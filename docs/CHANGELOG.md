@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-13 — INVESTIGATION(follow): the 0-1 dB "flapping" on ITU Good is run-to-run spread, not a defect (BUG-FOLLOW-CLIMB-NO-HYSTERESIS closed)
+
+**Claim under test.** 2026-11-12: at a true 0-1 dB on ITU Good the waveform follow climbs to OFDM on one
+high reading and the failed climbs cost time (Good 1 dB 415 vs 340 s, Good 0 dB 322 vs 244 s).
+
+**What the data says.** Those were single-seed pairs, and the GUI gate's run-to-run spread at 0-1 dB
+fading is larger: the same effective code ran Good 0 dB seed 62 in 245 and 616 s, seed 64 in 481 and
+267 s (AWGN repeats within +/-2 s; awgn2 211-214 s in ten runs). In the five-seed campaign the time at
+0-1 dB went into OFDM spells that delivered about MC-DPSK's floor rate (~3-6 B/s against DBPSK's
+3.6 B/s model), not into the climbs: OFDM and MC-DPSK carry about the same there.
+
+**What was tried.** A receiver rule commanding MC-DPSK when an OFDM spell's realized goodput trails
+MC-DPSK's (judged after two OFDM rounds, short by more than one frame; MC-DPSK's rate measured from
+the session's MC-DPSK spells, else the DBPSK model), counting the climb failed even if it had held.
+GUI A/B against the same build without it: Good 0/1/2/3/5 dB and AWGN 2 dB x seeds 61-65, five moving
+channels x 2 seeds - 37/37 pass in both arms, the rule never fired, 22/37 pairs faster (p = 0.32).
+Not shipped (`git stash`: "follow goodput down-rule"): no measured effect, and a receiver whose sender
+pauses mid-object would read the pause as a trickle. It stays available for a link where OFDM does
+trickle below MC-DPSK (interference the simulator does not model).
+
+**Method note.** At 0-1 dB fading compare >= 5 seeds per arm, and grep for the new mechanism's own log
+line before crediting it - here the early pairs "won" 493/664 and 245/616 s with the rule never firing.
+
+---
+
 ## 2026-11-13 — FIX(handshake): once a CONNECT can be on the air, a responder decodes it whole before calling it a PING (BUG-PONG-JAMS-WEAK-CONNECT)
 
 **What broke.** Multi-seed GUI campaign (5 new seeds x 30 scenarios): the realistic-radio scenario

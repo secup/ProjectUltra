@@ -100,7 +100,7 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
   callsign hashes; fixed length, so a failed frame no longer ends the burst. Control frames stay v2.
 - Multi-Carrier DPSK + chirp sync. ARQ selective-repeat with a **timing-derived window (1–5)** via `mcDpskWindowSizeForTiming` (not fixed window=1). Variable CWs, simple sequential. Control frames 20 B encoded as-is (no patching). Interleaving: NONE. Preamble: ALWAYS full chirp (no light sync). Key: `decodeMCDPSKFrame()` in streaming_decoder.cpp.
 
-### Mode 2: OFDM (wideband; AWGN ≥10, Good ≥12, Moderate ≥14, Poor ≥18 dB)
+### Mode 2: OFDM (wideband; entry floors under `ULTRA_FAST`: AWGN 2.5, Good 5, Moderate 14 dB on the selection SNR; ITU Poor reads as Good and enters OFDM)
 - OFDM + chirp sync (Schmidl-Cox removed as a mode; only the S-C correlation primitive remains for warm-LTS). ARQ selective-repeat: **window 8 default (`kWideOFDMWindowFrames`), up to 16 (`kHighThroughputOFDMWindowFrames`) on near-AWGN DQPSK/D8PSK ≥R1/2**. Fixed 4-CW data frames, 1-CW control. Data frames frame-interleaved (+optional channel interleaving); control 1 CW, no interleaving (fast ACK). Preamble: light (LTS only) for data after handshake; since 2026-11-09 (`ULTRA_FAST`) group starts carry NO chirp — the receiver finds each burst descriptor by frame-structure detection (chirp only at connect, the first groups and an RTO resend) — and data frames are ONE turbo codeword (`ULTRA_DATA_FEC`). Since 2026-11-12 a session's data frames
   use the compact layout (`protocol/ofdm_data_frame.hpp`, INV-OFDM-FRAME-001: an 8-byte header with the
   frame's index and count in its burst, CRC seeded from the callsign hashes, 11 more payload bytes per
@@ -130,7 +130,7 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 ### Mode Selection Flow
 1. Connection starts in MC-DPSK for PING/PONG/CONNECT (wideband or narrowband chirp).
 2. Dual-listen detects chirp type → sets BandwidthMode (WIDE/NARROW).
-3. After CONNECT_ACK, SNR measured, mode negotiated: wideband SNR<10 stay MC-DPSK; ≥10 → OFDM_CHIRP R1/4 (Good/Moderate/Poor entry floors 12/14/18); narrowband → OFDM_NARROW.
+3. After CONNECT_ACK, SNR measured, mode negotiated on the selection SNR (`connectSelectionSnrDb`: the reading, plus the fading basis bounded by the physical measurement): below the class floor (AWGN 2.5 / Good 5 / Moderate 14 under `ULTRA_FAST`; 8 / 8 / 14 with `ULTRA_FAST=0`) stay MC-DPSK, at or above → OFDM_CHIRP; narrowband → OFDM_NARROW. The fading index cannot tell ITU Poor from Good (it reads ~0.5-0.65), so a Poor 15 dB channel selects ~17 dB and runs OFDM QPSK R1/2 (GUI 2026-11-13: 5/5 seeds, ~390 bps, the same with an 8 dB Good floor).
 4. Waveform follow (2026-11-11, INV-FOLLOW-001, default ON as dual-listen; `ULTRA_WAVEFORM_FOLLOW=0` off, `=1` agreement A/B): a connected wideband session
    then crosses between MC-DPSK and OFDM_CHIRP as the channel moves: the receiver commands the crossing in
    its tone ACK (session rung word 1..10 OFDM, 11/12 MC-DPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
@@ -163,8 +163,8 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 | Mode | Channel | In-band floor | Notes |
 |------|---------|---------------|-------|
 | MC-DPSK R1/4 | AWGN | **-6 dB** | GUI gate 2026-11-11, 1 seed: 451 s for 1 KB with compact frames (v2 frames: FAIL at 600 s); -9 fails at the CONNECT frame. ITU Good: -3 dB passes (387 s, 1 seed). Was "5 dB" |
-| OFDM_CHIRP R1/4 | AWGN | **10 dB** | warm-sync LTS FER 4.875% @10, 0% @14-20 |
-| OFDM_CHIRP R1/4 | Good | **15 dB** | was "locked in DecodeBenchReplay" — that tool + CTest are now RETIRED (2026-05-30); the floor is UNBACKED, re-establish on `gui_qso_scenario.sh` (the trusted floor gate) during the ladder rework. |
+| OFDM_CHIRP QPSK | AWGN | **~3 dB** | GUI gate 2026-11-13, 5 seeds (realistic CFO 7.3 Hz): a true 3 dB runs QPSK R1/2 at 550 bps (2 KB in 57-60 s); a true 1 dB stays MC-DPSK DQPSK (90 bps). Entry floor 2.5 dB (chase-combined resends). Was "10 dB" (warm-sync LTS FER) |
+| OFDM_CHIRP QPSK | Good | **~5 dB** | GUI gate 2026-11-13, 5 seeds: a true 5 dB runs QPSK R1/2 at ~600 bps (8 KB in 100-168 s); entry floor 5 dB from the 2026-11-12 A/B at a true 1-5 dB. At a true 0-1 dB OFDM and MC-DPSK carry about the same and runs spread 245-664 s for 2 KB (BUG-FOLLOW-CLIMB-NO-HYSTERESIS, closed): judge 0-1 dB fading on many seeds per arm, never on pairs. Was "15 dB" (unbacked) |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
 | OFDM_NARROW R1/4 | AWGN / Good | ~17.6 | pre-audit |
 
@@ -475,16 +475,16 @@ count means one more carrier above DC than below (29/30), so the band is **not**
 |------|------|---------------|---------|-----|--------|
 | MC-DPSK | dual chirp | -6 dB AWGN | 938 | ±50 Hz | Good |
 | OFDM_NARROW | NB chirp + LTS | ~17 dB AWGN | ~450 (R1/2, w=3) | ±50 Hz | Good (R1/4) |
-| OFDM_CHIRP R1/4 | dual chirp + LTS anchor, warm LTS data | 10 dB AWGN / 15 dB Good | 5.1 k (32QAM R2/3) | ±50 Hz | Good (R1/4) |
+| OFDM_CHIRP R1/4 | dual chirp at connect, structure-acquired descriptors, warm LTS data | ~3 dB AWGN / ~5 dB Good (GUI 2026-11-13) | 5.1 k (32QAM R2/3) | ±50 Hz | Good, Moderate, Poor at 15 dB |
 | SC-DPSK | Barker-13 | -8 to -3 dB | 125 | N/A | Good |
 
 (OFDM_COX removed — enum `0x00` reserved; was Schmidl-Cox, never auto-selected. Only the S-C sync primitive remains.)
 
-Selection: Poor HF (2 ms delay) → MC-DPSK; low SNR 5-10 dB AWGN → MC-DPSK (to 5 dB), OFDM_CHIRP R1/4 from 10 dB; Moderate/Good → OFDM_CHIRP; OFDM_NARROW for narrowband-detected paths. OFDM_COX removed (enum 0x00 reserved); OTFS/MFSK reserved only.
+Selection (connect pick, then the waveform follow): below the class floor (AWGN 2.5 / Good 5 / Moderate 14 dB selection SNR) → MC-DPSK; at or above → OFDM_CHIRP; ITU Poor is classified Good (the fading index cannot separate them) and runs OFDM at 15 dB; OFDM_NARROW for narrowband-detected paths. OFDM_COX removed (enum 0x00 reserved); OTFS/MFSK reserved only.
 
 ## Known Limitations
-1. OFDM_COX removed from the protocol enum (0x00 reserved); only the Schmidl-Cox sync primitive remains. Poor HF needs MC-DPSK (see #2).
-2. Poor HF (2 ms delay): OFDM fails — use MC-DPSK.
+1. OFDM_COX removed from the protocol enum (0x00 reserved); only the Schmidl-Cox sync primitive remains.
+2. ITU Poor (2 ms delay, 1 Hz Doppler): no class of its own - the fading index reads it as Good. At 15 dB OFDM QPSK R1/2 holds (GUI 2026-11-13, 10/10 runs, 390-400 bps median); Poor below 15 dB is not measured. (Was "OFDM fails on Poor - use MC-DPSK", from before the current PHY.)
 3. MC-DPSK floor in-band -6 dB AWGN, -3 dB ITU Good (GUI gate, 2026-11-11, 1 seed each, compact frames); on AWGN the CONNECT frame fails at -9; ITU Good below -3 is not measured yet.
 4. File transfer: DATA_START/DATA_END not fully implemented.
 
