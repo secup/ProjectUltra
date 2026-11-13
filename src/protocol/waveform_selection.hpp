@@ -54,9 +54,15 @@ inline constexpr float kOFDMEntryFloorModerateDb = 14.0f;
 // floor 4 against 6 interleaved, AWGN, 7.3 Hz: a true 4-5 dB (5 runs, 4 KB) 400 s against 1833 s -
 // OFDM QPSK R1/2 at 420-1030 bps where MC-DPSK delivered 100; a true 2-3 dB (3 runs, 2 KB) 623 vs
 // 625 s, the reading (accurate on AWGN) stays under 4 and both stay on MC-DPSK; 16/16 PASS.
+// LOWERED 4 -> 2.5 (2026-11-12, same evening): the single-frame FER is the wrong reference for an
+// ARQ link that chase-combines its resends (measure_ack_fer, single shot, production geometry,
+// 7.3 Hz: QPSK R1/4 42 % at 3 dB, R1/2 100 %), while the GUI at a true AWGN 3 dB - readings 2.5-2.8,
+// the OFDM receiver's own LTS estimate 2.9 dB - ran QPSK R1/2 at 550-620 bps: 2 KB in 54/57/57 s
+// against 207-209 s on MC-DPSK. A true 2 dB (readings 1.0-1.2): one session climbed to OFDM and
+// finished in 164 s, one stayed (209 s); 1 dB stayed on MC-DPSK (208 s); 6/6 PASS.
 // Rig-dependent (a real radio's distortion moves the OFDM waterfall): a member of ULTRA_FAST
 // (default since 2026-11-09; ULTRA_FAST=0 restores 8 dB). ULTRA_OFDM_FLOOR_AWGN_DB overrides. Read once.
-inline constexpr float kOFDMEntryFloorAwgnMeasuredDb = 4.0f;
+inline constexpr float kOFDMEntryFloorAwgnMeasuredDb = 2.5f;
 inline float ofdmEntryFloorAwgnDb() {
     static const float v = [] {
         if (const char* e = std::getenv("ULTRA_OFDM_FLOOR_AWGN_DB")) {

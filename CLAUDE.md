@@ -173,8 +173,8 @@ Single-seed entries are floor *locators*, not statistical floors. Higher rates
 
 **Auto rate ladder:** `src/protocol/waveform_selection.hpp::selectOFDMCodeRate()`
 is the single source of truth for code-rate selection; wideband entry floors are
-in `src/protocol/connection_policy.hpp` (AWGN 4 and Good 5 via `ULTRA_FAST`, 8 and 8 with `ULTRA_FAST=0`; Moderate 14, Poor disabled — AWGN
-6 -> 4 and Good 8 -> 5 on 2026-11-12 from GUI floor A/Bs at a true 1-5 dB; the old 10/12/14/18 table is obsolete).
+in `src/protocol/connection_policy.hpp` (AWGN 2.5 and Good 5 via `ULTRA_FAST`, 8 and 8 with `ULTRA_FAST=0`; Moderate 14, Poor disabled — AWGN
+6 -> 2.5 and Good 8 -> 5 on 2026-11-12 from GUI floor A/Bs at a true 1-5 dB; the old 10/12/14/18 table is obsolete).
 Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.cpp`
 — don't duplicate the threshold table elsewhere.
 

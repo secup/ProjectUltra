@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-12 — TUNE(policy): AWGN OFDM entry floor 4 -> 2.5 dB under ULTRA_FAST - the link chase-combines its resends
+
+**What changed and why.** The 4 dB floor of the previous entry was QPSK R1/4's single-frame 10 %-FER
+point. That is the wrong reference for an ARQ link whose resends are chase-combined: `measure_ack_fer`
+(single shot, production geometry, 7.3 Hz) reads QPSK R1/4 at 42 % FER and R1/2 at 100 % at 3 dB, while
+the GUI session at a true AWGN 3 dB - MC-DPSK readings 2.5-2.8 dB, the OFDM receiver's own LTS estimate
+2.9 dB, so the scale is the same - ran QPSK R1/2 at 550-620 bps. `kOFDMEntryFloorAwgnMeasuredDb` = 2.5.
+The PAPR-correction test now uses a 6 dB peak cost so that OFDM is ruled out under every profile's floor.
+
+**Verification.** ctest 126/126 on this commit's tree. GUI (two `ultra_gui -sim` stations over OTASim,
+AWGN, `--cfo-hz 7.3`, 2 KB), floor 2.5 against the MC-DPSK sessions of the 4/6 A/B at the same SNRs: a
+true 3 dB, seeds 44-46 - 54/57/57 s on OFDM from the start against 207-209 s; 2 dB, seed 44 climbed to
+OFDM during the session and finished in 164 s against 208 s, seed 45 stayed on MC-DPSK (209 s); 1 dB,
+seed 44 stayed (208 s); 6/6 PASS.
+
+---
+
 ## 2026-11-12 — TUNE(policy): AWGN OFDM entry floor 6 -> 4 dB under ULTRA_FAST, measured; the MC-DPSK sub-ladder has its own floors
 
 **What changed and why.** The 6 dB AWGN floor (2026-11-09) was QPSK R1/4's measured 10 %-FER point

@@ -1971,13 +1971,13 @@ void test_ladder_papr_correction() {
                selectLadderRungPaprCorrected(snr, good, 0.0f).id == selectLadderRung(snr, good).id;
     }
     CHECK(same, "PAPR correction: a zero offset reproduces the plain ladder at every SNR");
-    // A measured 7 dB AWGN reading on a peak-limited TX: OFDM is judged at 3.6 dB, under any floor
-    // the profiles use; the MC-DPSK pick is made at the measured 7 dB on the MC-DPSK rungs' own
-    // floors - DQPSK (6 dB) - not at "just under the OFDM floor" (which, at the 4 dB floor, is the
-    // deepest DBPSK fallback).
+    // A measured 7 dB AWGN reading on a TX whose OFDM peak costs 6 dB: OFDM is judged at 1 dB, under
+    // any floor the profiles use (2.5 / 8); the MC-DPSK pick is made at the measured 7 dB on the
+    // MC-DPSK rungs' own floors - DQPSK (6 dB) - not at "just under the OFDM floor" (which, at a low
+    // floor, is the deepest DBPSK fallback).
     CHECK(selectLadderRung(7.0f, awgn).id == LadderRungId::OFDM_CHIRP &&
-              selectLadderRungPaprCorrected(7.0f, awgn, 3.4f).id == LadderRungId::ROBUST,
-          "PAPR correction: AWGN 7 dB with a 3.4 dB offset stays MC-DPSK, at DQPSK");
+              selectLadderRungPaprCorrected(7.0f, awgn, 6.0f).id == LadderRungId::ROBUST,
+          "PAPR correction: AWGN 7 dB with a 6 dB offset stays MC-DPSK, at DQPSK");
     CHECK(selectLadderRungPaprCorrected(awgn_floor + 3.5f, awgn, 3.4f).id == LadderRungId::OFDM_CHIRP,
           "PAPR correction: OFDM still entered once it clears its floor after the offset");
     CHECK(selectLadderRungPaprCorrected(ofdmEntryFloorGoodDb() + 2.0f, good, 3.4f).waveform ==
