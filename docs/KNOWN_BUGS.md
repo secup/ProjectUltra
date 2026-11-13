@@ -8,6 +8,35 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-PONG-JAMS-WEAK-CONNECT (open, 2026-11-13) — P1: below about +1 dB in-band an idle responder takes a CONNECT for a PING and keys its PONG over the rest of the frame
+
+GUI multi-seed campaign, realistic radio (`--tx-model hardware --tx-pa on --clock-ppm 50`), ITU Good
+5 dB (about -4.5 dB in-band at the receiver), 2 KB, seed 65: the session never connected. The first
+CONNECT failed to decode, which is normal at that SNR (seeds 61-64 needed 1-3 attempts). From then on
+the responder classified every retry as a PING and answered it while the CONNECT was still arriving
+(retry 2: CONNECT on the air 34.85-39.9 s, PONG keyed at 38.24 s). A half-duplex radio is deaf while
+keyed and the CONNECT's two codewords are interleaved over the whole frame, so all nine retries were
+destroyed by the responder's own PONG.
+
+Mechanism: while a bare chirp is plausible (`bare_chirp_expected_`), the pre-decode wait decision
+(`streaming_ofdm_decode.cpp`, `wait_for_fixed_connect`) skips the fixed CONNECT decode when the
+post-training gap reads payload-free: in-band RMS within `kPingNoiseGapFactor` = 1.5 of the noise
+reference (`streaming_frame_policy.hpp`), a power ratio of 2.25, which is every payload below about
++1 dB in-band - above the MC-DPSK CONNECT decode floor (-6 dB AWGN, about -3 dB Good). The GUI clears
+`bare_chirp_expected_` for 20 s after each PONG (`kResponderConnectExpectedMs`, app.cpp); the
+initiator retries every 20.2 s and the PING verdict lands about 3.4 s into the frame, so the window
+closes just before every retry's verdict. The comment there calls a PONG over a CONNECT a verified
+no-op because the initiator is transmitting - true for the initiator, but the responder deafens
+itself; invisible while OTASim was full-duplex (until 2026-11-11). The TNC never calls
+`setBareChirpExpected` (default true), so there the arm is always on and a TNC responder below about
++1 dB would PONG over even the first CONNECT (read from the code, not yet run).
+
+Direction: never key a reply over a frame that may still be arriving - when the gap reads
+payload-free, still decode the full fixed CONNECT and classify a PING only after that decode fails
+(the PONG then leaves about 3.4 s later at low SNR, inside the initiator's 20 s MC-DPSK PING timeout,
+`ROBUST_LOW_PING_TIMEOUT_MS`), in the shared decoder so GUI and TNC both get it; then size the gap test
+by its window's degrees of freedom instead of the fixed 1.5.
+
 ### BUG-FOLLOW-CLIMB-NO-HYSTERESIS (open, 2026-11-12) — P3: at a true 0-1 dB on ITU Good the follow can climb to OFDM on one high reading
 
 The waveform follow's up-crossing compares one MC-DPSK reading with the same class floor as the
