@@ -34,6 +34,21 @@ inline constexpr float kPingMaxDataToTrainingRMSRatio = 0.5f;
 // quiet input, or at the simulator's own ~0.09 MC-DPSK level, any chirp-locked frame whose decode
 // failed read as payload-free. Without a noise reference the silence ratio alone decides.)
 inline constexpr float kPingNoiseGapFactor = 1.5f;
+// A noise-level gap proves "no payload" only where a payload WOULD have stood out (BUG-PONG-JAMS-
+// WEAK-CONNECT, 2026-11-13). The 1.5x RMS gate is a 2.25x power ratio: any payload under +1 dB in-band
+// reads as noise there, and the MC-DPSK CONNECT decodes down to -6 dB AWGN / -3 dB Good. A PING
+// verdict reached before the frame could have ended keys the PONG over the rest of a weak CONNECT,
+// and a half-duplex radio is deaf while keyed (GUI, realistic radio at -4.5 dB in-band: all nine
+// CONNECT retries were destroyed by the responder's own PONG). The frame's own training is the
+// yardstick - same transmitter, same channel moment, the payload's per-carrier power - so the gap
+// test is informative when the training's in-band RMS clears the gap threshold by this margin: 3 dB
+// = ~1.1 dB for three spreads of the three power estimates (training 9 symbols, gap 3, inter-chirp
+// noise reference; 2BT degrees of freedom each) + ~2 dB for the fade moving between training and
+// gap (~0.1-0.2 s apart; 1 Hz Doppler on ITU Poor). A payload up to 3 dB under the training's level
+// then still reads above the threshold. Below it (training under ~5.4 dB in-band) the receiver
+// decodes the full frame first and classifies a PING only after that decode fails, so the PONG
+// leaves after the frame did.
+inline constexpr float kPingGapInformativeMarginDb = 3.0f;
 // A noise estimate exists (any measured floor above digital silence); was 1e-4 RMS, a level.
 inline constexpr float kMinIdleNoiseRMSForPingGap = 1.0e-7f;
 inline constexpr float kPingCorrFloor = 0.30f;
@@ -91,6 +106,11 @@ struct PingFrameDecision {
     float idle_noise_rms = 0.0f;   // 0 = caller had no valid idle-noise estimate
     float data_inband_rms = 0.0f;  // gap RMS through the in-band FIR (0 = not measured)
     bool gap_is_noise = false;     // noise-relative payload-absence verdict
+    float training_inband_rms = 0.0f;  // training RMS through the same FIR (0 = not measured)
+    // A payload at the training's level would have read above the gap threshold with margin, so
+    // gap_is_noise means "no payload" and not "a payload too weak to see"
+    // (kPingGapInformativeMarginDb).
+    bool gap_test_informative = false;
     // BUG-SYNC-CURSOR-AHEAD: the training window read digital silence, which a live RX
     // path cannot produce at any level. Means the slice covered unwritten ring memory — the
     // decode is invalid, not a PING.
@@ -109,7 +129,8 @@ inline PingFrameDecision evaluatePingFrame(
     bool ldpc_magic_valid = false,
     bool ldpc_decode_attempted = false,
     float idle_noise_rms = 0.0f,
-    float data_inband_rms = 0.0f) {
+    float data_inband_rms = 0.0f,
+    float training_inband_rms = 0.0f) {
     PingFrameDecision decision;
 
     const size_t train_len = std::min(training_skip_samples, count);
@@ -178,6 +199,14 @@ inline PingFrameDecision evaluatePingFrame(
         idle_noise_rms > kMinIdleNoiseRMSForPingGap &&
         data_inband_rms > 0.0f &&
         data_inband_rms <= idle_noise_rms * kPingNoiseGapFactor;
+    decision.training_inband_rms = training_inband_rms;
+    decision.gap_test_informative =
+        idle_noise_rms > kMinIdleNoiseRMSForPingGap &&
+        training_inband_rms >=
+            idle_noise_rms * kPingNoiseGapFactor *
+                std::pow(10.0f, kPingGapInformativeMarginDb / 20.0f);
+    // AFTER a full decode attempt this verdict may stand on the gap alone: the frame is over, so a
+    // PONG for a frame that was really a weak CONNECT costs airtime but destroys nothing.
     const bool payload_energy_absent = decision.ping_by_silence || decision.gap_is_noise;
     decision.ping_by_chirp_lock =
         chirp_signature_real && no_valid_frame &&
@@ -200,6 +229,24 @@ inline PingFrameDecision evaluatePingFrame(
     }
     decision.is_ping = decision.ping_by_silence || decision.ping_by_chirp_lock;
     return decision;
+}
+
+// "No payload follows", proven while the frame may still be on the air - the only basis on which a
+// receiver may skip the full CONNECT decode and answer at once (INV-HALF-DUPLEX-REPLY-001). Either the
+// gap is ratiometrically silent, or it reads as noise where a payload would have stood out. A gap at
+// the noise level under a weak training proves nothing: a CONNECT under +1 dB in-band reads the same.
+inline bool payloadAbsenceProvenBeforeDecode(const PingFrameDecision& d) {
+    return d.ping_by_silence || (d.gap_is_noise && d.gap_test_informative);
+}
+
+// The pre-decode PING verdict. An initiator sends CONNECT only after a PONG, so until this receiver
+// has itself called a frame a PING (and so PONGed it) no CONNECT can be on the air: a noise-level gap
+// is enough and first contact keeps its immediate PONG. Once it has, a CONNECT is expected, and the
+// verdict needs proof (payloadAbsenceProvenBeforeDecode) or the full decode - decode-first costs the
+// PONG ~3.4 s at low SNR, which first contact need not pay (GUI, AWGN -3..3 dB: connect 17 s against
+// 21 s when every PING waited).
+inline bool pingVerdictBeforeDecodeAllowed(const PingFrameDecision& d, bool connect_plausible) {
+    return payloadAbsenceProvenBeforeDecode(d) || (!connect_plausible && d.gap_is_noise);
 }
 
 inline PingRMSDecision evaluatePingRMS(

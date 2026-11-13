@@ -10,6 +10,70 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-13 — FIX(handshake): once a CONNECT can be on the air, a responder decodes it whole before calling it a PING (BUG-PONG-JAMS-WEAK-CONNECT)
+
+**What broke.** Multi-seed GUI campaign (5 new seeds x 30 scenarios): the realistic-radio scenario
+(`--tx-model hardware --tx-pa on --clock-ppm 50`, ITU Good 5 dB, about -4.5 dB in-band at the
+receiver) never connected on seed 65, and the verification batch found the same on plain ITU Good
+-3 dB, seed 65. In both, the first CONNECT failed to decode - normal at that SNR - and every retry
+after it was destroyed by the responder itself: it called the CONNECT a PING about 3.4 s into the
+4.8 s frame and keyed its PONG over the last 1.6 s (realistic radio, retry 2: CONNECT on the air
+34.85-39.9 s, PONG keyed at 38.24 s). A half-duplex radio hears nothing while keyed, and the
+CONNECT's two codewords are interleaved over the whole frame. The TNC was worse: at AWGN 0 dB it never
+connected - it PONGed over the very first CONNECT (`test_ultra_tnc_sim_audio`, `ULTRA_TNC_TEST_SNR_DB=0`).
+
+**Root cause.** While a bare chirp is plausible (`bare_chirp_expected_`), two sites skipped the fixed
+CONNECT decode when the post-training gap read as noise (`gap_is_noise`: in-band RMS within
+`kPingNoiseGapFactor` = 1.5 of the noise reference) - the CW0-peek wait decision and the pre-LDPC robust
+PING emit. 1.5 in RMS is 2.25 in power: every payload under about +1 dB in-band reads as noise, above
+the MC-DPSK CONNECT's decode floor (-6 dB AWGN, about -3 dB Good). The GUI clears
+`bare_chirp_expected_` for 20 s after its PONG; the initiator retries every 20.2 s and the verdict lands
+~3.4 s into the frame, so the window closed just before every retry's verdict. The TNC never sets the
+flag, so there the arm was always on, the first CONNECT included. The comment that called a PONG over
+a CONNECT a no-op (the initiator is transmitting) dated from the full-duplex simulator (until
+2026-11-11).
+
+**What changed.** `streaming_frame_policy.hpp`: `PingFrameDecision` carries the training's in-band RMS -
+the FIR pass that primes the gap filter already computed it and discarded it - and
+`gap_test_informative`: the training clears the gap gate by `kPingGapInformativeMarginDb` = 3 dB (three
+spreads of the three 2BT power estimates ~1.1 dB + ~2 dB for the fade moving between training and gap),
+so a payload up to 3 dB under the training's level still reads above it.
+`payloadAbsenceProvenBeforeDecode()` = a silent gap, or a noise-level gap where a payload would have
+shown; `pingVerdictBeforeDecodeAllowed(decision, connect_plausible)` asks for that proof only once a
+CONNECT can be on the air. An initiator sends CONNECT only after a PONG, so `StreamingDecoder` marks a
+CONNECT plausible when it emits a PING while disconnected (`connect_frame_plausible_`, cleared on every
+session-state change in `setMode`): first contact keeps the immediate PONG, the CONNECT and its retries
+are decoded whole first. Both pre-decode sites use it (`streaming_ofdm_decode.cpp`); PATH2 after the
+full decode keeps the plain gap verdict, so a payload-free frame is still a PING - its PONG now leaves
+after the frame did. The PATH2 logs print the training's in-band RMS and the verdict. Shared decoder:
+GUI, TNC and CLI alike. INV-HALF-DUPLEX-REPLY-001.
+
+**Cost.** A PING heard after this end has already PONGed (a re-PING after a lost PONG), with its
+training under ~5.4 dB in-band, is answered after the fixed-CONNECT span (~1.7-3.4 s later); the
+initiator's MC-DPSK PING timeout is 20 s (`ROBUST_LOW_PING_TIMEOUT_MS`). A first version that decoded
+every such PING first cost every low-SNR connect ~4 s (GUI AWGN -3..3 dB: 21 s against 17 s).
+
+**Verification.** CTest `StreamingFramePolicy` (new `test_weak_connect_is_not_a_ping_before_decode`: a
+CONNECT at -6.8 dB in-band proves nothing before the decode once a CONNECT is plausible, is answered at
+once at first contact, and is still a PING after the decode; a strong PING is answered at once; the 3 dB
+boundary; a payload 3 dB under an informative training is still seen; no noise reference, no verdict);
+full ctest 126/126. TNC at AWGN 0 dB: never connected before, 19.1 s now (22.5 s with the decode-every-
+PING first version). GUI, same scenarios and seeds, against the build before and the decode-every-PING first version:
+
+| Low-SNR handshake | This fix | First version | Build before |
+|---|---|---|---|
+| Realistic radio, ITU Good 5 dB, 2 KB, seeds 61-70 | 10/10; connect median 17 s; 6 CONNECT retries; 0 CONNECTs read as PINGs | 10/10; 43 s; 11; 2 | 9/10 (s65 never connected); 41 s; 24; 13 |
+| ITU Good -3 dB, 1 KB, seeds 61-65 | 5/5; 41 s; 5; 1 | 5/5; 65 s; 8; 1 | 4/5 (s65 never connected); 51 s; 16; 8 |
+| ITU Good 0 dB, 1 KB, seeds 61-65 | 5/5; 17 s; 0 | 5/5; 41 s; 4 | 5/5; 17 s; 1 |
+| AWGN 0 and -3 dB, 1 KB, seeds 61-65 | 10/10; 17 s | 10/10; 21 s | 10/10; 17 s |
+
+30/30 handshakes against 28/30; transfer times otherwise inside the seed-to-seed spread (17/24 pairs
+faster than the build before). The regression set on the first version (AWGN 1/3/10 dB, ITU Good
+1/5/10/20 dB, Poor 15 dB, narrowband AWGN/Good 22 dB and behind a 500 Hz filter, 2 seeds each) was
+unchanged; this fix decides those exactly as before (their PINGs are silent or informative).
+
+---
+
 ## 2026-11-12 — TUNE(policy): AWGN OFDM entry floor 4 -> 2.5 dB under ULTRA_FAST - the link chase-combines its resends
 
 **What changed and why.** The 4 dB floor of the previous entry was QPSK R1/4's single-frame 10 %-FER

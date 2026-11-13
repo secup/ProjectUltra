@@ -409,6 +409,75 @@ void test_unwritten_slice_is_not_a_ping() {
     CHECK(!b.buffer_invalid, "training rms above the floor is valid");
 }
 
+// ── BUG-PONG-JAMS-WEAK-CONNECT: a noise-level gap proves "no payload" only where one would show ──
+// GUI, realistic radio at about -4.5 dB in-band: after one failed CONNECT the idle responder read every
+// retry's payload as noise (in-band 0.188 against a 0.179 reference, inside the 1.5x gate), called it a
+// PING about 3.4 s into the 4.8 s frame and keyed its PONG over the rest - a half-duplex radio is deaf
+// while keyed, so all nine retries were destroyed by the responder itself. Before the frame could have
+// ended, only a gap that is silent, or noise where a payload would have stood out, may skip the decode.
+void test_weak_connect_is_not_a_ping_before_decode() {
+    const size_t n = kPingTrainingSkipSamples + kPingRMSCheckSamples;
+    // Raw samples: the payload region carries as much energy as the training (data/training ~1).
+    std::vector<float> frame(n);
+    for (size_t i = 0; i < n; ++i) frame[i] = (i % 2 == 0) ? 0.2f : -0.2f;
+    const float noise = 0.10f;          // in-band noise reference (inter-chirp gap / idle floor)
+    const float weak = noise * 1.10f;   // training and payload at -6.8 dB in-band (1.21x power)
+    auto weak_connect = evaluatePingFrame(
+        frame.data(), frame.size(), kPingTrainingSkipSamples, kPingRMSCheckSamples,
+        /*chirp_corr=*/0.50f, /*chirp_cfo_hz=*/7.3f, false, false, /*ldpc_attempted=*/true,
+        noise, /*data_inband_rms=*/weak, /*training_inband_rms=*/weak);
+    CHECK(!weak_connect.ping_by_silence, "a payload-bearing gap is not ratiometrically silent");
+    CHECK(weak_connect.gap_is_noise, "under +1 dB in-band a payload reads as noise at the 1.5x gate");
+    CHECK(!weak_connect.gap_test_informative, "a training this weak cannot tell a payload from noise");
+    CHECK(!payloadAbsenceProvenBeforeDecode(weak_connect),
+          "so it proves nothing while the frame may still be arriving: decode the full frame first");
+    CHECK(weak_connect.is_ping,
+          "after the full decode failed the frame is over, and PATH2 may still call it a PING");
+    // An initiator sends CONNECT only after a PONG: before this receiver has PONGed (first contact)
+    // the weak frame cannot be a CONNECT, and the noise-level gap is enough for the immediate PONG.
+    CHECK(pingVerdictBeforeDecodeAllowed(weak_connect, /*connect_plausible=*/false),
+          "first contact: no CONNECT can be on the air, the PING is answered at once");
+    CHECK(!pingVerdictBeforeDecodeAllowed(weak_connect, /*connect_plausible=*/true),
+          "after a PONG the same frame may be the CONNECT: decode it first");
+
+    // A genuine PING under a strong training: its gap really is empty, so it is answered at once.
+    const float strong = noise * 4.0f;  // training ~12 dB in-band
+    auto ping = evaluatePingFrame(
+        frame.data(), frame.size(), kPingTrainingSkipSamples, kPingRMSCheckSamples, 0.50f, 7.3f,
+        false, false, true, noise, /*data_inband_rms=*/noise, /*training_inband_rms=*/strong);
+    CHECK(ping.gap_is_noise && ping.gap_test_informative, "strong training, empty gap: informative");
+    CHECK(payloadAbsenceProvenBeforeDecode(ping), "a payload would have shown, so the PING stands");
+    CHECK(pingVerdictBeforeDecodeAllowed(ping, /*connect_plausible=*/true),
+          "even while a CONNECT is expected");
+
+    // The training must clear the gap gate by kPingGapInformativeMarginDb (3 dB: 2.12x noise RMS).
+    const float edge =
+        noise * kPingNoiseGapFactor * std::pow(10.0f, kPingGapInformativeMarginDb / 20.0f);
+    auto below = evaluatePingFrame(frame.data(), frame.size(), kPingTrainingSkipSamples,
+                                   kPingRMSCheckSamples, 0.50f, 7.3f, false, false, true, noise,
+                                   noise, edge * 0.99f);
+    auto above = evaluatePingFrame(frame.data(), frame.size(), kPingTrainingSkipSamples,
+                                   kPingRMSCheckSamples, 0.50f, 7.3f, false, false, true, noise,
+                                   noise, edge * 1.01f);
+    CHECK(!below.gap_test_informative, "just under the margin the gap test is blind");
+    CHECK(above.gap_test_informative, "just over it the gap test can see a payload");
+
+    // What the margin buys: at the informative edge, a payload whose signal sits 3 dB under the
+    // training's (a fade between the two windows) still reads above the gate.
+    const float signal_power = edge * edge - noise * noise;
+    const float payload_3db_down_rms = std::sqrt(signal_power * 0.5f + noise * noise);
+    CHECK(payload_3db_down_rms > noise * kPingNoiseGapFactor,
+          "a payload 3 dB under an informative training is still seen by the gap gate");
+
+    // No noise reference (arm disabled, e.g. while CONNECTING): nothing is informative and the
+    // silence ratio alone decides, as before.
+    auto no_ref = evaluatePingFrame(frame.data(), frame.size(), kPingTrainingSkipSamples,
+                                    kPingRMSCheckSamples, 0.50f, 7.3f, false, false, true,
+                                    /*idle_noise_rms=*/0.0f, /*data_inband_rms=*/0.0f, strong);
+    CHECK(!no_ref.gap_is_noise && !no_ref.gap_test_informative, "no reference, no noise verdict");
+    CHECK(!payloadAbsenceProvenBeforeDecode(no_ref), "and nothing is proven before the decode");
+}
+
 int main() {
     test_rms_and_ping_detection();
     test_ping_chirp_lock_fallback();
@@ -422,6 +491,7 @@ int main() {
     test_provisional_burst_air_gate_policy();
     test_physical_burst_end_wire_policy();
     test_unwritten_slice_is_not_a_ping();
+    test_weak_connect_is_not_a_ping_before_decode();
 
     if (tests_failed != 0) {
         std::cout << "StreamingFramePolicy: " << (tests_run - tests_failed)

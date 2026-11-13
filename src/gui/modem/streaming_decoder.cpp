@@ -1088,6 +1088,9 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
 
     const bool waveform_mode_changed = mode_ != mode;
     const bool ending_connected_session = connected_ && !connected;
+    if (connected_ != connected) {
+        connect_frame_plausible_.store(false, std::memory_order_relaxed);  // a new handshake era
+    }
     mode_ = mode;
     connected_ = connected;
     if (ending_connected_session) {

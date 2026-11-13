@@ -1177,6 +1177,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // disables the noise arm inside evaluatePingFrame.
         float idle_noise_rms = 0.0f;
         float data_inband_rms = 0.0f;
+        float training_inband_rms = 0.0f;
         // #27 PROTOCOL-STATE GATE (rig F225 regression fix): the noise-relative
         // chirp-lock arm may only classify PING when a bare chirp is PLAUSIBLE
         // (idle / probing — bare_chirp_expected_). While CONNECTING the only
@@ -1220,15 +1221,24 @@ void StreamingDecoder::decodeCurrentFrame() {
                     std::min(ping_training_skip, frame_buffer.size());
                 const size_t check_len =
                     std::min(frame_buffer.size() - check_start, ping_check_samples);
+                // The same pass measures the training's in-band level: the yardstick
+                // for whether a noise-level gap can prove "no payload"
+                // (kPingGapInformativeMarginDb, BUG-PONG-JAMS-WEAK-CONNECT). The first
+                // 101 outputs are the filter's own start-up transient.
+                constexpr size_t kGapFilterSettle = 101;
                 double train_sum_sq = 0.0;
+                size_t train_count = 0;
                 for (size_t i = 0; i < check_start; ++i) {
                     const float y = gap_filter.process(frame_buffer[i]);
-                    train_sum_sq += static_cast<double>(y) * static_cast<double>(y);
+                    if (i >= kGapFilterSettle) {
+                        train_sum_sq += static_cast<double>(y) * static_cast<double>(y);
+                        ++train_count;
+                    }
                 }
-                // (The physical-SNR latch moved into the waveform's exact
-                // training-span decode — handoff §2; the loop above remains
-                // as FIR priming for the gap window below.)
-                (void)train_sum_sq;
+                if (train_count > 0) {
+                    training_inband_rms = static_cast<float>(
+                        std::sqrt(train_sum_sq / static_cast<double>(train_count)));
+                }
                 if (check_len > 0) {
                     double sum_sq = 0.0;
                     for (size_t i = check_start; i < check_start + check_len; ++i) {
@@ -1244,10 +1254,13 @@ void StreamingDecoder::decodeCurrentFrame() {
             frame_buffer.data(), frame_buffer.size(), ping_training_skip,
             ping_check_samples, sync_correlation_, sync_chirp_cfo_hz_,
             ldpc_decode_succeeded, ldpc_magic_valid, ldpc_attempted,
-            idle_noise_rms, data_inband_rms);
+            idle_noise_rms, data_inband_rms, training_inband_rms);
     };
     auto emitPingFrame = [&](const frame_policy::PingFrameDecision& ping_decision,
                              bool ldpc_attempted) {
+        // A PONG follows (the connection answers a PING while disconnected): from here the
+        // initiator's CONNECT may be on the air, and a pre-decode PING verdict needs proof.
+        connect_frame_plausible_.store(true, std::memory_order_relaxed);
         LOG_MODEM(INFO, "[%s] PING detected: path1=%d path2=%d ratio=%.3f "
                   "chirp_corr=%.3f gap_error=%.1f chirp_cfo=%.2f Hz ldpc_attempted=%d "
                   "ldpc_ok=%s magic=%s "
@@ -1325,15 +1338,17 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
                   "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f chirp_cfo=%.2f Hz (max=%.0f Hz), "
-                  "valid_frame=0, reason=%s, inband_rms=%.4f noise_rms=%.4f "
-                  "gap_is_noise=%d, path1=%d, path2=%d",
+                  "valid_frame=0, reason=%s, inband_rms=%.4f noise_rms=%.4f train_inband_rms=%.4f "
+                  "gap_is_noise=%d informative=%d, path1=%d, path2=%d",
                   log_prefix_.c_str(), ping_decision.ratio,
                   ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
                   sync_gap_error_samples_, ping_decision.chirp_cfo_hz,
                   frame_policy::kPingMaxChirpCfoHz,
                   reason,
                   ping_decision.data_inband_rms, ping_decision.idle_noise_rms,
+                  ping_decision.training_inband_rms,
                   ping_decision.gap_is_noise ? 1 : 0,
+                  ping_decision.gap_test_informative ? 1 : 0,
                   ping_decision.ping_by_silence ? 1 : 0,
                   ping_decision.ping_by_chirp_lock ? 1 : 0);
 
@@ -2299,8 +2314,12 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // gate that was never implemented (the knob was inert — sim
                 // good@10: responder heard corr 0.754 PINGs and never PONGed;
                 // initiator gave up after 5).
+                // BUG-PONG-JAMS-WEAK-CONNECT: only where the gap test can see a payload.
+                // Under a weak training a CONNECT's payload reads as noise too, and this
+                // emit fires while the frame is still on the air.
                 if (data_bearing_mcdpsk && robust_idle_ping &&
-                    reject_ping.gap_is_noise &&
+                    frame_policy::pingVerdictBeforeDecodeAllowed(
+                        reject_ping, connect_frame_plausible_.load(std::memory_order_relaxed)) &&
                     reject_ping.chirp_corr >= frame_policy::kPingCorrFloor &&
                     std::abs(reject_ping.chirp_cfo_hz) <=
                         frame_policy::kPingMaxChirpCfoHz) {
@@ -2316,8 +2335,13 @@ void StreamingDecoder::decodeCurrentFrame() {
                 }
                 if (data_bearing_mcdpsk) {
                     LOG_MODEM(INFO, "[%s] MC-DPSK weak 1-CW LLRs but data-bearing "
-                              "(ratio=%.2f >= silence) — not a PING; falling through to "
-                              "fixed-frame wait", log_prefix_.c_str(), reject_ping.ratio);
+                              "(ratio=%.2f >= silence, gap_is_noise=%d informative=%d "
+                              "train_inband_rms=%.4f noise_rms=%.4f) — not a PING yet; "
+                              "falling through to fixed-frame wait",
+                              log_prefix_.c_str(), reject_ping.ratio,
+                              reject_ping.gap_is_noise ? 1 : 0,
+                              reject_ping.gap_test_informative ? 1 : 0,
+                              reject_ping.training_inband_rms, reject_ping.idle_noise_rms);
                 }
             }
             // F147 EXPECTED-ANCHOR IMMUNITY: this gate exists to kill false
@@ -2694,8 +2718,19 @@ void StreamingDecoder::decodeCurrentFrame() {
                 // ~10 dB and below) costs the full multi-second 4-CW wait before
                 // PATH2 can classify it — the responder half of the #70
                 // handshake floor.
-                return !(ping_decision.ping_by_silence ||
-                         ping_decision.gap_is_noise);
+                //
+                // BUG-PONG-JAMS-WEAK-CONNECT (2026-11-13): the noise-relative arm decides
+                // here only where it can see a payload (gap_test_informative). The 1.5x
+                // gate calls every payload under +1 dB in-band noise; skipping the decode
+                // then put the PING verdict ~3.4 s into a 4.8 s CONNECT, and the PONG keyed
+                // over its last 1.6 s - the responder deafened itself to the frame it was
+                // judging, on every retry. Under a weak training the full frame is decoded
+                // first; PATH2 after that decode still calls a payload-free frame a PING,
+                // and its PONG leaves after the frame did (INV-HALF-DUPLEX-REPLY-001). Until
+                // this receiver has PONGed, no CONNECT can be on the air: first contact keeps
+                // the immediate PONG (pingVerdictBeforeDecodeAllowed).
+                return !frame_policy::pingVerdictBeforeDecodeAllowed(
+                    ping_decision, connect_frame_plausible_.load(std::memory_order_relaxed));
             }();
             if (wait_for_fixed_connect) {
                 pending_total_cw_ = v2::kConnectFrameCodewords;
@@ -3167,8 +3202,8 @@ void StreamingDecoder::decodeCurrentFrame() {
 
         LOG_MODEM(INFO, "[%s] PING check PATH2: ratio=%.3f, "
                   "chirp_corr=%.3f (floor=%.2f), gap_error=%.1f chirp_cfo=%.2f Hz (max=%.0f Hz), "
-                  "ldpc_ok=%d, magic=%d, inband_rms=%.4f noise_rms=%.4f "
-                  "gap_is_noise=%d, path1=%d, path2=%d",
+                  "ldpc_ok=%d, magic=%d, inband_rms=%.4f noise_rms=%.4f train_inband_rms=%.4f "
+                  "gap_is_noise=%d informative=%d, path1=%d, path2=%d",
                   log_prefix_.c_str(), ping_decision.ratio,
                   ping_decision.chirp_corr, frame_policy::kPingCorrFloor,
                   sync_gap_error_samples_, ping_decision.chirp_cfo_hz,
@@ -3176,7 +3211,9 @@ void StreamingDecoder::decodeCurrentFrame() {
                   ping_decision.ldpc_decode_succeeded ? 1 : 0,
                   ping_decision.ldpc_magic_valid ? 1 : 0,
                   ping_decision.data_inband_rms, ping_decision.idle_noise_rms,
+                  ping_decision.training_inband_rms,
                   ping_decision.gap_is_noise ? 1 : 0,
+                  ping_decision.gap_test_informative ? 1 : 0,
                   ping_decision.ping_by_silence ? 1 : 0,
                   ping_decision.ping_by_chirp_lock ? 1 : 0);
 

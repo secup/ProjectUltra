@@ -1346,6 +1346,11 @@ private:
     // #70: see setBareChirpExpected. Default TRUE so an idle receiver (the common
     // case) is always robust-ping eligible; the App flips it FALSE during CONNECTING.
     std::atomic<bool> bare_chirp_expected_{true};
+    // Disconnected: this decoder has called a frame a PING, so a PONG went out and the initiator's
+    // CONNECT (and its retries) may follow - a PING verdict before the full fixed-CONNECT decode then
+    // needs proof (streaming_frame_policy::pingVerdictBeforeDecodeAllowed, INV-HALF-DUPLEX-REPLY-001).
+    // Cleared whenever the session state changes (setMode's connected flag).
+    std::atomic<bool> connect_frame_plausible_{false};
 
     // Dual-listen: narrowband waveform for detecting narrowband chirps when disconnected
     // Lazy-initialized on first search to avoid startup cost

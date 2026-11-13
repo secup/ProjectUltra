@@ -412,6 +412,28 @@ fixed-CONNECT decode, the pre-LDPC guards and PATH2 never see a shorter slice th
 PONG each cost 1.6 s more than their content. **Test:** `PingDetector`, `StreamingMCDPSK`,
 `UltraTncSimAudio`; GUI gate PONG at 3.5 s instead of 6.7 s.
 
+### INV-HALF-DUPLEX-REPLY-001: no reply is keyed over a frame that may still be arriving (2026-11-13)
+
+**Rule:** once a CONNECT may be on the air - this disconnected decoder has called a frame a PING,
+so a PONG went out (`StreamingDecoder::connect_frame_plausible_`, cleared on every session-state
+change) - a receiver may call a chirp-locked slice a PING before the full fixed CONNECT has arrived
+only on PROVEN payload absence (`streaming_frame_policy::payloadAbsenceProvenBeforeDecode`): the gap
+after the training is ratiometrically silent, or it reads as noise where a payload would have stood
+out (the frame's own training clears the noise-gap gate by `kPingGapInformativeMarginDb`). Otherwise
+the full fixed CONNECT is decoded first, and only after that decode fails may PATH2 call the frame a
+PING; its PONG then leaves after the frame did. Before the first PONG no CONNECT can be on the air (an
+initiator sends one only after a PONG), and a noise-level gap still answers at once
+(`pingVerdictBeforeDecodeAllowed`). Every pre-decode PING site (the CW0-peek wait decision, the
+pre-LDPC robust emit) goes through it, in the shared decoder (GUI, TNC, CLI). **Why:** a half-duplex radio is deaf while keyed. The 1.5x noise-gap
+gate calls every payload under about +1 dB in-band "noise", so at -4.5 dB in-band the responder
+called each CONNECT retry a PING 3.4 s into the 4.8 s frame and keyed over its last 1.6 s - nine
+retries destroyed by the responder itself (BUG-PONG-JAMS-WEAK-CONNECT). The code had called that PONG
+a no-op because the initiator is transmitting: true on the full-duplex simulator before 2026-11-11.
+**Test:** `StreamingFramePolicy` (`test_weak_connect_is_not_a_ping_before_decode`); GUI ITU Good -3 dB
+and realistic radio (`--tx-model hardware --tx-pa on --clock-ppm 50`) at Good 5 dB, seed 65 (both
+never connected before); `test_ultra_tnc_sim_audio` with `ULTRA_TNC_TEST_SNR_DB=0` (the TNC never
+connected at AWGN 0 dB before: it PONGed over even the first CONNECT).
+
 ---
 
 ## Rate Selection Invariants (2026-11-09)
