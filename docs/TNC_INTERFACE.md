@@ -74,8 +74,14 @@ commands, so this is safe to leave on.
 Bandwidth mapping:
 
 - `BW500` selects `OFDM_NARROW`
-- `BW2300` selects `OFDM_CHIRP`
-- `BW2750` is accepted for legacy compatibility and maps to `OFDM_CHIRP`
+- `BW2300` (the TNC's startup setting) selects a wideband session with the waveform left
+  automatic, as in the GUI: the responder picks MC-DPSK or `OFDM_CHIRP` from the measured SNR
+  and the waveform follow moves the session between them as the channel changes
+- `BW2750` is accepted for legacy compatibility and behaves as `BW2300`
+
+Until 2026-11-14 `BW2300`/`BW2750` forced `OFDM_CHIRP`, so a TNC session below the OFDM floor
+started in OFDM (BUG-TNC-BW-FORCES-OFDM). The `BITRATE` line posted at `CONNECTED` is still the
+bandwidth's nominal OFDM rate (2208 bps wideband, 386 bps at `BW500`).
 
 Binary payload bytes are sent on the data port while connected. Received
 ProtocolEngine binary payloads are emitted on the data port.

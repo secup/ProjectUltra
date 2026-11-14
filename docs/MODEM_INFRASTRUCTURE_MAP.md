@@ -173,7 +173,9 @@ SR-ARQ masks; ON → whole-group ACK/NACK.** They disagreeing was the QAM16 offs
 
 **Three modes:** MC-DPSK (`0x04`, handshake + low-SNR floor, DQPSK R1/4) 🟢 · OFDM_CHIRP
 (`0x05`, primary throughput) 🟢 · OFDM_NARROW (`0x06`, 500 Hz/21-carrier) 🟢 (coherent; returned
-2026-11-10 to `ModeCapabilities::ALL` `frame_v2.hpp:58`; reached only by request: forced waveform or a
+2026-11-10 to `ModeCapabilities::ALL` `frame_v2.hpp:58`; reached only by request: forced waveform (the
+TNC's `BW500`; `BW2300`/`BW2750` leave a wideband session AUTO since 2026-11-14 - they forced
+OFDM_CHIRP before, BUG-TNC-BW-FORCES-OFDM, `tnc_bridge.cpp` `waveformForBandwidth`) or a
 heard narrowband chirp; chirp-anchored bursts, `narrowOFDMFrameTiming(mod, rate, cw)` +
 `kNarrowOFDMFullAnchorExtraMs`, narrowband tone-ACK band plan, rate fixed per session from
 `kNarrowCoherentLadder` / `selectNarrowCoherentOFDM` (`waveform_selection.hpp`): one fading-safe column,

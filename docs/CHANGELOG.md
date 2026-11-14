@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-14 — FIX(tnc): a wideband BW no longer forces OFDM_CHIRP; the TNC's waveform is the SNR pick, as in the GUI (BUG-TNC-BW-FORCES-OFDM)
+
+**What broke.** Re-running the TNC's 0 dB connect check on the committed handshake fix
+(`ULTRA_TNC_TEST_SNR_DB=0 ULTRA_TNC_TEST_SEED=42 build/tests/test_ultra_tnc_sim_audio
+build/ota_simulator build/ultra_tnc`): the session connected (18.8 s) but in OFDM_CHIRP QPSK R1/4 at a
+-1 dB reading, retransmitted 49 times and had 0 bytes acknowledged when the waveform follow crossed it
+to MC-DPSK at 155 s. A GUI session at the same SNR starts in MC-DPSK.
+
+**Root cause.** `TNCBridge::waveformForBandwidth` (since the TNC landed, 2026-05-02) mapped `BW2300`
+and `BW2750` to `OFDM_CHIRP`, and `setBandwidth` set that as the engine's preferred mode. A preferred
+mode is a forced waveform: `selectNegotiatedMode` returns it over the SNR pick, on the initiator
+(the CONNECT carries it) and on a TNC responder alike. `ultra_tnc` calls `setBandwidth(2300)` at
+startup, so every wideband TNC session was forced - below the OFDM floor (AWGN 2.5 / Good 5 dB) it ran
+OFDM until the follow's patience ran out.
+
+**What changed.** `src/tnc/tnc_bridge.cpp`: a wideband BW maps to `WaveformMode::AUTO` (BWxxx picks
+the occupied bandwidth, not a waveform; 500 Hz still selects OFDM_NARROW, its only family). The
+BITRATE line posted at CONNECTED keeps the bandwidth's nominal OFDM rate through the new
+`nominalBitrateForBandwidth` (2208 / 386 bps, unchanged on the wire to the host): it is posted from the
+connection callback, which runs under the engine's mutex, so it cannot read the negotiated mode.
+`tests/test_tnc_bridge.cpp`: BW2300 and BW2750 after BW500 leave the engine AUTO (the old tests
+asserted the forcing). Docs: TNC_INTERFACE.md bandwidth mapping, MODEM_INFRASTRUCTURE_MAP.md §4.
+
+**Verification.** `TNCBridge` 23/23; `UltraTncSimAudio` (AWGN 15 dB, 8 KB) passes in 56.3 s (56.1-58.3 s
+in earlier runs - OFDM picked as before); the 0 dB run above now connects in MC-DPSK (18.8 s), 0
+retransmissions, ~3 KB acknowledged by 250 s against 0 B before (the 8 KB payload still outlasts the
+test's 240 s data window at 0 dB, as before). Full ctest green.
+
+## 2026-11-14 — VERIFY: the committed handshake fix (041dae4f) re-run on the exact build
+
+The 2026-11-13 verification binary was built while the follow goodput rule (later stashed) was still
+in the tree; the rule fired in one of its 30 runs (`pr_good0_s63`). Re-run on the build of b65ae3f9
+(GUI gate, `--cfo-hz 7.3`, 3 trees): realistic radio Good 5 dB seed 65 (never connected before the fix)
+PASS 553 s; Good -3 dB seed 65 (never connected before) PASS 235 s; Good 0 dB seed 63 PASS 311 s; fade
+PASS 215 s; Moderate 15 PASS 133 s; narrowband Good 22 PASS 147 s; AWGN 10 PASS 84 s; Good 20 PASS 68 s
+(3800 bps); AWGN 3 PASS 57 s. 9/9, times inside the earlier campaign's spread.
+
 ## 2026-11-13 — INVESTIGATION(follow): the 0-1 dB "flapping" on ITU Good is run-to-run spread, not a defect (BUG-FOLLOW-CLIMB-NO-HYSTERESIS closed)
 
 **Claim under test.** 2026-11-12: at a true 0-1 dB on ITU Good the waveform follow climbs to OFDM on one

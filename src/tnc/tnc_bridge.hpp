@@ -126,6 +126,7 @@ private:
     void onAudioQueueState(bool active, uint32_t elapsed_ms);
 
     static protocol::WaveformMode waveformForBandwidth(int hz);
+    static int nominalBitrateForBandwidth(int hz);
     static int bitrateEstimate(protocol::WaveformMode mode);
     static State toTNCState(protocol::ConnectionState state);
     void postPTT(bool on);

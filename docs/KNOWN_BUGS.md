@@ -2769,6 +2769,21 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-TNC-BW-FORCES-OFDM (FIXED 2026-11-14) — was P1 for TNC users: every TNC session forced OFDM_CHIRP, so below the OFDM floor it connected and then moved almost nothing
+
+`TNCBridge::waveformForBandwidth` mapped `BW2300` and `BW2750` to `OFDM_CHIRP` and `setBandwidth`
+installed that as the engine's preferred mode - a forced waveform, which `selectNegotiatedMode`
+honors over the SNR pick on both ends. `ultra_tnc` calls `setBandwidth(2300)` at startup, so every
+wideband TNC session (the Winlink path) started in OFDM whatever the SNR, where a GUI session (AUTO)
+starts in MC-DPSK below the class floor. `UltraTncSimAudio` at AWGN 0 dB (seed 42): connected in
+OFDM QPSK R1/4 at a -1 dB reading, 49 retransmissions, 0 bytes acknowledged in 155 s until the
+waveform follow crossed it to MC-DPSK. Found 2026-11-14 while re-running the TNC's 0 dB connect check
+on the committed handshake fix. Fix: a wideband BW leaves the waveform AUTO (500 Hz still selects
+OFDM_NARROW); the CONNECTED-time BITRATE line keeps the bandwidth's nominal OFDM rate
+(`nominalBitrateForBandwidth` - the callback runs under the engine mutex, so it cannot read the
+negotiated mode). Same test after the fix: connected in MC-DPSK, 0 retransmissions, ~3 KB acknowledged
+by 250 s; the 15 dB default `UltraTncSimAudio` passes in 56.3 s (56.1-58.3 s before).
+
 ### BUG-PONG-JAMS-WEAK-CONNECT (FIXED 2026-11-13) — was P1: below about +1 dB in-band a responder took a CONNECT for a PING and keyed its PONG over the rest of the frame
 
 A half-duplex radio is deaf while keyed. While a bare chirp was plausible, the pre-decode wait

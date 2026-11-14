@@ -280,13 +280,21 @@ int main() {
         expect(h.bridge.getState() == State::READY, "bridge should be READY");
     });
 
-    runner.run("BW2300 maps to OFDM_CHIRP", [] {
+    // BUG-TNC-BW-FORCES-OFDM: a wideband BW leaves the waveform to the SNR pick (AUTO), so a
+    // TNC session below the OFDM floor starts in MC-DPSK like a GUI session.
+    runner.run("BW2300 leaves the wideband waveform to the SNR pick", [] {
         Harness h;
-        WaveformMode callback_mode = WaveformMode::AUTO;
-        h.bridge.setPreferredWaveformChangedCallback([&](WaveformMode mode) { callback_mode = mode; });
+        std::vector<WaveformMode> callback_modes;
+        h.bridge.setPreferredWaveformChangedCallback(
+            [&](WaveformMode mode) { callback_modes.push_back(mode); });
+        h.bridge.setBandwidth(500);
+        expect(h.engine.preferred_mode == WaveformMode::OFDM_NARROW, "BW500 mapping mismatch");
         h.bridge.setBandwidth(2300);
-        expect(h.engine.preferred_mode == WaveformMode::OFDM_CHIRP, "BW2300 mapping mismatch");
-        expect(callback_mode == WaveformMode::OFDM_CHIRP, "preferred waveform callback mismatch");
+        expect(h.engine.preferred_mode == WaveformMode::AUTO,
+               "BW2300 must not force a waveform (was OFDM_CHIRP)");
+        expect(callback_modes == std::vector<WaveformMode>({WaveformMode::OFDM_NARROW,
+                                                           WaveformMode::AUTO}),
+               "preferred waveform callback mismatch");
     });
 
     runner.run("BW500 maps to OFDM_NARROW", [] {
@@ -295,13 +303,16 @@ int main() {
         expect(h.engine.preferred_mode == WaveformMode::OFDM_NARROW, "BW500 mapping mismatch");
     });
 
-    runner.run("BW2750 is accepted as OFDM_CHIRP", [] {
+    runner.run("BW2750 is accepted as an automatic wideband session", [] {
         Harness h;
         h.bridge.setMyCall({"VK2A"});
+        h.bridge.setBandwidth(500);
         h.bridge.setBandwidth(2750);
         h.bridge.start();
         h.engine.emitConnection(ConnectionState::CONNECTED, "VK2B");
-        expect(h.engine.preferred_mode == WaveformMode::OFDM_CHIRP, "BW2750 mapping mismatch");
+        expect(h.engine.preferred_mode == WaveformMode::AUTO, "BW2750 mapping mismatch");
+        expect(h.sink.bitrate == std::vector<int>({2208}),
+               "BW2750 posts the wideband OFDM nominal bitrate");
         expect(h.sink.connected.size() == 1, "connected event missing");
         expect(h.sink.connected[0].bw == 2750, "connected bandwidth should preserve requested BW2750");
     });

@@ -493,7 +493,7 @@ void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::
         const std::string& responder = inbound ? local : remote;
         if (auto sink = snapshotEventSink()) {
             sink->postModemConnected(initiator, responder, bw);
-            sink->postModemBitrate(bitrateEstimate(waveformForBandwidth(bw)));
+            sink->postModemBitrate(nominalBitrateForBandwidth(bw));
         }
     } else if (state == protocol::ConnectionState::DISCONNECTED && previous != State::IDLE &&
                previous != State::READY && previous != State::LISTENING) {
@@ -596,11 +596,25 @@ void TNCBridge::onAudioQueueState(bool active, uint32_t elapsed_ms) {
     }
 }
 
+// BWxxx picks the occupied bandwidth, not a waveform. 500 Hz has one waveform family
+// (OFDM_NARROW). A wideband session stays AUTO, as the GUI's default does: the responder picks
+// MC-DPSK or OFDM_CHIRP from the measured SNR and the waveform follow moves it as the channel
+// changes. Until 2026-11-14 BW2300/BW2750 (and the TNC's startup BW2300) forced OFDM_CHIRP, so a
+// TNC session below the OFDM floor connected in OFDM and moved almost nothing until the follow
+// crossed it to MC-DPSK (AWGN 0 dB: 155 s at 6 B/s; BUG-TNC-BW-FORCES-OFDM).
 protocol::WaveformMode TNCBridge::waveformForBandwidth(int hz) {
     if (hz == 500) {
         return protocol::WaveformMode::OFDM_NARROW;
     }
-    return protocol::WaveformMode::OFDM_CHIRP;
+    return protocol::WaveformMode::AUTO;
+}
+
+// The BITRATE line at CONNECTED: the nominal rate of the bandwidth's OFDM waveform. It is posted
+// from the connection callback, which runs under the engine's mutex, so the negotiated mode
+// cannot be read there (getCurrentBitrate_bps() reads it outside the callback).
+int TNCBridge::nominalBitrateForBandwidth(int hz) {
+    return bitrateEstimate(hz == 500 ? protocol::WaveformMode::OFDM_NARROW
+                                     : protocol::WaveformMode::OFDM_CHIRP);
 }
 
 int TNCBridge::bitrateEstimate(protocol::WaveformMode mode) {
