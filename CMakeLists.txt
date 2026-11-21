@@ -625,6 +625,20 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(papr_tx_measure PRIVATE ultra_core ota_channel_core)
 
+    # Peak-control Phase 0 (docs/PEAK_CONTROL_DESIGN_2026_11_21.md): clip curves on real
+    # ModemEngine::transmitBurst bursts, every wideband rung. Measurement only.
+    add_executable(peak_control_measure
+        tools/peak_control_measure.cpp
+        ${ULTRA_MODEM_ENGINE_SOURCES}
+    )
+    target_include_directories(peak_control_measure PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+    )
+    target_link_libraries(peak_control_measure PRIVATE ultra_core ota_channel_core)
+
     add_executable(channel_discriminator_probe
         tools/channel_discriminator_probe.cpp
     )

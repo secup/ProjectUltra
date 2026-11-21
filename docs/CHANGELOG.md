@@ -10,6 +10,35 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — measure(papr): peak-control Phase 0 — a per-rung clip is worth +3.6 to +6.4 dB on a peak-limited TX (prediction, no behaviour change)
+
+**Why.** A peak-normalized transmitter loses the burst's crest factor in average power; coherent
+OFDM bursts carry 9.8-11 dB of it. The July clipper (one 9-12 dB threshold for every rung, one pass,
+no receiver model) was net −12 % on the rig and stays off. Design: `docs/PEAK_CONTROL_DESIGN_2026_11_21.md`
+(per-rung headroom derived from the rung's EVM threshold and the measured clip curves, §3).
+
+**What.** New tool `tools/peak_control_measure.cpp` (CMake target `peak_control_measure`, measurement
+only): builds real bursts through `ModemEngine::transmitBurst` for all 10 wideband rungs, applies a
+file-local iterative envelope clip-and-filter prototype over a headroom sweep, and measures every
+data and pilot cell exactly (aligned with the encoder's genie symbol capture, correlation 1.00000
+checked per symbol; aborts otherwise): crest factor, Bussgang gain (data / pilot / LTS), clip SDR,
+which segment holds the peak, and the PEP-fair gain at the rung's turbo EVM threshold.
+
+**Result** (5 passes, filter edge ± 3 carrier spacings; full table in the design doc §5a): best
+headroom 0-1 dB on QPSK (+5.6 to +6.4 dB), 3-4 dB on 8PSK/16QAM (+4.1 to +5.3), 6 dB on 32QAM R2/3
+(+3.6). The peak is always in the data symbols, before and after the clip. Pilots and data see the
+same Bussgang gain (±0.004); the LTS does not (0.87 dB apart at h=1), so the receiver must correct an
+LTS-seeded channel estimate. One pass loses 1-1.6 dB against five.
+
+**Not yet shown:** any GUI-gate result. The prediction assumes the EVM thresholds hold with clip
+noise and that pilot-estimate noise costs nothing; Phase 1 (TX clipper + RX α/LLR model behind a
+lockstep knob) must prove it with `--tx-model hardware` across the matrix including clean channels.
+
+**Verification.** `cmake --build build --target peak_control_measure && ./build/peak_control_measure --edge-bins 3`
+(about 2 minutes; prints the per-rung tables and a BEST line per rung).
+
+---
+
 ## 2026-11-14 — FIX(tnc): a wideband BW no longer forces OFDM_CHIRP; the TNC's waveform is the SNR pick, as in the GUI (BUG-TNC-BW-FORCES-OFDM)
 
 **What broke.** Re-running the TNC's 0 dB connect check on the committed handshake fix
