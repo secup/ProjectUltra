@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — RELEASE: v0.6.3-pre-alpha
+
+Version 0.6.2 -> 0.6.3 in `CMakeLists.txt`. **Not compatible over the air with 0.6.2** (compact
+OFDM and MC-DPSK data frames, the moved MC-DPSK session rung words, and peak control's rate-selector
+carry, which needs the same setting on both stations): both stations must upgrade. Since v0.6.2
+(105 commits): peak control on by default (4-6 dB more average power at the same PEP); 64QAM R2/3
+and R3/4 rungs; TNC: no longer hears itself, recovers from a failed or abandoned session, never
+leaves PTT keyed (GitHub #38); the TNC's wideband BW no longer forces OFDM; the half-duplex PONG
+self-jam fix; OFDM entry floors AWGN 2.5 / Good 5 dB; the waveform follow and dual-listen work of
+2026-11-11..13. The GUI gate now models a real transmitter's levels by default (`--tx-model
+hardware`). README: v0.6.3 results on the peak-SNR scale. Not yet measured on hardware.
+
+---
+
 ## 2026-11-21 — feat(rate): 64QAM R2/3 and R3/4 rungs (turbo only, cw16); MC-DPSK rung words 11/12 -> 13/14
 
 **Why.** At AWGN 25-30 dB peak SNR the link sat on 32QAM R2/3 (3.33 bits per carrier), its top rung.

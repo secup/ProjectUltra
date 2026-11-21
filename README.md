@@ -17,16 +17,18 @@ view.
 > versions, so both stations must run the same build. Performance is measured on software and
 > hardware HF channel simulators; it is not yet characterized over the air at scale.
 
-*Updated 2026-11-10. Latest release: [`v0.6.2-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.2-pre-alpha).*
+*Updated 2026-11-21. Latest release: [`v0.6.3-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.3-pre-alpha).*
 
 ---
 
 ## Highlights
 
-- **Adaptive wideband OFDM.** 59 carriers in 2.8 kHz, coherent QPSK through 16QAM. The receiver
+- **Adaptive wideband OFDM.** 59 carriers in 2.8 kHz, coherent QPSK through 64QAM. The receiver
   learns the link quality from frame outcomes and from each frame's measured signal quality,
   and moves to a faster rung as soon as the frames say it would decode.
 - **Strong coding.** Each OFDM data frame is one long turbo codeword; control frames use LDPC.
+- **Peak control.** Every data burst is clipped and filtered to the crest factor its mode can
+  afford, so a peak-limited transmitter puts 4-6 dB more average power on the air at the same PEP.
 - **Efficient ARQ.** Selective repeat over multi-frame bursts, soft combining of repeated frames,
   and short tone-burst acknowledgements.
 - **Low overhead.** A sync chirp opens the connection; after that each burst is found from its
@@ -47,6 +49,32 @@ view.
 All figures are goodput: file bytes delivered and CRC-verified per second of transfer, with
 retransmissions and turnarounds included. Connection setup (about 14 s since v0.6.2, 24 s before) is
 not included.
+
+### v0.6.3, software channel simulator, real transmitter levels
+
+From v0.6.3 the simulator scales every burst to the same **peak** level, as a real transmitter
+(PEP, ALC) does; SNR below is peak envelope power over the noise in 3 kHz. Two changes move the
+data rate: peak control (each data burst clipped to the crest factor its mode can afford: 4-6 dB
+more average power for the same peak) and two 64QAM rungs on strong channels. 7.3 Hz dial offset,
+mean of 3 seeds; "Before" is the same code with peak control off and without the 64QAM rungs
+(64QAM never engaged on the fading channels tested, so those rows are peak control alone):
+
+| Channel | Peak SNR | Before | v0.6.3 | File |
+|---|---:|---:|---:|---|
+| AWGN | 30 dB | 5.7 kbps | 6.9 kbps | 201 KB |
+| AWGN | 25 dB | 5.6 kbps | 6.8 kbps | 201 KB |
+| AWGN | 20 dB | 4.1 kbps | 5.1 kbps | 201 KB |
+| AWGN | 15 dB | 2.9 kbps | 3.3 kbps | 201 KB |
+| AWGN | 10 dB | 0.12 kbps (MC-DPSK) | 1.8 kbps | 201 KB |
+| ITU Good | 28 dB | — | 3.7 kbps | 41 KB |
+| ITU Good | 20 dB | 1.6 kbps | 2.1 kbps | 41 KB |
+| ITU Good | 12 dB | 0.4 kbps | 1.2 kbps | 21 KB |
+| ITU Moderate | 25 dB | 2.1 kbps | 2.2-2.4 kbps | 41 KB |
+| ITU Moderate | 18 dB | 1.2 kbps | 1.7 kbps | 21 KB |
+
+At 5 dB both stay on MC-DPSK (about 0.11 kbps, its top rate); at 0 dB peak SNR the connection
+handshake does not complete in this test. The earlier tables below are on the old scale (every burst
+at the same average level) and are not comparable with this one.
 
 ### v0.6.2, software channel simulator
 
@@ -87,7 +115,7 @@ AWGN in the simulator, the link now runs OFDM at 770–970 bps from 15 dB on the
 `v0.5.2.1-pre-alpha` between a Raspberry Pi 5 and a Mac through a hardware HF channel simulator,
 real soundcards and real half-duplex turnaround (August 2026). 50 KB on ITU Good at 20 dB:
 16 of 16 transfers byte-exact, mean 1.98 kbps with the rung held at 8PSK R2/3, 1.50–2.32 kbps
-under automatic rate control. v0.6.0 to v0.6.2 have not yet been measured on hardware.
+under automatic rate control. v0.6.0 to v0.6.3 have not yet been measured on hardware.
 
 Fading channels vary a lot from run to run: identical builds on the same path have differed by
 0.7 kbps. Compare distributions, not best runs. No claim is made about performance relative to
