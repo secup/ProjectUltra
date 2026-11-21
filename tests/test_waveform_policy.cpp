@@ -445,7 +445,16 @@ void test_data_mode_policy() {
     // data frames (ULTRA_DATA_FEC=ldpc, CTest WaveformPolicyLdpc) they are holes and 16QAM R2/3
     // stays the top Good pick.
     const bool turbo = v2::ofdmDataFrameFec() == v2::DataFrameFec::TURBO;
-    for (float snr : {32.0f, 30.0f, 28.0f}) {
+    // 64QAM (2026-11-21, turbo only): R3/4 from Good 32, R2/3 from 30.
+    recommendDataMode(32.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(turbo ? (mod == Modulation::QAM64 && rate == CodeRate::R3_4)
+                : (mod == Modulation::QAM16 && rate == CodeRate::R2_3),
+          "good-fading in-band SNR32 selects 64QAM R3/4 with turbo (G32 anchor), 16QAM R2/3 with LDPC");
+    recommendDataMode(30.0f, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
+    CHECK(turbo ? (mod == Modulation::QAM64 && rate == CodeRate::R2_3)
+                : (mod == Modulation::QAM16 && rate == CodeRate::R2_3),
+          "good-fading in-band SNR30 selects 64QAM R2/3 with turbo (G30 anchor), 16QAM R2/3 with LDPC");
+    for (float snr : {29.0f, 28.0f}) {
         recommendDataMode(snr, WaveformMode::OFDM_CHIRP, mod, rate, 0.30f);
         if (turbo) {
             CHECK(mod == Modulation::QAM32 && rate == CodeRate::R2_3,

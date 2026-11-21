@@ -160,6 +160,10 @@ inline float evmDecodeThresholdTurboDb(uint8_t rung) {
         case kRungIdxQam16R23: return 11.75f;
         case kRungIdxQam16R34: return 12.3f;   // 16QAM R2/3 + 0.55, measured (was 13.4 derived)
         case kRungIdxQam32R23: return 15.5f;   // 16QAM R2/3 + 3.76, measured
+        // 64QAM (2026-11-21), measured the same way (decoded frames' EVM at the 50 %-FER SNR,
+        // relative to 16QAM R2/3; that sweep reproduces 32QAM's +3.76 exactly): +5.65 / +6.20.
+        case kRungIdxQam64R23: return 17.4f;
+        case kRungIdxQam64R34: return 17.95f;
         default: return 99.0f;
     }
 }
@@ -432,6 +436,7 @@ private:
             case Modulation::QAM8: return 1;
             case Modulation::QAM16: return 2;
             case Modulation::QAM32: return 3;
+            case Modulation::QAM64: return 4;
             default: return -1;  // not a coherent data rung: its frames keep the own threshold
         }
     }
@@ -440,7 +445,7 @@ private:
         float own_db = 0.0f;
         float eta_db = 0.0f;
     };
-    mutable std::array<std::array<CrossThreshold, 4>, kRungIdxCount> cross_{};
+    mutable std::array<std::array<CrossThreshold, 5>, kRungIdxCount> cross_{};
 
     std::array<float, kWindowFrames> ring_{};
     std::array<Modulation, kWindowFrames> ring_mod_{};

@@ -64,8 +64,8 @@ void test_margin_is_visible_from_any_rung() {
               sel.successProb(kRungIdxQam32R23) > 0.99f,
           "20 dB EVM frames predict 16QAM R2/3 and 32QAM R2/3 decode them");
     const auto pick = sel.best(productionGeometry());
-    CHECK(pick.rung == kRungIdxQam32R23,
-          "AWGN-like 20 dB frames select the densest rung, 32QAM R2/3, directly from R1/2 (got "
+    CHECK(pick.rung == kRungIdxQam64R34,
+          "AWGN-like 20 dB frames select the densest rung, 64QAM R3/4, directly from R1/2 (got "
               << static_cast<int>(pick.rung) << ")");
 
     // QPSK frames midway between QPSK R2/3's threshold and 8PSK R2/3's threshold as QPSK
@@ -189,9 +189,10 @@ void test_climb_mode_only_takes_reliable_rungs() {
     const auto geometry = productionGeometry();
     EvmRateSelector awgn;
     awgn.observeGroup(kRungIdxQpskR12, frames(18.0f, 5), 5, 5);
+    // 18 dB on QPSK frames clears 64QAM R3/4's threshold as QPSK frames read it (15.6 dB).
     CHECK(awgn.bestReliable(geometry, kRungIdxNone, LatentRateController::kCapProb) ==
-              kRungIdxQam32R23,
-          "AWGN-like frames: 32QAM R2/3 is reliable, so a climb may go straight to it");
+              kRungIdxQam64R34,
+          "AWGN-like frames: 64QAM R3/4 is reliable, so a climb may go straight to it");
     // 8PSK frames: four well above 16QAM R2/3's threshold as 8PSK frames read it, one between
     // 8PSK R2/3's own threshold and that: 16QAM R2/3 decodes ~80 %, 8PSK R2/3 all but certainly.
     const float t16 = evmThresholdOnFramesDb(kRungIdxQam16R23, Modulation::QAM8);

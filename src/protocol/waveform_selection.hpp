@@ -338,6 +338,15 @@ inline constexpr CoherentRung kCoherentLadderPsk8Exp[] = {
     // anchors matter only for a CONNECT-time pick without RX authority, and sit above 16QAM
     // R2/3's 26.0 so that pick is unchanged below 27 dB: each rung loses <= 2 % of Good frames
     // there. AWGN and Moderate stay disabled for the classifier hazard documented below.
+    // 64QAM R2/3 and R3/4 (2026-11-21, TURBO ONLY, cw16). measure_ack_fer, production geometry,
+    // 3 seeds x 20 frames: AWGN 50 % points 16QAM R2/3 9.7, 32QAM R2/3 13.3, 64QAM R2/3 14.6,
+    // 64QAM R3/4 15.9 dB (the harness's scale); ITU Good 16QAM R2/3 12.1, 64QAM R2/3 18.8, R3/4
+    // 20.0 dB with error floors (pass at 30-32 dB: 88 % / 83 %). Delivered bits per carrier on
+    // Good at 26 dB: 64QAM R2/3 3.47 vs 32QAM R2/3 3.27; R3/4 pays only above ~30 dB there. Like
+    // 32QAM, the rows exist for the rate controllers (RX authority climbs on measured EVM); the
+    // Good anchors sit above 32QAM's 28 so the CONNECT-time pick is unchanged below 30 dB.
+    {Modulation::QAM64, CodeRate::R3_4, {kRungDisabledDb, 32.0f,           kRungDisabledDb}, true},
+    {Modulation::QAM64, CodeRate::R2_3, {kRungDisabledDb, 30.0f,           kRungDisabledDb}, true},
     {Modulation::QAM32, CodeRate::R2_3, {kRungDisabledDb, 28.0f,           kRungDisabledDb}, true},
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, 27.0f,           kRungDisabledDb}, true},
     {Modulation::QAM16, CodeRate::R2_3, {kRungDisabledDb, 26.0f,           kRungDisabledDb}},  // AWGN COLUMN — MEASURED 2026-07-28 AND DELIBERATELY LEFT DISABLED. Forced 16QAM R2/3 on OTASim AWGN passes at EVERY swept dial with ZERO craters: dial 20 -> 3250 bps (26/26 frames OK), 16 -> 3240, 14 -> 3110, 12 -> 3270 (27/28 frames). vs 8PSK R2/3 auto at AWGN@20 = 2430, i.e. +33.7% measured against +33.5% predicted from 2.67/2.00 bits-per-carrier. In-band reads dial-0.2 there, so the lowest working point is snr_avg ~20.5 and the AWGN floor is BELOW the swept range. THE RUNG WORKS. It stays disabled because the HAZARD IS THE CLASSIFIER, NOT THE RUNG: 8PSK R3/4 was auto-disabled 2026-07-06 for exactly this shape — "the A18 anchor was validated on TRUE AWGN only; on the Watterson bench a 60-90 s calm stretch legitimately classifies AWGN, unlocks this rung, and it craters when fading returns (F141/F143: 3 runs poisoned)". 16QAM R2/3 measures 51.4% FER on Good, and the Good/AWGN discriminator is a known-open bug (BUG-FADING-INDEX-BLIND; the coherence discriminator). A calm stretch misclassified as AWGN would unlock a rung that fails half its frames — the identical failure with a worse rung. UNLOCK CONDITION: a trustworthy sustained-AWGN classification (or the effective-SINR/PER selector, which makes the column moot because it predicts PER from the measured per-carrier grid instead of a channel-class label). Reproduce: ULTRA_FORCE_DATA_MOD=QAM16 ULTRA_FORCE_DATA_RATE=R2_3 ULTRA_LOCK_RATE=1 ULTRA_RX_RATE_AUTHORITY=0 tools/gui_qso_scenario.sh --channel awgn --snr-db 12 --expect-mod 16QAM --expect-rate R2/3. GOOD 20.0 -> 26.0 (2026-07-26, MEASURED, LIVE LADDER): at 20.0 this rung measures **51.4% FER** on ITU Good and NEVER overtakes 8PSK R2/3 anywhere in 16-24 dB (delivered @20 1890 vs 2450; @24 2700 vs 2754). The ladder was confidently selecting a rung that fails HALF its frames, cratering, demoting and reaching again -- the dominant source of rate churn. 26.0 is EXTRAPOLATED, not measured: 16QAM R2/3 is still behind at the top swept point (24 dB) and the curves converge, so it should overtake around 25-26. Set above the highest measured point where 8PSK still wins, preserving the rung for a genuinely better channel rather than deleting it. Re-measure above 24 dB before trusting 26.
@@ -424,7 +433,9 @@ enum : uint8_t {
     kRungIdxQam16R23 = 8,
     kRungIdxQam16R34 = 9,
     kRungIdxQam32R23 = 10,  // 2026-11-10 (turbo only); rectangular 4 x 8 32QAM, cw16
-    kRungIdxCount = 11,  // first unassigned
+    kRungIdxQam64R23 = 11,  // 2026-11-21 (turbo only); square 64QAM, cw16
+    kRungIdxQam64R34 = 12,  // 2026-11-21 (turbo only)
+    kRungIdxCount = 13,  // first unassigned
 };
 
 // The authority field is five bits wide while canonical rung indices occupy only the
@@ -459,6 +470,8 @@ inline uint8_t coherentRungIndexFor(Modulation mod, CodeRate rate) {
         return kRungIdxNone;
     }
     if (mod == Modulation::QAM32 && rate == CodeRate::R2_3) return kRungIdxQam32R23;
+    if (mod == Modulation::QAM64 && rate == CodeRate::R2_3) return kRungIdxQam64R23;
+    if (mod == Modulation::QAM64 && rate == CodeRate::R3_4) return kRungIdxQam64R34;
     return kRungIdxNone;
 }
 
@@ -475,6 +488,8 @@ inline CoherentPick coherentRungFromIndex(uint8_t idx) {
         case kRungIdxQam16R23: return {Modulation::QAM16, CodeRate::R2_3};
         case kRungIdxQam16R34: return {Modulation::QAM16, CodeRate::R3_4};
         case kRungIdxQam32R23: return {Modulation::QAM32, CodeRate::R2_3};
+        case kRungIdxQam64R23: return {Modulation::QAM64, CodeRate::R2_3};
+        case kRungIdxQam64R34: return {Modulation::QAM64, CodeRate::R3_4};
         default: return {Modulation::QPSK, CodeRate::R1_4};
     }
 }
@@ -509,6 +524,7 @@ inline EnvironmentForcedDataProfile forcedDataProfileFromEnvironment() {
         else if (s == "QAM8" || s == "8PSK")   profile.modulation = Modulation::QAM8;
         else if (s == "QAM16" || s == "16QAM") profile.modulation = Modulation::QAM16;
         else if (s == "QAM32" || s == "32QAM") profile.modulation = Modulation::QAM32;
+        else if (s == "QAM64" || s == "64QAM") profile.modulation = Modulation::QAM64;
         else                                      profile.malformed = true;
     }
     if (const char* env = std::getenv("ULTRA_FORCE_DATA_RATE")) {

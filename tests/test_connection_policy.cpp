@@ -1084,12 +1084,14 @@ void test_mcdpsk_rate_controller() {
     CHECK(mcDpskRungIndexFor(Modulation::DBPSK) == 0 && mcDpskRungIndexFor(Modulation::DQPSK) == 1 &&
               mcDpskRungIndexFor(Modulation::QPSK) == -1,
           "rung index of each constellation");
-    CHECK(encodeMcDpskRungCommand(0) == 11 && encodeMcDpskRungCommand(1) == 12 &&
+    // 13, 14 since 2026-11-21 (64QAM took OFDM rungs 11, 12); 11, 12 before.
+    CHECK(encodeMcDpskRungCommand(0) == 13 && encodeMcDpskRungCommand(1) == 14 &&
               encodeMcDpskRungCommand(-1) == 0 && encodeMcDpskRungCommand(2) == 0,
           "command encoding");
-    CHECK(decodeMcDpskRungCommand(0) == -1 && decodeMcDpskRungCommand(11) == 0 &&
-              decodeMcDpskRungCommand(12) == 1 && decodeMcDpskRungCommand(1) == -1 &&
-              decodeMcDpskRungCommand(13) == -1 && decodeMcDpskRungCommand(0x1F) == -1,
+    CHECK(decodeMcDpskRungCommand(0) == -1 && decodeMcDpskRungCommand(13) == 0 &&
+              decodeMcDpskRungCommand(14) == 1 && decodeMcDpskRungCommand(1) == -1 &&
+              decodeMcDpskRungCommand(11) == -1 && decodeMcDpskRungCommand(12) == -1 &&
+              decodeMcDpskRungCommand(15) == -1 && decodeMcDpskRungCommand(0x1F) == -1,
           "command decoding (0, OFDM rungs and unknown words carry no MC-DPSK command)");
     for (int r = 0; r < kMcDpskRungCount; ++r) {
         CHECK(decodeMcDpskRungCommand(encodeMcDpskRungCommand(r)) == r, "codec round trip");

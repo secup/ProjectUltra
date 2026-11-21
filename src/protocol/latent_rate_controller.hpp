@@ -240,6 +240,10 @@ inline float latentThetaForRung(uint8_t idx) {
             case kRungIdxQam16R23: return 17.8f;
             case kRungIdxQam16R34: return 19.5f;  // turbo: 16QAM R2/3 + 1.7 (was 22.0, LDPC floor)
             case kRungIdxQam32R23: return 22.3f;  // turbo: 16QAM R2/3 + 4.5
+            // 2026-11-21: 16QAM R2/3 + the ITU Good spacing measured in one sweep (16QAM R2/3
+            // 12.1, 64QAM R2/3 18.8, R3/4 20.0 dB 50 %-FER points): +6.7 and +7.9 dB.
+            case kRungIdxQam64R23: return 24.5f;
+            case kRungIdxQam64R34: return 25.7f;
             default: return 99.0f;
         }
     }
@@ -254,6 +258,8 @@ inline float latentThetaForRung(uint8_t idx) {
         case kRungIdxQam16R23: return 20.3f;  // measured
         case kRungIdxQam16R34: return 22.0f;  // derived: 16QAM R2/3 + the turbo spacing 1.7
         case kRungIdxQam32R23: return 24.8f;  // derived: 16QAM R2/3 + the turbo spacing 4.5
+        case kRungIdxQam64R23: return 27.0f;  // derived: 16QAM R2/3 + the measured Good spacing 6.7
+        case kRungIdxQam64R34: return 28.2f;  // derived: + 7.9
         default: return 99.0f;
     }
 }

@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — feat(rate): 64QAM R2/3 and R3/4 rungs (turbo only, cw16); MC-DPSK rung words 11/12 -> 13/14
+
+**Why.** At AWGN 25-30 dB peak SNR the link sat on 32QAM R2/3 (3.33 bits per carrier), its top rung.
+The PHY already mapped and demapped square 64QAM; it had no rung.
+
+**Measured** (`measure_ack_fer --geometry production`, turbo, cw16, 3 seeds x 20 frames; `--mod qam64`
+added): AWGN 50 % points 16QAM R2/3 9.7, 32QAM R2/3 13.3, 64QAM R2/3 14.6, 64QAM R3/4 15.9 dB (the
+harness's SNR scale): 64QAM R2/3 costs 1.3 dB over our rectangular 4x8 32QAM for +20 % bits, R3/4
+2.6 dB for +35 %. ITU Good: 16QAM R2/3 12.1, 64QAM R2/3 18.8, R3/4 20.0 dB, with error floors (88 % /
+83 % pass at 30-32 dB). EVM thresholds by the 32QAM method (decoded frames' EVM at the 50 % point,
+relative to 16QAM R2/3; the same sweep reproduces 32QAM's +3.76 exactly): +5.65 -> 17.4 dB, +6.20 ->
+17.95 dB.
+
+**What.** `kRungIdxQam64R23 = 11`, `kRungIdxQam64R34 = 12` (`kRungIdxCount` 13); ladder rows turbo-only,
+Good anchors 30 / 32 (above 32QAM's 28: the CONNECT pick is unchanged below 30 dB), AWGN/Moderate
+disabled like 32QAM; turbo EVM thresholds 17.4 / 17.95 (LDPC: disabled); latent thetas 24.5 / 25.7
+(16QAM R2/3 + the measured Good spacing 6.7 / 7.9); the selector's constellation slots 4 -> 5; cw16 via
+`recommendCWCount`; `ULTRA_FORCE_DATA_MOD=QAM64`. **Wire change:** the session rung word's MC-DPSK
+values moved 11/12 -> 13/14 (still inside the 4-bit index; v0.6.3 is not 0.6.2-compatible anyway).
+Peak control gives 64QAM h = 6 dB.
+
+**Tests.** `WaveformPolicy` (Good 32 -> 64QAM R3/4, 30 -> 64QAM R2/3, 29/28 -> 32QAM R2/3),
+`ConnectionPolicy` (MC-DPSK words 13/14), `EvmRateSelector` (20 dB / 18 dB QPSK frames now pick 64QAM
+R3/4). Full ctest 127/127. GUI gate: pending.
+
+---
+
 ## 2026-11-21 — test(gate): `gui_qso_scenario.sh` defaults to `--tx-model hardware`
 
 Every burst at the same PEAK level, as a real transmitter does; `--tx-model sim` (same AVERAGE level,

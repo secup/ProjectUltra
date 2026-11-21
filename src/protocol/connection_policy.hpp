@@ -826,12 +826,13 @@ inline int mcDpskRungIndexFor(Modulation mod) {
 // The command rides the tone ACK's 5-bit rung word [rate_hint(3) | rung_cmd(2)], which names one
 // rung of the SESSION ladder whatever the waveform (waveform follow, 2026-11-11):
 //   0        no command
-//   1..10    the canonical wideband OFDM rungs (kRungIdx*, waveform_selection.hpp), bit 4 being
+//   1..12    the canonical wideband OFDM rungs (kRungIdx*, waveform_selection.hpp), bit 4 being
 //            the OFDM startup-probe flag
-//   11, 12   MC-DPSK DBPSK, DQPSK at the session's MC-DPSK geometry
+//   13, 14   MC-DPSK DBPSK, DQPSK at the session's MC-DPSK geometry (11, 12 until 2026-11-21,
+//            when the 64QAM rungs took 11 and 12 - a wire change, v0.6.3 is not 0.6.2-compatible)
 // So an MC-DPSK session reads an OFDM value as an up-crossing and an OFDM session reads an MC-DPSK
 // value as a down-crossing (ULTRA_WAVEFORM_FOLLOW); a constellation change stays 11 <-> 12.
-inline constexpr uint8_t kSessionRungWordMcDpskBase = 11;
+inline constexpr uint8_t kSessionRungWordMcDpskBase = 13;
 static_assert(kSessionRungWordMcDpskBase >= kRungIdxCount &&
                   kSessionRungWordMcDpskBase + kMcDpskRungCount - 1 <= kRungAuthorityIndexMask,
               "MC-DPSK rung words sit above the OFDM rungs, inside the 4-bit index");
@@ -2459,7 +2460,9 @@ inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform
     // Measured (turbo, measure_ack_fer): 16 codewords decode ~0.7 dB lower than 8 on AWGN (one
     // longer turbo codeword) and the same on ITU Good. The coherence walk in
     // recommendCWCountForFading still shortens it past the measured Tc.
-    if (waveform == WaveformMode::OFDM_CHIRP && mod == Modulation::QAM32) {
+    // 64QAM (2026-11-21): the rule asks 24 for 6 bits; capped the same way.
+    if (waveform == WaveformMode::OFDM_CHIRP &&
+        (mod == Modulation::QAM32 || mod == Modulation::QAM64)) {
         return v2::kMaxFixedFrameCodewords;
     }
     return recommendCWCount(rate, waveform);
