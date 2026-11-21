@@ -10,6 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — test(gate): `gui_qso_scenario.sh` defaults to `--tx-model hardware`
+
+Every burst at the same PEAK level, as a real transmitter does; `--tx-model sim` (same AVERAGE level,
+the default until now) stays available. Why: no radio normalizes average power, and with peak control
+on the `sim` model scores the clip's distortion with none of its power gain. Gate results before this
+date are `sim` unless they say otherwise; under `hardware` the burst peak is 0.7 dB above `--snr-db`
+on the PEP-over-noise-in-3-kHz scale. (`ultra_tnc`'s OTASim path still normalizes to the average
+reference; the TNC gate tests are unchanged.)
+
+---
+
 ## 2026-11-21 — feat(papr): peak control ON by default; the clipper keeps designed silence
 
 `ULTRA_PEAK_CONTROL` defaults ON (`=0` opts out; same setting on both stations - v0.6.3 is not

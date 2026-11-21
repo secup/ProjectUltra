@@ -200,7 +200,11 @@ Boundary tests: `tests/test_waveform_policy.cpp`, `tests/test_connection_policy.
   Soundcard clock offset: `--clock-ppm P` (BRAVO's clock P ppm fast; `ClockOffsetChannelModel`,
   windowed-sinc time scaling, chunk-invariant). Until 2026-11-09 both simulated stations shared
   one sample clock.
-  Real-station TX levels: `--tx-model hardware` (every burst at the same PEAK like the hardware
+  Real-station TX levels: `--tx-model hardware` - THE DEFAULT since 2026-11-21 (`--tx-model sim`, the
+  old default, normalizes every burst to the same AVERAGE level: no real radio does that, and with
+  peak control on it scores the clip's distortion with none of its power gain; gate results before
+  2026-11-21 are `sim` unless they say otherwise; under `hardware` the burst PEAK sits 0.7 dB above
+  `--snr-db` on the PEP-over-noise-in-3-kHz scale) - (every burst at the same PEAK like the hardware
   path, so OFDM data rides ~1 dB below the MC-DPSK CONNECT — 3-4 dB until 2026-11-10, when the
   unscrambled BURST_HEADER symbol set every burst's peak, INV-FRAME-WHITEN-001) and the radio's
   ALC/PA `--tx-pa SPEC` (`TxPaAlcChannelModel`). The connect-time pick corrects for that gap on a

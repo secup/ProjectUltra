@@ -42,7 +42,9 @@ RX_FILTER=""
 RX_GAIN_DB=""
 SNR_PROFILE=""
 FULL_DUPLEX=0
-TX_MODEL="sim"
+# Default hardware since 2026-11-21: every burst at the same PEAK, as a real transmitter (PEP/ALC)
+# does. "sim" (same AVERAGE level) hides crest factor and scores peak control as a loss.
+TX_MODEL="hardware"
 RECORD=0
 SEED="42"
 EXPECT_RATE="R1/4"
@@ -76,9 +78,9 @@ usage() {
   printf '  --clock-ppm PPM                Soundcard clock offset between the two stations: BRAVO\n'
   printf '                                 runs PPM fast, so ALPHA hears BRAVO time-compressed by\n'
   printf '                                 PPM and BRAVO hears ALPHA stretched (default: 0)\n'
-  printf '  --tx-model sim|hardware        sim: every burst at the same average level (default);\n'
-  printf '                                 hardware: same PEAK level as a real station, so high-PAPR\n'
-  printf '                                 OFDM rides lower than MC-DPSK (sets ULTRA_SIM_PAPR_PENALTY=1)\n'
+  printf '  --tx-model hardware|sim        hardware (default): every burst at the same PEAK level, as a\n'
+  printf '                                 real transmitter does (sets ULTRA_SIM_PAPR_PENALTY=1);\n'
+  printf '                                 sim: every burst at the same average level (pre-2026-11-21 default)\n'
   printf '  --tx-pa SPEC                   Senders'"'"' radio ALC/PA: on, or pep=0.5,drive_db=3,p=2,sat_db=3,\n'
   printf '                                 attack_ms=2,release_ms=300 (default: none)\n'
   printf '  --rx-filter LOW-HIGH           Both receivers'"'"' IF filter passband in Hz, e.g. 1250-1750 for a\n'
