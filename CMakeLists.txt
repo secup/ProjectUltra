@@ -416,6 +416,7 @@ ultra_enable_tool_test_warnings(
 # Core library
 add_library(ultra_core STATIC
     src/ofdm/modulator.cpp
+    src/ofdm/peak_control.cpp
     src/ofdm/ofdm_demodulator_setup.cpp
     src/ofdm/ofdm_symbol_demap.cpp
     src/ofdm/ofdm_stream_processor.cpp

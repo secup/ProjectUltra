@@ -10,6 +10,37 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — feat(papr): peak control Phases 1+2 behind `ULTRA_PEAK_CONTROL` (default off; GUI A/B running)
+
+**What.** (1) TX: `ModemEngine::applyPeakControl` (`modem_engine.cpp`) clips the whole key-down of a
+wideband coherent OFDM data burst after `postProcessTx` (so the settling lead-in and the TX filter
+cannot regrow the peak), 5 passes of envelope clip + band limit to the occupied band ± 3 carrier
+spacings, at the headroom `peak_control::chooseHeadroom` derives from the rung's EVM threshold and the
+Phase 0 curves (`src/ofdm/peak_control.cpp`, new, in `ultra_core`): h = 0 dB QPSK R1/4, 1 R1/2-R2/3,
+2 R3/4, 3 8PSK, 4 16QAM, 5 32QAM R2/3. Live log: `Peak control QPSK R1/2: h=1 dB crest 9.55 -> 3.19 dB`.
+(2) RX: the EVM rate selector stores each frame's rung and, with the knob on, carries a target rung's
+threshold onto frames sent at another headroom (`thresholdOnFramesOfRungDb`, design §4.2.3).
+
+**Why (2) is required, not a refinement.** A clipped frame's EVM cannot exceed its own distortion
+floor (QPSK R1/2 at h=1: 12.85 dB). The unmodified selector compares that reading with 16QAM/32QAM
+thresholds measured on unclipped frames; 32QAM R2/3's 15.5 dB is unreachable from QPSK frames at any
+SNR. The carry: 16QAM R2/3's 11.75 dB becomes 10.42 dB on QPSK R1/2 frames (pinned by hand
+calculation in the test).
+
+**No receiver decode change.** The first data symbol's channel estimate comes from the comb pilots
+(`channel_equalizer_pilot.cpp:689`, alpha = 1), which Phase 0 measured to share the data's Bussgang
+gain to ±0.004; the LTS's different gain therefore does not reach the data decisions. (To be
+confirmed by the gate.)
+
+**Tests.** New CTest `PeakControl` (`tests/test_peak_control.cpp`): headroom monotone in the threshold,
+positive gain on every rung, carry and prediction inverse to 1e-3 dB, the hand-calculated carry, and on
+a production burst: crest 9.48 -> 3.11 dB, T/R silence exact zeros, out-of-band energy -42.6 dB.
+`EvmRateSelector`, `Psk8Climb`, `RxAuthority`, `WaveformFollow`, `DualListenEngine*` pass. Full build
+clean. GUI A/B (AWGN, peak SNR 0-30 dB, `--tx-model hardware`, 3 seeds, the reference sweep's file
+sizes): pending.
+
+---
+
 ## 2026-11-21 — measure(papr): peak-control Phase 0 — a per-rung clip is worth +3.6 to +6.4 dB on a peak-limited TX (prediction, no behaviour change)
 
 **Why.** A peak-normalized transmitter loses the burst's crest factor in average power; coherent

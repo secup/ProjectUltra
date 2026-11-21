@@ -1160,3 +1160,24 @@ if(CMAKE_CXX_FLAGS MATCHES "-fsanitize=")
         endif()
     endforeach()
 endif()
+
+# Peak control (2026-11-21, docs/PEAK_CONTROL_DESIGN_2026_11_21.md): derived headroom, cross-rung
+# threshold carry, and the clipper on a production burst.
+add_executable(test_peak_control
+    test_peak_control.cpp
+    ../src/gui/modem/modem_engine.cpp
+    ../src/gui/modem/modem_rx.cpp
+    ../src/gui/modem/modem_rx_decode.cpp
+    ../src/gui/modem/modem_mode.cpp
+    ../src/gui/modem/modem_dual_listen.cpp
+    ../src/gui/modem/modem_carrier_sense.cpp
+    ../src/gui/adaptive_mode.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_peak_control PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../tools
+)
+target_link_libraries(test_peak_control PRIVATE ultra_core ota_channel_core)
+add_test(NAME PeakControl COMMAND test_peak_control)

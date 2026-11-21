@@ -5,6 +5,11 @@
 #include "modem_engine.hpp"
 #include "diagnostics/diagnostics_recorder.hpp"
 #include "protocol/connection_policy.hpp"
+#include "protocol/evm_rate_selector.hpp"
+#include "protocol/waveform_selection.hpp"
+#include "ofdm/pilot_pattern.hpp"
+#include "ultra/peak_control.hpp"
+#include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/logging.hpp"
 #include <cstring>
 #include <algorithm>
@@ -657,6 +662,7 @@ std::vector<float> ModemEngine::transmitBurst(
         }
     }
     auto processed = postProcessTx(samples, -1, -1, settling_fill.empty() ? nullptr : &settling_fill);
+    applyPeakControl(processed);
     if (protocol::isOFDMMode(waveform_mode_) && streaming_decoder_) {
         const size_t turn_samples =
             static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
@@ -677,6 +683,34 @@ std::vector<float> ModemEngine::transmitBurst(
         }
     }
     return processed;
+}
+
+// Peak control (ULTRA_PEAK_CONTROL, docs/PEAK_CONTROL_DESIGN_2026_11_21.md): clip the whole key-down
+// of a wideband coherent OFDM data burst at the headroom its rung's EVM threshold calls for. Runs on
+// the final waveform (after the settling lead-in and the TX filter) so nothing regrows its peak
+// before the transmitter's peak normalization. Narrowband keeps its linear TX (its curve is not
+// measured).
+void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
+    if (!peak_control::enabled() || waveform_mode_ != protocol::WaveformMode::OFDM_CHIRP ||
+        !ofdm_link_adaptation::isCoherentModulation(data_modulation_)) {
+        return;
+    }
+    const uint8_t rung = protocol::coherentRungIndexFor(data_modulation_, data_code_rate_);
+    if (rung == protocol::kRungIdxNone) return;
+    const auto choice = peak_control::chooseHeadroom(protocol::evmDecodeThresholdDb(rung));
+    if (choice.h_db < 0.0f) return;
+    const float df = static_cast<float>(config_.sample_rate) / static_cast<float>(config_.fft_size);
+    const float lo = ofdm_pilots::carrierFrequencyHzForLogical(config_, 0) - 3.0f * df;
+    const float hi = ofdm_pilots::carrierFrequencyHzForLogical(config_, config_.num_carriers - 1) +
+                     3.0f * df;
+    const auto r = peak_control::apply(samples, choice.h_db, static_cast<float>(config_.sample_rate),
+                                       lo, hi);
+    if (r.applied) {
+        LOG_MODEM(INFO, "[%s] Peak control %s %s: h=%.0f dB crest %.2f -> %.2f dB (predicted %+.2f dB, D %.1f dB)",
+                  log_prefix_.c_str(), modulationToString(data_modulation_),
+                  codeRateToString(data_code_rate_), choice.h_db, r.pre_crest_db, r.post_crest_db,
+                  choice.gain_db, choice.sdr_db);
+    }
 }
 
 std::vector<float> ModemEngine::transmitPing() {

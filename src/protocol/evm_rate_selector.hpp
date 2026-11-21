@@ -59,6 +59,7 @@
 #include "frame_v2.hpp"
 #include "ofdm/dd_evm_model.hpp"
 #include "ultra/fast_profile.hpp"
+#include "ultra/peak_control.hpp"
 #include "latent_rate_controller.hpp"
 #include "waveform_selection.hpp"
 
@@ -213,6 +214,7 @@ public:
     void reset() {
         ring_.fill(0.0f);
         ring_mod_.fill(Modulation::AUTO);
+        ring_rung_.fill(kRungIdxNone);
         ring_group_.fill(0);
         next_ = 0;
         count_ = 0;
@@ -242,6 +244,7 @@ public:
             if (rung < kRungIdxCount) predicted += frameSuccess(e, rung, margin_db_);
             ring_[next_] = e;
             ring_mod_[next_] = frame_mod;
+            ring_rung_[next_] = coherent_rung ? rung : kRungIdxNone;
             ring_group_[next_] = groups_;
             next_ = (next_ + 1) % kWindowFrames;
             if (count_ < kWindowFrames) ++count_;
@@ -278,7 +281,9 @@ public:
         if (count_ == 0) return 0.0f;
         float s = 0.0f;
         for (size_t i = 0; i < count_; ++i) {
-            s += successAt(ring_[i], thresholdOnFrames(rung, ring_mod_[i]), margin_db_);
+            s += successAt(ring_[i], peakAdjusted(thresholdOnFrames(rung, ring_mod_[i]), rung,
+                                                  ring_rung_[i]),
+                           margin_db_);
         }
         return s / static_cast<float>(count_);
     }
@@ -395,6 +400,19 @@ public:
     }
 
 private:
+    // Peak control (ULTRA_PEAK_CONTROL, lockstep): the sender clips each rung at its own headroom,
+    // so a frame of rung a was sent at a different average power (per PEP) and with a different
+    // distortion floor than rung r would be. Carry r's threshold onto rung a's frames
+    // (peak_control::thresholdOnFramesOfRungDb, design §4.2.3). Off: unchanged.
+    static float peakAdjusted(float eta_db, uint8_t target, uint8_t frame_rung) {
+        if (!peak_control::enabled() || frame_rung == kRungIdxNone || frame_rung == target ||
+            target >= kRungIdxCount || frame_rung >= kRungIdxCount) {
+            return eta_db;
+        }
+        const auto a = peak_control::chooseHeadroom(evmDecodeThresholdDb(frame_rung));
+        const auto b = peak_control::chooseHeadroom(evmDecodeThresholdDb(target));
+        return peak_control::thresholdOnFramesOfRungDb(eta_db, a, b);
+    }
     // evmThresholdOnFramesDb, cached per (rung, frame constellation): the PSK model integrates
     // numerically, and successProb runs for every rung at every decision. Keyed on the own
     // threshold too, so a FEC switch (tests) recomputes.
@@ -426,6 +444,7 @@ private:
 
     std::array<float, kWindowFrames> ring_{};
     std::array<Modulation, kWindowFrames> ring_mod_{};
+    std::array<uint8_t, kWindowFrames> ring_rung_{};  // coherent rung each frame was sent on
     std::array<int, kWindowFrames> ring_group_{};  // observeGroup ordinal of each frame
     size_t next_ = 0;
     size_t count_ = 0;
