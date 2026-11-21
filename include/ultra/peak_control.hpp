@@ -34,6 +34,20 @@ struct CurvePoint {
 // The measured curve (wideband 1024/59 geometry, 5 passes), h = 0..10 dB.
 const std::vector<CurvePoint>& wideband5PassCurve();
 
+// MC-DPSK session geometry (8 carriers 500-2500 Hz, 1024-sample symbols, chirp band 250-2750 Hz),
+// production clipper, distortion measured INSIDE the tones' bands (+-1 symbol rate around each
+// carrier, `peak_control_measure --mcdpsk`): evenly spaced tones put their intermodulation on
+// other tones. h = 0..8 dB.
+const std::vector<CurvePoint>& mcDpsk8x1024Curve();
+
+// MC-DPSK decode threshold in the same tone-band domain: the measured in-band (3 kHz) AWGN floor
+// (DBPSK R1/4 -6 dB, GUI 2026-11-11; DQPSK +2.5 dB over DBPSK, the differential BPSK->QPSK gap,
+// connection_policy.hpp) moved into the tones' bands, 10 log10(3000 / (carriers * 2 * baud)).
+float mcDpskToneBandThresholdDb(bool dqpsk, int carriers, int samples_per_symbol);
+
+struct Choice;
+Choice chooseHeadroomOnCurve(const std::vector<CurvePoint>& curve, float eta_db);
+
 // h_r* for a rung whose EVM decode threshold is eta_db; also returns its predicted gain and the
 // distortion floor it transmits with. A rung whose threshold no clip level beats returns
 // h_db < 0 (send unclipped).

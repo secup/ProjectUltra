@@ -51,10 +51,32 @@ const std::vector<CurvePoint>& wideband5PassCurve() {
     return curve;
 }
 
-Choice chooseHeadroom(float eta_db) {
+const std::vector<CurvePoint>& mcDpsk8x1024Curve() {
+    // peak_control_measure --mcdpsk (2026-11-21): G from the DBPSK burst (DQPSK within 0.1 dB), D
+    // the LOWER of the two (DQPSK's, 0.5-1.4 dB below DBPSK's) - conservative for both.
+    static const std::vector<CurvePoint> curve = {
+        {0.0f, 5.62f, 11.92f}, {1.0f, 5.40f, 13.11f}, {2.0f, 5.15f, 14.67f}, {3.0f, 4.76f, 16.58f},
+        {4.0f, 4.21f, 19.18f}, {5.0f, 3.52f, 22.55f}, {6.0f, 2.68f, 27.04f}, {7.0f, 1.74f, 32.20f},
+        {8.0f, 0.78f, 38.81f},
+    };
+    return curve;
+}
+
+float mcDpskToneBandThresholdDb(bool dqpsk, int carriers, int samples_per_symbol) {
+    constexpr float kDbpskInBandFloorDb = -6.0f;  // GUI gate 2026-11-11 (CLAUDE.md floors table)
+    constexpr float kDqpskOverDbpskDb = 2.5f;     // connection_policy.hpp: BPSK->QPSK gap
+    const float baud = 48000.0f / static_cast<float>(samples_per_symbol);
+    const float tone_bw = static_cast<float>(carriers) * 2.0f * baud;
+    return kDbpskInBandFloorDb + (dqpsk ? kDqpskOverDbpskDb : 0.0f) +
+           10.0f * std::log10(3000.0f / tone_bw);
+}
+
+Choice chooseHeadroom(float eta_db) { return chooseHeadroomOnCurve(wideband5PassCurve(), eta_db); }
+
+Choice chooseHeadroomOnCurve(const std::vector<CurvePoint>& curve, float eta_db) {
     Choice best;
     const float eta = std::pow(10.0f, eta_db / 10.0f);
-    for (const auto& p : wideband5PassCurve()) {
+    for (const auto& p : curve) {
         const float d = std::pow(10.0f, p.sdr_db / 10.0f);
         if (!(d > eta)) continue;
         const float g = p.gain_db + 10.0f * std::log10(1.0f - eta / d);

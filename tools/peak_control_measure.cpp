@@ -31,6 +31,8 @@
 #include "protocol/evm_rate_selector.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/waveform_selection.hpp"
+#include "psk/multi_carrier_dpsk.hpp"
+#include "ultra/peak_control.hpp"
 
 #define POCKETFFT_CACHE_SIZE 16
 #include "pocketfft/pocketfft_hdronly.h"
@@ -179,6 +181,75 @@ const RungDef kRungs[] = {
     {Modulation::QAM16, CodeRate::R3_4, "16QAM R3/4"}, {Modulation::QAM32, CodeRate::R2_3, "32QAM R2/3"},
 };
 
+// --mcdpsk: an MC-DPSK session burst (8 carriers, 1024-sample symbols, the connection's profile),
+// clipped by the PRODUCTION clipper (peak_control::apply) band-limited to the chirp band. Distortion
+// is measured INSIDE the tones' own bands (+-1 symbol rate around each carrier): evenly spaced tones
+// put their intermodulation products on other tones, so a wideband SDR would mislead.
+int runMcDpsk(Modulation mod) {
+    ModemEngine tx;
+    tx.setLogPrefix("PC0");
+    tx.joinConnectedSession(protocol::WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
+    tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
+    tx.crossConnectedWaveform(protocol::WaveformMode::MC_DPSK, mod, CodeRate::R1_4, 3, 8, 1024);
+    auto group = [&](uint16_t seq0) {
+        std::vector<Bytes> g;
+        for (int i = 0; i < 3; ++i) {
+            auto f = v2::DataFrame::makeData("ALPHA", "BRAVO", uint16_t(seq0 + i),
+                                             std::string(60, char('a' + i)));
+            f.flags |= v2::Flags::MORE_FRAG;
+            g.push_back(f.serialize());
+        }
+        return g;
+    };
+    (void)tx.transmitBurst(group(1), 0);
+    const std::vector<float> burst = tx.transmitBurst(group(10), 1);
+    if (burst.empty()) { std::printf("no MC-DPSK burst\n"); return 1; }
+    ultra::MultiCarrierDPSKConfig mc;
+    mc.num_carriers = 8;
+    mc.samples_per_symbol = 1024;
+    const auto freqs = mc.getCarrierFreqs();
+    const double fs = 48000.0, baud = fs / 1024.0;
+    const size_t L = nextPow2(2 * burst.size());
+    auto spectrum = [&](const std::vector<float>& x) {
+        std::vector<Cx> v(L, Cx(0, 0));
+        for (size_t i = 0; i < x.size(); ++i) v[i] = Cx(x[i], 0);
+        fft(v, true);
+        return v;
+    };
+    auto inTone = [&](size_t b) {
+        const double f = fs * double(b) / double(L);
+        for (float fc : freqs) if (std::fabs(f - fc) <= baud) return true;
+        return false;
+    };
+    const auto Xu = spectrum(burst);
+    size_t a = 0, e = burst.size();
+    while (a < e && burst[a] == 0.0f) ++a;
+    while (e > a && burst[e - 1] == 0.0f) --e;
+    std::printf("== MC-DPSK %s burst: %zu active samples, tones %.0f..%.0f Hz\n",
+                ultra::modulationToString(mod), e - a, freqs.front(), freqs.back());
+    std::printf("   %5s %7s %7s %7s %7s\n", "h", "crest", "PEPgain", "alpha", "D_tone");
+    double pre_crest = 0;
+    for (double h = 0.0; h <= 8.0 + 1e-9; h += 1.0) {
+        std::vector<float> y = burst;
+        const auto r = ultra::peak_control::apply(y, float(h), float(fs), 250.0f, 2750.0f);
+        pre_crest = r.pre_crest_db;
+        const auto Xc = spectrum(y);
+        Cx num(0, 0); double den = 0;
+        for (size_t b = 1; b < L / 2; ++b) if (inTone(b)) { num += Xc[b] * std::conj(Xu[b]); den += std::norm(Xu[b]); }
+        const Cx al = num / den;
+        double sig = 0, err = 0;
+        for (size_t b = 1; b < L / 2; ++b) if (inTone(b)) { sig += std::norm(al * Xu[b]); err += std::norm(Xc[b] - al * Xu[b]); }
+        // PEP of the real signal: its peak sample (the TX normalizes the sample peak)
+        double pk_u = 0, pk_c = 0;
+        for (size_t i = a; i < e; ++i) { pk_u = std::max(pk_u, double(std::fabs(burst[i]))); pk_c = std::max(pk_c, double(std::fabs(y[i]))); }
+        const double pep_gain = 10 * std::log10(std::norm(al) * pk_u * pk_u / (pk_c * pk_c));
+        std::printf("   %5.1f %7.2f %7.2f %7.3f %7.2f\n", h, r.post_crest_db, pep_gain, std::abs(al),
+                    10 * std::log10(sig / err));
+    }
+    std::printf("   unclipped crest %.2f dB (envelope PEP / mean)\n", pre_crest);
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -189,6 +260,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) n_frames = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--csv") && i + 1 < argc) csv_path = argv[++i];
         else if (!std::strcmp(argv[i], "--edge-bins") && i + 1 < argc) edge_bins = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--mcdpsk")) return runMcDpsk(Modulation::DBPSK) | runMcDpsk(Modulation::DQPSK);
         else { std::fprintf(stderr, "usage: %s [--frames N] [--edge-bins B] [--csv PATH]\n", argv[0]); return 2; }
     }
     FILE* csv = csv_path ? std::fopen(csv_path, "w") : nullptr;

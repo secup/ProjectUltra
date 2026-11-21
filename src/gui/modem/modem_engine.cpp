@@ -691,7 +691,29 @@ std::vector<float> ModemEngine::transmitBurst(
 // before the transmitter's peak normalization. Narrowband keeps its linear TX (its curve is not
 // measured).
 void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
-    if (!peak_control::enabled() || waveform_mode_ != protocol::WaveformMode::OFDM_CHIRP ||
+    if (!peak_control::enabled()) return;
+    // MC-DPSK data bursts on the session geometry the curve was measured on (8 carriers, 1024-sample
+    // symbols, 500-2500 Hz); other MC-DPSK profiles (narrowband 4-carrier) stay linear.
+    if (waveform_mode_ == protocol::WaveformMode::MC_DPSK) {
+        const auto& mc = mc_dpsk_config_;
+        if (mc.num_carriers != 8 || mc.samples_per_symbol != 1024 || mc.freq_low != 500.0f ||
+            mc.freq_high != 2500.0f) {
+            return;
+        }
+        const bool dqpsk = mc.bits_per_symbol == 2;
+        const auto choice = peak_control::chooseHeadroomOnCurve(
+            peak_control::mcDpsk8x1024Curve(),
+            peak_control::mcDpskToneBandThresholdDb(dqpsk, mc.num_carriers, mc.samples_per_symbol));
+        if (choice.h_db < 0.0f) return;
+        const auto r = peak_control::apply(samples, choice.h_db, mc.sample_rate, 250.0f, 2750.0f);
+        if (r.applied) {
+            LOG_MODEM(INFO, "[%s] Peak control MC-DPSK %s: h=%.0f dB crest %.2f -> %.2f dB (predicted %+.2f dB, D %.1f dB)",
+                      log_prefix_.c_str(), dqpsk ? "DQPSK" : "DBPSK", choice.h_db, r.pre_crest_db,
+                      r.post_crest_db, choice.gain_db, choice.sdr_db);
+        }
+        return;
+    }
+    if (waveform_mode_ != protocol::WaveformMode::OFDM_CHIRP ||
         !ofdm_link_adaptation::isCoherentModulation(data_modulation_)) {
         return;
     }

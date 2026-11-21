@@ -77,6 +77,21 @@ int main() {
               "16QAM R2/3 threshold on QPSK R1/2 frames = 10.42 dB, below QPSK's clip floor");
     }
 
+    // MC-DPSK: thresholds moved into the tones' bands (8 x 2 x 46.875 Hz = 750 Hz of 3000: +6.02 dB),
+    // and both constellations take the hardest clip (their thresholds sit ~10 dB under the floor D)
+    {
+        const float tb = pc::mcDpskToneBandThresholdDb(false, 8, 1024);
+        const float tq = pc::mcDpskToneBandThresholdDb(true, 8, 1024);
+        const auto cb = pc::chooseHeadroomOnCurve(pc::mcDpsk8x1024Curve(), tb);
+        const auto cq = pc::chooseHeadroomOnCurve(pc::mcDpsk8x1024Curve(), tq);
+        std::printf("  MC-DPSK DBPSK eta %.2f -> h %.0f (%+.2f dB), DQPSK eta %.2f -> h %.0f (%+.2f dB)\n",
+                    tb, cb.h_db, cb.gain_db, tq, cq.h_db, cq.gain_db);
+        check(std::fabs(tb - 0.02f) < 0.01f && std::fabs(tq - 2.52f) < 0.01f,
+              "MC-DPSK tone-band thresholds 0.02 / 2.52 dB");
+        check(cb.h_db == 0.0f && cq.h_db == 0.0f && cb.gain_db > 4.5f && cq.gain_db > 4.5f,
+              "MC-DPSK DBPSK and DQPSK clip at h=0 for more than 4.5 dB");
+    }
+
     // 3. a real burst through the clipper
     gui::ModemEngine tx;
     tx.joinConnectedSession(protocol::WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_2);

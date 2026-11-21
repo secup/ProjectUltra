@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — feat(papr): peak control Phase 4 — MC-DPSK data bursts (same knob)
+
+MC-DPSK session bursts (8 carriers 500-2500 Hz, 1024-sample symbols) carry a 9.1 dB crest.
+`peak_control_measure --mcdpsk` measures the production clipper on them with distortion taken INSIDE
+the tones' bands (evenly spaced tones put intermodulation on other tones): h=0 gives +5.6 dB of PEP-fair
+power at a 11.9-12.4 dB tone-band SDR. The thresholds in that domain (measured in-band floors, DBPSK
+R1/4 -6 dB, DQPSK +2.5 dB, moved by 10 log10(3000 / 750 Hz) = +6.02 dB) are 0.02 / 2.52 dB, so both take
+h=0 for +5.3 / +5.1 dB predicted (`mcDpsk8x1024Curve`, `mcDpskToneBandThresholdDb`,
+`ModemEngine::applyPeakControl` MC-DPSK branch). Other MC-DPSK profiles (narrowband 4-carrier) stay
+linear. CONNECT/control frames are not clipped (they go through `transmit()`, not `transmitBurst()`).
+Tests: `PeakControl` (+2 checks), `MCDPSKFrame`, `StreamingMCDPSK`, `MCDPSKClockOffset`,
+`MCDPSKSnrCalibration`, `MCDPSKAckTurnaround`, `DualListenEngine*` pass.
+
+---
+
 ## 2026-11-21 — feat(papr): peak control Phases 1+2 behind `ULTRA_PEAK_CONTROL` (default off; GUI A/B running)
 
 **What.** (1) TX: `ModemEngine::applyPeakControl` (`modem_engine.cpp`) clips the whole key-down of a
