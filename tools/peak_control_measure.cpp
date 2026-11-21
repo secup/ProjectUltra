@@ -32,6 +32,9 @@
 #include "protocol/frame_v2.hpp"
 #include "protocol/waveform_selection.hpp"
 #include "psk/multi_carrier_dpsk.hpp"
+#include "gui/modem/streaming_decoder.hpp"
+#include "gui/modem/streaming_encoder.hpp"
+#include "ota_channel_core/channel.hpp"
 #include "ultra/peak_control.hpp"
 
 #define POCKETFFT_CACHE_SIZE 16
@@ -250,6 +253,71 @@ int runMcDpsk(Modulation mod) {
     return 0;
 }
 
+// --mcdpsk-snr: what clipping does to the two MC-DPSK SNR estimates the connect pick reads
+// (training, data-aided). A connect-geometry DQPSK frame (the MCDPSKSnrCalibration setup) is clipped
+// at headroom h by the production clipper, rescaled to its unclipped RMS (so the channel's SNR stays
+// the true SNR of the frame), sent through AWGN, and decoded; per h and true SNR the mean reading.
+int runMcDpskSnr() {
+    auto cfg = ultra::mc_dpsk_presets::level8();
+    cfg.samples_per_symbol = 1024;
+    const Bytes payload(60, 0x5A);
+    const Bytes ser = v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, CodeRate::R1_4).serialize();
+    std::printf("== MC-DPSK SNR estimates on clipped frames sent at the unclipped frame's PEAK\n");
+    std::printf("   (AWGN, 3 seeds; 'snr' = the unclipped frame's SNR; -99 = no reading)\n");
+    std::printf("   %5s %6s %9s %9s %7s\n", "h", "snr", "training", "data_aid", "decoded");
+    const bool floor_only = std::getenv("PC_FLOOR") != nullptr;
+    const std::vector<float> snrs = floor_only
+        ? std::vector<float>{-6.f, -5.f, -4.f, -3.f, -2.f, -1.f, 0.f}
+        : std::vector<float>{-12.f, -10.f, -8.f, -6.f, 0.f, 6.f, 10.f, 14.f, 18.f, 24.f};
+    const uint32_t n_seeds = floor_only ? 10 : 3;
+    for (double h : {-1.0, 0.0, 3.0, 4.0, 6.0}) {
+        for (float snr : snrs) {
+            double st = 0, sd = 0; int nt = 0, nd = 0, ok = 0;
+            for (uint32_t seed = 1; seed <= n_seeds; ++seed) {
+                ultra::gui::StreamingEncoder enc;
+                enc.setMode(protocol::WaveformMode::MC_DPSK);
+                enc.setMCDPSKConfig(cfg);
+                enc.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+                auto frame = enc.encodeFrame(ser);
+                if (h >= 0.0) {
+                    // a peak-limited transmitter: the clipped frame goes out at the SAME PEAK
+                    float pk0 = 0; for (float v : frame) pk0 = std::max(pk0, std::fabs(v));
+                    ultra::peak_control::apply(frame, float(h), 48000.0f, 250.0f, 2750.0f);
+                    float pk1 = 0; for (float v : frame) pk1 = std::max(pk1, std::fabs(v));
+                    if (pk1 > 0) for (auto& v : frame) v *= pk0 / pk1;
+                }
+                std::vector<float> audio(48000, 0.0f);
+                audio.insert(audio.end(), frame.begin(), frame.end());
+                audio.resize(audio.size() + 96000, 0.0f);
+                ultra::ota_channel_core::SimulatedChannel ch;
+                ch.setSeed(seed);
+                ch.configure(snr, ultra::ota_channel_core::ChannelType::AWGN);
+                ch.transmitFromA(audio);
+                audio = ch.receiveForB(audio.size());
+                ultra::gui::StreamingDecoder dec;
+                dec.setLogPrefix("CAL");
+                dec.setMode(protocol::WaveformMode::MC_DPSK, true);
+                dec.setMCDPSKConfig(cfg);
+                dec.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+                for (size_t pos = 0; pos < audio.size(); pos += 4800) {
+                    dec.feedAudio(audio.data() + pos, std::min<size_t>(4800, audio.size() - pos));
+                    dec.processBuffer();
+                }
+                while (dec.hasFrame()) {
+                    auto r = dec.getFrame();
+                    if (r.has_mcdpsk_training_snr_db && std::isfinite(r.mcdpsk_training_snr_db)) { st += r.mcdpsk_training_snr_db; ++nt; }
+                    if (r.has_mcdpsk_data_aided_snr_db && std::isfinite(r.mcdpsk_data_aided_snr_db)) { sd += r.mcdpsk_data_aided_snr_db; ++nd; }
+                    if (r.success) ++ok;
+                }
+            }
+            std::printf("   %5s %6.0f %9.2f %9.2f %5d/%u\n", h < 0 ? "none" : std::to_string(int(h)).c_str(), snr,
+                        nt ? st / nt : -99.0, nd ? sd / nd : -99.0, ok, n_seeds);
+            std::fflush(stdout);
+        }
+    }
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -260,6 +328,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--frames") && i + 1 < argc) n_frames = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--csv") && i + 1 < argc) csv_path = argv[++i];
         else if (!std::strcmp(argv[i], "--edge-bins") && i + 1 < argc) edge_bins = std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--mcdpsk-snr")) return runMcDpskSnr();
         else if (!std::strcmp(argv[i], "--mcdpsk")) return runMcDpsk(Modulation::DBPSK) | runMcDpsk(Modulation::DQPSK);
         else { std::fprintf(stderr, "usage: %s [--frames N] [--edge-bins B] [--csv PATH]\n", argv[0]); return 2; }
     }

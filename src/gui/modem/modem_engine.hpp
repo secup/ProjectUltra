@@ -776,6 +776,7 @@ private:
     // lead_in_fill (optional): settling fill written over the END of the lead-in (key-up
     // airtime unchanged); see StreamingEncoder::settlingLeadInFill.
     void applyPeakControl(std::vector<float>& samples) const;
+    void applyControlPeakControl(std::vector<float>& samples) const;
     std::vector<float> postProcessTx(const std::vector<float>& samples,
                                      int lead_in_ms = -1, int tail_ms = -1,
                                      const std::vector<float>* lead_in_fill = nullptr);

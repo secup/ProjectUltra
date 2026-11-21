@@ -462,12 +462,37 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   static_cast<long long>(now_us), samples.size());
     }
     auto processed = postProcessTx(samples);
+    if (!is_ofdm) applyControlPeakControl(processed);
     if (is_ofdm && streaming_decoder_) {
         const size_t turn_samples =
             static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
         streaming_decoder_->seedExpectedFrameArrivalAfterSamples(processed.size() + turn_samples);
     }
     return processed;
+}
+
+// Peak control for MC-DPSK frames sent through transmit(): CONNECT, CONNECT_ACK, control frames and
+// single frames. Their headroom is NOT the data bursts' h=0: the CONNECT is also the frame the
+// connect-time pick measures its SNR on, and clip distortion biases that measurement. Measured
+// (peak_control_measure --mcdpsk-snr, connect geometry, AWGN, 10 seeds): the data-aided SNR the pick
+// reads stays within 0.2 dB of truth through 18 dB only at h >= 6 (h=4 reads 2.5 dB low at 14 dB, the
+// Moderate OFDM floor; h=0 saturates at ~4 dB); h=6 buys +2.7 dB of power for a 0.1 dB higher decode
+// floor (50 % point -3.2 vs -3.3 dB), net +2.6 dB for the handshake. So h = the largest clip whose
+// reading stays unbiased through the highest connect decision threshold.
+void ModemEngine::applyControlPeakControl(std::vector<float>& samples) const {
+    constexpr float kMcDpskControlHeadroomDb = 6.0f;
+    if (!peak_control::enabled()) return;
+    const auto& mc = mc_dpsk_config_;
+    if (mc.num_carriers != 8 || mc.samples_per_symbol != 1024 || mc.freq_low != 500.0f ||
+        mc.freq_high != 2500.0f) {
+        return;
+    }
+    const auto r = peak_control::apply(samples, kMcDpskControlHeadroomDb, mc.sample_rate, 250.0f,
+                                       2750.0f);
+    if (r.applied) {
+        LOG_MODEM(INFO, "[%s] Peak control MC-DPSK control frame: h=%.0f dB crest %.2f -> %.2f dB",
+                  log_prefix_.c_str(), kMcDpskControlHeadroomDb, r.pre_crest_db, r.post_crest_db);
+    }
 }
 
 // ============================================================================

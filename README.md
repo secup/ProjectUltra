@@ -28,7 +28,8 @@ view.
   and moves to a faster rung as soon as the frames say it would decode.
 - **Strong coding.** Each OFDM data frame is one long turbo codeword; control frames use LDPC.
 - **Peak control.** Every data burst is clipped and filtered to the crest factor its mode can
-  afford, so a peak-limited transmitter puts 4-6 dB more average power on the air at the same PEP.
+  afford, so a peak-limited transmitter puts 4-6 dB more average power on the air at the same PEP;
+  the handshake frames get a gentler clip (+2.6 dB) that keeps the connect-time SNR reading true.
 - **Efficient ARQ.** Selective repeat over multi-frame bursts, soft combining of repeated frames,
   and short tone-burst acknowledgements.
 - **Low overhead.** A sync chirp opens the connection; after that each burst is found from its
@@ -66,14 +67,16 @@ mean of 3 seeds; "Before" is the same code with peak control off and without the
 | AWGN | 20 dB | 4.1 kbps | 5.1 kbps | 201 KB |
 | AWGN | 15 dB | 2.9 kbps | 3.3 kbps | 201 KB |
 | AWGN | 10 dB | 0.12 kbps (MC-DPSK) | 1.8 kbps | 201 KB |
+| AWGN | 0 dB | no connection | 0.10 kbps (MC-DPSK) | 19 KB |
 | ITU Good | 28 dB | — | 3.7 kbps | 41 KB |
 | ITU Good | 20 dB | 1.6 kbps | 2.1 kbps | 41 KB |
 | ITU Good | 12 dB | 0.4 kbps | 1.2 kbps | 21 KB |
 | ITU Moderate | 25 dB | 2.1 kbps | 2.2-2.4 kbps | 41 KB |
 | ITU Moderate | 18 dB | 1.2 kbps | 1.7 kbps | 21 KB |
 
-At 5 dB both stay on MC-DPSK (about 0.11 kbps, its top rate); at 0 dB peak SNR the connection
-handshake does not complete in this test. The earlier tables below are on the old scale (every burst
+At 5 dB both stay on MC-DPSK (about 0.11 kbps, its top rate). At 0 dB the handshake used to fail
+every time; the handshake frames are now clipped too (gently, so the connect-time SNR reading stays
+true), and the link connects on the first attempt. The earlier tables below are on the old scale (every burst
 at the same average level) and are not comparable with this one.
 
 ### v0.6.2, software channel simulator

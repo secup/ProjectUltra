@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — feat(papr): peak control for MC-DPSK control frames (h = 6 dB): the handshake connects at 0 dB peak SNR
+
+**Broke.** On a peak-limited transmitter the CONNECT (unclipped, 9 dB crest) arrived ~8.4 dB below
+the peak SNR: at 0 dB peak the PING/PONG worked but every CONNECT_ACK was lost, `Connect failed after
+10 attempts` on all 3 seeds, baseline and peak control alike (GUI, `--tx-model hardware`, 7.3 Hz).
+
+**Changed.** `ModemEngine::applyControlPeakControl` clips MC-DPSK frames sent through `transmit()`
+(CONNECT, CONNECT_ACK, control frames, single frames) on the 8x1024 geometry, at h = 6 dB, not the
+data bursts' 0 dB. **Why 6:** the CONNECT is also the frame the connect-time pick measures its SNR on,
+and clip distortion biases the data-aided estimate it reads. `peak_control_measure --mcdpsk-snr`
+(connect geometry, AWGN, clipped frame at the true SNR): data-aided reading at a true 14 dB (the
+Moderate OFDM floor) 3.9 / 9.1 / 11.5 / 13.9 dB at h = 0 / 3 / 4 / 6, unbiased through 18 dB only at
+h = 6; decode 50 % points (10 seeds) -3.3 unclipped, -1.8 / -2.4 / -2.8 / -3.2 dB clipped; net
+handshake gain G - floor shift = +4.1 / +3.9 / +3.7 / +2.6 dB. h = the largest clip whose reading
+stays unbiased through the highest connect decision threshold.
+
+**Verified.** GUI gate, peak SNR 0 dB, 19 KB, 3 seeds: all connect on the first attempt (were 0/3)
+and transfer on MC-DPSK. AWGN 25 dB 6.72 / 6.75 / 6.84 kbps (unchanged), Moderate 25 dB 2.88 / 2.75 /
+2.13, Good 20 dB 2.03 / 1.99 / 2.46 (within the day's spread): the connect pick is unharmed.
+
+---
+
 ## 2026-11-21 — RELEASE: v0.6.3-pre-alpha
 
 Version 0.6.2 -> 0.6.3 in `CMakeLists.txt`. **Not compatible over the air with 0.6.2** (compact
