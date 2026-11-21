@@ -1148,6 +1148,11 @@ ultra_enable_test_warnings(
 # faster MC-DPSK / OFDM / tone-ACK tests; every other job runs them.
 set_property(TEST MCDPSKSnrCalibration OFDMSnrCalibration EVMSnrCalibration ToneBurstAckWatterson
     APPEND PROPERTY LABELS slow)
+# Engine tests whose decoder runs wall-clock frame timeouts against audio fed faster than real
+# time: under the sanitizer's slowdown the deadlines fire before the decode (CI 2026-11-21: "Frame
+# timeout after 9143 ms", then a missing frame) - the harness racing the clock, not a memory error.
+# Their decode paths run under ASan in the MC-DPSK and OFDM streaming tests.
+set_property(TEST DualListenEngine DualListenEngineV2GapCrash APPEND PROPERTY LABELS slow)
 
 # Hang guards scale with sanitizer instrumentation. The explicit TIMEOUTs above were sized on
 # optimized or plain Debug runs; ASan/UBSan runs the DSP tests 20-45x slower than the optimized

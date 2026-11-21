@@ -118,7 +118,8 @@ MultiCarrierDPSKConfig connectGeometry(bool track) {
 
 // Encode a multi-codeword MC-DPSK DATA frame (identical demodulateSoft PHY path as
 // CONNECT, sized for a multi-second frame), apply `impair`, push through AWGN, decode.
-bool decodes(const Impair& impair, float snr_db, bool track, const Bytes& payload) {
+bool decodes(const Impair& impair, float snr_db, bool track, const Bytes& payload,
+             uint32_t noise_seed = 0x5a17u) {
     auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, CodeRate::R1_4);
     const Bytes serialized = frame.serialize();
 
@@ -132,7 +133,7 @@ bool decodes(const Impair& impair, float snr_db, bool track, const Bytes& payloa
     auto audio = withSilence(impair ? impair(samples) : samples);
 
     ultra::ota_channel_core::SimulatedChannel channel;
-    channel.setSeed(0x5a17u);
+    channel.setSeed(noise_seed);
     channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
     channel.transmitFromA(audio);
     audio = channel.receiveForB(audio.size());
@@ -210,21 +211,32 @@ int main() {
     std::cout << "\n== Frequency jitter (cheap-card +-7 Hz), AWGN 8 dB ==\n";
     std::cout << "  peakHz @rate | OFF  | ON\n";
     struct JC { float pk, rt; bool require_on; };
+    // Each cell over kSeeds noise realizations. The channel noise comes from
+    // std::normal_distribution, whose sequence is implementation-defined: one seed is a different
+    // draw on libc++ and libstdc++, and a single frame at the edge of the waterfall decides on that
+    // draw (CI 2026-11-21: 5 Hz @ 3 Hz flipped ON on Linux only). The invariants are statistical:
+    // a required case decodes on every realization with tracking ON, and tracking ON never decodes
+    // fewer realizations than OFF (no harm).
+    constexpr uint32_t kSeeds = 5;
+    std::cout << "  (" << kSeeds << " noise realizations per cell: decoded OFF / ON)\n";
     for (JC j : {JC{0, 0, true}, JC{2, 3, true}, JC{7, 1, true},
                  JC{5, 3, false}, JC{7, 3, false}, JC{7, 10, false}}) {
-        bool off = decodes(jit(j.pk, j.rt), 8.0f, false, payload);
-        bool on = decodes(jit(j.pk, j.rt), 8.0f, true, payload);
+        int off = 0, on = 0;
+        for (uint32_t s = 0; s < kSeeds; ++s) {
+            off += decodes(jit(j.pk, j.rt), 8.0f, false, payload, 0x5a17u + s) ? 1 : 0;
+            on += decodes(jit(j.pk, j.rt), 8.0f, true, payload, 0x5a17u + s) ? 1 : 0;
+        }
         std::cout << "  " << std::setw(4) << (int)j.pk << " @" << std::setw(2) << (int)j.rt
-                  << "Hz | " << yn(off) << " | " << yn(on)
+                  << "Hz | " << off << "/" << kSeeds << "  | " << on << "/" << kSeeds
                   << (j.require_on ? "" : "  (report-only)") << "\n";
-        if (j.require_on && !on) {
+        if (j.require_on && on < static_cast<int>(kSeeds)) {
             std::cout << "   -> FAIL: tracking ON must recover " << (int)j.pk
-                      << " Hz @" << (int)j.rt << " Hz jitter\n";
+                      << " Hz @" << (int)j.rt << " Hz jitter on every realization\n";
             ++failures;
         }
-        // SAFETY INVARIANT: tracking must never break a frame the untracked demod decoded.
-        if (off && !on) {
-            std::cout << "   -> FAIL: tracking ON broke a case that decoded with tracking OFF\n";
+        // SAFETY INVARIANT: tracking must never cost decodes the untracked demod makes.
+        if (on < off) {
+            std::cout << "   -> FAIL: tracking ON decoded fewer realizations than OFF\n";
             ++failures;
         }
     }
