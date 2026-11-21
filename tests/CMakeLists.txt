@@ -462,6 +462,8 @@ add_test(NAME LatentRateController COMMAND test_latent_rate_controller)
 add_executable(test_evm_rate_selector test_evm_rate_selector.cpp)
 target_link_libraries(test_evm_rate_selector PRIVATE ultra_core)
 add_test(NAME EvmRateSelector COMMAND test_evm_rate_selector)
+# Its cross-constellation checks assume unclipped frames; the clipped carry is tested in PeakControl.
+set_tests_properties(EvmRateSelector PROPERTIES ENVIRONMENT "ULTRA_PEAK_CONTROL=0")
 
 # CLI loopback (2026-11-10): `ultra ptx` -> `ultra prx` through ModemEngine for every frame type.
 if(TARGET ultra)

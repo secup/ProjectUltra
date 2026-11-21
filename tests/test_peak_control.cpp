@@ -16,6 +16,7 @@
 #include "ultra/peak_control.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <complex>
 #include <cstdio>
 #include <random>
@@ -31,6 +32,8 @@ static void check(bool ok, const char* what) {
 }
 
 int main() {
+    // Part 3 needs an unclipped production burst to clip by hand; peak control is on by default.
+    setenv("ULTRA_PEAK_CONTROL", "0", 1);
     // 1. headroom monotone in the threshold, gain positive for every rung
     float prev_h = -1.0f;
     bool monotone = true, positive = true;
@@ -143,6 +146,19 @@ int main() {
         const double ratio_db = 10 * std::log10(out / in);
         std::printf("  out-of-band / in-band energy %.1f dB\n", ratio_db);
         check(ratio_db < -30.0, "clipped burst stays inside its band (< -30 dB outside)");
+    }
+    // Designed silence inside a burst (MC-DPSK's inter-chirp gap: the receiver's noise reference)
+    // stays exact zeros through the clipper.
+    {
+        std::vector<float> x(48000, 0.0f);
+        std::mt19937 g(3);
+        std::normal_distribution<float> n(0.0f, 0.1f);
+        for (size_t i = 2000; i < 20000; ++i) x[i] = n(g);
+        for (size_t i = 24000; i < 44000; ++i) x[i] = n(g);  // 4000-sample gap between
+        const auto rr = pc::apply(x, 0.0f, 48000.0f, 250.0f, 2750.0f);
+        bool gap_silent = true;
+        for (size_t i = 20000; i < 24000; ++i) gap_silent = gap_silent && x[i] == 0.0f;
+        check(rr.applied && gap_silent, "an internal silent gap stays exact zeros");
     }
     std::printf("%s\n", g_fail ? "FAILED" : "ALL PASSED");
     return g_fail ? 1 : 0;

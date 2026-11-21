@@ -16,9 +16,10 @@
 // constellation to ±0.3 dB in D, because after the IDFT every constellation is Gaussian), and eta_r
 // is the rung's EVM decode threshold (protocol/evm_rate_selector.hpp). No per-modulation constant.
 //
-// Knob ULTRA_PEAK_CONTROL: 0 = off (default until the GUI A/B), 1 = on. Transmit-side only: the
-// receiver's first data symbol takes its channel estimate from the comb pilots, which see the same
-// Bussgang gain as the data (measured ±0.004), so no receiver change is needed for decode.
+// Knob ULTRA_PEAK_CONTROL: ON by default since 2026-11-21; 0 = off. Same setting on both stations:
+// the receiver's EVM rate selector carries each rung's clip floor (thresholdOnFramesOfRungDb). The
+// decode itself needs no receiver change: the first data symbol's channel estimate comes from the
+// comb pilots, which see the same Bussgang gain as the data (measured ±0.004).
 
 #include <cstddef>
 #include <vector>

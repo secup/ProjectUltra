@@ -10,6 +10,30 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — feat(papr): peak control ON by default; the clipper keeps designed silence
+
+`ULTRA_PEAK_CONTROL` defaults ON (`=0` opts out; same setting on both stations - v0.6.3 is not
+compatible over the air with 0.6.2 anyway). GUI A/B, `--tx-model hardware`, 7.3 Hz, 3 seeds, peak SNR:
+AWGN 20 dB 4.07-4.15 -> 5.11 kbps (+24 %), 15 dB mean +17 %, 30/25 dB even (top rung both arms);
+ITU Good 20 dB 1.63 -> 2.17 kbps mean (+33 %), 12 dB 500/630 -> 1110/1210 bps (seeds 1/3);
+Moderate 25 dB +17 %, 18 dB 1.20 -> 1.78 kbps (seed 3).
+
+**Bug found by the default flip** (CTest `DualListenEngine`, "the sender's burst has its silent
+inter-chirp gap"): the band limit rang into designed silence - MC-DPSK's inter-chirp gap is the
+receiver's noise reference. `peak_control::apply` now restores every run of >= 1 ms of exact zeros
+and leaves those runs out of the level reference. New `PeakControl` check. The AWGN 5/0 dB GUI runs
+were restarted on the fixed binary.
+
+`EvmRateSelector` runs with `ULTRA_PEAK_CONTROL=0` (its cross-constellation checks assume unclipped
+frames; the clipped carry is tested in `PeakControl`). Full ctest: 127/127 with the fixes (TNCSession
+disabled since 2026-05-30).
+
+**Simulator note.** The GUI gate's default `--tx-model sim` normalizes every burst to the same AVERAGE
+level, so peak control costs its clip SDR there and gains nothing; judge it (and any PHY change from
+now on) with `--tx-model hardware`, which is what a real transmitter does.
+
+---
+
 ## 2026-11-21 — fix(tnc): stop hearing itself, recover from a failed session, never leave PTT keyed (GitHub #38)
 
 BUG-TNC-HEARS-ITSELF, BUG-TNC-STUCK-AFTER-FAILED-SESSION, BUG-TNC-PTT-STUCK-ON (KNOWN_BUGS has the

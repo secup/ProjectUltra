@@ -121,6 +121,20 @@ Result apply(std::vector<float>& x, float h_db, float fs, float lo_hz, float hi_
     while (e > a && x[e - 1] == 0.0f) --e;
     if (e <= a) return r;
 
+    // Designed silence - the T/R lead-in and tail, MC-DPSK's inter-chirp gap (the receiver's noise
+    // reference) - is a run of exact zeros. The band limit rings into it; the clipper must not
+    // create signal where the waveform specifies none, so those runs are restored afterwards and
+    // left out of the level reference. 1 ms of exact 0.0f never occurs inside a real signal.
+    constexpr size_t kMinSilentRun = 48;
+    std::vector<uint8_t> silent(x.size(), 0);
+    for (size_t i = 0; i < x.size();) {
+        if (x[i] != 0.0f) { ++i; continue; }
+        size_t j = i;
+        while (j < x.size() && x[j] == 0.0f) ++j;
+        if (j - i >= kMinSilentRun) std::fill(silent.begin() + i, silent.begin() + j, uint8_t{1});
+        i = j;
+    }
+
     const size_t L = nextPow2(2 * x.size());
     std::vector<Cx> z(L, Cx(0.0f, 0.0f));
     for (size_t i = 0; i < x.size(); ++i) z[i] = Cx(x[i], 0.0f);
@@ -132,12 +146,15 @@ Result apply(std::vector<float>& x, float h_db, float fs, float lo_hz, float hi_
 
     auto crest = [&](const std::vector<Cx>& v) {
         double sum = 0.0, pk = 0.0;
+        size_t n = 0;
         for (size_t i = a; i < e; ++i) {
+            if (silent[i]) continue;
             const double p = std::norm(v[i]);
             sum += p;
             pk = std::max(pk, p);
+            ++n;
         }
-        const double mean = sum / static_cast<double>(e - a);
+        const double mean = n > 0 ? sum / static_cast<double>(n) : 0.0;
         return std::pair<double, double>(mean, mean > 0.0 ? pk / mean : 0.0);
     };
     const auto [mean_env, pre] = crest(z);
@@ -157,9 +174,8 @@ Result apply(std::vector<float>& x, float h_db, float fs, float lo_hz, float hi_
     }
     const auto post = crest(z).second;
     r.post_crest_db = post > 0.0 ? static_cast<float>(10.0 * std::log10(post)) : 0.0f;
-    for (size_t i = 0; i < x.size(); ++i) x[i] = z[i].real();
-    // outside the original span the band limit leaves ringing below the clip level; keep the
-    // T/R silence exact (the half-duplex model and the receiver's digital-silence test read it)
+    for (size_t i = 0; i < x.size(); ++i) x[i] = silent[i] ? 0.0f : z[i].real();
+    // the edges of the active span (shorter zero runs never occur there either)
     for (size_t i = 0; i < a; ++i) x[i] = 0.0f;
     for (size_t i = e; i < x.size(); ++i) x[i] = 0.0f;
     r.applied = true;
@@ -168,8 +184,11 @@ Result apply(std::vector<float>& x, float h_db, float fs, float lo_hz, float hi_
 
 bool enabled() {
     static const bool on = [] {
+        // Default ON since 2026-11-21 (GUI A/B on a peak-limited TX: AWGN +24 % at 20 dB peak SNR,
+        // ITU Good +33 % at 20 dB, no loss on clean channels). ULTRA_PEAK_CONTROL=0 turns it off;
+        // same setting on both stations (the receiver's rate selector carries the clip floors).
         const char* v = std::getenv("ULTRA_PEAK_CONTROL");
-        return v && v[0] == '1';
+        return !(v && v[0] == '0');
     }();
     return on;
 }
