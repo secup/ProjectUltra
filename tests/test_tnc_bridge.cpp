@@ -439,6 +439,22 @@ int main() {
         expect(h.sink.ptt == std::vector<bool>({true, false}), "PTT OFF missing after tail");
     });
 
+    // GitHub #38 issue 3: PTT ON with no PTT OFF while retries went on. Audio that is queued but
+    // never played (stalled output device) must not hold the transmitter keyed.
+    runner.run("stalled TX audio is dropped and PTT unkeys", [] {
+        Harness h;
+        h.bridge.start();
+        h.audio.queueTxSamples({0.1f, 0.2f, 0.3f});  // no device: never drains
+        h.bridge.tick(0);
+        expect(h.sink.ptt == std::vector<bool>({true}), "PTT ON missing");
+        h.bridge.tick(500);
+        expect(!h.audio.isTxQueueEmpty(), "queue dropped before the stall limit");
+        h.bridge.tick(500);  // 1000 ms without a sample played
+        expect(h.audio.isTxQueueEmpty(), "stalled queue not dropped at the stall limit");
+        h.bridge.tick(200);  // PTT tail
+        expect(h.sink.ptt == std::vector<bool>({true, false}), "PTT not released after a stall");
+    });
+
     runner.run("setPttChangedCallback fires alongside event sink", [] {
         // Hardware-PTT hook in ultra_tnc relies on this callback. The
         // cmd-port PTT events still fire via the sink; the callback is

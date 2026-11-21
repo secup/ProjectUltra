@@ -1102,7 +1102,11 @@ void Connection::disconnect() {
         return;
     }
 
-    if (state_ == ConnectionState::CONNECTING) {
+    // A connect attempt that has not reached CONNECTED is cancelled outright: there is no peer
+    // session to close. PROBING (the PING phase) was missing here, so a host that hung up or
+    // sent DISCONNECT while we were still pinging left the retries running and every later
+    // CONNECT refused (GitHub #38).
+    if (state_ == ConnectionState::CONNECTING || state_ == ConnectionState::PROBING) {
         enterDisconnected("Cancelled");
         return;
     }
@@ -1133,6 +1137,17 @@ void Connection::disconnect() {
                   "(control_keydown=%ums, timeout=%ums)",
                   disconnect_retransmit_ms_, disconnectControlKeydownMs(),
                   timeout_remaining_ms_);
+    }
+}
+
+// Hard abort (host ABORT, or the host went away): stop every transmission and retry, and return to
+// DISCONNECTED now, in any state, without the DISCONNECT handshake. The peer's own timeouts end its
+// side. After this a CONNECT is accepted immediately (GitHub #38: only a restart recovered the TNC).
+void Connection::abort() {
+    abortTxNow();
+    if (state_ != ConnectionState::DISCONNECTED) {
+        LOG_MODEM(INFO, "Connection: Aborted in state %s", connectionStateToString(state_));
+        enterDisconnected("Aborted");
     }
 }
 

@@ -536,6 +536,13 @@ void TNCServer::onTimerTick(uint32_t elapsed_ms) {
 }
 
 void TNCServer::evictCmdClient() {
+    // The host that owned the radio session is gone (closed, or replaced by a new connection):
+    // abort the session, drop its queued audio and unkey. Only a fresh TNCSession used to be made,
+    // so the connect retries ran on underneath it and the next host's CONNECT was refused with
+    // "state=CONNECTING" until a restart (GitHub #38).
+    if (!isInvalidSocket(cmd_client_fd_)) {
+        modem_.abort();
+    }
     closeClientFd(cmd_client_fd_);
     closeClientFd(data_client_fd_);
     cmd_line_buffer_.clear();

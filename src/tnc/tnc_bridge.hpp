@@ -48,6 +48,11 @@ public:
     virtual bool connect(const std::string& remote_call) = 0;
     virtual void disconnect() = 0;
     virtual void abortTxNow() = 0;
+    // Hard abort: no TX, DISCONNECTED in any state. Default for fakes: the old TX-stop + disconnect.
+    virtual void abortSession() {
+        abortTxNow();
+        disconnect();
+    }
     virtual bool sendBinary(const ultra::Bytes& data) = 0;
     virtual bool sendFile(const std::string& path) = 0;
     virtual size_t getTxBacklogBytes() const = 0;
@@ -179,7 +184,15 @@ private:
     PttChangedCallback ptt_changed_cb_;
     LocalCallChangedCallback local_call_changed_cb_;
 
+    // Stuck-transmitter guard (tick()).
+    size_t tx_queue_last_size_ = 0;
+    uint32_t tx_queue_stall_ms_ = 0;
+
+public:
+    // PTT stays keyed this long after the last queued sample (the output path still plays it).
     static constexpr uint32_t kPttTailMs = 200;
+    // Queued TX audio that has not drained for this long means the output device stopped.
+    static constexpr uint32_t kTxStallMs = 1000;
 };
 
 } // namespace ultra::tnc

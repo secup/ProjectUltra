@@ -275,6 +275,16 @@ void ProtocolEngine::disconnect() {
     dispatchPendingCallbacks();
 }
 
+void ProtocolEngine::abort() {
+    {
+        std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+        connection_.abort();
+        tx_queue_.clear();
+        defer_tx_ = false;
+    }
+    dispatchPendingCallbacks();
+}
+
 void ProtocolEngine::abortTxNow() {
     {
         std::lock_guard<ProtocolEngineMutex> lock(mutex_);

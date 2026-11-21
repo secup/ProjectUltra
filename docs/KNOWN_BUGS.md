@@ -2769,6 +2769,42 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-TNC-HEARS-ITSELF + BUG-TNC-STUCK-AFTER-FAILED-SESSION + BUG-TNC-PTT-STUCK-ON (FIXED 2026-11-21, GitHub #38) — was P1 for TNC users on a one-simulator bench or a VOX loop
+
+- **Report** (GitHub #38, 0.6.2 under Winlink Express, one hardware HF simulator in half-duplex mode:
+  each station's audio is mixed onto both outputs, so a station hears itself at the peer's level):
+  1. `ultra_tnc` took its own PONG for a new PING and answered it every ~3 s forever; on the calling
+     side it saw its own CONNECT ("Simultaneous CONNECT with identical callsign").
+  2. After the host hung up mid-call, every later `CONNECT` was refused (`Cannot connect,
+     state=CONNECTING`, then `state=CONNECTED`) while the old connect retries ran on; `DISCONNECT`
+     during the handshake got `WRONG`. Only a restart recovered.
+  3. `PTT ON` with no matching `PTT OFF` across three connect retries.
+- **Root causes.** (1) The GUI mutes its receiver for every transmission (`app.cpp` `setRxMuted` +
+  `stopCapture`); `ultra_tnc`'s hardware audio path fed every captured sample to the decoder,
+  keyed or not. (2a) `TNCServer::evictCmdClient` made a fresh `TNCSession` when the host's command
+  connection closed (or a new host replaced it) but never touched the radio session. (2b)
+  `Connection::disconnect()` did nothing in PROBING (the PING phase). (2c) The bridge's `abort()`
+  called the graceful `disconnect()`, which from CONNECTED runs the DISCONNECT handshake (seconds of
+  retries) before a CONNECT is accepted. (2d) `TNCSession::cmdDisconnect` refused CONNECTING. (3)
+  PTT follows the TX audio queue; queued audio that never plays (stalled output device) held PTT
+  on with no bound. The report's excerpt does not show why the queue stopped draining.
+- **Fix.** (1) `ultra_tnc` replaces received audio with digital silence from the moment its own audio
+  is queued until the PTT tail (`TNCBridge::kPttTailMs`) + 20 ms receiver recovery + one capture
+  buffer has passed (`receiveBlankedWhileKeyed`) - silence, not a gap, so the decoder's timeline
+  stays continuous, as a rig's muted receiver behind a running sound card. (2) New hard abort
+  `Connection::abort()` / `ProtocolEngine::abort()` (TX stopped, DISCONNECTED in any state, no
+  handshake); the bridge's `abort()` uses it; the server aborts the radio session whenever the host
+  that owned it goes away or is replaced; `disconnect()` cancels PROBING; `DISCONNECT` while
+  connecting cancels the attempt (OK, then DISCONNECTED). (3) `TNCBridge::tick` drops TX audio that
+  has not drained for 1 s (`kTxStallMs`, ~3x the largest device buffer) and the PTT tail unkeys.
+- **Tests.** `Protocol` "DISCONNECT while pinging and ABORT while connected return to idle" (fails
+  without the PROBING fix: "DISCONNECT left the PING phase running"); `TNCServer` "command client
+  hanging up mid-connect aborts the radio session", "new command client replacing a connected one
+  aborts its session", "DISCONNECT during call setup cancels it"; `TNCBridge` "stalled TX audio is
+  dropped and PTT unkeys". `UltraTncSimAudio` passes.
+- **Not verified:** the receive blanking on the reporter's hardware loop (the OTASim path already
+  models a half-duplex radio and is not blanked a second time). Needs the reporter's re-test.
+
 ### BUG-TNC-BW-FORCES-OFDM (FIXED 2026-11-14) — was P1 for TNC users: every TNC session forced OFDM_CHIRP, so below the OFDM floor it connected and then moved almost nothing
 
 `TNCBridge::waveformForBandwidth` mapped `BW2300` and `BW2750` to `OFDM_CHIRP` and `setBandwidth`

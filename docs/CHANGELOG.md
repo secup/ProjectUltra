@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-21 — fix(tnc): stop hearing itself, recover from a failed session, never leave PTT keyed (GitHub #38)
+
+BUG-TNC-HEARS-ITSELF, BUG-TNC-STUCK-AFTER-FAILED-SESSION, BUG-TNC-PTT-STUCK-ON (KNOWN_BUGS has the
+report, root causes and tests).
+- `tools/ultra_tnc.cpp`: receive blanked to digital silence while keyed + PTT tail + 20 ms recovery +
+  one capture buffer (hardware audio path; the GUI already mutes its receiver per transmission).
+- `Connection::abort()` / `ProtocolEngine::abort()`: hard abort to DISCONNECTED in any state;
+  `Connection::disconnect()` now cancels PROBING as well as CONNECTING.
+- `TNCBridge::abort()` uses the hard abort (`ProtocolEnginePort::abortSession`, default = old
+  behaviour for fakes); `TNCServer::evictCmdClient()` aborts the radio session when its host goes
+  away or is replaced; `TNCSession::cmdDisconnect()` cancels a call in setup instead of `WRONG`.
+- `TNCBridge::tick()`: TX audio that has not drained for 1 s is dropped so PTT unkeys.
+- Tests: `Protocol` (+1, proven to fail without the PROBING fix), `TNCServer` (+3), `TNCBridge` (+1);
+  `UltraTncSimAudio`, `TNCBridge`, `TNCServer`, `Protocol` pass.
+
+---
+
 ## 2026-11-21 — feat(papr): peak control Phase 4 — MC-DPSK data bursts (same knob)
 
 MC-DPSK session bursts (8 carriers 500-2500 Hz, 1024-sample symbols) carry a 9.1 dB crest.

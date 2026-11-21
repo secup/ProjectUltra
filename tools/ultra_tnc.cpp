@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <system_error>
 #include <csignal>
@@ -306,12 +307,37 @@ public:
             std::lock_guard<std::mutex> lock(input_audio_mutex_);
             auto samples = audio_.getRxSamples(4096);
             if (!samples.empty()) {
+                if (receiveBlankedWhileKeyed()) {
+                    // Half-duplex: a keyed station hears nothing (a rig mutes its receiver; on a
+                    // one-simulator bench or a VOX loop the input carries our own signal at the
+                    // peer's level, and the decoder answered its own PONG forever, GitHub #38).
+                    // Digital silence, not a gap: the sound card keeps sampling, so the decoder's
+                    // sample timeline stays continuous.
+                    std::fill(samples.begin(), samples.end(), 0.0f);
+                }
                 modem_.feedAudio(samples);
             }
         }
 
         bridge_.tick(elapsed_ms);
         maybeFireDeferredAck();
+    }
+
+    // Receive is blanked from the moment our own audio is queued until the PTT tail has run out
+    // (TNCBridge::kPttTailMs: the output path is still playing), plus the receiver's T/R recovery
+    // (20 ms, the figure OTASim's half-duplex model uses) and the capture path's buffering (one
+    // device buffer): samples recorded while keyed can be read up to that much later.
+    bool receiveBlankedWhileKeyed() {
+        const auto now = std::chrono::steady_clock::now();
+        if (!audio_.isTxQueueEmpty()) {
+            last_tx_audio_ = now;
+            tx_audio_seen_ = true;
+        }
+        if (!tx_audio_seen_) return false;
+        const double capture_ms = 1000.0 * static_cast<double>(audio_.getBufferSize()) / kSampleRate;
+        const auto hold = std::chrono::milliseconds(
+            ultra::tnc::TNCBridge::kPttTailMs + kRxRecoveryMs + static_cast<int>(std::ceil(capture_ms)));
+        return now - last_tx_audio_ < hold;
     }
 
     // Listen-before-ACK poll for a deferred tone ACK (the GUI tick's policy). Sensors are read
@@ -438,6 +464,10 @@ private:
     std::mutex deferred_ack_mutex_;
     std::vector<float> deferred_ack_samples_;
     std::chrono::steady_clock::time_point deferred_ack_deadline_{};
+    // Half-duplex receive blanking (receiveBlankedWhileKeyed).
+    static constexpr int kRxRecoveryMs = 20;
+    std::chrono::steady_clock::time_point last_tx_audio_{};
+    bool tx_audio_seen_ = false;
     int64_t deferred_ack_armed_substantive_ms_ = 0;
     bool deferred_ack_timer_reconfirm_ = false;  // requested by the backstop timer
     int deferred_ack_quiet_polls_ = 0;
@@ -1025,6 +1055,8 @@ private:
                      measurement.target_peak);
         }
 
+        last_tx_audio_ = std::chrono::steady_clock::now();
+        tx_audio_seen_ = true;
         audio_.queueTxSamples(samples);
         // No external expected-arrival seed: ModemEngine seeds it internally on transmit
         // (see the OTASim branch above). SyncController owns the cold/warm hand-off.

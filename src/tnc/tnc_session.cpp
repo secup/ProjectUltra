@@ -789,6 +789,15 @@ void TNCSession::cmdConnect(std::string_view args) {
 }
 
 void TNCSession::cmdDisconnect() {
+    // DISCONNECT during the call setup cancels it (it used to get WRONG and the session then
+    // completed anyway, GitHub #38). The bridge reports DISCONNECTED when the link is down.
+    if (state_ == State::CONNECTING) {
+        modem_.abort();
+        pending_inbound_ = false;
+        state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
+        emitOK();
+        return;
+    }
     if (state_ != State::CONNECTED && state_ != State::DISCONNECTING) {
         emitWrong();
         return;

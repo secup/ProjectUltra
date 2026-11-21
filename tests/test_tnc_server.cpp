@@ -185,6 +185,11 @@ struct FakeModemAdapter : ModemAdapter {
         return start_connect_calls.size();
     }
 
+    int abortCallCount() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return abort_calls;
+    }
+
     int disconnectCallCount() const {
         std::lock_guard<std::mutex> lock(mutex);
         return disconnect_calls;
@@ -695,6 +700,39 @@ int main() {
         waitUntil([&] { return harness.modem.disconnectCallCount() == 1; }, 500, "modem disconnect not called");
         harness.server.postModemDisconnected();
         expectLine(cmd, "DISCONNECTED\r");
+    });
+
+    // GitHub #38: a host that hangs up (or is replaced) mid-call left the connect retries running
+    // and refused the next CONNECT with "state=CONNECTING" until the TNC was restarted.
+    runner.run("command client hanging up mid-connect aborts the radio session", [] {
+        ServerHarness harness;
+        {
+            TestClient cmd(harness.server.getCmdPort());
+            enterConnecting(harness, cmd);
+            expect(harness.modem.abortCallCount() == 0, "abort before the host hung up");
+            cmd.close();
+        }
+        waitUntil([&] { return harness.modem.abortCallCount() == 1; }, 1000,
+                  "modem abort not called when the command client hung up");
+    });
+
+    runner.run("new command client replacing a connected one aborts its session", [] {
+        ServerHarness harness;
+        TestClient first(harness.server.getCmdPort());
+        enterConnected(harness, first);
+        TestClient second(harness.server.getCmdPort());
+        expect(first.waitForClosed(), "first command client was not closed");
+        waitUntil([&] { return harness.modem.abortCallCount() == 1; }, 1000,
+                  "modem abort not called when the session's host was replaced");
+    });
+
+    runner.run("DISCONNECT during call setup cancels it", [] {
+        ServerHarness harness;
+        TestClient cmd(harness.server.getCmdPort());
+        enterConnecting(harness, cmd);
+        expect(command(cmd, "DISCONNECT") == "OK\r", "DISCONNECT while connecting got WRONG");
+        waitUntil([&] { return harness.modem.abortCallCount() == 1; }, 500,
+                  "DISCONNECT while connecting did not abort the attempt");
     });
 
     runner.group("Lifecycle");

@@ -4,6 +4,7 @@
 #include "protocol/frame_v2.hpp"
 #include "protocol/waveform_selection.hpp"
 #include "tnc_server.hpp"
+#include "ultra/logging.hpp"
 #include "ultra/types.hpp"
 
 #include <algorithm>
@@ -47,6 +48,10 @@ public:
 
     void abortTxNow() override {
         engine_.abortTxNow();
+    }
+
+    void abortSession() override {
+        engine_.abort();
     }
 
     bool sendBinary(const ultra::Bytes& data) override {
@@ -313,15 +318,17 @@ void TNCBridge::disconnect() {
 }
 
 void TNCBridge::abort() {
-    engine_.abortTxNow();
+    // Unkey first: the queued audio is dropped, so nothing is left to transmit.
     audio_.clearTxQueue();
     {
         std::lock_guard<std::mutex> lock(ptt_mutex_);
         postPTT(false);
         ptt_tail_ms_ = 0;
     }
+    // A hard abort, not disconnect(): disconnect() from CONNECTED starts the DISCONNECT handshake
+    // (seconds of retries), during which a new CONNECT is refused (GitHub #38).
+    engine_.abortSession();
     state_.store(State::READY, std::memory_order_release);
-    engine_.disconnect();
 }
 
 bool TNCBridge::sendBinary(const std::vector<uint8_t>& bytes) {
@@ -412,6 +419,25 @@ void TNCBridge::tick(uint32_t elapsed_ms) {
     if (!started_.load(std::memory_order_acquire)) {
         return;
     }
+    // Stuck-transmitter guard: queued audio that stops draining (the output device stalled) would
+    // hold PTT keyed forever - a host keying a real radio from PTT ON/OFF leaves the transmitter
+    // on (GitHub #38: PTT ON, three connect retries, no PTT OFF). A playing device drains its
+    // queue continuously; one that has not consumed a sample for kTxStallMs (about 3x the largest
+    // device buffer the engine allows, 16384 samples = 341 ms) is not playing. Drop the audio and
+    // let the PTT tail unkey.
+    const size_t queued = audio_.getTxQueueSize();
+    if (queued == 0 || queued < tx_queue_last_size_) {
+        tx_queue_stall_ms_ = 0;
+    } else {
+        tx_queue_stall_ms_ += elapsed_ms;
+        if (tx_queue_stall_ms_ >= kTxStallMs) {
+            LOG_ERROR("TNC", "TX audio stalled: %zu samples queued, none played for %u ms; dropping "
+                             "the queue and unkeying", queued, tx_queue_stall_ms_);
+            audio_.clearTxQueue();
+            tx_queue_stall_ms_ = 0;
+        }
+    }
+    tx_queue_last_size_ = audio_.getTxQueueSize();
     onAudioQueueState(!audio_.isTxQueueEmpty(), elapsed_ms);
 
     // Pat / Winlink need periodic BUFFER N updates to know when their

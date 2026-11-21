@@ -457,6 +457,49 @@ bool test_connection_establishment() {
     return true;
 }
 
+bool test_disconnect_and_abort_return_to_idle() {
+    TEST("DISCONNECT while pinging and ABORT while connected return to idle (GitHub #38)");
+
+    ConnectionConfig config;
+    config.auto_accept = true;
+    config.connect_timeout_ms = 5000;
+    config.connect_retries = 3;
+
+    // 1. DISCONNECT in the PING phase cancels the attempt (it was a no-op in PROBING, so the
+    //    retries ran on and every later CONNECT was refused).
+    {
+        ProtocolEngine a(config);
+        a.setLocalCallsign("TEST1A");
+        int pings = 0;
+        a.setPingTxCallback([&] { ++pings; });  // a station with a PING sender starts in PROBING
+        if (!a.connect("TEST2B")) FAIL("connect() refused from idle");
+        if (pings != 1) FAIL("no PING sent");
+        if (a.getState() != ConnectionState::PROBING) FAIL("not PROBING after connect()");
+        a.disconnect();
+        if (a.getState() != ConnectionState::DISCONNECTED) FAIL("DISCONNECT left the PING phase running");
+        if (!a.connect("TEST2B")) FAIL("CONNECT refused after cancelling the PING phase");
+        a.abort();
+    }
+
+    // 2. ABORT from CONNECTED is immediate: no DISCONNECT handshake to wait out, and a new
+    //    CONNECT is accepted at once.
+    {
+        ProtocolEngine a(config), b(config);
+        a.setLocalCallsign("TEST1A");
+        b.setLocalCallsign("TEST2B");
+        SimulatedChannel channel(a, b);
+        if (!a.connect("TEST2B")) FAIL("connect() refused");
+        for (int i = 0; i < 50 && a.getState() != ConnectionState::CONNECTED; i++) channel.run(1, 100);
+        if (a.getState() != ConnectionState::CONNECTED) FAIL("did not connect");
+        a.abort();
+        if (a.getState() != ConnectionState::DISCONNECTED) FAIL("ABORT did not reach DISCONNECTED at once");
+        if (!a.connect("TEST2B")) FAIL("CONNECT refused right after ABORT");
+    }
+
+    PASS();
+    return true;
+}
+
 bool test_environment_force_handshake_precedence() {
     TEST("Environment-forced data rung survives handshake entry policy");
 
@@ -1540,6 +1583,7 @@ int main() {
 
     std::cout << "\nTwo-Station Simulation:\n";
     test_connection_establishment();
+    test_disconnect_and_abort_return_to_idle();
     test_environment_force_handshake_precedence();
     test_nonphysical_snr_sources_do_not_drive_negotiation();
     test_disconnect();

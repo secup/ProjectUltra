@@ -205,6 +205,7 @@ public:
     void acceptCall();
     void rejectCall();
     void disconnect();
+    void abort();  // hard: no DISCONNECT handshake, DISCONNECTED in any state
     void abortTxNow();
 
     // --- Data Transfer ---

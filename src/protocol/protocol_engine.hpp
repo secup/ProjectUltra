@@ -95,6 +95,7 @@ public:
     void acceptCall();
     void rejectCall();
     void disconnect();
+    void abort();  // hard abort: TX stopped, DISCONNECTED in any state (Connection::abort)
     void abortTxNow();
 
     // --- Data Transfer ---
