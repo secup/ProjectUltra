@@ -429,6 +429,21 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   protocol::v2::frameTypeToString(header.type),
                   use_light ? "LIGHT" : "FULL");
     }
+    if (!is_ofdm && header.valid && data.size() > protocol::v2::ControlFrame::SIZE &&
+        (header.type == protocol::v2::FrameType::CONNECT ||
+         header.type == protocol::v2::FrameType::CONNECT_ACK ||
+         header.type == protocol::v2::FrameType::CONNECT_NAK)) {
+        const bool mfsk = header.type == protocol::v2::FrameType::CONNECT
+            ? handshake_connect_tx_count_.fetch_add(1, std::memory_order_relaxed) >= 1
+            : peer_handshake_mfsk_.load(std::memory_order_relaxed);
+        streaming_encoder_->setHandshakeMfskOnce(mfsk);
+        if (mfsk) {
+            LOG_MODEM(INFO, "[%s] TX %s as the M-FSK handshake frame (%s)", log_prefix_.c_str(),
+                      protocol::v2::frameTypeToString(header.type),
+                      header.type == protocol::v2::FrameType::CONNECT ? "a retry"
+                                                                       : "answering an M-FSK CONNECT");
+        }
+    }
     auto samples = use_light ? streaming_encoder_->encodeFrameLight(data)
                              : streaming_encoder_->encodeFrame(data);
 
@@ -761,6 +776,7 @@ void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
 }
 
 std::vector<float> ModemEngine::transmitPing() {
+    handshake_connect_tx_count_.store(0, std::memory_order_relaxed);
     auto samples = streaming_encoder_->encodePing();
 
     LOG_MODEM(INFO, "[%s] TX PING (chirp): %zu samples",

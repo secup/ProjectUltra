@@ -2,6 +2,7 @@
 
 #include "ofdm/genie_tx_capture.hpp"
 #include "streaming_decoder.hpp"
+#include "handshake_mfsk.hpp"
 #include "protocol/connection_policy.hpp"  // MC-DPSK data constellations
 #include "protocol/descriptor_window_anchor.hpp"
 #include "protocol/mcdpsk_frame.hpp"
@@ -4602,7 +4603,45 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrameImpl(const std::vector<float>& s
             }
         }
         if (!status.allSuccess()) {
-            return fixed;
+            // The same span as the M-FSK handshake frame (handshake_mfsk.hpp): one R1/2 codeword
+            // over 16-FSK. The receiver cannot tell the payload modulation before a CRC passes.
+            auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
+            if (!mc || !handshake_mfsk::fits(mc_dpsk_config_)) {
+                return fixed;
+            }
+            const auto mfsk_bits = mc->mfskSoftBitsOfLastFrame(v2::kHandshakeMfskTones);
+            const size_t mfsk_frame_bits = static_cast<size_t>(
+                fec::FrameInterleaver::totalFrameBits(v2::kHandshakeMfskCodewords));
+            if (mfsk_bits.size() < mfsk_frame_bits) {
+                return fixed;
+            }
+            auto mstatus = v2::decodeFixedFrame(mfsk_bits, v2::kHandshakeMfskRate,
+                                                v2::kHandshakeMfskCodewords);
+            if (!mstatus.allSuccess()) {
+                LOG_MODEM(INFO, "[%s] M-FSK handshake decode failed too", log_prefix_.c_str());
+                return fixed;
+            }
+            Bytes assembled = mstatus.reassemble();
+            auto hdr = v2::parseHeader(assembled);
+            if (!hdr.valid || !v2::isConnectFrame(hdr.type)) {
+                return fixed;
+            }
+            mc->adoptPendingMfskReading(handshake_mfsk::kMfskOverDbpskReadingDb);
+            DecodeResult mfsk_ok;
+            mfsk_ok.snr_db = snr;
+            mfsk_ok.snr_source = SNRSource::SYNC_QUALITY;
+            mfsk_ok.sync_quality_db = snr;
+            mfsk_ok.cfo_hz = cfo;
+            mfsk_ok.success = true;
+            mfsk_ok.handshake_mfsk = true;
+            mfsk_ok.codewords_ok = v2::kHandshakeMfskCodewords;
+            mfsk_ok.frame_data = std::move(assembled);
+            mfsk_ok.frame_type = hdr.type;
+            LOG_MODEM(INFO, "[%s] M-FSK handshake frame decode SUCCESS (%d-FSK %s, DBPSK %d/%d CWs)",
+                      log_prefix_.c_str(), v2::kHandshakeMfskTones,
+                      codeRateToString(v2::kHandshakeMfskRate), fixed.codewords_ok,
+                      fixed.codewords_ok + fixed.codewords_failed);
+            return mfsk_ok;
         }
 
         Bytes assembled = status.reassemble();

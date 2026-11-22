@@ -67,6 +67,14 @@ public:
     // Untracked soft bits of the last demodulated frame when the residual tracker applied a
     // correction (else empty); see MultiCarrierDPSKDemodulator::takeUntrackedSoftBits.
     std::vector<float> takeUntrackedSoftBits();
+
+    // M-FSK re-demodulation of the last frame process() saw (same chirp timing and CFO): the
+    // receiver does not know a handshake frame's payload modulation until one decode passes its
+    // CRC, so a failed DPSK CONNECT is read again as M-FSK (protocol/frame_v2.hpp
+    // kHandshakeMfsk*). The reading of that demodulation is held until the caller confirms the
+    // decode (adoptPendingMfskReading), so a failed attempt leaves the frame's readings alone.
+    std::vector<float> mfskSoftBitsOfLastFrame(int tones);
+    void adoptPendingMfskReading(float reading_offset_db = 0.0f);
     void reset() override;
 
     // Demodulate MC-DPSK continuation samples that follow an already-processed
@@ -156,6 +164,10 @@ private:
     bool last_snr_valid_ = false;
     // #58: whole-frame data-aided fade-averaged SNR (sibling of last_snr_).
     float last_data_aided_snr_ = 0.0f;
+    std::vector<float> last_frame_samples_;
+    bool pending_mfsk_snr_valid_ = false;
+    float pending_mfsk_snr_db_ = 0.0f;
+    float pending_mfsk_fading_index_ = 0.0f;
     bool last_data_aided_snr_valid_ = false;
     float last_cfo_ = 0.0f;
 };

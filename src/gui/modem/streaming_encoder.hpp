@@ -114,6 +114,11 @@ public:
     // Used once when entering connected OFDM so the receiver can establish an
     // OFDM-specific timing anchor before switching to LTS-only warm sync.
     void forceNextFrameFullPreamble() { force_full_preamble_once_ = true; }
+    // The next MC-DPSK CONNECT / CONNECT_ACK / CONNECT_NAK goes out as the M-FSK handshake frame
+    // (handshake_mfsk.hpp) when the profile allows it; one-shot, cleared by encodeFrame.
+    void setHandshakeMfskOnce(bool on) { handshake_mfsk_once_ = on; }
+    // Whether the last encodeFrame call sent the M-FSK handshake frame (diagnostics, tests).
+    bool lastFrameWasHandshakeMfsk() const { return last_frame_handshake_mfsk_; }
 
     // Encode multiple frames as a single burst with one LTS preamble
     // Each frame gets its own training symbols for per-block channel estimation
@@ -332,6 +337,8 @@ private:
     // enabled, and never affects the emitted samples.
     long long genie_stream_base_ = 0;
     bool force_full_preamble_once_ = false;
+    bool handshake_mfsk_once_ = false;
+    bool last_frame_handshake_mfsk_ = false;
     bool papr_reduction_enabled_ = phy::kPaprReductionDefaultEnabled;
     float papr_reduction_threshold_db_ = phy::kOfdmPaprReductionDefaultThresholdDb;
     phy::PaprReductionMeasurement last_papr_reduction_;

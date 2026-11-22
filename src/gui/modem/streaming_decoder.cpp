@@ -51,7 +51,7 @@ bool isFixedFrameCwCount(int cw_count) {
 }
 
 size_t mcDpskBitsPerSymbol(const MultiCarrierDPSKConfig& config) {
-    return static_cast<size_t>(std::max(1, config.num_carriers * config.bits_per_symbol));
+    return static_cast<size_t>(config.bitsPerSymbolTime());
 }
 
 // Return a conservative 1-CW control-frame sample requirement for connected OFDM.

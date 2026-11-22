@@ -5,6 +5,7 @@
 #include "streaming_encoder.hpp"
 #include "sync/acquisition_mode.hpp"
 #include "streaming_control_profile.hpp"
+#include "handshake_mfsk.hpp"
 #include "streaming_frame_policy.hpp"
 #include "waveform/ofdm_chirp_waveform.hpp"
 #include "waveform/mc_dpsk_waveform.hpp"
@@ -389,6 +390,43 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool p
     // negotiated DATA constellation. Baud is standardized at 1024, so configure()
     // only swaps the constellation; the CONNECT FEC is already R1/4 (encodeFrameBytes).
     const bool is_mc_dpsk = (mode_ == protocol::WaveformMode::MC_DPSK);
+
+    // M-FSK handshake frame (handshake_mfsk.hpp): the same ConnectFrame as one R1/2 codeword over
+    // 16-FSK, the same span as the DBPSK frame. The header's codeword count says 1.
+    const bool want_mfsk = handshake_mfsk_once_;
+    handshake_mfsk_once_ = false;
+    last_frame_handshake_mfsk_ = false;
+    if (want_mfsk && is_mc_dpsk && frame_data.size() > v2::ControlFrame::SIZE &&
+        frame_data.size() >= v2::DataFrame::HEADER_SIZE &&
+        v2::isConnectFrame(static_cast<v2::FrameType>(frame_data[2])) &&
+        handshake_mfsk::fits(mc_dpsk_config_)) {
+        Bytes tx = frame_data;
+        if (tx[12] != v2::kHandshakeMfskCodewords) {
+            tx[12] = static_cast<uint8_t>(v2::kHandshakeMfskCodewords);
+            const uint16_t hcrc = v2::ControlFrame::calculateCRC(tx.data(), 15);
+            tx[15] = (hcrc >> 8) & 0xFF;
+            tx[16] = hcrc & 0xFF;
+            const size_t fcrc_offset = tx.size() - 2;
+            const uint16_t fcrc = v2::ControlFrame::calculateCRC(tx.data(), fcrc_offset);
+            tx[fcrc_offset] = (fcrc >> 8) & 0xFF;
+            tx[fcrc_offset + 1] = fcrc & 0xFF;
+        }
+        const Bytes encoded = v2::encodeFixedFrame(tx, v2::kHandshakeMfskRate,
+                                                   v2::kHandshakeMfskCodewords);
+        MCDPSKWaveform mfsk(handshake_mfsk::configFor(mc_dpsk_config_));
+        const Samples preamble = mfsk.generatePreamble();
+        const Samples modulated = mfsk.modulate(encoded);
+        std::vector<float> result;
+        result.reserve(preamble.size() + modulated.size());
+        result.insert(result.end(), preamble.begin(), preamble.end());
+        result.insert(result.end(), modulated.begin(), modulated.end());
+        last_frame_handshake_mfsk_ = true;
+        LOG_MODEM(INFO, "[%s] M-FSK handshake frame: %zu bytes -> %d-FSK %s %d CW -> %zu samples",
+                  log_prefix_.c_str(), frame_data.size(), v2::kHandshakeMfskTones,
+                  codeRateToString(v2::kHandshakeMfskRate), v2::kHandshakeMfskCodewords,
+                  result.size());
+        return result;
+    }
     bool use_control_profile =
         (is_ofdm && isControlFrameBytes(frame_data)) ||
         (is_mc_dpsk && isHandshakeNegotiationFrameBytes(frame_data));
@@ -1033,7 +1071,7 @@ EncoderConfig StreamingEncoder::getConfig() const {
     if (mode_ == protocol::WaveformMode::MC_DPSK) {
         cfg.num_carriers = mc_dpsk_config_.num_carriers;
         cfg.data_carriers = mc_dpsk_config_.num_carriers;
-        cfg.bits_per_symbol = mc_dpsk_config_.num_carriers * mc_dpsk_config_.bits_per_symbol;
+        cfg.bits_per_symbol = mc_dpsk_config_.bitsPerSymbolTime();
         cfg.use_pilots = false;
         cfg.pilot_spacing = 0;
     } else {

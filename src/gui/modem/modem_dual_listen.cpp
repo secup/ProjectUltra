@@ -55,6 +55,14 @@ void ModemEngine::wireDecoderCoreCallbacks(StreamingDecoder* decoder) {
         });
 
         if (delivered) {
+            if (result.frame_type == v2::FrameType::CONNECT ||
+                result.frame_type == v2::FrameType::CONNECT_ACK ||
+                result.frame_type == v2::FrameType::CONNECT_NAK) {
+                peer_handshake_mfsk_.store(result.handshake_mfsk, std::memory_order_relaxed);
+                if (result.frame_type != v2::FrameType::CONNECT) {
+                    handshake_connect_tx_count_.store(0, std::memory_order_relaxed);
+                }
+            }
             if (decode_observer_) decode_observer_(result);
             if (deliverFrame(result)) {
                 notifyFrameParsed(result.frame_data, result.frame_type);

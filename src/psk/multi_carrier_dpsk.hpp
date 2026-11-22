@@ -40,6 +40,15 @@ struct MultiCarrierDPSKConfig {
     // Modulation
     int bits_per_symbol = 2;        // 2 = DQPSK, 1 = DBPSK
 
+    // M-ary FSK data symbols (2026-11-22, low-SNR): > 0 sends each data symbol as ONE of
+    // mfsk_tones tones evenly spaced over [freq_low, freq_high], continuous phase, at the chirp's
+    // amplitude - a constant envelope, so a peak-limited transmitter puts its full PEP into the
+    // payload (an 8-carrier DPSK symbol averages 6-9 dB below its peak). Detection is
+    // noncoherent (tone energies), log2(mfsk_tones) bits per symbol time. The chirp, training and
+    // reference symbols stay; the training and reference are scaled to the chirp's peak so no
+    // part of the frame sets the transmitter's peak above the payload. 0 = DPSK (bits_per_symbol).
+    int mfsk_tones = 0;
+
     // Training
     int training_symbols = 8;       // Training symbols for sync
 
@@ -82,8 +91,29 @@ struct MultiCarrierDPSKConfig {
     }
 
     // Get raw bit rate (before FEC)
+    bool isMfsk() const { return mfsk_tones >= 2; }
+    // Coded bits carried per symbol time: one tone of M (log2 M bits) for M-FSK, every carrier's
+    // constellation bits for DPSK. Every frame-length computation goes through this.
+    int bitsPerSymbolTime() const {
+        if (isMfsk()) {
+            int b = 0;
+            while ((1 << (b + 1)) <= mfsk_tones) ++b;
+            return std::max(1, b);
+        }
+        return std::max(1, num_carriers * bits_per_symbol);
+    }
+    std::vector<float> getMfskToneFreqs() const {
+        std::vector<float> f(static_cast<size_t>(std::max(0, mfsk_tones)));
+        for (int i = 0; i < mfsk_tones; ++i) {
+            f[static_cast<size_t>(i)] =
+                freq_low + (freq_high - freq_low) * static_cast<float>(i) /
+                               static_cast<float>(std::max(1, mfsk_tones - 1));
+        }
+        return f;
+    }
+
     float getRawBitRate() const {
-        return getSymbolRate() * num_carriers * bits_per_symbol;
+        return getSymbolRate() * static_cast<float>(bitsPerSymbolTime());
     }
 
     // Get chirp config for sync
@@ -147,7 +177,7 @@ public:
                     float t = i * phase_inc;  // Start at 0 each symbol
                     Complex carrier = std::polar(1.0f, t);
                     Complex modulated = training_sym * carrier;
-                    output[idx] += modulated.real() / config_.num_carriers;
+                    output[idx] += preambleSymbolScale() * modulated.real() / config_.num_carriers;
                 }
             }
         }
@@ -177,10 +207,44 @@ public:
                 float t = i * phase_inc;  // Start at 0
                 Complex carrier = std::polar(1.0f, t);
                 Complex modulated = ref_sym * carrier;
-                output[i] += modulated.real() / config_.num_carriers;
+                output[i] += preambleSymbolScale() * modulated.real() / config_.num_carriers;
             }
         }
 
+        return output;
+    }
+
+    // The training and reference symbols sum every carrier, in phase at a symbol's first sample
+    // (peak = full scale 1.0). Under M-FSK the payload runs at the chirp's amplitude, so they are
+    // scaled to that peak too: nothing in the frame sets the transmitter's peak above the payload.
+    float preambleSymbolScale() const {
+        return config_.isMfsk() ? config_.getChirpConfig().amplitude : 1.0f;
+    }
+
+    // M-FSK payload: one tone per symbol time, MSB-first bit groups, continuous phase across
+    // symbols and calls (a phase step would splatter and dent the envelope through the TX filter).
+    Samples modulateMfsk(const std::vector<int>& bits_in) {
+        const int bps = config_.bitsPerSymbolTime();
+        std::vector<int> bits = bits_in;
+        const size_t num_symbols = (bits.size() + static_cast<size_t>(bps) - 1) / static_cast<size_t>(bps);
+        bits.resize(num_symbols * static_cast<size_t>(bps), 0);
+        const auto tones = config_.getMfskToneFreqs();
+        const double amp = config_.getChirpConfig().amplitude;
+        const double fs = config_.sample_rate;
+        Samples output(num_symbols * static_cast<size_t>(config_.samples_per_symbol), 0.0f);
+        size_t bit_idx = 0;
+        for (size_t sym = 0; sym < num_symbols; ++sym) {
+            int t = 0;
+            for (int b = 0; b < bps; ++b) t = (t << 1) | bits[bit_idx++];
+            t = std::min(t, config_.mfsk_tones - 1);
+            const double w = 2.0 * M_PI * static_cast<double>(tones[static_cast<size_t>(t)]) / fs;
+            for (int i = 0; i < config_.samples_per_symbol; ++i) {
+                output[sym * static_cast<size_t>(config_.samples_per_symbol) + static_cast<size_t>(i)] =
+                    static_cast<float>(amp * std::cos(mfsk_phase_));
+                mfsk_phase_ += w;
+            }
+            mfsk_phase_ = std::fmod(mfsk_phase_, 2.0 * M_PI);
+        }
         return output;
     }
 
@@ -193,9 +257,12 @@ public:
                 bits.push_back((byte >> b) & 1);
             }
         }
+        if (config_.isMfsk()) {
+            return modulateMfsk(bits);
+        }
 
         // Calculate symbols needed
-        int bits_per_ofdm_symbol = config_.num_carriers * config_.bits_per_symbol;
+        int bits_per_ofdm_symbol = config_.bitsPerSymbolTime();
         int num_symbols = (bits.size() + bits_per_ofdm_symbol - 1) / bits_per_ofdm_symbol;
 
         // Pad bits if needed
@@ -252,12 +319,14 @@ public:
     void reset() {
         carrier_phases_.assign(config_.num_carriers, 0.0f);
         prev_symbols_.assign(config_.num_carriers, Complex(1.0f, 0.0f));
+        mfsk_phase_ = 0.0;
     }
 
     const MultiCarrierDPSKConfig& getConfig() const { return config_; }
     const sync::ChirpSync& getChirpSync() const { return chirp_sync_; }
 
 private:
+    double mfsk_phase_ = 0.0;
     MultiCarrierDPSKConfig config_;
     std::vector<float> carrier_freqs_;
     std::vector<float> carrier_phases_;
@@ -520,7 +589,170 @@ public:
         }
     }
 
+    // log I0(x), the noncoherent tone likelihood (polynomial fits, A&S 9.8.1/9.8.2; |rel err| < 2e-7).
+    static double logBesselI0(double x) {
+        if (x < 3.75) {
+            const double t = (x / 3.75) * (x / 3.75);
+            return std::log(1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492 +
+                            t * (0.2659732 + t * (0.0360768 + t * 0.0045813))))));
+        }
+        const double t = 3.75 / x;
+        return x - 0.5 * std::log(x) +
+               std::log(0.39894228 + t * (0.01328592 + t * (0.00225319 + t * (-0.00157565 +
+                        t * (0.00916281 + t * (-0.02057706 + t * (0.02635537 +
+                        t * (-0.01647633 + t * 0.00392377))))))));
+    }
+
+    // M-FSK soft demodulation (config_.mfsk_tones). Per symbol time, the complex correlation with
+    // every tone at tone + CFO (the same continuous-CFO correlator as the DPSK carriers). Under
+    // noise each correlator is circular Gaussian with power s2 per symbol; one tone also carries
+    // the signal, amplitude a. The bit LLRs are the exact noncoherent ones: tone metric
+    // log I0(2 a |r| / s2) - a^2 / s2, log-sum-exp over the tones carrying each bit value.
+    //   s2: median of the non-maximal tone energies / ln 2 (exponential median), one value per
+    //       frame (the noise floor does not fade).
+    //   a:  per tone and symbol, EM over the frame: the posterior of the sent tone under the
+    //       current amplitudes, then each tone's a^2 from its posterior-weighted excess energy
+    //       over +-kWin symbols and the neighbouring tones (a fade moves in time and frequency),
+    //       with one frame-wide observation as a prior so a sparse window stays sane. Frame-wide
+    //       a^2 = E[sum of tone energies] - M s2, unbiased at any SNR (the maximal tone is often a
+    //       noise peak at low SNR). Measured (tools/mfsk_proto, 2026-11-22): 16-FSK R1/2 decodes
+    //       20/20 at the GUI gate's -10 dB AWGN on a peak-limited TX.
+    std::vector<float> demodulateMfskSoft(SampleSpan data) {
+        const int M = config_.mfsk_tones;
+        const int bps = config_.bitsPerSymbolTime();
+        const int N = config_.samples_per_symbol;
+        const int num_symbols = static_cast<int>(data.size()) / N;
+        std::vector<float> soft_bits;
+        if (num_symbols <= 0 || M < 2) return soft_bits;
+        const auto tones = config_.getMfskToneFreqs();
+        const double fs = static_cast<double>(config_.sample_rate);
+        const size_t nsym = static_cast<size_t>(num_symbols);
+        const size_t m_sz = static_cast<size_t>(M);
+        std::vector<double> mag(nsym * m_sz), E(nsym * m_sz);
+        for (size_t s = 0; s < nsym; ++s) {
+            const float* sym = data.data() + s * static_cast<size_t>(N);
+            double cfo_phase0 = 0.0;
+            if (corr_cfo_hz_ != 0.0f && corr_origin_ != nullptr) {
+                cfo_phase0 = corr_origin_phase_ + 2.0 * M_PI * static_cast<double>(corr_cfo_hz_) *
+                                                      static_cast<double>(sym - corr_origin_) / fs;
+            }
+            for (size_t m = 0; m < m_sz; ++m) {
+                const double w = 2.0 * M_PI * (static_cast<double>(tones[m]) +
+                                               static_cast<double>(corr_cfo_hz_)) / fs;
+                double re = 0.0, im = 0.0;
+                double ph = std::fmod(cfo_phase0, 2.0 * M_PI);
+                for (int i = 0; i < N; ++i) {
+                    re += static_cast<double>(sym[i]) * std::cos(ph);
+                    im -= static_cast<double>(sym[i]) * std::sin(ph);
+                    ph += w;
+                }
+                E[s * m_sz + m] = re * re + im * im;
+                mag[s * m_sz + m] = std::sqrt(E[s * m_sz + m]);
+            }
+        }
+        std::vector<double> rest;
+        rest.reserve(nsym * (m_sz - 1));
+        double sum_all = 0.0;
+        for (size_t s = 0; s < nsym; ++s) {
+            const auto b = E.begin() + static_cast<std::ptrdiff_t>(s * m_sz);
+            const auto mx = std::max_element(b, b + M);
+            for (auto it = b; it != b + M; ++it) {
+                sum_all += *it;
+                if (it != mx) rest.push_back(*it);
+            }
+        }
+        const auto mid = rest.begin() + static_cast<std::ptrdiff_t>(rest.size() / 2);
+        std::nth_element(rest.begin(), mid, rest.end());
+        const double s2 = std::max(*mid / std::log(2.0), 1e-30);
+        const double a2 = std::max(sum_all / static_cast<double>(nsym) - static_cast<double>(M) * s2,
+                                   1e-3 * s2);
+        constexpr long kWin = 12;
+        constexpr int kEmIterations = 2;
+        std::vector<double> amp(nsym * m_sz, std::sqrt(a2));
+        std::vector<double> lam(m_sz), post(nsym * m_sz);
+        auto metrics = [&](size_t s) {
+            double mx = -1e300;
+            for (size_t m = 0; m < m_sz; ++m) {
+                const size_t i = s * m_sz + m;
+                lam[m] = logBesselI0(2.0 * amp[i] * mag[i] / s2) - amp[i] * amp[i] / s2;
+                mx = std::max(mx, lam[m]);
+            }
+            return mx;
+        };
+        for (int it = 0; it < kEmIterations; ++it) {
+            for (size_t s = 0; s < nsym; ++s) {
+                const double mx = metrics(s);
+                double z = 0.0;
+                for (size_t m = 0; m < m_sz; ++m) z += std::exp(lam[m] - mx);
+                for (size_t m = 0; m < m_sz; ++m) post[s * m_sz + m] = std::exp(lam[m] - mx) / z;
+            }
+            for (size_t s = 0; s < nsym; ++s) {
+                for (size_t m = 0; m < m_sz; ++m) {
+                    double num = 0.0, den = 0.0;
+                    for (long ds = -kWin; ds <= kWin; ++ds) {
+                        const long ss = static_cast<long>(s) + ds;
+                        if (ss < 0 || ss >= static_cast<long>(nsym)) continue;
+                        for (long dm = -1; dm <= 1; ++dm) {
+                            const long mm = static_cast<long>(m) + dm;
+                            if (mm < 0 || mm >= M) continue;
+                            const size_t i = static_cast<size_t>(ss) * m_sz + static_cast<size_t>(mm);
+                            num += post[i] * (E[i] - s2);
+                            den += post[i];
+                        }
+                    }
+                    amp[s * m_sz + m] = std::sqrt(std::max((num + a2) / (den + 1.0), 0.01 * a2));
+                }
+            }
+        }
+        soft_bits.reserve(nsym * static_cast<size_t>(bps));
+        for (size_t s = 0; s < nsym; ++s) {
+            metrics(s);
+            for (int b = 0; b < bps; ++b) {
+                double l0 = -1e300, l1 = -1e300;
+                for (int m = 0; m < M; ++m) {
+                    double& acc = ((m >> (bps - 1 - b)) & 1) ? l1 : l0;
+                    const double v = lam[static_cast<size_t>(m)];
+                    acc = (acc < v) ? v + std::log1p(std::exp(acc - v))
+                                    : acc + std::log1p(std::exp(v - acc));
+                }
+                soft_bits.push_back(static_cast<float>(std::clamp(l0 - l1, -20.0, 20.0)));
+            }
+        }
+        // Per-tone mean amplitude (frequency selectivity) and the decided tone's amplitude track
+        // over time (temporal variation): the fading index's two inputs, as for the carriers.
+        carrier_magnitudes_.assign(m_sz, 0.0f);
+        double t_sum = 0.0, t_sq = 0.0;
+        for (size_t s = 0; s < nsym; ++s) {
+            size_t best = 0;
+            for (size_t m = 0; m < m_sz; ++m) {
+                carrier_magnitudes_[m] += static_cast<float>(amp[s * m_sz + m] / static_cast<double>(nsym));
+                if (post[s * m_sz + m] > post[s * m_sz + best]) best = m;
+            }
+            t_sum += amp[s * m_sz + best];
+            t_sq += amp[s * m_sz + best] * amp[s * m_sz + best];
+        }
+        const double t_mean = t_sum / static_cast<double>(nsym);
+        temporal_fading_index_ = t_mean > 0.0
+            ? static_cast<float>(std::sqrt(std::max(0.0, t_sq / static_cast<double>(nsym) - t_mean * t_mean)) / t_mean)
+            : 0.0f;
+        // Data-aided in-band SNR: Es/N0 = a^2 / s2 per symbol, over the 2900 Hz in-band noise
+        // bandwidth of the DPSK estimators.
+        constexpr double kInBandNoiseBandwidthHz = 2900.0;
+        const double snr_inband = (a2 / s2) * static_cast<double>(config_.getSymbolRate()) /
+                                  kInBandNoiseBandwidthHz;
+        last_data_aided_snr_valid_ = false;
+        if (snr_inband > 0.0 && std::isfinite(snr_inband)) {
+            last_data_aided_snr_db_ = std::clamp(static_cast<float>(10.0 * std::log10(snr_inband)),
+                                                 -20.0f, 60.0f);
+            last_data_aided_snr_valid_ = true;
+        }
+        return soft_bits;
+    }
+
     std::vector<float> demodulateSoft(SampleSpan data) {
+        if (config_.isMfsk()) {
+            return demodulateMfskSoft(data);
+        }
         int num_symbols = data.size() / config_.samples_per_symbol;
         std::vector<float> soft_bits;
         soft_bits.reserve(num_symbols * config_.num_carriers * config_.bits_per_symbol);
@@ -1043,7 +1275,7 @@ private:
         // Calculate how many samples we need
         size_t data_samples = 0;
         if (expected_data_bytes_ > 0) {
-            int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+            int bits_per_symbol = config_.bitsPerSymbolTime();
             int num_symbols = (expected_data_bytes_ * 8 + bits_per_symbol - 1) / bits_per_symbol;
             data_samples = num_symbols * config_.samples_per_symbol;
         } else {
@@ -1053,7 +1285,7 @@ private:
                 data_samples = sample_buffer_.size() - full_preamble;
             } else {
                 // Need at least 1 LDPC codeword (648 bits) minimum
-                int bits_per_symbol = config_.num_carriers * config_.bits_per_symbol;
+                int bits_per_symbol = config_.bitsPerSymbolTime();
                 int num_symbols = (648 + bits_per_symbol - 1) / bits_per_symbol;
                 data_samples = num_symbols * config_.samples_per_symbol;
             }

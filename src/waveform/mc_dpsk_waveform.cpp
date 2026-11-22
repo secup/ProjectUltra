@@ -200,6 +200,9 @@ bool MCDPSKWaveform::process(SampleSpan samples) {
     // looking for chirp in the samples
     LOG_MODEM(DEBUG, "MCDPSKWaveform: process: setting CFO=%.1f Hz in demodulator", cfo_hz_);
     demodulator_->setChirpDetected(cfo_hz_);
+    if (!config_.isMfsk()) {
+        last_frame_samples_.assign(samples.begin(), samples.end());
+    }
 
     // Process samples through demodulator
     bool ready = demodulator_->process(samples);
@@ -231,6 +234,38 @@ std::vector<float> MCDPSKWaveform::getSoftBits() {
 
 std::vector<float> MCDPSKWaveform::takeUntrackedSoftBits() {
     return demodulator_ ? demodulator_->takeUntrackedSoftBits() : std::vector<float>{};
+}
+
+std::vector<float> MCDPSKWaveform::mfskSoftBitsOfLastFrame(int tones) {
+    pending_mfsk_snr_valid_ = false;
+    if (last_frame_samples_.empty() || tones < 2) {
+        return {};
+    }
+    MultiCarrierDPSKConfig cfg = config_;
+    cfg.mfsk_tones = tones;
+    MultiCarrierDPSKDemodulator demod(cfg);
+    if (demodulator_ && demodulator_->noiseReferenceRMS() > 0.0f) {
+        demod.setNoiseReferenceRMS(demodulator_->noiseReferenceRMS());
+    }
+    demod.setChirpDetected(cfo_hz_);
+    if (!demod.process(SampleSpan(last_frame_samples_.data(), last_frame_samples_.size()))) {
+        return {};
+    }
+    if (demod.hasDataAidedSNR()) {
+        pending_mfsk_snr_valid_ = true;
+        pending_mfsk_snr_db_ = demod.getDataAidedSNRdB();
+        pending_mfsk_fading_index_ = demod.getFadingIndex();
+    }
+    return demod.getSoftBits();
+}
+
+void MCDPSKWaveform::adoptPendingMfskReading(float reading_offset_db) {
+    if (!pending_mfsk_snr_valid_) {
+        return;
+    }
+    last_data_aided_snr_valid_ = true;
+    last_data_aided_snr_ = pending_mfsk_snr_db_ - reading_offset_db;
+    pending_mfsk_snr_valid_ = false;
 }
 
 bool MCDPSKWaveform::processDataOnly(SampleSpan samples) {
@@ -366,7 +401,7 @@ int MCDPSKWaveform::getMinSamplesForCWCount(int num_cw) const {
 int MCDPSKWaveform::getDataOnlySamplesForCWCount(int num_cw) const {
     num_cw = std::max(1, num_cw);
     constexpr int LDPC_BLOCK_SIZE = 648;
-    int bits_per_symbol = std::max(1, config_.num_carriers * config_.bits_per_symbol);
+    int bits_per_symbol = config_.bitsPerSymbolTime();
     int data_bits = num_cw * LDPC_BLOCK_SIZE;
     int data_symbols = (data_bits + bits_per_symbol - 1) / bits_per_symbol;
     return data_symbols * config_.samples_per_symbol;

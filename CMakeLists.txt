@@ -639,6 +639,25 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
     )
     target_link_libraries(peak_control_measure PRIVATE ultra_core ota_channel_core)
+    # Low-SNR M-FSK feasibility on a peak-limited TX (production LDPC + SimulatedChannel).
+    add_executable(mfsk_proto tools/mfsk_proto.cpp)
+    target_include_directories(mfsk_proto PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(mfsk_proto PRIVATE ultra_core ota_channel_core)
+    # Low-SNR frame decode rate through the production encoder/decoder (peak-limited TX).
+    add_executable(lowsnr_floor
+        tools/lowsnr_floor.cpp
+        ${ULTRA_MODEM_ENGINE_SOURCES}
+    )
+    target_include_directories(lowsnr_floor PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
+    )
+    target_link_libraries(lowsnr_floor PRIVATE ultra_core ota_channel_core)
 
     add_executable(channel_discriminator_probe
         tools/channel_discriminator_probe.cpp

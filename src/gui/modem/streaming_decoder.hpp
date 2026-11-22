@@ -124,6 +124,8 @@ struct DecodeResult {
     // (fade-averaged). snr_db routes data_aided when this frame decoded OK.
     bool has_mcdpsk_training_snr_db = false;
     float mcdpsk_training_snr_db = 0.0f;
+    // The frame was the M-FSK handshake frame (handshake_mfsk.hpp): its reply goes out the same way.
+    bool handshake_mfsk = false;
     bool has_mcdpsk_data_aided_snr_db = false;
     float mcdpsk_data_aided_snr_db = 0.0f;
     // True when snr_db carries the data-aided (fade-averaged differential-EVM)

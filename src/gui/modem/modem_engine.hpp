@@ -766,6 +766,13 @@ private:
 
     // Estimated CFO from peer (detected during connection, persists for connected mode)
     float peer_cfo_hz_ = 0.0f;
+    // M-FSK handshake frames (handshake_mfsk.hpp, 2026-11-22). The first CONNECT of an attempt goes
+    // out as DBPSK (the connect pick's readings are calibrated on it, and a strong link needs
+    // nothing else); every retry goes out as M-FSK: a CONNECT that drew no CONNECT_ACK says the link
+    // is weak, where M-FSK reaches ~6 dB further in the same airtime. A CONNECT_ACK / CONNECT_NAK
+    // answers in the modulation of the CONNECT it answers. Counted per PING cycle.
+    std::atomic<int> handshake_connect_tx_count_{0};
+    std::atomic<bool> peer_handshake_mfsk_{false};
 
     // Helper methods
     void rebuildFilters();

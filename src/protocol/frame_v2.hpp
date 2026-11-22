@@ -1199,6 +1199,20 @@ static_assert(17 + ConnectFrame::PAYLOAD_SIZE + 2 <= static_cast<size_t>(kConnec
               "a ConnectFrame must fit its fixed R1/4 frame");
 static_assert(17 + ConnectFrame::PAYLOAD_SIZE + 2 > static_cast<size_t>(kConnectFrameCodewords - 1) * 20,
               "kConnectFrameCodewords is the smallest frame that holds a ConnectFrame");
+// The same handshake frame as M-FSK (2026-11-22, low SNR): 16 tones over the profile's band,
+// constant envelope, noncoherent; ONE R1/2 codeword (40 bytes >= 35). 648 coded bits / 4 bits per
+// symbol = 162 symbols, exactly the 2 x 648 / 8 symbols of the DBPSK frame on the 8-carrier profile:
+// the same airtime and the same span after the chirp, so every handshake timer holds and a receiver
+// demodulates the one span both ways (the CRC decides). On a peak-limited transmitter the payload
+// carries the full PEP (the DBPSK frame averages ~6 dB below its peak after the h = 6 clip) and the
+// noncoherent detector needs ~4 dB less Eb/N0 than the differential one at R1/4: tools/lowsnr_floor
+// (production encoder/decoder, AWGN, 0.5 peak, 7.3 Hz) 16-FSK R1/2 decodes 10/10 at the gate's
+// -10 dB where DBPSK R1/4 decodes 0/10 (3/10 at -8).
+inline constexpr int kHandshakeMfskTones = 16;
+inline constexpr CodeRate kHandshakeMfskRate = CodeRate::R1_2;
+inline constexpr int kHandshakeMfskCodewords = 1;
+static_assert(17 + ConnectFrame::PAYLOAD_SIZE + 2 <= static_cast<size_t>(kHandshakeMfskCodewords) * 40,
+              "a ConnectFrame must fit its M-FSK R1/2 frame");
 inline constexpr int FIXED_FRAME_CODEWORDS = kDefaultFixedFrameCodewords;  // source compatibility
 constexpr uint16_t DISCONNECT_SEQ = 0xFFFF;  // Unique seq for DISCONNECT (won't collide with ARQ 0-based seqs)
 constexpr int FIXED_FRAME_OVERHEAD = DataFrame::HEADER_SIZE + DataFrame::CRC_SIZE;  // 17 + 2 = 19 bytes
