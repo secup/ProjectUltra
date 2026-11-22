@@ -4692,7 +4692,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrameImpl(const std::vector<float>& s
             if (!hdr.valid || !v2::isConnectFrame(hdr.type)) {
                 return fixed;
             }
-            mc->adoptPendingMfskReading(handshake_mfsk::kMfskOverDbpskReadingDb);
+            mc->adoptPendingMfskReading();
             DecodeResult mfsk_ok;
             mfsk_ok.snr_db = snr;
             mfsk_ok.snr_source = SNRSource::SYNC_QUALITY;

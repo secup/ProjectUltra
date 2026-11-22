@@ -25,6 +25,14 @@
 
 namespace ultra {
 
+// A 16-FSK frame's reading over a DBPSK frame's on the same channel, on the production TX path (GUI gate,
+// `--tx-model hardware`, 2026-11-22): the DBPSK CONNECT (8-carrier sum, h = 6 control clip) reads 5.3-5.8 dB
+// below the channel at 0 and 20 dB (the gate's level log: its payload 5.45 dB under the noise reference),
+// 16-FSK (constant envelope at the peak) 0.4-0.7 dB above it at -12..-8 dB. Its readings are reported less
+// this, so every MC-DPSK threshold calibrated on DPSK readings holds. (tools/lowsnr_floor, which peak-
+// normalizes a frame without the TX chain's filter and level stages, measured only 1.9 dB.)
+inline constexpr float kMfskOverDbpskReadingDb = 6.0f;
+
 // Configuration for multi-carrier DPSK
 struct MultiCarrierDPSKConfig {
     float sample_rate = 48000.0f;
@@ -776,14 +784,17 @@ public:
             }
         }
         // Data-aided in-band SNR: Es/N0 = a^2 / s2 per symbol, over the 2900 Hz in-band noise
-        // bandwidth of the DPSK estimators.
+        // bandwidth of the DPSK estimators - then reported DBPSK-EQUIVALENT (kMfskOverDbpskReadingDb):
+        // every MC-DPSK threshold (the connect pick, the follow's crossings) is calibrated on the
+        // DPSK frames' readings, and a 16-FSK frame carries more average power at the same peak.
         constexpr double kInBandNoiseBandwidthHz = 2900.0;
         const double snr_inband = (a2 / s2) * static_cast<double>(config_.getSymbolRate()) /
                                   kInBandNoiseBandwidthHz;
         last_data_aided_snr_valid_ = false;
         if (snr_inband > 0.0 && std::isfinite(snr_inband)) {
-            last_data_aided_snr_db_ = std::clamp(static_cast<float>(10.0 * std::log10(snr_inband)),
-                                                 -20.0f, 60.0f);
+            last_data_aided_snr_db_ = std::clamp(
+                static_cast<float>(10.0 * std::log10(snr_inband)) - kMfskOverDbpskReadingDb,
+                -20.0f, 60.0f);
             last_data_aided_snr_valid_ = true;
         }
         return soft_bits;

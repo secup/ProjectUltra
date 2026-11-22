@@ -91,11 +91,13 @@ void test_ladder_rung_selection() {
     CHECK(selectLadderRung(6.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
           "Moderate below in-band 7 dB selects DBPSK (Robust-Mid)");
-    CHECK(selectLadderRung(-3.0f, ChannelClassification::MODERATE).id ==
+    CHECK(selectLadderRung(-7.0f, ChannelClassification::MODERATE).id ==
                   LadderRungId::ROBUST_LOW &&
-              selectLadderRung(-5.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_MID &&
-              selectLadderRung(-7.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_LOW,
-          "16-FSK below the DBPSK crossover (AWGN -6, fading -2.5 dB)");
+              selectLadderRung(-6.0f, ChannelClassification::MODERATE).id ==
+                  LadderRungId::ROBUST_MID &&
+              selectLadderRung(-11.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_MID &&
+              selectLadderRung(-13.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_LOW,
+          "16-FSK below the DBPSK crossover (readings: AWGN -12, fading -6.5 dB)");
     CHECK(selectLadderRung(7.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
           "Moderate in-band 7 dB boundary selects Robust-Mid (DBPSK)");
@@ -1324,9 +1326,8 @@ void test_connect_selection_needs_physical_evidence() {
     const float weak = connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/true, 0.0f, 0);
     CHECK(std::fabs(weak - (-3.9f)) < 1e-4f,
           "no physical measurement: the reading is the selection (affine basis)");
-    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::MFSK16,
-          "a -3.9 dB reading on Good picks the deepest fallback (16-FSK, below the -2.5 dB "
-          "DBPSK crossover), not DQPSK");
+    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::DBPSK,
+          "a -3.9 dB reading on Good picks DBPSK (above the -6.5 dB 16-FSK crossover), not DQPSK");
     CHECK(std::fabs(connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/false, 0.0f, 0) -
                     (-3.9f)) < 1e-4f,
           "no physical measurement: the reading is the selection (flat basis)");

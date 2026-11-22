@@ -9,13 +9,8 @@ namespace ultra {
 namespace gui {
 namespace handshake_mfsk {
 
-// The connect pick's thresholds (OFDM entry floors, the MC-DPSK rungs, the PAPR prior) are
-// calibrated on the DBPSK handshake frame's data-aided reading. The M-FSK frame carries more average
-// power at the same peak (constant envelope vs the clipped 8-carrier sum), so on the same channel its
-// reading is higher by this much; it is reported DBPSK-equivalent. Measured: tools/lowsnr_floor
-// --connect (production encoder + the h = 6 control clip, 0.5 peak, AWGN, 7.3 Hz, 10 seeds per
-// point): M-FSK minus DBPSK reading +1.8 / +2.1 / +1.8 / +1.9 dB at the gate's 0 / -2 / -4 / -6 dB.
-inline constexpr float kMfskOverDbpskReadingDb = 1.9f;
+// The M-FSK demodulation reports its reading DBPSK-equivalent (kMfskOverDbpskReadingDb,
+// psk/multi_carrier_dpsk.hpp), so the connect pick's thresholds hold for an M-FSK CONNECT.
 
 inline MultiCarrierDPSKConfig configFor(const MultiCarrierDPSKConfig& profile) {
     MultiCarrierDPSKConfig cfg = profile;

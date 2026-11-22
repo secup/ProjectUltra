@@ -1702,16 +1702,18 @@ inline LadderRung mcDpskLadderRung(float snr_db, ChannelClassification channel, 
     if (snr_db >= robust_dqpsk_floor) {
         return ladderRungForId(LadderRungId::ROBUST);  // DQPSK R1/4 — ~2x DBPSK
     }
-    // 16-FSK R1/4 (ROBUST_LOW, half DBPSK's rate) where DBPSK R1/4 stops paying: below the reading at
-    // which DBPSK decodes about half its frames (the break-even of a rate twice as high). Measured
-    // 2026-11-22, tools/lowsnr_floor (production encoder/decoder, peak-limited TX with the h = 0 data
-    // clip, 7.3 Hz, 10 trials; readings DBPSK-equivalent, as the connect pick's): AWGN DBPSK 8/10 at
-    // the gate's -6 dB, 0/10 at -8, 16-FSK 10/10 down to -10 -> crossover ~-6.5 dB = reading -6;
-    // ITU Good DBPSK 9/10 at 0 dB, 3-4/10 at -2..-4, 16-FSK 9/10 at -2..-4 -> crossover ~-1 dB =
-    // reading -2.5. Moderate and Poor are unmeasured: the Good value (16-FSK is noncoherent, the
-    // differential detector loses more as Doppler grows). The receiver's rate commands move the
-    // session from there in either direction.
-    const float mfsk_below_db = (channel == ChannelClassification::AWGN) ? -6.0f : -2.5f;
+    // 16-FSK R1/4 (ROBUST_LOW, half DBPSK's rate) where DBPSK R1/4 stops paying: below the channel SNR
+    // at which DBPSK decodes about half its frames (the break-even of a rate twice as high), on the
+    // scale the pick reads - the DBPSK CONNECT's reading, 5.4 dB under the channel on the production TX
+    // path (GUI gate, --tx-model hardware, 2026-11-22: -5.3/-5.4 dB at 0 dB, 14.2 at 20 dB; 16-FSK
+    // readings are reported DBPSK-equivalent). Crossovers (tools/lowsnr_floor, production encoder/decoder
+    // with the h = 0 data clip, 7.3 Hz, 10 trials): AWGN DBPSK 8/10 at -6 dB, 0/10 at -8, 16-FSK 10/10
+    // down to -10 -> ~-6.5 dB -> reading -12; ITU Good DBPSK 9/10 at 0 dB, 3-4/10 at -2..-4, 16-FSK
+    // 9/10 at -2..-4 -> ~-1 dB -> reading -6.5. Moderate and Poor are unmeasured: the Good value
+    // (16-FSK is noncoherent; the differential detector loses more as Doppler grows). The receiver's
+    // rate commands move the session from there in either direction. (Until a GUI A/B the same night
+    // these were -6 / -2.5 on the harness's reading scale: AWGN 0 dB and Good 3 dB started at 16-FSK.)
+    const float mfsk_below_db = (channel == ChannelClassification::AWGN) ? -12.0f : -6.5f;
     if (snr_db < mfsk_below_db) {
         return ladderRungForId(LadderRungId::ROBUST_LOW);  // 16-FSK R1/4 (deepest fallback)
     }
