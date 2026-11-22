@@ -170,7 +170,9 @@ Floors are **in-band SNR (3 kHz noise BW)**. Full table, methodology, and histor
 
 | Mode | Channel | In-band floor | Notes |
 |------|---------|---------------|-------|
-| MC-DPSK R1/4 | AWGN | **-6 dB** | GUI gate 2026-11-11, 1 seed: 451 s for 1 KB with compact frames (v2 frames: FAIL at 600 s); -9 fails at the CONNECT frame. ITU Good: -3 dB passes (387 s, 1 seed). Was "5 dB" |
+| MC-DPSK 16-FSK R1/4 | AWGN | **-12 dB** (gate, `--tx-model hardware`) | GUI 2026-11-22, 1 KB, 7.3 Hz: -12 dB PASS (604 s, 200 ms tone ACK), -10 dB PASS 6/6 seeds (~20 bps), -8 PASS; handshake via the M-FSK CONNECT retry. Before: no connection below ~-3 dB on a peak-limited TX |
+| MC-DPSK 16-FSK R1/4 | Good | **-8 dB** | GUI 2026-11-22: -8 dB PASS 2/2 seeds (700-800 s, 10 bps), -6 PASS |
+| MC-DPSK DBPSK R1/4 | AWGN | **-6 dB** (sim TX model) | GUI gate 2026-11-11, 1 seed, `--tx-model sim` (average-level): 451 s for 1 KB; ITU Good -3 dB. On a peak-limited TX (`hardware`, default since 2026-11-21) the DBPSK payload rides ~5.4 dB under the channel: the CONNECT failed at -4 dB (2026-11-22) |
 | OFDM_CHIRP QPSK | AWGN | **~3 dB** | GUI gate 2026-11-13, 5 seeds (realistic CFO 7.3 Hz): a true 3 dB runs QPSK R1/2 at 550 bps (2 KB in 57-60 s); a true 1 dB stays MC-DPSK DQPSK (90 bps). Entry floor 2.5 dB (chase-combined resends). Was "10 dB" (warm-sync LTS FER) |
 | OFDM_CHIRP QPSK | Good | **~5 dB** | GUI gate 2026-11-13, 5 seeds: a true 5 dB runs QPSK R1/2 at ~600 bps (8 KB in 100-168 s); entry floor 5 dB from the 2026-11-12 A/B at a true 1-5 dB. At a true 0-1 dB OFDM and MC-DPSK carry about the same and runs spread 245-664 s for 2 KB (BUG-FOLLOW-CLIMB-NO-HYSTERESIS, closed): judge 0-1 dB fading on many seeds per arm, never on pairs. Was "15 dB" (unbacked) |
 | OFDM_CHIRP R1/2 | AWGN / Good | **14 dB** | 1-seed locator |
