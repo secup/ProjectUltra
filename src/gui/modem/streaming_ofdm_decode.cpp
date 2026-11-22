@@ -2320,9 +2320,8 @@ void StreamingDecoder::decodeCurrentFrame() {
                 if (data_bearing_mcdpsk && robust_idle_ping &&
                     frame_policy::pingVerdictBeforeDecodeAllowed(
                         reject_ping, connect_frame_plausible_.load(std::memory_order_relaxed)) &&
-                    reject_ping.chirp_corr >= frame_policy::kPingCorrFloor &&
-                    std::abs(reject_ping.chirp_cfo_hz) <=
-                        frame_policy::kPingMaxChirpCfoHz) {
+                    frame_policy::chirpSignatureReal(reject_ping.chirp_corr,
+                                                     reject_ping.chirp_cfo_hz)) {
                     LOG_MODEM(INFO, "[%s] robust idle PING by chirp-lock "
                               "(ratio=%.2f corr=%.2f chirp_cfo=%.2f Hz inband_rms=%.4f "
                               "noise_rms=%.4f) — gap is NOISE, not data",

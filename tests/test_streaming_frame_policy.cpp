@@ -66,14 +66,14 @@ void test_ping_chirp_lock_fallback() {
     auto no_lock = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor - 0.001f, 8.3f,
+        0.0f, 8.3f,
         false, false);
-    CHECK(!no_lock.is_ping, "chirp fallback should reject below correlation floor");
+    CHECK(!no_lock.is_ping, "chirp fallback needs a detected chirp (correlation 0 = none)");
 
     auto wide_gap = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, kPingMaxChirpCfoHz + 0.1f,
+        0.19f, kPingMaxChirpCfoHz + 0.1f,
         false, false);
     CHECK(!wide_gap.is_ping, "chirp fallback should reject a dual chirp implying > 50 Hz CFO");
 
@@ -83,28 +83,28 @@ void test_ping_chirp_lock_fallback() {
     auto narrow_chirp = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, 1402.0f / (2.0f * 96.0f),
+        0.19f, 1402.0f / (2.0f * 96.0f),
         false, false, false);
     CHECK(narrow_chirp.ping_by_chirp_lock,
           "a narrowband chirp at 7.3 Hz is a real chirp signature (1402-sample gap error)");
     auto edge = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, -kPingMaxChirpCfoHz,
+        0.19f, -kPingMaxChirpCfoHz,
         false, false, false);
     CHECK(edge.ping_by_chirp_lock, "exactly the 50 Hz acquisition range still counts");
 
     auto valid_frame = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, 14.5f,
+        0.19f, 14.5f,
         true, true, true);
     CHECK(!valid_frame.is_ping, "valid LDPC frame should not classify as ping");
 
     auto full_ldpc_failure = evaluatePingFrame(
         busy_band.data(), busy_band.size(),
         kPingTrainingSkipSamples, kPingRMSCheckSamples,
-        kPingCorrFloor, -14.5f,
+        0.19f, -14.5f,
         false, false, true);
     CHECK(!full_ldpc_failure.is_ping,
           "chirp-locked full-LDPC failure with data energy should stay a frame failure");

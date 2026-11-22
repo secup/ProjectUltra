@@ -51,13 +51,23 @@ inline constexpr float kPingNoiseGapFactor = 1.5f;
 inline constexpr float kPingGapInformativeMarginDb = 3.0f;
 // A noise estimate exists (any measured floor above digital silence); was 1e-4 RMS, a level.
 inline constexpr float kMinIdleNoiseRMSForPingGap = 1.0e-7f;
-inline constexpr float kPingCorrFloor = 0.30f;
+// A chirp signature is real when the sync detector accepted it: both chirps cleared the detector's
+// threshold (the larger of its fixed floor and the noise-referenced level, about one false lock per
+// hour of noise, BUG-NB-CHIRP-FALSE-LOCK-FILTERED) and the up/down spacing implies a CFO inside the
+// acquisition range. A second, fixed correlation floor here (0.30 until 2026-11-22, set in 2026-06
+// when real chirps read 0.6-0.75) refused chirps the detector had proven: a wideband chirp reads
+// ~0.28 at -6 dB and ~0.19 at -10 dB in-band, so the responder never PONGed below about -5 dB
+// (GUI 2026-11-22, AWGN -6/-8/-10: every PING detected, none answered). 0 = no chirp detected.
+inline constexpr float kPingCorrFloor = 0.0f;
 // A real dual chirp's up/down spacing implies a CFO inside the modem's acquisition range, +/-50 Hz.
 // The bound is in HERTZ because the same offset moves the pair by 2·CFO·fs/chirp_rate samples: 10
 // samples/Hz on the wideband chirp (2400 Hz in 500 ms) but 96 on the narrowband handshake chirp (500
 // Hz in 1 s). The old 1000-sample bound was +/-50 Hz on wideband and +/-5.2 Hz on narrowband, so a
 // 7.3 Hz narrowband link lost the low-SNR PING path (BUG-NARROW-PING-GAP, 2026-11-10).
 inline constexpr float kPingMaxChirpCfoHz = 50.0f;
+inline bool chirpSignatureReal(float chirp_corr, float chirp_cfo_hz) {
+    return chirp_corr > kPingCorrFloor && std::abs(chirp_cfo_hz) <= kPingMaxChirpCfoHz;
+}
 inline constexpr size_t kDefaultFalseLockAdvanceSamples = 1024;
 inline constexpr size_t kMinFalseLockAdvanceSamples = 512;
 inline constexpr float kMinSyncRecoveryCorrelation = 0.80f;
@@ -173,9 +183,7 @@ inline PingFrameDecision evaluatePingFrame(
     // real audio instead of fabricating one and walling off the region behind a search floor.
     decision.ping_by_silence =
         !decision.buffer_invalid && decision.ratio < kPingMaxDataToTrainingRMSRatio;
-    const bool chirp_signature_real =
-        chirp_corr >= kPingCorrFloor &&
-        std::abs(chirp_cfo_hz) <= kPingMaxChirpCfoHz;
+    const bool chirp_signature_real = chirpSignatureReal(chirp_corr, chirp_cfo_hz);
     const bool no_valid_frame = !ldpc_decode_succeeded || !ldpc_magic_valid;
     // PATH2 is for chirp-only probes whose payload area was too weak/noisy to
     // justify an LDPC decode. Once a full LDPC attempt has been made on a
