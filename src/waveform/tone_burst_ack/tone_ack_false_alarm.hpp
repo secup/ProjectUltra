@@ -54,6 +54,10 @@ inline constexpr int kToneAckGroupSeqBits = 6;
 // rate_hint 0 (3 bits), drive hold (2 bits).
 inline double toneAckPredicatePassProbability(size_t span) {
     const double seq_cells = std::ldexp(1.0, kToneAckGroupSeqBits);
+    // group_seq is 6 bits: its delta from base-1 is at most 63, so no span reaches further. Also
+    // bounds the loop: Connection publishes SIZE_MAX before its first arm, and an unbounded loop
+    // here ran forever on gcc/MSVC (clang deleted it as side-effect free; CI 2026-11-22 hung).
+    span = std::min<size_t>(span, (size_t{1} << kToneAckGroupSeqBits) - 1);
     double mask_sum = 0.0;
     for (size_t d = 0; d <= span; ++d) {
         const int rem = static_cast<int>(std::min<size_t>(span - d, kToneAckFrameMaskBits));
