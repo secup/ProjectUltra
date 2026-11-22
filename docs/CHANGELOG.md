@@ -10,6 +10,75 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-22 — feat(lowsnr): -10 dB links: 16-FSK handshake frame and session rung, PING/chirp floors
+
+**Broke.** GUI gate, `--tx-model hardware`, AWGN, 1 KB, 7.3 Hz (2026-11-22 baseline): -4 dB PING/PONG
+worked but all 10 CONNECTs failed; -6, -8 and -10 dB the responder never PONGed. Four causes:
+1. *PING floor.* The PING verdict required chirp correlation >= `kPingCorrFloor` 0.30 (set 2026-06 when
+   real chirps read 0.6-0.75). The detector had already accepted the dual chirp on its noise-referenced
+   threshold; real chirps read ~0.28 at -6 dB and ~0.19 at -10 dB, so every PING was refused.
+2. *Peak limit on the payload.* An 8-carrier DPSK payload averages 6-9 dB below its own peak; on a
+   peak-limited transmitter (every real one, and the gate's default since 2026-11-21) the CONNECT's data
+   rode ~7.8 dB below what a constant-envelope signal at the same PEP carries (gate level log: CONNECT
+   -5.45 dB vs reference, a full-peak sine +1.29 dB). The differential detector adds ~6 dB at the per-bit
+   SNRs involved: the CONNECT needed Eb/N0 ~10 dB where a coded BPSK link needs ~2.
+3. *Chirp floor.* The detector kept a fixed 0.15 floor under its noise-referenced threshold (~0.11 behind
+   an IF filter); at -10 dB the weaker half of a PONG's dual chirp read under 0.15 (seeds 42/43: up
+   0.164-0.169), so the initiator never heard the PONG.
+4. *Loss evidence below -7 dB.* A failed first frame counted as a loss only if its data section read
+   above the 80 ms inter-chirp gap's noise; that reference needs a ~20 % power excess, so below ~-7 dB
+   failed probes were "no frame" (GUI -8 dB: five DBPSK probe/timeout cycles of ~27 s each).
+Also the SNR byte (CONNECT_ACK, MODE_CHANGE) floored at -10 dB, which was also the stale sentinel: a
+real -10 dB reading was clipped and screened as "no measurement".
+
+**Changed.**
+- `streaming_frame_policy.hpp` `chirpSignatureReal`: a PING is real when the detector accepted the chirp
+  (correlation > 0, implied CFO within ±50 Hz); `kPingCorrFloor` 0.30 -> 0.
+- `chirp_sync.hpp` `detectChirpTemplateFFT`: the noise-referenced threshold decides wherever it can be
+  measured (>= 64 cells); the fixed threshold only for windows too short to measure.
+- **M-FSK in the MC-DPSK family** (`multi_carrier_dpsk.hpp`): `MultiCarrierDPSKConfig::mfsk_tones`; one
+  of M tones per symbol time, continuous phase at the chirp's amplitude (constant envelope; the
+  training/reference symbols scaled to that peak); `demodulateMfskSoft`: per-tone correlators at tone +
+  CFO, noise from the median of the non-maximal tones, EM per-tone amplitude track (time ±12 symbols,
+  ±1 tone), exact noncoherent log-I0 bit LLRs, data-aided SNR a²/s2 x Rs / 2900 Hz. Frame lengths go
+  through `bitsPerSymbolTime()`.
+- **M-FSK handshake frame** (`gui/modem/handshake_mfsk.hpp`, `frame_v2.hpp` `kHandshakeMfsk*`): CONNECT /
+  CONNECT_ACK / CONNECT_NAK as one R1/2 codeword over 16-FSK = 162 symbols, exactly the 2-codeword DBPSK
+  frame's span on the 8-carrier profile (every handshake timer holds). ModemEngine sends the first
+  CONNECT of a PING cycle as DBPSK and every retry as M-FSK; a CONNECT_ACK/NAK answers in the CONNECT's
+  modulation. The receiver re-demodulates a failed DBPSK CONNECT span as M-FSK
+  (`MCDPSKWaveform::mfskSoftBitsOfLastFrame`); the reading is reported DBPSK-equivalent (-1.9 dB,
+  measured). Narrowband (4 carriers in 420 Hz) fails the orthogonality gate and keeps DBPSK.
+- **16-FSK session rung** (`Modulation::MFSK16`, `connection_policy.hpp`): MC-DPSK rungs 16-FSK, DBPSK,
+  DQPSK (words 13/14/15; same sps, R1/4, codewords per frame); `mcDpskBitsPerSymbolTime`,
+  `mcDpskRungBelow`. `ROBUST_LOW` (a duplicate DBPSK rung) is 16-FSK R1/4 and the connect pick starts
+  there below a DBPSK-equivalent reading of -6 dB (AWGN) / -2.5 dB (fading). No peak control on 16-FSK.
+  The receiver decodes a burst's first frame in the DPSK-sized window as before; only after it fails at
+  every DPSK rung does it wait for a 16-FSK frame's span (`mc_mfsk_lookahead_pending_`), so no DPSK
+  frame waits longer; the peek always covers a frame at the configured rung.
+- `StreamingDecoder::mcDpskBurstProvenByChirp`: in a connected MC-DPSK session a detector-accepted dual
+  chirp is the peer's burst - loss evidence and 16-FSK look-ahead evidence where the energy test is blind.
+- SNR byte -20..+43.75 dB (`v2::kSnrByteFloorDb`); stale sentinel -20 dB.
+- Tools: `tools/mfsk_proto` (PHY feasibility), `tools/lowsnr_floor` (production encoder/decoder, peak-
+  limited TX, band-limited noise like OTASim/an IF filter; `--connect`, `LOW_CLIP=1` for the data clip).
+
+**Measured.**
+- `tools/lowsnr_floor --connect` (production encoder + h = 6 control clip, 0.5 peak, AWGN, 7.3 Hz, 10
+  trials), same 4.85 s airtime: DBPSK CONNECT 9/10 at -6 dB, 0/10 at -8; M-FSK 10/10 at -8 and -10,
+  8/10 at -12.
+- `tools/lowsnr_floor` data frames with the h = 0 clip: DBPSK R1/4 8/10 at -6, 0/10 at -8; 16-FSK R1/4
+  10/10 at -10, 3/10 at -12. ITU Good: DBPSK 9/10 at 0 dB, 3-4/10 at -2..-4; 16-FSK 9/10 at -2..-4.
+- GUI gate (1 KB, AWGN, 7.3 Hz, `--tx-model hardware`): -10 dB PASS seed 42 (509 s) and seed 43 (541 s),
+  ~20 bps, connected on the first M-FSK retry and started at 16-FSK; -8 dB PASS (756 s, before the loss-
+  evidence fix: five failed DBPSK probes); 20 dB PASS 760 bps, unchanged (connects on DBPSK, OFDM).
+- ctest 127/127.
+
+Wire change (rung words, SNR byte, the new handshake frame): not compatible with v0.6.3. Open: the h = 0
+clip may give MC-DPSK DPSK data nothing (BUG-MCDPSK-PEAK-CONTROL-NO-GAIN); fading below -6 dB unmeasured
+on the GUI; 16-FSK window is one 10.5 s frame per burst (the 19 s key-down target).
+
+---
+
 ## 2026-11-21 — feat(papr): peak control for MC-DPSK control frames (h = 6 dB): the handshake connects at 0 dB peak SNR
 
 **Broke.** On a peak-limited transmitter the CONNECT (unclipped, 9 dB crest) arrived ~8.4 dB below
