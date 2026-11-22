@@ -30,7 +30,14 @@ sent seq is still dropped by the NEVER-SENT guard, and new sends are still cappe
 
 **Verified.** `test_arq_toneburst_fabrication` adds `test_ack_after_window_shrink_accepted` (3 in
 flight, window 3 -> 1, a tone ACK through all three retires them); it fails before the fix and
-6/6 pass after. ARQ/connection/tone-ACK CTests are 13/13. GUI reruns of the 4 failed seeds: see below.
+6/6 pass after. ARQ/connection/tone-ACK CTests are 13/13.
+A first version also widened the timeout resend loops to every outstanding frame. That made a
+16-FSK resend burst 3 x 11.8 s long; the receiver (window 1) ACKed after frame 1 into the sender's own
+transmission and was never heard (Good 0 dB seed 71). Resends now stay inside the current window
+(60f0e1ff, `test_timeout_resend_after_shrink_is_one_window`).
+GUI rerun of the branch side (Good 0 and 3 dB, 4 KB, seeds 64-71, 7.3 Hz, `--tx-model hardware`):
+**16/16 PASS** (was 12/16; main 15/16). 7 runs stepped DBPSK -> 16-FSK and survived, 0 far-future drops.
+Mean time: Good 0 1136 s (main 1189 s on its 7 passes), Good 3 819 s (main 872 s); within run-to-run spread.
 
 ## 2026-11-22 — feat(lowsnr): -10 dB links: 16-FSK handshake frame and session rung, PING/chirp floors
 
