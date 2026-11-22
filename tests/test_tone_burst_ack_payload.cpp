@@ -608,8 +608,8 @@ void test_symbol_ms_staircase() {
     EXPECT_EQ(symbolMsForSNR(-2.0f), kSymbolMsMidSNR);    // measured -4 + 2
     EXPECT_EQ(symbolMsForSNR(-2.1f), kSymbolMsLowSNR);
     EXPECT_EQ(symbolMsForSNR(-4.0f), kSymbolMsLowSNR);    // measured -6 + 2
-    EXPECT_EQ(symbolMsForSNR(-4.1f), kSymbolMsMargSNR);
-    EXPECT_EQ(symbolMsForSNR(-20.0f), kSymbolMsMargSNR);  // floor, never 200 ms
+    EXPECT_EQ(symbolMsForSNR(-4.1f), kSymbolMsWeakSNR);   // 100 ms edge -6 + 2 (2026-11-22)
+    EXPECT_EQ(symbolMsForSNR(-20.0f), kSymbolMsWeakSNR);  // 200 ms floor since 2026-11-22
 
     // FADING column — materially stricter: a deep null inside a short symbol is unrecoverable.
     EXPECT_EQ(symbolMsForSNR(25.0f, true), kSymbolMsHighSNR);
@@ -619,7 +619,9 @@ void test_symbol_ms_staircase() {
     EXPECT_EQ(symbolMsForSNR(5.9f,  true), kSymbolMsLowSNR);
     EXPECT_EQ(symbolMsForSNR(4.0f,  true), kSymbolMsLowSNR);   // Moderate +2 + 2
     EXPECT_EQ(symbolMsForSNR(3.9f,  true), kSymbolMsMargSNR);
-    EXPECT_EQ(symbolMsForSNR(-20.0f, true), kSymbolMsMargSNR); // floor, never 200 ms
+    EXPECT_EQ(symbolMsForSNR(2.0f,  true), kSymbolMsMargSNR);  // 100 ms edge 0 + 2
+    EXPECT_EQ(symbolMsForSNR(1.9f,  true), kSymbolMsWeakSNR);
+    EXPECT_EQ(symbolMsForSNR(-20.0f, true), kSymbolMsWeakSNR); // 200 ms floor since 2026-11-22
 
     // Every value the staircase can return is a rung the production monitor scans
     // (kStaircaseSymbolMs is its scan set): the 200 ms rung was a guaranteed miss.

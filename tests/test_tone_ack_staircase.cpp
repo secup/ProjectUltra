@@ -37,7 +37,8 @@ int main() {
         s.noteFrame(20.0f, SNRSource::OFDM_BROADBAND, 0.5f);
         CHECK(s.choose().symbol_ms == 12, "a lone trough lengthened one ACK only");
         s.noteFrame(1.0f, SNRSource::OFDM_BROADBAND, 0.5f);
-        CHECK(s.choose().symbol_ms == 100, "1 dB on fading: the 100 ms floor");
+        CHECK(s.choose().symbol_ms == 200,
+              "1 dB on fading: the 200 ms floor (100 ms needs 0 + 2 dB, re-measured 2026-11-22)");
     }
     {
         // A single high reading after a run of low ones does not shorten the ACK (the median holds).
@@ -58,8 +59,8 @@ int main() {
         CHECK(s.choose().symbol_ms == 25,
               "an MC-DPSK reading of 0.6 dB (a 5 dB fading channel): the baseline, as before");
         for (int i = 0; i < 5; ++i) s.noteFrame(-5.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
-        CHECK(s.choose().symbol_ms == 100,
-              "an MC-DPSK session at -5 dB: lengthened to the 100 ms floor");
+        CHECK(s.choose().symbol_ms == 200,
+              "an MC-DPSK session at -5 dB: lengthened to the 200 ms floor (100 ms needs -6 + 2 dB)");
         for (int i = 0; i < 5; ++i) s.noteFrame(20.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
         CHECK(s.choose().symbol_ms == 25, "an MC-DPSK reading never shortens below the baseline");
     }

@@ -141,10 +141,10 @@ static_assert(kBaselineSymbolSamples * 1000 == kSampleRate * kBaselineSymbolMs,
 inline constexpr uint32_t kSymbolMsHighSNR = 12;   // 408 ms ACK
 inline constexpr uint32_t kSymbolMsMidSNR = 25;    // 850 ms ACK (baseline)
 inline constexpr uint32_t kSymbolMsLowSNR = 50;    // 1.7 s ACK
-inline constexpr uint32_t kSymbolMsMargSNR = 100;  // 3.4 s ACK, the staircase floor
-// 200 ms (6.8 s ACK) is decodable by ToneBurstDetector but is NOT a staircase rung: a 200 ms
-// burst is 326,400 samples, larger than the production monitor buffer (sized from
-// kStaircaseSymbolMs), so the monitor never scans it. Kept for detector-level tests.
+inline constexpr uint32_t kSymbolMsMargSNR = 100;  // 3.4 s ACK
+// 200 ms (6.8 s ACK): the staircase floor since 2026-11-22 (the 16-FSK rung runs links at -10 dB and
+// below, where the 100 ms ACK decodes 38 % of the time on AWGN). The monitor scans it and sizes its
+// buffer from kStaircaseSymbolMs (326,400 samples).
 inline constexpr uint32_t kSymbolMsWeakSNR = 200;
 
 // The staircase rungs — EXACTLY the durations the production ACK monitor scans
@@ -153,8 +153,8 @@ inline constexpr uint32_t kSymbolMsWeakSNR = 200;
 // returned 200 ms below 0 dB on fading / -8 dB on AWGN while the monitor scanned only
 // {12, 25, 50, 100} — the app.cpp claim "a conservative (longer) choice is always decodable"
 // was false at the bottom of the table.
-inline constexpr std::array<uint32_t, 4> kStaircaseSymbolMs = {{
-    kSymbolMsHighSNR, kSymbolMsMidSNR, kSymbolMsLowSNR, kSymbolMsMargSNR}};
+inline constexpr std::array<uint32_t, 5> kStaircaseSymbolMs = {{
+    kSymbolMsHighSNR, kSymbolMsMidSNR, kSymbolMsLowSNR, kSymbolMsMargSNR, kSymbolMsWeakSNR}};
 
 // §15.5 staircase selector: map the receiver's measured in-band SNR (of the forward link, the
 // best available proxy for the reverse link the ACK rides) to the symbol duration. Shorter
@@ -189,18 +189,29 @@ inline constexpr std::array<uint32_t, 4> kStaircaseSymbolMs = {{
 // MARGIN: +2 dB (one sweep step) over the measured edge. The sweep runs on the channel model
 // alone and omits real-radio impairments (cheap-card distortion, level drift, ALC).
 inline constexpr float kAckEdgeMarginDb = 2.0f;
+// The 100 ms rung's 95 % edges, RE-MEASURED 2026-11-22 with the 200 ms rung in the same runs
+// (tools/measure_ack_staircase, 60-100 trials per cell, diversity on): AWGN 100 ms -6 dB (80 % at -8,
+// 38 % at -10), 200 ms -10 dB (87 % at -12); ITU Good 100 ms not reached at 0 dB (93 %), 200 ms -4 dB;
+// Moderate 100 ms 0 dB, 200 ms -4 dB. The 2026-11-08 table above read the 100 ms AWGN edge at -10 dB:
+// this run measures every rung 2-4 dB worse (50 ms AWGN -4 dB, not -6) - the upper rungs keep their
+// 2026-11-08 edges until the whole table is re-measured; the floor follows today's same-run pair. On
+// AWGN the 100 ms band is then empty (its edge + margin is the 50 ms rung's start).
+inline constexpr float kAck100msAwgnEdgeDb = -6.0f;
+inline constexpr float kAck100msFadingEdgeDb = 0.0f;
 
 inline constexpr uint32_t symbolMsForSNR(float snr_db, bool fading_present = false) {
     if (fading_present) {
         if (snr_db >= 8.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;  // 12 ms -> 408 ms
         if (snr_db >= 4.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;   // 25 ms -> 850 ms
         if (snr_db >= 2.0f + kAckEdgeMarginDb) return kSymbolMsLowSNR;   // 50 ms -> 1.7 s
-        return kSymbolMsMargSNR;                                         // 100 ms floor
+        if (snr_db >= kAck100msFadingEdgeDb + kAckEdgeMarginDb) return kSymbolMsMargSNR;  // 3.4 s
+        return kSymbolMsWeakSNR;                                         // 200 ms floor, 6.8 s
     }
     if (snr_db >=  0.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;
     if (snr_db >= -4.0f + kAckEdgeMarginDb) return kSymbolMsMidSNR;
     if (snr_db >= -6.0f + kAckEdgeMarginDb) return kSymbolMsLowSNR;
-    return kSymbolMsMargSNR;
+    if (snr_db >= kAck100msAwgnEdgeDb + kAckEdgeMarginDb) return kSymbolMsMargSNR;
+    return kSymbolMsWeakSNR;
 }
 
 // ============================================================================
