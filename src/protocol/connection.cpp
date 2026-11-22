@@ -9136,7 +9136,12 @@ void Connection::noteRxMcDpskFrameLost(int modulation) {
     const int rung = (modulation >= 0)
         ? connection_policy::mcDpskRungIndexFor(static_cast<Modulation>(modulation))
         : -1;
-    const bool changed = mcdpsk_rate_ctl_.observe(rung, /*clean=*/false);
+    // The same floor as a burst verdict (mcDpskRungCommandForAck): into 16-FSK only when this
+    // spell's readings name it.
+    const bool readings_name_mfsk = sessionLadderPick().rung.modulation == Modulation::MFSK16;
+    const int lowest_allowed =
+        readings_name_mfsk ? 0 : connection_policy::mcDpskRungIndexFor(Modulation::DBPSK);
+    const bool changed = mcdpsk_rate_ctl_.observe(rung, /*clean=*/false, true, lowest_allowed);
     LOG_MODEM(INFO, "Connection: MC-DPSK RATE rx: frame lost at %s -> command %s%s "
               "(probe after %d clean bursts)",
               rung >= 0 ? modulationToString(static_cast<Modulation>(modulation)) : "unknown",
