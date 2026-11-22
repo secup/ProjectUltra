@@ -100,6 +100,17 @@ PASS 867 s, ITU Good -8 dB PASS 806 s; AWGN -12 dB connected, ACKs lost (before 
   and measured 1.9 dB. Now: 16-FSK readings less 6.0 dB; ROBUST_LOW below -12 (AWGN) / -6.5 (fading) = the
   measured crossovers (-6.5 / -1 dB channel SNR) minus the CONNECT offset.
 
+- *Rate controller on a fading channel.* With 16-FSK under DBPSK, "down on any loss above the bottom rung"
+  stepped a DBPSK session down on every frame a fade took (GUI ITU Good 0 dB seed 61: five DBPSK <-> 16-FSK
+  cycles, FAIL at 1800 s; main 1135 s). That rule dated from v2 frames (a failed frame lost the rest of the
+  burst); compact frames go on past one. Now a lossy burst that delivered at least half its window holds
+  the rung (each step halves the rate) and only resets the streak (`McDpskRateController::observe`
+  `majority_delivered`).
+- *Tone ACK and MC-DPSK readings.* The staircase read MC-DPSK readings raw against edges measured on the
+  channel scale; with the 200 ms floor that keyed 6.8 s ACKs at AWGN -2 dB (845 vs 731 s for 4 KB, 0
+  retx either way). `kMcDpskReadingBelowChannelDb` = 5.4 maps them to the channel; the connect pick's
+  16-FSK thresholds are the measured channel crossovers minus it.
+
 Wire change (rung words, SNR byte, the new handshake frame): not compatible with v0.6.3. Open: the h = 0
 clip may give MC-DPSK DPSK data nothing (BUG-MCDPSK-PEAK-CONTROL-NO-GAIN); the tone-ACK table's upper
 rungs; 16-FSK window is one 10.5 s frame per burst (the 19 s key-down target).
