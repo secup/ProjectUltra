@@ -76,13 +76,20 @@ public:
             c.symbol_ms = waveform::tone_burst_ack::symbolMsForSNR(c.snr_used, c.fading_present);
         } else if (c.source == SNRSource::MCDPSK_IN_BAND) {
             c.fading_present = false;  // the fade-effective reading, AWGN column (see above)
-            // The ACK's edges are on the channel scale; an MC-DPSK reading sits
-            // kMcDpskReadingBelowChannelDb under it on a peak-limited TX (2026-11-22: with the 200 ms
-            // floor, read raw it keyed 6.8 s ACKs at AWGN -2 dB, 845 s vs 731 s for 4 KB, 0 retx).
+            // Up to 100 ms the raw reading decides, as before 2026-11-22: on fading it carries the
+            // fade loss, the margin the AWGN column needs. The 200 ms floor (2026-11-22) is chosen on
+            // the channel scale its edge was measured on (the reading sits
+            // kMcDpskReadingBelowChannelDb under it): read raw it keyed 6.8 s ACKs at AWGN -2 dB
+            // (845 vs 731 s for 4 KB, 0 retx); mapping every rung shortened fading ACKs to 25 ms
+            // (ITU Good 0 / 3 dB: 32 / 10 retransmissions).
+            namespace tba = waveform::tone_burst_ack;
             const float on_channel =
                 c.snr_used + protocol::connection_policy::kMcDpskReadingBelowChannelDb;
-            c.symbol_ms = std::max(waveform::tone_burst_ack::kBaselineSymbolMs,
-                                   waveform::tone_burst_ack::symbolMsForSNR(on_channel, false));
+            uint32_t ms = tba::symbolMsForSNR(c.snr_used, false);
+            if (ms == tba::kSymbolMsWeakSNR && tba::symbolMsForSNR(on_channel, false) != tba::kSymbolMsWeakSNR) {
+                ms = tba::kSymbolMsMargSNR;
+            }
+            c.symbol_ms = std::max(tba::kBaselineSymbolMs, ms);
         }
         return c;
     }
