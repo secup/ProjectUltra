@@ -996,17 +996,16 @@ public:
     // Returns true when the command changed. upper_margin: this burst's evidence that the next rung
     // would decode (the receiver's 4x-noise re-decode of its first frame); a clean burst without it
     // does not count toward a probe. Callers with no such test pass true.
-    // majority_delivered (2026-11-22): a lossy burst that still delivered at least half its frames
-    // stays at its rung - each step halves the rate, so the upper rung pays while it loses under half
-    // a burst. "Down on any loss" dated from v2 frames, where a failed frame took the rest of the
-    // burst with it; compact frames (the default since 2026-11-11) go on past one. With 16-FSK under
-    // DBPSK, any lost DBPSK frame on a fading channel stepped down and back up again (GUI ITU Good
-    // 0 dB, seed 61: five DBPSK <-> 16-FSK cycles, FAIL at 1800 s where main, DBPSK at the bottom,
-    // passed in 1135 s). The streak still resets: a lossy burst is no evidence for an up-step.
-    bool observe(int rung, bool clean, bool upper_margin = true, bool majority_delivered = false) {
+    // lowest_allowed (2026-11-22): a loss never steps below this rung. The receiver passes the rung
+    // its readings name (Connection: 16-FSK only when the spell's readings pick it), so a fade on a
+    // channel that carries DBPSK - an irreducible loss - holds DBPSK instead of dropping to 16-FSK and
+    // climbing back two or more clean bursts later (GUI ITU Good 0 / 3 dB, seed 61: DBPSK <-> 16-FSK
+    // about once a minute, 1509 / 1048 s for 4 KB where main, DBPSK at the bottom, took 1135 / 877 s).
+    // The streak still resets: a lossy burst is no evidence for an up-step.
+    bool observe(int rung, bool clean, bool upper_margin = true, int lowest_allowed = 0) {
         const int before = command_;
         const int at = (rung >= 0) ? rung : command_;
-        if (!clean && majority_delivered && at == command_) {
+        if (!clean && at == command_ && at <= lowest_allowed) {
             clean_streak_ = 0;
             return false;
         }

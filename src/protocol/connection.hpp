@@ -1406,6 +1406,9 @@ private:
     // SENDER: the newest ACK group_seq whose command was applied (stale ACKs are ignored) and
     // the arq time of the last timeout fallback (one step per timeout event).
     connection_policy::McDpskRateController mcdpsk_rate_ctl_;
+    // Consecutive silent retransmission timeouts on the rung above 16-FSK (the sender's fallback
+    // into 16-FSK waits for the second, maybeFallBackMcDpskRungOnTimeout).
+    int mcdpsk_silent_timeouts_above_mfsk_ = 0;
     // Waveform follow state. The receiver commands a crossing in the ACK it sends from inside the
     // ARQ and applies it on the next tick (a crossing reconfigures the ARQ). An up-crossing is on
     // probation until its first OFDM burst: the receiver reverts if none shows by the deadline

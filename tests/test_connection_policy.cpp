@@ -1285,14 +1285,18 @@ void test_mcdpsk_rate_controller() {
         CHECK(!c.observe(1, true, true) && c.command() == 1, "the run restarts after a no-margin burst");
     }
     CHECK(c.observe(1, true, true) && c.command() == 2, "k0 clean bursts with margin probe");
-    // A lossy burst that still delivered at least half its frames holds the rung (break-even of a
-    // 2x rate step) and resets the streak; a majority loss steps down.
+    // lowest_allowed: a loss never steps below the rung the readings name (16-FSK only when they
+    // pick it): at DBPSK with the floor at DBPSK a loss holds; with the floor at 16-FSK it steps down.
     c.reset(1, k0);
     for (int i = 0; i < k0 - 1; ++i) c.observe(1, true);
-    CHECK(!c.observe(1, false, true, /*majority_delivered=*/true) && c.command() == 1,
-          "a partial loss (majority delivered) holds DBPSK");
+    CHECK(!c.observe(1, false, true, /*lowest_allowed=*/1) && c.command() == 1,
+          "a loss at DBPSK whose readings do not name 16-FSK holds DBPSK");
     CHECK(!c.observe(1, true) && c.command() == 1, "and resets the clean run");
-    CHECK(c.observe(1, false, true, false) && c.command() == 0, "a majority loss steps down");
+    CHECK(c.observe(1, false, true, 0) && c.command() == 0,
+          "with the readings naming 16-FSK a loss steps down");
+    c.reset(2, k0);
+    CHECK(c.observe(2, false, true, 1) && c.command() == 1,
+          "a loss at DQPSK still steps down to DBPSK above the floor");
     // The backoff is capped.
     c.reset(1, k0);
     for (int round = 0; round < 10; ++round) {

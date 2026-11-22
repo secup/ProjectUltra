@@ -9028,6 +9028,16 @@ void Connection::maybeFallBackMcDpskRungOnTimeout(uint32_t elapsed_ms) {
     // Nothing came back for the burst, so no receiver command can either: the resend goes one
     // rung down (the receiver's first-frame retry decodes either constellation). An older copy of
     // the ACK that would have carried the previous command must not lift it back.
+    // Into 16-FSK only on the second silent timeout in a row (2026-11-22): one fade takes about one
+    // burst, and the step costs two or more clean 16-FSK bursts to climb back (GUI ITU Good 3 dB:
+    // DBPSK -> 16-FSK on single fades). A channel that needs 16-FSK times out again.
+    if (connection_policy::kMcDpskRungModulations[rung - 1] == Modulation::MFSK16 &&
+        ++mcdpsk_silent_timeouts_above_mfsk_ < 2) {
+        LOG_MODEM(INFO, "Connection: MC-DPSK RATE tx: retransmit timeout at %s, no ACK - holding "
+                  "(16-FSK on the next one)", modulationToString(data_modulation_));
+        return;
+    }
+    mcdpsk_silent_timeouts_above_mfsk_ = 0;
     if (applyMcDpskTxModulation(connection_policy::kMcDpskRungModulations[rung - 1],
                                 "retransmit timeout, no ACK") &&
         mcdpsk_last_command_group_seq_ >= 0) {
@@ -9052,17 +9062,14 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
         const bool clean = closes_turn && !reports_hole && !tone_ack_turn_loss_context_;
         // -1: no margin test ran (v2 frames): the up-step falls back to the clean run alone.
         const bool upper_margin = rx_mcdpsk_margin_ != 0;
-        // At least half the rung's window decoded (the burst's frames are the sender's window at
-        // that rung; a short last burst only makes this conservative).
-        const size_t window = connection_policy::mcDpskWindowSizeForTiming(
-            connection_policy::mcDpskFrameTiming(rx_mcdpsk_last_modulation_,
-                                                 config_.mc_dpsk_num_carriers,
-                                                 config_.mc_dpsk_samples_per_symbol,
-                                                 data_frame_cw_count_));
-        const bool majority_delivered =
-            window > 1 && 2 * static_cast<size_t>(rx_mcdpsk_frames_since_command_) >= window;
+        // A loss steps into 16-FSK only when this spell's readings name it (the connect pick on
+        // them): otherwise the channel carries DBPSK and the loss was a fade.
+        const int dbpsk_rung = connection_policy::mcDpskRungIndexFor(Modulation::DBPSK);
+        const bool readings_name_mfsk =
+            sessionLadderPick().rung.modulation == Modulation::MFSK16;
+        const int lowest_allowed = readings_name_mfsk ? 0 : dbpsk_rung;
         const bool changed =
-            mcdpsk_rate_ctl_.observe(rung, clean, upper_margin, majority_delivered);
+            mcdpsk_rate_ctl_.observe(rung, clean, upper_margin, lowest_allowed);
         rx_mcdpsk_frames_since_command_ = 0;
         rx_mcdpsk_margin_ = -1;
         LOG_MODEM(INFO,
@@ -9153,6 +9160,7 @@ void Connection::maybeObeyMcDpskRungCommand(uint8_t command_word, uint8_t group_
     if (rung < 0) {
         return;  // no command (an older peer, or an ACK with nothing to say)
     }
+    mcdpsk_silent_timeouts_above_mfsk_ = 0;  // an ACK came back
     // A late copy of an older ACK must not undo a newer command: accept group_seq values at or
     // after the last applied one (6-bit sequence, half-space comparison).
     if (mcdpsk_last_command_group_seq_ >= 0 &&
