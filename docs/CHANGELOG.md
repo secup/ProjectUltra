@@ -47,12 +47,13 @@ real -10 dB reading was clipped and screened as "no measurement".
   frame's span on the 8-carrier profile (every handshake timer holds). ModemEngine sends the first
   CONNECT of a PING cycle as DBPSK and every retry as M-FSK; a CONNECT_ACK/NAK answers in the CONNECT's
   modulation. The receiver re-demodulates a failed DBPSK CONNECT span as M-FSK
-  (`MCDPSKWaveform::mfskSoftBitsOfLastFrame`); the reading is reported DBPSK-equivalent (-1.9 dB,
-  measured). Narrowband (4 carriers in 420 Hz) fails the orthogonality gate and keeps DBPSK.
+  (`MCDPSKWaveform::mfskSoftBitsOfLastFrame`); every 16-FSK reading is reported DBPSK-equivalent
+  (`kMfskOverDbpskReadingDb` 6.0 dB, GUI-measured; the harness's 1.9 dB was on another scale, see below). Narrowband (4 carriers in 420 Hz) fails the orthogonality gate and keeps DBPSK.
 - **16-FSK session rung** (`Modulation::MFSK16`, `connection_policy.hpp`): MC-DPSK rungs 16-FSK, DBPSK,
   DQPSK (words 13/14/15; same sps, R1/4, codewords per frame); `mcDpskBitsPerSymbolTime`,
   `mcDpskRungBelow`. `ROBUST_LOW` (a duplicate DBPSK rung) is 16-FSK R1/4 and the connect pick starts
-  there below a DBPSK-equivalent reading of -6 dB (AWGN) / -2.5 dB (fading). No peak control on 16-FSK.
+  there below a DBPSK-equivalent reading of -12 dB (AWGN) / -6.5 dB (fading) (see below). No peak control
+  on 16-FSK.
   The receiver decodes a burst's first frame in the DPSK-sized window as before; only after it fails at
   every DPSK rung does it wait for a 16-FSK frame's span (`mc_mfsk_lookahead_pending_`), so no DPSK
   frame waits longer; the peek always covers a frame at the configured rung.
@@ -91,6 +92,13 @@ GUI after these (1 KB, 7.3 Hz): AWGN -10 dB PASS seeds 44/45 (501/562 s, reading
 clip fix); AWGN -4 dB PASS 218 s 50 bps starting at DBPSK (40 bps at 16-FSK before the fading fix; the
 baseline never connected); AWGN -8 dB PASS 466 s (756 s before the loss-evidence fix); ITU Good -6 dB
 PASS 867 s, ITU Good -8 dB PASS 806 s; AWGN -12 dB connected, ACKs lost (before the 200 ms rung).
+
+- *Reading scale.* GUI A/B vs main at AWGN 0 dB and ITU Good 3 dB (4 KB): the branch started at 16-FSK
+  (90 vs 100 bps, 30 vs 40 bps). On the production TX path the DBPSK CONNECT reads 5.4 dB under the channel
+  (-5.3/-5.4 at 0 dB, 14.2 at 20 dB; the gate's level log puts its payload 5.45 dB under the reference) and
+  16-FSK ~0.6 dB over it; the harness peak-normalizes frames without the TX chain's filter and level stages
+  and measured 1.9 dB. Now: 16-FSK readings less 6.0 dB; ROBUST_LOW below -12 (AWGN) / -6.5 (fading) = the
+  measured crossovers (-6.5 / -1 dB channel SNR) minus the CONNECT offset.
 
 Wire change (rung words, SNR byte, the new handshake frame): not compatible with v0.6.3. Open: the h = 0
 clip may give MC-DPSK DPSK data nothing (BUG-MCDPSK-PEAK-CONTROL-NO-GAIN); the tone-ACK table's upper
