@@ -73,9 +73,28 @@ real -10 dB reading was clipped and screened as "no measurement".
   evidence fix: five failed DBPSK probes); 20 dB PASS 760 bps, unchanged (connects on DBPSK, OFDM).
 - ctest 127/127.
 
+Later the same night:
+- *Control clip on 16-FSK frames.* `applyControlPeakControl` ran on the M-FSK handshake frame and on 16-FSK
+  session frames: nothing to clip (crest 2.28 -> 2.28 dB), but its band limit rang at the frame's
+  transitions (peak 0.80 -> 0.97), so the hardware TX path scaled the payload ~1.7 dB down. Skipped for
+  constant-envelope frames.
+- *Fading index of an M-FSK frame.* The decoder reported the DPSK pass's index (hopping tones read as eight
+  carriers fading: 0.64-1.27 on AWGN), which moved the connect pick to its fading threshold (AWGN -4 dB
+  started at 16-FSK). The 16-FSK demodulator now noise-corrects its index (excess variance over
+  2a^2 s2 + s2^2) and an M-FSK decode reports it: AWGN 0.00-0.09, ITU Good 0.33-0.54.
+- *Tone ACK below -10 dB.* GUI AWGN -12 dB: 19 frames decoded, 19 ACKs sent at 100 ms, almost none heard.
+  `tools/measure_ack_staircase` re-measured: AWGN 100 ms 95 % edge -6 dB (38 % at -10), 200 ms -10 dB;
+  Good/Moderate 200 ms -4 dB. 200 ms (6.8 s ACK) is the staircase floor below the 100 ms edge + 2 dB.
+  The upper rungs read 2-4 dB worse than their 2026-11-08 edges in this run (re-measure the table).
+
+GUI after these (1 KB, 7.3 Hz): AWGN -10 dB PASS seeds 44/45 (501/562 s, reading -12.8/-13.0 before the
+clip fix); AWGN -4 dB PASS 218 s 50 bps starting at DBPSK (40 bps at 16-FSK before the fading fix; the
+baseline never connected); AWGN -8 dB PASS 466 s (756 s before the loss-evidence fix); ITU Good -6 dB
+PASS 867 s, ITU Good -8 dB PASS 806 s; AWGN -12 dB connected, ACKs lost (before the 200 ms rung).
+
 Wire change (rung words, SNR byte, the new handshake frame): not compatible with v0.6.3. Open: the h = 0
-clip may give MC-DPSK DPSK data nothing (BUG-MCDPSK-PEAK-CONTROL-NO-GAIN); fading below -6 dB unmeasured
-on the GUI; 16-FSK window is one 10.5 s frame per burst (the 19 s key-down target).
+clip may give MC-DPSK DPSK data nothing (BUG-MCDPSK-PEAK-CONTROL-NO-GAIN); the tone-ACK table's upper
+rungs; 16-FSK window is one 10.5 s frame per burst (the 19 s key-down target).
 
 ---
 
