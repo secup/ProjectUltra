@@ -71,6 +71,8 @@ enum class Modulation : uint8_t {
     QAM32 = 7,   // 5 bits/symbol - coherent
     QAM64 = 8,   // 6 bits/symbol - coherent
     QAM256 = 10, // 8 bits/symbol - highest throughput, needs 30+ dB SNR
+    MFSK16 = 11, // 4 bits/symbol time - 16-FSK, noncoherent, constant envelope (MC-DPSK family,
+                 // the low-SNR rung; MultiCarrierDPSKConfig::mfsk_tones)
     AUTO = 0xFF, // Let responder decide based on SNR (for CONNECT frame)
 };
 
@@ -87,6 +89,7 @@ inline uint32_t getBitsPerSymbol(Modulation mod) {
         case Modulation::QAM32:  return 5;
         case Modulation::QAM64:  return 6;
         case Modulation::QAM256: return 8;
+        case Modulation::MFSK16: return 4;
         default: return 1;
     }
 }
@@ -104,6 +107,7 @@ inline const char* modulationToString(Modulation mod) {
         case Modulation::QAM32:  return "32QAM";
         case Modulation::QAM64:  return "64QAM";
         case Modulation::QAM256: return "256QAM";
+        case Modulation::MFSK16: return "16FSK";
         default: return "UNKNOWN";
     }
 }

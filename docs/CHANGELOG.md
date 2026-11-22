@@ -10,6 +10,28 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-22 — fix(arq): a window shrink no longer orphans the frames in flight (BUG-ARQ-WINDOW-SHRINK-ACK-DROP)
+
+**Broke.** Paired GUI A/B, ITU Good 0 and 3 dB, 4 KB, seeds 64-71, `lowsnr-minus10` vs main: branch 12/16
+PASS, main 15/16. All four branch failures were "max retries exceeded" mid-transfer. In each, the sender
+stepped DBPSK -> 16-FSK on a silent timeout. The MC-DPSK window is timing-derived, so it shrank
+3 -> 1 with seqs 22..24 in flight. The receiver decoded every 16-FSK resend and tone-ACKed "through 24",
+and the sender heard every ACK, then logged `Future ACK seq=24 too far ahead of base=22, ignoring`
+eight times and gave up. The far-future guard measured the ACK against the NEW window
+(forward 3 > window 1 + 1). The SACK walk, the base-advance reset and both timeout loops were also
+bounded by the current window, so frames past it were invisible. The bug is latent on main (any
+mid-flight shrink); the 16-FSK rung (window 1) made it fire.
+
+**Changed.** `SelectiveRepeatARQ::txSpan()` = the frames outstanding (`tx_next - tx_base`), at least the
+window, at most `MAX_WINDOW`. The ACK freshness check, the SACK bitmap walk, the hole/fast-retx reset,
+`timeoutRetransmitDue` and the timeout resend loop now use it. A fabricated ACK beyond the highest
+sent seq is still dropped by the NEVER-SENT guard, and new sends are still capped by the window
+(`getAvailableSlots`).
+
+**Verified.** `test_arq_toneburst_fabrication` adds `test_ack_after_window_shrink_accepted` (3 in
+flight, window 3 -> 1, a tone ACK through all three retires them); it fails before the fix and
+6/6 pass after. ARQ/connection/tone-ACK CTests are 13/13. GUI reruns of the 4 failed seeds: see below.
+
 ## 2026-11-22 — feat(lowsnr): -10 dB links: 16-FSK handshake frame and session rung, PING/chirp floors
 
 **Broke.** GUI gate, `--tx-model hardware`, AWGN, 1 KB, 7.3 Hz (2026-11-22 baseline): -4 dB PING/PONG

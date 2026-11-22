@@ -2781,6 +2781,13 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-ARQ-WINDOW-SHRINK-ACK-DROP (FIXED 2026-11-22) — was P1 on MC-DPSK rate steps down
+
+- A window shrink with frames in flight (MC-DPSK DBPSK -> 16-FSK: 3 -> 1) made the sender drop
+  the legitimate ACK through those frames as "far-future". It resent until "max retries exceeded"
+  while hearing every ACK (GUI Good 0-3 dB: 4/16 runs). Fix: TX-side span = frames outstanding
+  (`SelectiveRepeatARQ::txSpan`); see CHANGELOG 2026-11-22.
+
 ### BUG-TNC-HEARS-ITSELF + BUG-TNC-STUCK-AFTER-FAILED-SESSION + BUG-TNC-PTT-STUCK-ON (FIXED 2026-11-21, GitHub #38) — was P1 for TNC users on a one-simulator bench or a VOX loop
 
 - **Report** (GitHub #38, 0.6.2 under Winlink Express, one hardware HF simulator in half-duplex mode:

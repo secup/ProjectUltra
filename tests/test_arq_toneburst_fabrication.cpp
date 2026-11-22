@@ -218,6 +218,30 @@ static bool test_legit_tone_acks_still_work() {
     return true;
 }
 
+// BUG-ARQ-WINDOW-SHRINK-ACK-DROP (2026-11-22): a rate step down (DBPSK -> 16-FSK) shrinks
+// the timing-derived window 3 -> 1 with three frames still in flight. The receiver's
+// cumulative ACK through the last of them is legitimate (every seq in it was SENT), but the
+// far-future guard measured it against the NEW window and dropped it on every resend until
+// the frame ran out of retries (GUI ITU Good 0-3 dB: 4/16 runs "max retries exceeded" while
+// every ACK was heard).
+static bool test_ack_after_window_shrink_accepted() {
+    TEST("ACK through in-flight frames accepted after the window shrinks");
+
+    Harness h(8);
+    if (!h.walkBaseTo(22)) FAIL("setup: could not walk base to 22");
+    h.arq.setWindowSize(3);
+    if (!h.sendFrames(3)) FAIL("setup: could not queue 3 frames");  // seqs 22..24
+    h.arq.setWindowSize(1);
+    const int completes_before = h.completes_ok;
+    if (!h.arq.onToneBurstAck(/*group_seq6=*/24, /*bitmap=*/0, /*move_epoch=*/0))
+        FAIL("ACK through the sent frames must be accepted after the window shrinks");
+    if (h.arq.getTxBaseSeq() != 25) FAIL("base did not advance to 25");
+    if (h.completes_ok != completes_before + 3) FAIL("ACK did not retire the 3 in-flight frames");
+    if (h.arq.getStats().future_acks_ignored != 0) FAIL("ACK counted as far-future");
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "BUG-TONEACK-FABRICATION regression suite\n";
     bool ok = true;
@@ -226,6 +250,7 @@ int main() {
     ok &= test_control_sack_beyond_sent_dropped();
     ok &= test_precommit_plausibility_matches_sent_support();
     ok &= test_legit_tone_acks_still_work();
+    ok &= test_ack_after_window_shrink_accepted();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
 }

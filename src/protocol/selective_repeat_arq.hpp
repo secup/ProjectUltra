@@ -726,6 +726,11 @@ private:
                tone_burst_sack_transport_ready_;
     }
     size_t seqToSlot(uint16_t seq) const;
+    // TX-side span to walk/accept: the frames actually outstanding, at least the window.
+    // A rate step down shrinks the timing-derived window with frames still in flight
+    // (MC-DPSK DBPSK -> 16-FSK: 3 -> 1); those frames stay ACK-able, SACK-able and
+    // timeout-resendable (BUG-ARQ-WINDOW-SHRINK-ACK-DROP). Bounded by MAX_WINDOW slots.
+    size_t txSpan() const;
     bool isInTXWindow(uint16_t seq) const;
     bool isInRXWindow(uint16_t seq) const;
 

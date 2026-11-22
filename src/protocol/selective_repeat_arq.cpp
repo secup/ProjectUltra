@@ -1242,8 +1242,9 @@ bool SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // Stale-ACK guard: reject ACKs strictly older than (tx_base_seq_ - 1).
     // seq == (tx_base_seq_ - 1) is valid — it's the common "no new cumulative progress"
     // ACK that still carries a fresh SACK bitmap for the current window.
-    const auto ack_freshness = arq_policy::classifyAckFreshness(
-        seq, tx_base_seq_, config_.window_size);
+    // Plausible span = what is outstanding (txSpan), not the current window; fabricated
+    // ACKs beyond the highest sent seq are still dropped by the NEVER-SENT guard below.
+    const auto ack_freshness = arq_policy::classifyAckFreshness(seq, tx_base_seq_, txSpan());
     const uint16_t ack_base = (tx_base_seq_ - 1) & 0xFFFF;
     if (ack_freshness == arq_policy::AckFreshness::Stale) {
         stats_.stale_acks_ignored++;
@@ -1377,7 +1378,7 @@ bool SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
     // --- Positive-only SACK bitmap: mark frames the receiver confirms it HAS ---
     if (bitmap != 0) {
         bool any_sacked = false;
-        for (int i = 0; i < 32 && i < static_cast<int>(config_.window_size); i++) {
+        for (int i = 0; i < 32 && i < static_cast<int>(txSpan()); i++) {
             if (!(bitmap & (1u << i))) continue;
 
             uint16_t sack_seq = (tx_base_seq_ + i) & 0xFFFF;
@@ -1480,7 +1481,7 @@ bool SelectiveRepeatARQ::handleAckFrame(const v2::ControlFrame& frame) {
 
     // Reset hole and fast-retransmit guards when base advances (new gap context).
     if (tx_base_seq_ != base_before_ack) {
-        for (size_t i = 0; i < config_.window_size; i++) {
+        for (size_t i = 0, n = txSpan(); i < n; i++) {
             size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
             tx_window_[slot].hole_ack_count = 0;
             tx_window_[slot].fast_retx_count = 0;
@@ -1524,7 +1525,7 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
 }
 
 bool SelectiveRepeatARQ::timeoutRetransmitDue(uint32_t elapsed_ms) const {
-    for (size_t i = 0; i < config_.window_size; i++) {
+    for (size_t i = 0, n = txSpan(); i < n; i++) {
         const size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         const TXSlot& s = tx_window_[slot];
         if (!s.active || s.acked || s.timeout_suspended) {
@@ -1581,7 +1582,7 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
     std::vector<Bytes> timeout_retx_batch;
     std::vector<Bytes>* timeout_retx_batch_ptr =
         on_transmit_batch_ ? &timeout_retx_batch : nullptr;
-    for (size_t i = 0; i < config_.window_size; i++) {
+    for (size_t i = 0, n = txSpan(); i < n; i++) {
         size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         TXSlot& s = tx_window_[slot];
 
@@ -2859,6 +2860,12 @@ std::vector<uint16_t> SelectiveRepeatARQ::predictedIncomingSeqs(size_t max_n) co
 
 size_t SelectiveRepeatARQ::seqToSlot(uint16_t seq) const {
     return seq % MAX_WINDOW;
+}
+
+size_t SelectiveRepeatARQ::txSpan() const {
+    const size_t outstanding =
+        static_cast<size_t>(static_cast<uint16_t>((tx_next_seq_ - tx_base_seq_) & 0xFFFF));
+    return std::min(std::max(config_.window_size, outstanding), MAX_WINDOW);
 }
 
 bool SelectiveRepeatARQ::isInTXWindow(uint16_t seq) const {
