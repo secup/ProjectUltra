@@ -152,9 +152,8 @@ int main(int argc, char** argv) {
     const char* only = std::getenv("LOW_ONLY");
     const std::vector<Case> cases = {
         {"DBPSK  R1/4", Modulation::DBPSK, CodeRate::R1_4, 0, 30},
-        {"16FSK  R1/4", Modulation::DBPSK, CodeRate::R1_4, 16, 30},
-        {"16FSK  R1/2", Modulation::DBPSK, CodeRate::R1_2, 16, 30},
-        {"8FSK   R1/4", Modulation::DBPSK, CodeRate::R1_4, 8, 30},
+        {"16FSK  R1/4", Modulation::MFSK16, CodeRate::R1_4, 0, 30},
+        {"16FSK  R1/2", Modulation::MFSK16, CodeRate::R1_2, 0, 30},
     };
     std::vector<float> snrs = {-14, -12, -10, -8, -6, -4, -2, 0};
     if (const char* e = std::getenv("LOW_SNR")) snrs = {float(std::atof(e))};
@@ -172,7 +171,8 @@ int main(int argc, char** argv) {
         const Bytes payload(c.payload, 0x5A);
         const Bytes ser =
             v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, c.rate).serialize();
-        std::vector<int> ok(snrs.size(), 0);
+        std::vector<int> ok(snrs.size(), 0), nread(snrs.size(), 0);
+        std::vector<double> reading(snrs.size(), 0.0);
         double air = 0;
         for (size_t si = 0; si < snrs.size(); ++si) {
             for (int t = 1; t <= trials; ++t) {
@@ -182,6 +182,8 @@ int main(int argc, char** argv) {
                 enc.setDataMode(c.mod, c.rate);
                 auto frame = enc.encodeFrame(ser);
                 air = double(frame.size()) / 48000.0;
+                // ModemEngine clips MC-DPSK data bursts at h = 0 (applyPeakControl, 8x1024 tones)
+                if (std::getenv("LOW_CLIP")) ultra::peak_control::apply(frame, 0.0f, 48000.0f, 250.0f, 2750.0f);
                 (void)sim::normalizeTxBurstForHardware(frame, 0.5f);
                 std::vector<float> audio(48000, 0.0f);
                 audio.insert(audio.end(), frame.begin(), frame.end());
@@ -221,12 +223,20 @@ int main(int argc, char** argv) {
                     dec.processBuffer();
                 }
                 bool got = false;
-                while (dec.hasFrame()) got |= dec.getFrame().success;
+                while (dec.hasFrame()) {
+                    auto r = dec.getFrame();
+                    if (r.success && !got) {
+                        got = true;
+                        if (r.has_mcdpsk_data_aided_snr_db) { reading[si] += r.mcdpsk_data_aided_snr_db; ++nread[si]; }
+                    }
+                }
                 ok[si] += got;
             }
         }
         std::printf("%-14s %6.2f |", c.name, air);
         for (int v : ok) std::printf(" %4d", v);
+        std::printf("   reading:");
+        for (size_t i = 0; i < snrs.size(); ++i) std::printf(" %.1f", nread[i] ? reading[i] / nread[i] : -99.0);
         std::printf("\n");
         std::fflush(stdout);
     }

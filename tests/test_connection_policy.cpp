@@ -58,7 +58,7 @@ void test_fading_labels_and_capabilities() {
 void test_ladder_rung_selection() {
     const auto robust_low = ladderRungForId(LadderRungId::ROBUST_LOW);
     CHECK(robust_low.waveform == WaveformMode::MC_DPSK, "Robust-Low waveform");
-    CHECK(robust_low.modulation == Modulation::DBPSK, "Robust-Low modulation");
+    CHECK(robust_low.modulation == Modulation::MFSK16, "Robust-Low modulation (16-FSK since 2026-11-22)");
     // #72: MC-DPSK standardized on sps=1024 (control==data baud → handshake always
     // mutually decodable; the gears now vary only constellation/rate, not baud).
     CHECK(robust_low.samples_per_symbol == 1024, "Robust-Low SPS");
@@ -86,9 +86,16 @@ void test_ladder_rung_selection() {
     CHECK(std::string(ladderRungIdToString(LadderRungId::ROBUST_LOW)) == "Robust-Low",
           "Robust-Low rung string");
 
+    // Below the DQPSK floor: DBPSK (ROBUST_MID; ROBUST_LOW was the same DBPSK rung until
+    // 2026-11-22) down to the DBPSK crossover, 16-FSK (ROBUST_LOW) under it.
     CHECK(selectLadderRung(6.9f, ChannelClassification::MODERATE).id ==
-              LadderRungId::ROBUST_LOW,
-          "Moderate below in-band 7 dB selects Robust-Low");
+              LadderRungId::ROBUST_MID,
+          "Moderate below in-band 7 dB selects DBPSK (Robust-Mid)");
+    CHECK(selectLadderRung(-3.0f, ChannelClassification::MODERATE).id ==
+                  LadderRungId::ROBUST_LOW &&
+              selectLadderRung(-5.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_MID &&
+              selectLadderRung(-7.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_LOW,
+          "16-FSK below the DBPSK crossover (AWGN -6, fading -2.5 dB)");
     CHECK(selectLadderRung(7.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
           "Moderate in-band 7 dB boundary selects Robust-Mid (DBPSK)");
@@ -1317,8 +1324,9 @@ void test_connect_selection_needs_physical_evidence() {
     const float weak = connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/true, 0.0f, 0);
     CHECK(std::fabs(weak - (-3.9f)) < 1e-4f,
           "no physical measurement: the reading is the selection (affine basis)");
-    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::DBPSK,
-          "a -3.9 dB reading on Good picks DBPSK, not DQPSK");
+    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::MFSK16,
+          "a -3.9 dB reading on Good picks the deepest fallback (16-FSK, below the -2.5 dB "
+          "DBPSK crossover), not DQPSK");
     CHECK(std::fabs(connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/false, 0.0f, 0) -
                     (-3.9f)) < 1e-4f,
           "no physical measurement: the reading is the selection (flat basis)");

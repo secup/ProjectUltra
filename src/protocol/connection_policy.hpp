@@ -745,8 +745,10 @@ inline LadderRung ladderRungForId(LadderRungId id) {
             // (DBPSK/DQPSK) + rate — handled by the control-profile path, exactly
             // like OFDM. The 512 "fast" gear's throughput is recovered at 1024 via
             // DQPSK (ROBUST) and code rate; its only real edge was fast-Doppler.
+            // 2026-11-22: the deepest fallback is 16-FSK (it was a second DBPSK R1/4 rung, the
+            // same as ROBUST_MID): ~4 dB below DBPSK at half its rate on a peak-limited TX.
             return {id, "Robust-Low", WaveformMode::MC_DPSK,
-                    Modulation::DBPSK, CodeRate::R1_4, 8, 1024, 3};
+                    Modulation::MFSK16, CodeRate::R1_4, 8, 1024, 3};
         case LadderRungId::ROBUST_MID:
             return {id, "Robust-Mid", WaveformMode::MC_DPSK,
                     Modulation::DBPSK, CodeRate::R1_4, 8, 1024, 3};
@@ -786,7 +788,7 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
     if (num_carriers != 8) {
         return {};
     }
-    if (modulation == Modulation::DBPSK && samples_per_symbol >= 2048 && cw_count == 3) {
+    if (modulation == Modulation::MFSK16 && samples_per_symbol == 1024 && cw_count == 3) {
         return ladderRungForId(LadderRungId::ROBUST_LOW);
     }
     if (modulation == Modulation::DBPSK && samples_per_symbol == 1024 && cw_count == 3) {
@@ -1699,10 +1701,20 @@ inline LadderRung mcDpskLadderRung(float snr_db, ChannelClassification channel, 
     if (snr_db >= robust_dqpsk_floor) {
         return ladderRungForId(LadderRungId::ROBUST);  // DQPSK R1/4 — ~2x DBPSK
     }
-    if (snr_db >= robust_mid_floor) {
-        return ladderRungForId(LadderRungId::ROBUST_MID);  // DBPSK R1/4
+    // 16-FSK R1/4 (ROBUST_LOW, half DBPSK's rate) where DBPSK R1/4 stops paying: below the reading at
+    // which DBPSK decodes about half its frames (the break-even of a rate twice as high). Measured
+    // 2026-11-22, tools/lowsnr_floor (production encoder/decoder, peak-limited TX with the h = 0 data
+    // clip, 7.3 Hz, 10 trials; readings DBPSK-equivalent, as the connect pick's): AWGN DBPSK 8/10 at
+    // the gate's -6 dB, 0/10 at -8, 16-FSK 10/10 down to -10 -> crossover ~-6.5 dB = reading -6;
+    // ITU Good DBPSK 9/10 at 0 dB, 3-4/10 at -2..-4, 16-FSK 9/10 at -2..-4 -> crossover ~-1 dB =
+    // reading -2.5. Moderate and Poor are unmeasured: the Good value (16-FSK is noncoherent, the
+    // differential detector loses more as Doppler grows). The receiver's rate commands move the
+    // session from there in either direction.
+    const float mfsk_below_db = (channel == ChannelClassification::AWGN) ? -6.0f : -2.5f;
+    if (snr_db < mfsk_below_db) {
+        return ladderRungForId(LadderRungId::ROBUST_LOW);  // 16-FSK R1/4 (deepest fallback)
     }
-    return ladderRungForId(LadderRungId::ROBUST_LOW);  // DBPSK R1/4 (deepest fallback)
+    return ladderRungForId(LadderRungId::ROBUST_MID);  // DBPSK R1/4
 }
 
 inline LadderRung selectLadderRung(float snr_db, float fading_index) {

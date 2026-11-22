@@ -740,6 +740,9 @@ void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
             mc.freq_high != 2500.0f) {
             return;
         }
+        // A 16-FSK burst is constant-envelope already (its training is scaled to the chirp's peak):
+        // there is no crest to trade, only distortion to add.
+        if (data_modulation_ == Modulation::MFSK16) return;
         const bool dqpsk = mc.bits_per_symbol == 2;
         const auto choice = peak_control::chooseHeadroomOnCurve(
             peak_control::mcDpsk8x1024Curve(),

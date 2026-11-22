@@ -1094,7 +1094,7 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
         if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
             modem_.setMCDPSKProfile(mc_dpsk_num_carriers,
                                     mc_dpsk_samples_per_symbol,
-                                    mod == Modulation::DBPSK ? 1 :
+                                    (mod == Modulation::DBPSK || mod == Modulation::MFSK16) ? 1 :
                                     mod == Modulation::D8PSK ? 3 : 2);
         }
         // BUG-MC-RETRY-SPURIOUS fix 4: the protocol layer just COMMITTED a data
