@@ -166,6 +166,15 @@ public:
         acceptance_predicate_ = std::move(predicate);
     }
 
+    // Frames the sender has in flight (tx_next - tx_base), read once per detection pass: the
+    // candidate floor follows the protocol predicate's selectivity at that span
+    // (toneAckNoiseRatioFloorFor, tone_ack_false_alarm.hpp). Without a provider the floor stays
+    // kCostasNoiseRatioFloor (standalone detector/monitor users).
+    void setInFlightSpanProvider(std::function<size_t()> provider) {
+        span_provider_ = std::move(provider);
+    }
+    float lastNoiseRatioFloor() const { return detector_.noiseRatioFloor(); }
+
     // §15 step 4d-late: arm the detector for an expected ACK arrival.
     // While armed, detection runs every detect_interval_samples_armed (the
     // tight production cadence). When the armed window elapses without a
@@ -213,6 +222,7 @@ private:
     ToneBurstDetector detector_;
     ToneBurstAckCallback callback_;
     ToneBurstAckAcceptancePredicate acceptance_predicate_;
+    std::function<size_t()> span_provider_;
 
     // Linear buffer (not strictly circular — we drop the oldest samples
     // when over capacity). Simpler than ring buffer; size cap keeps memory

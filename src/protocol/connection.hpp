@@ -362,6 +362,13 @@ public:
         const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection);
     bool isToneBurstAckCandidatePlausible(
         const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const;
+    // Frames in flight when the tone-ACK monitor was last armed, for its candidate floor
+    // (tone_ack_false_alarm.hpp). Read lock-free on the audio thread every detection pass; the
+    // sender arms after every burst and the span only shrinks until the next one, so the armed
+    // value bounds it. SIZE_MAX (never armed) keeps the widest floor.
+    size_t toneBurstAckInFlightSpan() const {
+        return tone_ack_armed_span_.load(std::memory_order_relaxed);
+    }
 
     void setFileProgressCallback(FileProgressCallback cb);
     void setFileReceivedCallback(FileReceivedCallback cb);
@@ -1964,6 +1971,7 @@ private:
     std::function<bool()> channel_busy_query_;  // keepalive universal busy gate
     DriveAdvisoryCallback on_drive_advisory_;  // software-ALC sender-side hook
     ArmToneBurstAckMonitorCallback on_arm_tone_burst_ack_monitor_;
+    std::atomic<size_t> tone_ack_armed_span_{SIZE_MAX};
     ConnectedCallback on_connected_;
     DisconnectedCallback on_disconnected_;
     DisconnectTeardownCallback on_disconnect_teardown_;

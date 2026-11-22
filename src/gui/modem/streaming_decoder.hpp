@@ -921,6 +921,9 @@ public:
         ToneBurstAckAcceptancePredicate predicate) {
         tone_burst_monitor_.setAcceptancePredicate(std::move(predicate));
     }
+    void setToneBurstAckInFlightSpanProvider(std::function<size_t()> provider) {
+        tone_burst_monitor_.setInFlightSpanProvider(std::move(provider));
+    }
 
     // For tests + diagnostics: how many tone-burst ACKs has the always-on
     // monitor decoded since construction or last reset.

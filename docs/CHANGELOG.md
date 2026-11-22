@@ -10,6 +10,48 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-22 — feat(ack): tone-ACK candidate floor from a false-ACK budget and the span in flight
+
+**Was.** Every tone-ACK candidate had to reach 2.2x the noise-only Costas expectation
+(`kCostasNoiseRatioFloor`, 2026-11-10), sized for the worst sender state. At low SNR that floor, not
+the payload, limits the ACK: on the bench (`measure_ack_staircase`, AWGN) the 100 ms ACK decoded
+38 % at -10 dB and 5 % at -12 at floor 2.2, against 98 % and 83 % at 1.6.
+
+**Measured (H0).** `tools/ack_noise_h0` runs the production detector on noise only: 2.3 M windows,
+the five staircase rungs, carrier search 0 and +-4.8 Hz (the connected monitor's widths). Each window
+is decoded at floor 1.4 and every CRC-12-passing decode is logged with its candidate ratio and
+payload. Results, with every rung scanned:
+- CRC-passing noise decodes per armed hour: 19 / 5.5 / 1.2 / 0.26 / 0.081 at floors 1.5-1.9; none
+  at 2.0 and above. Search 0: 14 / 4.3 / 0.99 / 0.20 / 0.023.
+- The 4242 false payloads are uniform: type, epoch and group_seq are flat, and the frame_mask
+  popcount is binomial(16, 1/2).
+- The protocol predicate (type ACK, group_seq inside [base-1, base-1+span], frame_mask only over
+  the frames still sent) therefore passes a false decode with a probability that follows from the
+  field widths: ~1/64 at 16 frames in flight, ~1e-5 at 5, ~4e-7 at 1.
+
+**Changed.** `tone_ack_false_alarm.hpp`: `toneAckNoiseRatioFloorFor(span, halfwidth, diversity)` is
+the lowest floor whose accepted false-ACK rate, R(F) x P_pred(span), stays under 1e-5 per armed hour.
+- R(F) = 19 exp(-12 (F - 1.5)) /h. The slope is the shallowest measured, so the floors err high.
+- The result is clamped to [1.5 (lowest measured), 2.2].
+- That gives 1.5 at 1-2 frames, 1.60 at 3, 1.72 at 5, 1.90 at 8, and 2.2 at 16. The rule returns
+  2.36 at 16, so the old single floor is its widest-window case.
+- 2.2 stays wherever the model was not measured: a carrier search wider than 5 Hz (the +-50 Hz
+  acquisition case) or no diversity (narrowband band plan).
+- The move-epoch echo is not counted as protection.
+
+Plumbing:
+- `Connection::armToneBurstAckListenWindow` publishes `arq_.txOutstanding()` in an atomic. The
+  sender arms after every burst and the span only shrinks until the next one.
+- `ProtocolEngine::toneBurstAckInFlightSpan` reads that atomic lock-free (the audio thread calls it
+  every pass). It goes through `ModemEngine`/`StreamingDecoder` to
+  `ToneBurstAckMonitor::setInFlightSpanProvider`, which sets `ToneBurstDetector::setNoiseRatioFloor`
+  each pass.
+- Without a provider (tools, standalone users) the floor stays at 2.2.
+
+**Verified.** CTest `ToneAckFalseAlarm` checks the predicate geometry, the floor rule and budget,
+the unmeasured cases and the monitor applying the provider. Full CTest 128/128. GUI A/B vs main:
+see below.
+
 ## 2026-11-22 — fix(arq): a window shrink no longer orphans the frames in flight (BUG-ARQ-WINDOW-SHRINK-ACK-DROP)
 
 **Broke.** Paired GUI A/B, ITU Good 0 and 3 dB, 4 KB, seeds 64-71, `lowsnr-minus10` vs main: branch 12/16

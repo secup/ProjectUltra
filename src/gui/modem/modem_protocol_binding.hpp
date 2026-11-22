@@ -246,6 +246,9 @@ inline void wireModemToProtocol(ModemEngine& modem,
             const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) {
             return protocol.isToneBurstAckCandidatePlausible(payload);
         });
+    // The candidate floor follows the predicate's selectivity at the span in flight.
+    modem.setToneBurstAckInFlightSpanProvider(
+        [&protocol]() { return protocol.toneBurstAckInFlightSpan(); });
     modem.setToneBurstAckCallback(
         [&protocol](const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& d) {
             protocol.onToneBurstAck(d);

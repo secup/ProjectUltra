@@ -96,6 +96,9 @@ using ToneBurstAckAcceptancePredicate =
 // search); a preamble faded deep at 0 to -5 dB can score under any noise-safe floor (its payload
 // may still decode), the price of not handing noise to a 12-bit CRC. The H0 bound is pinned by
 // ToneBurstAckRoundTrip (noise-only windows never reach the floor).
+// Since 2026-11-22 this is the WIDEST-span floor: a connected monitor lowers it as the protocol
+// predicate gets more selective (fewer frames in flight), inside a false-ACK budget
+// (toneAckNoiseRatioFloorFor, tone_ack_false_alarm.hpp).
 inline constexpr float kCostasNoiseRatioFloor = 2.2f;
 
 class ToneBurstDetector {

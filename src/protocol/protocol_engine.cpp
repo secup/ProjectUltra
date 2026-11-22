@@ -443,6 +443,11 @@ bool ProtocolEngine::isToneBurstAckCandidatePlausible(
     return connection_.isToneBurstAckCandidatePlausible(payload);
 }
 
+size_t ProtocolEngine::toneBurstAckInFlightSpan() const {
+    // Lock-free (an atomic): called on the audio thread every tone-ACK detection pass.
+    return connection_.toneBurstAckInFlightSpan();
+}
+
 void ProtocolEngine::onBurstGroupReceived(uint16_t group_seq,
                                           const std::vector<Bytes>& frames, bool all_ok,
                                           float quality, uint16_t frame_mask,

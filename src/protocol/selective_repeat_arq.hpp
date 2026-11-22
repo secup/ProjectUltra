@@ -282,6 +282,10 @@ public:
     // listen-before-ACK channel gating. Returns true if a keepalive was sent.
     bool keepaliveAckIfStalled(uint32_t threshold_ms);
     uint16_t getTxBaseSeq() const { return tx_base_seq_; }
+    // Seqs sent and not yet cumulatively acknowledged (tx_next - tx_base).
+    size_t txOutstanding() const {
+        return static_cast<size_t>(static_cast<uint16_t>((tx_next_seq_ - tx_base_seq_) & 0xFFFF));
+    }
     // HARQ provisional keys (2026-07-01): the receiver's mirror of the
     // sender's next-burst seq fill = ascending !received seqs in the rx
     // window. The sender fills bursts [unacked holes in window order][new

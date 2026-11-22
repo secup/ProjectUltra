@@ -159,6 +159,7 @@ public:
         const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection);
     bool isToneBurstAckCandidatePlausible(
         const ultra::waveform::tone_burst_ack::ToneBurstAckPayload& payload) const;
+    size_t toneBurstAckInFlightSpan() const;
     void tick(uint32_t elapsed_ms);
 
     // §14.36 Phase 5c live GUI surface: the sender's most recent decode-headroom

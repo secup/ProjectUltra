@@ -1,6 +1,7 @@
 // tone_burst_ack_monitor.cpp — sliding-window ACK detection driver.
 
 #include "tone_burst_ack_monitor.hpp"
+#include "tone_ack_false_alarm.hpp"
 
 #include <cstdlib>
 
@@ -156,6 +157,10 @@ void ToneBurstAckMonitor::feedAudio(const float* samples, size_t count) {
 
 void ToneBurstAckMonitor::runDetectionPass() {
     if (armed_) ++passes_while_armed_;
+    if (span_provider_) {
+        detector_.setNoiseRatioFloor(toneAckNoiseRatioFloorFor(
+            span_provider_(), detector_.frequencyHalfWidthHz(), detector_.diversity()));
+    }
     // GAPLESS armed sweep: advance the high-water mark to the buffer end AFTER
     // this pass's windows are computed (each bin's window below is derived from
     // the PRE-pass hw). A tone straddling the end whose tail hasn't arrived yet

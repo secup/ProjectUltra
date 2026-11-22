@@ -8515,6 +8515,7 @@ void Connection::armToneBurstAckListenWindow(uint32_t explicit_timeout_ms) {
             : arq_.getAckTimeout();
         window_ms = std::max(window_ms, timeout_ms);
     }
+    tone_ack_armed_span_.store(arq_.txOutstanding(), std::memory_order_relaxed);
     on_arm_tone_burst_ack_monitor_(window_ms);
 }
 

@@ -354,6 +354,13 @@ public:
         forEachRxDecoder(
             [&](StreamingDecoder* d) { d->setToneBurstAckAcceptancePredicate(tone_ack_predicate_); });
     }
+    // Frames in flight (the tone-ACK candidate floor follows it, tone_ack_false_alarm.hpp).
+    void setToneBurstAckInFlightSpanProvider(std::function<size_t()> provider) {
+        tone_ack_span_provider_ = std::move(provider);
+        forEachRxDecoder([&](StreamingDecoder* d) {
+            d->setToneBurstAckInFlightSpanProvider(tone_ack_span_provider_);
+        });
+    }
 
     // §15 step 4d-late: arm the receiver's tone-burst ACK monitor for an
     // expected ACK arrival. Connection calls this right after queueing a
@@ -657,6 +664,7 @@ private:
     BurstWindowAnchorCallback burst_window_anchor_cb_;
     ToneBurstAckCallback tone_ack_cb_;
     ToneBurstAckAcceptancePredicate tone_ack_predicate_;
+    std::function<size_t()> tone_ack_span_provider_;
     StreamingDecoder::HarqProvisionalContextCallback harq_context_cb_;
     fec::SoftCombineBuffer* soft_combine_buffer_ = nullptr;
     uint32_t mcdpsk_local_hash_ = 0;

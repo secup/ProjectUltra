@@ -190,6 +190,7 @@ void ModemEngine::applyStoredDecoderSettings(StreamingDecoder* decoder) {
     if (harq_context_cb_) decoder->setHarqProvisionalContextCallback(harq_context_cb_);
     if (tone_ack_cb_) decoder->setToneBurstAckCallback(tone_ack_cb_);
     if (tone_ack_predicate_) decoder->setToneBurstAckAcceptancePredicate(tone_ack_predicate_);
+    if (tone_ack_span_provider_) decoder->setToneBurstAckInFlightSpanProvider(tone_ack_span_provider_);
     decoder->setMcDpskSessionAddresses(mcdpsk_local_hash_, mcdpsk_peer_hash_);
     decoder->setCodecType(codec_type_);
     decoder->setBurstTransportRxEnabled(burst_transport_rx_enabled_);
