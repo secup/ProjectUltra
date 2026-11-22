@@ -58,9 +58,15 @@ int main() {
         for (int i = 0; i < 5; ++i) s.noteFrame(0.6f, SNRSource::MCDPSK_IN_BAND, 0.0f);
         CHECK(s.choose().symbol_ms == 25,
               "an MC-DPSK reading of 0.6 dB (a 5 dB fading channel): the baseline, as before");
+        // MC-DPSK readings sit kMcDpskReadingBelowChannelDb (5.4) under the channel the ACK crosses.
         for (int i = 0; i < 5; ++i) s.noteFrame(-5.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
+        CHECK(s.choose().symbol_ms == 25,
+              "an MC-DPSK reading of -5 dB is a ~0 dB channel: the baseline");
+        for (int i = 0; i < 5; ++i) s.noteFrame(-8.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
+        CHECK(s.choose().symbol_ms == 50, "a reading of -8 dB (channel -2.6): 50 ms");
+        for (int i = 0; i < 5; ++i) s.noteFrame(-11.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
         CHECK(s.choose().symbol_ms == 200,
-              "an MC-DPSK session at -5 dB: lengthened to the 200 ms floor (100 ms needs -6 + 2 dB)");
+              "a reading of -11 dB (channel -5.6, under the 100 ms edge + 2): the 200 ms floor");
         for (int i = 0; i < 5; ++i) s.noteFrame(20.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
         CHECK(s.choose().symbol_ms == 25, "an MC-DPSK reading never shortens below the baseline");
     }

@@ -9052,7 +9052,17 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
         const bool clean = closes_turn && !reports_hole && !tone_ack_turn_loss_context_;
         // -1: no margin test ran (v2 frames): the up-step falls back to the clean run alone.
         const bool upper_margin = rx_mcdpsk_margin_ != 0;
-        const bool changed = mcdpsk_rate_ctl_.observe(rung, clean, upper_margin);
+        // At least half the rung's window decoded (the burst's frames are the sender's window at
+        // that rung; a short last burst only makes this conservative).
+        const size_t window = connection_policy::mcDpskWindowSizeForTiming(
+            connection_policy::mcDpskFrameTiming(rx_mcdpsk_last_modulation_,
+                                                 config_.mc_dpsk_num_carriers,
+                                                 config_.mc_dpsk_samples_per_symbol,
+                                                 data_frame_cw_count_));
+        const bool majority_delivered =
+            window > 1 && 2 * static_cast<size_t>(rx_mcdpsk_frames_since_command_) >= window;
+        const bool changed =
+            mcdpsk_rate_ctl_.observe(rung, clean, upper_margin, majority_delivered);
         rx_mcdpsk_frames_since_command_ = 0;
         rx_mcdpsk_margin_ = -1;
         LOG_MODEM(INFO,

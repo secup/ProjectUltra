@@ -19,6 +19,7 @@
 //   Any other source: the baseline.
 // Lock-free: noteFrame runs on the modem RX path, choose on the protocol's ACK callback (which holds
 // the protocol mutex, so neither may call into the protocol).
+#include "protocol/connection_policy.hpp"  // kMcDpskReadingBelowChannelDb
 #include "protocol/waveform_selection.hpp"  // kFadingAwgnMax
 #include "ultra/types.hpp"                  // SNRSource
 #include "waveform/tone_burst_ack/tone_burst_constants.hpp"
@@ -75,8 +76,13 @@ public:
             c.symbol_ms = waveform::tone_burst_ack::symbolMsForSNR(c.snr_used, c.fading_present);
         } else if (c.source == SNRSource::MCDPSK_IN_BAND) {
             c.fading_present = false;  // the fade-effective reading, AWGN column (see above)
+            // The ACK's edges are on the channel scale; an MC-DPSK reading sits
+            // kMcDpskReadingBelowChannelDb under it on a peak-limited TX (2026-11-22: with the 200 ms
+            // floor, read raw it keyed 6.8 s ACKs at AWGN -2 dB, 845 s vs 731 s for 4 KB, 0 retx).
+            const float on_channel =
+                c.snr_used + protocol::connection_policy::kMcDpskReadingBelowChannelDb;
             c.symbol_ms = std::max(waveform::tone_burst_ack::kBaselineSymbolMs,
-                                   waveform::tone_burst_ack::symbolMsForSNR(c.snr_used, false));
+                                   waveform::tone_burst_ack::symbolMsForSNR(on_channel, false));
         }
         return c;
     }

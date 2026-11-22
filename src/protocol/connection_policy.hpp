@@ -814,6 +814,14 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
 // The rungs share sps, code rate (R1/4) and codewords per frame, so a change is a pure
 // constellation change: frames already cut stay valid (MC-DPSK frames are variable-length, the
 // codeword count rides in each frame's header) and the ARQ geometry is untouched. Slowest first.
+// An MC-DPSK reading's offset from the channel SNR on the production TX path: the DPSK frame (8-carrier
+// sum, h = 6 control clip / h = 0 data clip) averages this far under the transmitter's peak relative to a
+// full-peak tone (GUI gate, --tx-model hardware, 2026-11-22: the DBPSK CONNECT read -5.3/-5.4 dB at a 0 dB
+// channel and 14.2 at 20 dB; the gate's level log put its payload 5.45 dB under the noise reference).
+// 16-FSK readings are reported on the same scale (kMfskOverDbpskReadingDb). Whatever is measured on the
+// channel scale (a crossover, the tone ACK's edges) maps to readings through it.
+inline constexpr float kMcDpskReadingBelowChannelDb = 5.4f;
+
 // 16-FSK (2026-11-22) is the bottom rung: one tone of 16 per symbol time (4 bits, half DBPSK's 8 on
 // the 8-carrier profile), noncoherent and constant envelope, so on a peak-limited transmitter it
 // decodes ~4 dB below DBPSK at the same code rate (tools/lowsnr_floor: 16-FSK R1/4 10/10 at the gate's
@@ -988,9 +996,20 @@ public:
     // Returns true when the command changed. upper_margin: this burst's evidence that the next rung
     // would decode (the receiver's 4x-noise re-decode of its first frame); a clean burst without it
     // does not count toward a probe. Callers with no such test pass true.
-    bool observe(int rung, bool clean, bool upper_margin = true) {
+    // majority_delivered (2026-11-22): a lossy burst that still delivered at least half its frames
+    // stays at its rung - each step halves the rate, so the upper rung pays while it loses under half
+    // a burst. "Down on any loss" dated from v2 frames, where a failed frame took the rest of the
+    // burst with it; compact frames (the default since 2026-11-11) go on past one. With 16-FSK under
+    // DBPSK, any lost DBPSK frame on a fading channel stepped down and back up again (GUI ITU Good
+    // 0 dB, seed 61: five DBPSK <-> 16-FSK cycles, FAIL at 1800 s where main, DBPSK at the bottom,
+    // passed in 1135 s). The streak still resets: a lossy burst is no evidence for an up-step.
+    bool observe(int rung, bool clean, bool upper_margin = true, bool majority_delivered = false) {
         const int before = command_;
         const int at = (rung >= 0) ? rung : command_;
+        if (!clean && majority_delivered && at == command_) {
+            clean_streak_ = 0;
+            return false;
+        }
         if (!clean) {
             clean_streak_ = 0;
             if (at > 0 && at == command_) {
@@ -1713,7 +1732,11 @@ inline LadderRung mcDpskLadderRung(float snr_db, ChannelClassification channel, 
     // (16-FSK is noncoherent; the differential detector loses more as Doppler grows). The receiver's
     // rate commands move the session from there in either direction. (Until a GUI A/B the same night
     // these were -6 / -2.5 on the harness's reading scale: AWGN 0 dB and Good 3 dB started at 16-FSK.)
-    const float mfsk_below_db = (channel == ChannelClassification::AWGN) ? -12.0f : -6.5f;
+    constexpr float kDbpskCrossoverAwgnDb = -6.5f;    // channel SNR, measured (above)
+    constexpr float kDbpskCrossoverFadingDb = -1.0f;
+    const float mfsk_below_db =
+        ((channel == ChannelClassification::AWGN) ? kDbpskCrossoverAwgnDb : kDbpskCrossoverFadingDb) -
+        kMcDpskReadingBelowChannelDb;
     if (snr_db < mfsk_below_db) {
         return ladderRungForId(LadderRungId::ROBUST_LOW);  // 16-FSK R1/4 (deepest fallback)
     }

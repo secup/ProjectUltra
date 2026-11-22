@@ -1285,6 +1285,14 @@ void test_mcdpsk_rate_controller() {
         CHECK(!c.observe(1, true, true) && c.command() == 1, "the run restarts after a no-margin burst");
     }
     CHECK(c.observe(1, true, true) && c.command() == 2, "k0 clean bursts with margin probe");
+    // A lossy burst that still delivered at least half its frames holds the rung (break-even of a
+    // 2x rate step) and resets the streak; a majority loss steps down.
+    c.reset(1, k0);
+    for (int i = 0; i < k0 - 1; ++i) c.observe(1, true);
+    CHECK(!c.observe(1, false, true, /*majority_delivered=*/true) && c.command() == 1,
+          "a partial loss (majority delivered) holds DBPSK");
+    CHECK(!c.observe(1, true) && c.command() == 1, "and resets the clean run");
+    CHECK(c.observe(1, false, true, false) && c.command() == 0, "a majority loss steps down");
     // The backoff is capped.
     c.reset(1, k0);
     for (int round = 0; round < 10; ++round) {
