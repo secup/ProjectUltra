@@ -24,9 +24,11 @@ using protocol::WaveformMode;
 
 namespace {
 
-// Under a sanitizer the DSP runs several times slower than real time: the decode thread cannot keep
-// up with the audio and the decode counts below are not meaningful there (the races still are).
-#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__)
+// Under a sanitizer or coverage instrumentation (-O1 + counters) the DSP runs several times slower
+// than real time: the decode thread cannot keep up with the audio and the decode counts below are
+// not meaningful there (the races still are). Coverage CI 2026-11-22: OFDM phase 0 frames on one
+// run, the same commit passed on the run before.
+#if defined(__SANITIZE_THREAD__) || defined(__SANITIZE_ADDRESS__) || defined(ULTRA_COVERAGE_BUILD)
 constexpr bool kSanitized = true;
 #elif defined(__has_feature)
 #if __has_feature(thread_sanitizer) || __has_feature(address_sanitizer)
