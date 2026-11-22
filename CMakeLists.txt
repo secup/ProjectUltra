@@ -632,17 +632,20 @@ if(ULTRA_BUILD_TOOLS)
 
     # Peak-control Phase 0 (docs/PEAK_CONTROL_DESIGN_2026_11_21.md): clip curves on real
     # ModemEngine::transmitBurst bursts, every wideband rung. Measurement only.
-    add_executable(peak_control_measure
-        tools/peak_control_measure.cpp
-        ${ULTRA_MODEM_ENGINE_SOURCES}
-    )
-    target_include_directories(peak_control_measure PRIVATE
+    # The ModemEngine source set compiled ONCE for every measurement tool that drives the real
+    # engine (each tool used to recompile it: the largest translation units in the tree, and
+    # two or three parallel copies starved the CI Linux runner, 2026-11-22).
+    add_library(ultra_modem_engine_tools STATIC ${ULTRA_MODEM_ENGINE_SOURCES})
+    target_include_directories(ultra_modem_engine_tools PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
         ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
     )
-    target_link_libraries(peak_control_measure PRIVATE ultra_core ota_channel_core)
+    target_link_libraries(ultra_modem_engine_tools PUBLIC ultra_core ota_channel_core)
+
+    add_executable(peak_control_measure tools/peak_control_measure.cpp)
+    target_link_libraries(peak_control_measure PRIVATE ultra_modem_engine_tools)
     # Low-SNR M-FSK feasibility on a peak-limited TX (production LDPC + SimulatedChannel).
     add_executable(mfsk_proto tools/mfsk_proto.cpp)
     target_include_directories(mfsk_proto PRIVATE
@@ -651,17 +654,8 @@ if(ULTRA_BUILD_TOOLS)
     )
     target_link_libraries(mfsk_proto PRIVATE ultra_core ota_channel_core)
     # Low-SNR frame decode rate through the production encoder/decoder (peak-limited TX).
-    add_executable(lowsnr_floor
-        tools/lowsnr_floor.cpp
-        ${ULTRA_MODEM_ENGINE_SOURCES}
-    )
-    target_include_directories(lowsnr_floor PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/tools
-        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
-    )
-    target_link_libraries(lowsnr_floor PRIVATE ultra_core ota_channel_core)
+    add_executable(lowsnr_floor tools/lowsnr_floor.cpp)
+    target_link_libraries(lowsnr_floor PRIVATE ultra_modem_engine_tools)
 
     add_executable(channel_discriminator_probe
         tools/channel_discriminator_probe.cpp
