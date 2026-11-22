@@ -16,6 +16,7 @@
 #include <cmath>
 #include <random>
 #include <cstdlib>
+#include "env_compat.hpp"
 #include <string>
 #include <vector>
 

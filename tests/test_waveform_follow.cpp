@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include "env_compat.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iostream>

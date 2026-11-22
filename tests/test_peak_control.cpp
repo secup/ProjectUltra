@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <cstdlib>
+#include "env_compat.hpp"
 #include <complex>
 #include <cstdio>
 #include <random>
