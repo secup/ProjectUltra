@@ -511,8 +511,11 @@ jobs:
 
       - name: Build (Linux/macOS)
         if: runner.os != 'Windows'
+        # A bare --parallel is UNBOUNDED under Makefiles: harmless while every object is a ccache
+        # hit (17 s builds), but a real rebuild launched every compile at once and the Linux runner
+        # ran out of memory and was killed four runs in a row (2026-11-22). One job per CPU.
         run: |
-          cmake --build build --parallel
+          cmake --build build --parallel "$(nproc 2>/dev/null || sysctl -n hw.ncpu)"
           ccache --show-stats
 
       - name: Save ccache
