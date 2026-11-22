@@ -49,8 +49,15 @@ Plumbing:
 - Without a provider (tools, standalone users) the floor stays at 2.2.
 
 **Verified.** CTest `ToneAckFalseAlarm` checks the predicate geometry, the floor rule and budget,
-the unmeasured cases and the monitor applying the provider. Full CTest 128/128. GUI A/B vs main:
-see below.
+the unmeasured cases and the monitor applying the provider. Full CTest 128/128. GUI A/B, paired seeds,
+new build vs main (7d81f48a), `--tx-model hardware`, 7.3 Hz:
+- AWGN -12 dB, 1 KB, seeds 41/42: **581/566 s vs 709/666 s** (-16 %).
+- AWGN -10 dB, 3 seeds: 501/500/506 vs 501/500/501 s, identical; the ACK was not the limit there.
+- ITU Good -8 dB, 1 KB, 7 seeds: mean 754 vs 723 s over 6 pairs (paired difference +31 +- 43 s, noise).
+  Seed 44 failed identically in both arms (no PONG after 5 PINGs, before any ACK).
+- ITU Good 0 dB, 4 KB, 2 seeds: 1049/1019 vs 900/1100 s, noise.
+- AWGN 20 dB: 48 s / 1400 bps vs 48 s / 1410. ITU Good 12 dB: 83 s / 580 bps vs 83 s / 580.
+- Zero fabricated or outside-window ACK drops in every run of both arms.
 
 ## 2026-11-22 — fix(arq): a window shrink no longer orphans the frames in flight (BUG-ARQ-WINDOW-SHRINK-ACK-DROP)
 
