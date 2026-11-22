@@ -415,7 +415,7 @@ DetectAndDecodeResult ToneBurstDetector::detectAndDecode(SampleSpan samples,
         result.strongest_candidate_noise_ratio = std::max(result.strongest_candidate_noise_ratio, z);
     }
     auto noiseFloorFor = [&](int hyp) {
-        return kCostasNoiseRatioFloor * static_cast<float>(noise_by_hyp[static_cast<size_t>(hyp)]);
+        return noise_ratio_floor_ * static_cast<float>(noise_by_hyp[static_cast<size_t>(hyp)]);
     };
 
     // Timing hypotheses = the LOCAL MAXIMA of the coarse Costas statistic, one per correlation

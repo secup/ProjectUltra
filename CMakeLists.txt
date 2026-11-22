@@ -603,6 +603,10 @@ if(ULTRA_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
     target_link_libraries(measure_ack_staircase PRIVATE ultra_core ota_channel_core)
+    # Tone-ACK false-alarm measurement on noise only (the detector's candidate floor and CRC-12).
+    add_executable(ack_noise_h0 tools/ack_noise_h0.cpp)
+    target_include_directories(ack_noise_h0 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(ack_noise_h0 PRIVATE ultra_core)
 
     add_executable(measure_ack_fer
         tools/measure_ack_fer.cpp

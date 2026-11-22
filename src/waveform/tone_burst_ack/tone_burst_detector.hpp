@@ -124,6 +124,10 @@ public:
         freq_halfwidth_hz_ = (halfwidth_hz > 0.0f) ? halfwidth_hz : 0.0f;
     }
     float frequencyPriorHz() const { return freq_prior_hz_; }
+    // Candidate floor in units of the noise-only expectation (default kCostasNoiseRatioFloor).
+    // Measurement hook: tools/ack_noise_h0 sweeps it on noise; production keeps the default.
+    void setNoiseRatioFloor(float floor) { noise_ratio_floor_ = floor > 0.0f ? floor : kCostasNoiseRatioFloor; }
+    float noiseRatioFloor() const { return noise_ratio_floor_; }
     float frequencyHalfWidthHz() const { return freq_halfwidth_hz_; }
     // Half a Goertzel bin, 1 / (2 T): the hypothesis spacing.
     static float frequencyHypothesisStepHz(uint32_t symbol_ms) {
@@ -190,6 +194,7 @@ private:
     float freq_prior_hz_ = 0.0f;
     float shift_hz_ = 0.0f;  // band plan shift of every tone
     float freq_halfwidth_hz_ = 0.0f;
+    float noise_ratio_floor_ = kCostasNoiseRatioFloor;
 };
 
 }  // namespace tone_burst_ack
