@@ -1073,6 +1073,9 @@ private:
     // A burst's first frame failed at the DPSK rungs with data energy: the next pass waits for a
     // 16-FSK frame's span (mcDpskControlPeekSamples) and tries every rung again.
     bool mc_mfsk_lookahead_pending_ = false;
+    // Consecutive connected MC-DPSK burst starts whose first frame decoded at no rung (reset by a
+    // decoded first frame): the 16-FSK look-ahead is armed from the second (mcDpskMfskLookaheadWanted).
+    int mc_first_frame_failures_in_row_ = 0;
     DecodeResult decodeMCDPSKFrameImpl(const std::vector<float>& soft_bits,
                                         CodeRate rate, size_t bytes_per_cw,
                                         float snr, float cfo);

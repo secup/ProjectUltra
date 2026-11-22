@@ -295,6 +295,49 @@ bool runLostFrameReport() {
 // frames; optionally the middle frame replaced by noise (frames 1 and 3 must still decode: the
 // frame length is fixed, so a failure no longer ends the burst); optionally sent at DQPSK to a
 // receiver configured for DBPSK.
+// A sender that dropped to 16-FSK under a DBPSK receiver: it does so only on its second silent timeout
+// in a row, so the receiver arms its 16-FSK look-ahead from its second consecutive failed burst start
+// (StreamingDecoder::mcDpskMfskLookaheadWanted). Three 16-FSK bursts: at least the third decodes.
+bool runMfskBurstsAtDbpskReceiver() {
+    const uint32_t alpha = v2::hashCallsign("ALPHA");
+    const uint32_t bravo = v2::hashCallsign("BRAVO");
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(Modulation::MFSK16, CodeRate::R1_4);
+    encoder.setFixedFrameCodewords(3);
+    encoder.setMcDpskCompactFrames(true);
+    std::vector<float> air(48000, 0.0f);
+    for (uint16_t b = 0; b < 3; ++b) {
+        Bytes payload(52, static_cast<uint8_t>(0x21 + b));
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(400 + b),
+                                             payload, CodeRate::R1_4);
+        const auto burst = encoder.encodeBurstLight({frame.serialize()});
+        air.insert(air.end(), burst.begin(), burst.end());
+        air.resize(air.size() + 4 * 48000, 0.0f);  // the ACK turn
+    }
+    air.resize(air.size() + 12 * 48000, 0.0f);
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("TEST");
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
+    decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    decoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    decoder.setFixedFrameCodewords(3);
+    decoder.setMcDpskSessionAddresses(bravo, alpha);
+    feedInChunks(decoder, air);
+    std::vector<uint16_t> seqs;
+    while (decoder.hasFrame()) {
+        auto r = decoder.getFrame();
+        if (!r.success || !v2::isDataFrame(r.frame_type)) continue;
+        if (auto f = v2::DataFrame::deserialize(r.frame_data)) seqs.push_back(f->seq);
+    }
+    const bool ok = !seqs.empty() && seqs.back() == 402;
+    std::cout << (ok ? "" : "FAIL: ") << "16-FSK bursts at a DBPSK receiver: " << seqs.size()
+              << " decoded" << (seqs.empty() ? "" : ", last seq ") << (seqs.empty() ? 0 : seqs.back())
+              << "\n";
+    return ok;
+}
+
 bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle,
                      Modulation rx_mod = Modulation::DBPSK, uint16_t n_frames = 3) {
     const uint32_t alpha = v2::hashCallsign("ALPHA");
@@ -772,8 +815,7 @@ int main() {
             protocol::connection_policy::mcDpskFrameTiming(Modulation::MFSK16, 8, 1024, 3)));
     if (!runCompactBurst("compact 16-FSK burst at a 16-FSK receiver", Modulation::MFSK16, false,
                          Modulation::MFSK16, mfsk_window)) return 1;
-    if (!runCompactBurst("compact 16-FSK burst at a DBPSK receiver", Modulation::MFSK16, false,
-                         Modulation::DBPSK, mfsk_window)) return 1;
+    if (!runMfskBurstsAtDbpskReceiver()) return 1;
     if (!runCompactBurstPhysicalPerFrame(Modulation::DBPSK, Modulation::DBPSK)) return 1;
     if (!runCompactBurstPhysicalPerFrame(Modulation::DQPSK, Modulation::DBPSK)) return 1;
     if (!runMarginTest(20.0f, true)) return 1;

@@ -2239,6 +2239,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         if (mcDpskCompactActive()) {
             if (auto compact = decodeMcDpskCompactFirstFrame(frame_buffer, decode_cfo, soft_bits)) {
                 mc_mfsk_lookahead_pending_ = false;
+                mc_first_frame_failures_in_row_ = 0;
                 // Evidence for the receiver's up-step, before the frame (and the burst's ACK) is
                 // delivered: only at a rung with one above it.
                 const int rung = protocol::connection_policy::mcDpskRungIndexFor(
@@ -2264,6 +2265,9 @@ void StreamingDecoder::decodeCurrentFrame() {
         }
         mc_mfsk_lookahead_pending_ = false;
         retryMcDpskFirstFrameConstellation(frame_buffer, decode_cfo, soft_bits, frame_sync_abs);
+        if (mcDpskCompactActive() && !mcDpskCw0IsFrameHeader(soft_bits, code_rate_)) {
+            ++mc_first_frame_failures_in_row_;
+        }
     }
     if (soft_bits.empty()) {
         LOG_MODEM(DEBUG, "[%s] getSoftBits() returned empty", log_prefix_.c_str());
@@ -4192,6 +4196,14 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
     const size_t mfsk_span =
         static_cast<size_t>(mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
     if (frame_buffer.size() >= mfsk_span) {
+        return false;
+    }
+    // A sender drops into 16-FSK only on its second silent timeout in a row
+    // (Connection::maybeFallBackMcDpskRungOnTimeout) or on this receiver's command, which configures
+    // this waveform to 16-FSK first. Before two consecutive burst starts failed here no 16-FSK frame
+    // can be on the air: a first frame lost in a fade must not wait ~5 s more for a 16-FSK span (GUI
+    // ITU Good 3 dB: 18 such waits in a 4 KB transfer, 1078 s vs main's 877).
+    if (mc_first_frame_failures_in_row_ < 2) {
         return false;
     }
     if (mcDpskBurstProvenByChirp()) {
