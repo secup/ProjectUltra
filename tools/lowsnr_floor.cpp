@@ -52,8 +52,8 @@ static int runConnect(int trials, float cfo, ota_channel_core::ChannelType ch_ty
         if (only_mfsk >= 0 && mfsk != only_mfsk) continue;
         auto cfg = ultra::mc_dpsk_presets::level8();
         cfg.samples_per_symbol = 1024;
-        std::vector<int> ok(snrs.size(), 0), via_mfsk(snrs.size(), 0);
-        std::vector<double> snr_sum(snrs.size(), 0.0);
+        std::vector<int> ok(snrs.size(), 0), via_mfsk(snrs.size(), 0), nfade(snrs.size(), 0);
+        std::vector<double> snr_sum(snrs.size(), 0.0), fade_sum(snrs.size(), 0.0);
         double air = 0;
         for (size_t si = 0; si < snrs.size(); ++si) {
             for (int t = 1; t <= trials; ++t) {
@@ -111,6 +111,7 @@ static int runConnect(int trials, float cfo, ota_channel_core::ChannelType ch_ty
                 while (dec.hasFrame()) {
                     auto r = dec.getFrame();
                     if (r.success && v2::isConnectFrame(r.frame_type)) {
+                        if (dec.hasLastFadingIndex()) { fade_sum[si] += dec.getLastFadingIndex(); ++nfade[si]; }
                         ++ok[si];
                         via_mfsk[si] += r.handshake_mfsk;
                         snr_sum[si] += r.has_mcdpsk_data_aided_snr_db ? r.mcdpsk_data_aided_snr_db : -99;
@@ -125,6 +126,8 @@ static int runConnect(int trials, float cfo, ota_channel_core::ChannelType ch_ty
         for (int v : via_mfsk) std::printf(" %d", v);
         std::printf(")  reading:");
         for (size_t i = 0; i < snrs.size(); ++i) std::printf(" %.1f", ok[i] ? snr_sum[i] / ok[i] : -99.0);
+        std::printf("  fading:");
+        for (size_t i = 0; i < snrs.size(); ++i) std::printf(" %.2f", nfade[i] ? fade_sum[i] / nfade[i] : -1.0);
         std::printf("\n");
         std::fflush(stdout);
     }

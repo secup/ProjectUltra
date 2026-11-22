@@ -172,6 +172,8 @@ private:
     bool pending_mfsk_snr_valid_ = false;
     float pending_mfsk_snr_db_ = 0.0f;
     float pending_mfsk_fading_index_ = 0.0f;
+    bool mfsk_fading_override_valid_ = false;
+    float mfsk_fading_override_ = 0.0f;
     bool last_data_aided_snr_valid_ = false;
     float last_cfo_ = 0.0f;
 };

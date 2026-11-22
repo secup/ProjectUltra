@@ -718,23 +718,63 @@ public:
                 soft_bits.push_back(static_cast<float>(std::clamp(l0 - l1, -20.0, 20.0)));
             }
         }
-        // Per-tone mean amplitude (frequency selectivity) and the decided tone's amplitude track
-        // over time (temporal variation): the fading index's two inputs, as for the carriers.
-        carrier_magnitudes_.assign(m_sz, 0.0f);
-        double t_sum = 0.0, t_sq = 0.0;
-        for (size_t s = 0; s < nsym; ++s) {
-            size_t best = 0;
-            for (size_t m = 0; m < m_sz; ++m) {
-                carrier_magnitudes_[m] += static_cast<float>(amp[s * m_sz + m] / static_cast<double>(nsym));
-                if (post[s * m_sz + m] > post[s * m_sz + best]) best = m;
+        // Fading index, noise-corrected. At the decided tone E = |a + n|^2 with n ~ CN(0, s2): without
+        // fading E has mean a^2 + s2 and variance 2 a^2 s2 + s2^2. Only the variance beyond that is the
+        // channel's. Temporal: the excess variance of E over the frame (confident symbols only, so a
+        // wrong tone decision is not read as a fade), as an amplitude CV ~ power CV / 2. Frequency:
+        // the per-tone mean powers' spread beyond their estimation variance. At low SNR the raw
+        // amplitude spread is all noise: uncorrected, AWGN read 0.55-0.8 (a fading class) at -4..-10 dB
+        // (GUI 2026-11-22), which moved the connect pick to its fading threshold.
+        {
+            std::vector<double> tone_sum(m_sz, 0.0);
+            std::vector<int> tone_n(m_sz, 0);
+            double e_sum = 0.0, e_sq = 0.0;
+            int n_conf = 0;
+            for (size_t s = 0; s < nsym; ++s) {
+                size_t best = 0;
+                for (size_t m = 1; m < m_sz; ++m) {
+                    if (post[s * m_sz + m] > post[s * m_sz + best]) best = m;
+                }
+                if (post[s * m_sz + best] < 0.9) continue;
+                const double e = E[s * m_sz + best];
+                e_sum += e;
+                e_sq += e * e;
+                ++n_conf;
+                tone_sum[best] += e;
+                ++tone_n[best];
             }
-            t_sum += amp[s * m_sz + best];
-            t_sq += amp[s * m_sz + best] * amp[s * m_sz + best];
+            temporal_fading_index_ = 0.0f;
+            carrier_magnitudes_.assign(m_sz, 0.0f);
+            if (n_conf >= 8) {
+                const double mean_e = e_sum / n_conf;
+                const double a2_hat = std::max(mean_e - s2, 1e-3 * s2);
+                const double noise_var = 2.0 * a2_hat * s2 + s2 * s2;
+                const double var_e = std::max(0.0, e_sq / n_conf - mean_e * mean_e);
+                const double fade_var = std::max(0.0, var_e - noise_var);
+                temporal_fading_index_ = static_cast<float>(0.5 * std::sqrt(fade_var) / a2_hat);
+                // Per-tone mean power minus the noise, shrunk toward the frame mean by its estimation
+                // variance (tones seen few times carry little evidence).
+                double tone_var_sum = 0.0, est_var_sum = 0.0;
+                int tones_used = 0;
+                for (size_t m = 0; m < m_sz; ++m) {
+                    if (tone_n[m] < 2) continue;
+                    const double p_m = tone_sum[m] / tone_n[m] - s2;
+                    tone_var_sum += (p_m - a2_hat) * (p_m - a2_hat);
+                    est_var_sum += noise_var / tone_n[m];
+                    ++tones_used;
+                }
+                const double freq_cv =
+                    tones_used >= 3
+                        ? std::sqrt(std::max(0.0, (tone_var_sum - est_var_sum) / tones_used)) / a2_hat
+                        : 0.0;
+                // carrier_magnitudes_ feeds getFrequencyFadingIndex() (CV of its entries): encode the
+                // corrected power CV as amplitudes 1 +- cv/2 alternating, which have exactly that CV.
+                for (size_t m = 0; m < m_sz; ++m) {
+                    carrier_magnitudes_[m] =
+                        static_cast<float>(1.0 + ((m % 2) ? 0.5 : -0.5) * freq_cv);
+                }
+            }
         }
-        const double t_mean = t_sum / static_cast<double>(nsym);
-        temporal_fading_index_ = t_mean > 0.0
-            ? static_cast<float>(std::sqrt(std::max(0.0, t_sq / static_cast<double>(nsym) - t_mean * t_mean)) / t_mean)
-            : 0.0f;
         // Data-aided in-band SNR: Es/N0 = a^2 / s2 per symbol, over the 2900 Hz in-band noise
         // bandwidth of the DPSK estimators.
         constexpr double kInBandNoiseBandwidthHz = 2900.0;

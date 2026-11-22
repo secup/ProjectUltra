@@ -203,6 +203,7 @@ bool MCDPSKWaveform::process(SampleSpan samples) {
     // looking for chirp in the samples
     LOG_MODEM(DEBUG, "MCDPSKWaveform: process: setting CFO=%.1f Hz in demodulator", cfo_hz_);
     demodulator_->setChirpDetected(cfo_hz_);
+    mfsk_fading_override_valid_ = false;
     if (!config_.isMfsk()) {
         last_frame_samples_.assign(samples.begin(), samples.end());
     }
@@ -268,6 +269,8 @@ void MCDPSKWaveform::adoptPendingMfskReading(float reading_offset_db) {
     }
     last_data_aided_snr_valid_ = true;
     last_data_aided_snr_ = pending_mfsk_snr_db_ - reading_offset_db;
+    mfsk_fading_override_valid_ = true;
+    mfsk_fading_override_ = pending_mfsk_fading_index_;
     pending_mfsk_snr_valid_ = false;
 }
 
@@ -428,6 +431,11 @@ int MCDPSKWaveform::getDataOnlySamplesForCWCount(int num_cw) const {
 }
 
 float MCDPSKWaveform::getFadingIndex() const {
+    // A frame that decoded as the M-FSK handshake frame reports the M-FSK demodulation's index: the
+    // DPSK pass read the hopping tones as eight carriers fading in and out (1.3 on AWGN).
+    if (mfsk_fading_override_valid_) {
+        return mfsk_fading_override_;
+    }
     if (demodulator_) {
         return demodulator_->getFadingIndex();
     }

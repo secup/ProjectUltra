@@ -477,7 +477,13 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   static_cast<long long>(now_us), samples.size());
     }
     auto processed = postProcessTx(samples);
-    if (!is_ofdm) applyControlPeakControl(processed);
+    // A 16-FSK frame (the M-FSK handshake frame, or a session frame at the 16-FSK rung) is constant-
+    // envelope: the clip has no crest to trade, and its band limit rings at the frame's transitions
+    // (GUI 2026-11-22: crest 2.28 -> 2.28 dB, peak 0.80 -> 0.97, so the hardware TX path scaled the
+    // payload ~1.7 dB down).
+    const bool constant_envelope = streaming_encoder_->lastFrameWasHandshakeMfsk() ||
+                                   tx_modulation == Modulation::MFSK16;
+    if (!is_ofdm && !constant_envelope) applyControlPeakControl(processed);
     if (is_ofdm && streaming_decoder_) {
         const size_t turn_samples =
             static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
