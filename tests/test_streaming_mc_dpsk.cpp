@@ -3,6 +3,7 @@
 #include "gui/modem/streaming_encoder.hpp"
 #include "ota_channel_core/channel.hpp"
 #include "protocol/frame_v2.hpp"
+#include "protocol/connection_policy.hpp"
 #include "ultra/logging.hpp"
 
 #include <algorithm>
@@ -294,7 +295,8 @@ bool runLostFrameReport() {
 // frames; optionally the middle frame replaced by noise (frames 1 and 3 must still decode: the
 // frame length is fixed, so a failure no longer ends the burst); optionally sent at DQPSK to a
 // receiver configured for DBPSK.
-bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
+bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle,
+                     Modulation rx_mod = Modulation::DBPSK, uint16_t n_frames = 3) {
     const uint32_t alpha = v2::hashCallsign("ALPHA");
     const uint32_t bravo = v2::hashCallsign("BRAVO");
     StreamingEncoder encoder;
@@ -304,7 +306,7 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
     encoder.setFixedFrameCodewords(3);
     encoder.setMcDpskCompactFrames(true);
     std::vector<Bytes> serialized_frames;
-    for (uint16_t i = 0; i < 3; ++i) {
+    for (uint16_t i = 0; i < n_frames; ++i) {
         Bytes payload(52);
         for (size_t j = 0; j < payload.size(); ++j) payload[j] = static_cast<uint8_t>(0x11 * (i + 1) + j);
         auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(300 + i),
@@ -313,11 +315,12 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
         serialized_frames.push_back(frame.serialize());
     }
     auto samples = encoder.encodeBurstLight(serialized_frames);
-    // DBPSK and DQPSK frames: 3 x 648 air bits on 8 carriers.
-    const size_t frame_samples = static_cast<size_t>(
-        ((3 * 648 + 8 * (tx_mod == Modulation::DBPSK ? 1 : 2) - 1) /
-         (8 * (tx_mod == Modulation::DBPSK ? 1 : 2))) * 1024);
-    if (samples.size() <= 3 * frame_samples) {
+    // 3 x 648 air bits per frame: on 8 carriers (DBPSK, DQPSK) or 4 bits per symbol time (16-FSK).
+    const size_t bits_per_symbol_time =
+        protocol::connection_policy::mcDpskBitsPerSymbolTime(tx_mod, 8);
+    const size_t frame_samples =
+        ((3 * 648 + bits_per_symbol_time - 1) / bits_per_symbol_time) * 1024;
+    if (samples.size() <= n_frames * frame_samples) {
         std::cout << "FAIL: " << name << ": burst shorter than three frames\n";
         return false;
     }
@@ -337,7 +340,7 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
     decoder.setLogPrefix("TEST");
     decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
     decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
-    decoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    decoder.setDataMode(rx_mod, CodeRate::R1_4);
     decoder.setFixedFrameCodewords(3);
     decoder.setMcDpskSessionAddresses(bravo, alpha);
     int lost = 0;
@@ -351,7 +354,7 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
         }
     });
     feedInChunks(decoder, withSilence(samples));
-    if (!corrupt_middle &&
+    if (!corrupt_middle && n_frames == 3 &&
         (air_remaining_at_frame.size() != 3 || air_remaining_at_frame[0] == 0 ||
          air_remaining_at_frame[1] == 0 || air_remaining_at_frame[2] != 0)) {
         std::cout << "FAIL: " << name << ": burst air end not published per frame (";
@@ -372,15 +375,17 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle) {
             return false;
         }
         const auto expect = v2::DataFrame::deserialize(serialized_frames[frame->seq - 300]);
-        if (frame->seq < 300 || frame->seq > 302 || !expect || frame->payload != expect->payload ||
+        if (frame->seq < 300 || frame->seq >= 300 + n_frames || !expect || frame->payload != expect->payload ||
             frame->src_hash != alpha || frame->dst_hash != bravo) {
             std::cout << "FAIL: " << name << ": frame " << frame->seq << " does not match\n";
             return false;
         }
         seqs.push_back(frame->seq);
     }
-    const std::vector<uint16_t> want = corrupt_middle ? std::vector<uint16_t>{300, 302}
-                                                      : std::vector<uint16_t>{300, 301, 302};
+    std::vector<uint16_t> want;
+    for (uint16_t i = 0; i < n_frames; ++i) {
+        if (!(corrupt_middle && i == 1)) want.push_back(static_cast<uint16_t>(300 + i));
+    }
     if (seqs != want || (corrupt_middle && lost != 1) || (!corrupt_middle && lost != 0)) {
         std::cout << "FAIL: " << name << ": decoded " << seqs.size() << " frame(s), " << lost
                   << " loss report(s)\n";
@@ -758,6 +763,17 @@ int main() {
     if (!runCompactBurst("compact burst", Modulation::DBPSK, false)) return 1;
     if (!runCompactBurst("compact burst, middle frame lost", Modulation::DBPSK, true)) return 1;
     if (!runCompactBurst("compact DQPSK burst at a DBPSK receiver", Modulation::DQPSK, false)) return 1;
+    // 16-FSK, the bottom rung (2026-11-22): at a receiver commanded there (its peek must cover a
+    // 486-symbol frame), and at a DBPSK receiver (the sender's timeout dropped it one rung: the
+    // first frame fails in the DPSK-sized window and the receiver waits for a 16-FSK span).
+    // A 16-FSK frame (3 codewords) is 10.4 s on air: the timing-derived window is one frame.
+    const uint16_t mfsk_window = static_cast<uint16_t>(
+        protocol::connection_policy::mcDpskWindowSizeForTiming(
+            protocol::connection_policy::mcDpskFrameTiming(Modulation::MFSK16, 8, 1024, 3)));
+    if (!runCompactBurst("compact 16-FSK burst at a 16-FSK receiver", Modulation::MFSK16, false,
+                         Modulation::MFSK16, mfsk_window)) return 1;
+    if (!runCompactBurst("compact 16-FSK burst at a DBPSK receiver", Modulation::MFSK16, false,
+                         Modulation::DBPSK, mfsk_window)) return 1;
     if (!runCompactBurstPhysicalPerFrame(Modulation::DBPSK, Modulation::DBPSK)) return 1;
     if (!runCompactBurstPhysicalPerFrame(Modulation::DQPSK, Modulation::DBPSK)) return 1;
     if (!runMarginTest(20.0f, true)) return 1;

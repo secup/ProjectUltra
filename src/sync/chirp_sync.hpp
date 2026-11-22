@@ -829,9 +829,15 @@ private:
                      samples.size(), best_corr, best_pos, rms_start, rms_mid);
         }
 
-        // The fixed threshold stays the floor; the noise-referenced one rules only where the noise
-        // in the chirp's band would otherwise put its peaks above it (a narrow IF filter).
-        if (best_corr < std::max(threshold, noise_floor)) {
+        // The noise-referenced threshold decides wherever it can be measured (>= 64 cells): it is
+        // the level this window's own noise reaches about once per hour, whatever filter shaped it.
+        // The fixed threshold applies only to a window too short to measure (noise_floor 0). Until
+        // 2026-11-22 the fixed 0.15 stayed a floor under it: a wideband chirp reads ~0.16-0.20 at
+        // -10 dB in-band behind a radio's IF filter (noise-referenced level ~0.11 there), so the
+        // weaker of a dual chirp's two halves fell under 0.15 and a -10 dB PONG was never heard
+        // (GUI AWGN -10 dB seeds 42/43: up 0.164-0.169, down under 0.15).
+        const float accept = (noise_floor > 0.0f) ? noise_floor : threshold;
+        if (best_corr < accept) {
             if (best_corr >= threshold) {
                 static std::atomic<uint32_t> refused{0};
                 const uint32_t n = ++refused;

@@ -4195,8 +4195,7 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
     }
     const size_t data_start = static_cast<size_t>(
         std::max(0, mc->getMinSamplesForCWCount(1) - mc->getDataOnlySamplesForCWCount(1)));
-    if (!(sync_noise_ref_rms_ > 0.0f) || sync_noise_ref_samples_ == 0 ||
-        frame_buffer.size() <= data_start + 200) {
+    if (frame_buffer.size() <= data_start + 200) {
         return false;
     }
     FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
@@ -4208,11 +4207,15 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
         const float y = band.process(frame_buffer[i]);
         sum_sq += static_cast<double>(y) * static_cast<double>(y);
     }
+    const double window_power = sum_sq / static_cast<double>(measured);
+    if (!(sync_noise_ref_rms_ > 0.0f) || sync_noise_ref_samples_ == 0) {
+        // The inter-chirp gap read digital silence (no noise reference): any energy is signal.
+        return window_power > 0.0;
+    }
     const double noise_power =
         static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
-    return !frame_policy::inBandPowerReadsAsNoise(sum_sq / static_cast<double>(measured), measured,
-                                                  noise_power, sync_noise_ref_samples_, 2900.0,
-                                                  48000.0);
+    return !frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
+                                                  sync_noise_ref_samples_, 2900.0, 48000.0);
 }
 
 size_t StreamingDecoder::mcDpskControlPeekSamples() const {
@@ -4226,6 +4229,10 @@ size_t StreamingDecoder::mcDpskControlPeekSamples() const {
             for (const int cw : mcDpskCompactCodewordHypotheses()) {
                 longest = std::max(longest, mc->getSamplesForCWCountAtDbpsk(cw));
             }
+            // A frame at the configured rung itself: 16-FSK's is the longest (GUI 2026-11-22, AWGN
+            // -8 dB: a receiver commanded to 16-FSK peeked a 4-codeword DBPSK span, 324 symbols, at
+            // 486-symbol 16-FSK frames and lost every one).
+            longest = std::max(longest, mc->getMinSamplesForCWCount(mcDpskCompactCodewords()));
             if (mc_mfsk_lookahead_pending_) {
                 longest = std::max(longest, mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
             }
