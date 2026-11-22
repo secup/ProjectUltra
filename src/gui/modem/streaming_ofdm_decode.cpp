@@ -4126,7 +4126,8 @@ void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<floa
         const double window_power = sum_sq / static_cast<double>(measured);
         const double noise_power =
             static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
-        if (!frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
+        if (mcDpskBurstProvenByChirp() ||
+            !frame_policy::inBandPowerReadsAsNoise(window_power, measured, noise_power,
                                                    sync_noise_ref_samples_, 2900.0, 48000.0)) {
             noteMcDpskFrameLost(-1);
             if (mcDpskCompactActive() &&
@@ -4192,6 +4193,9 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
         static_cast<size_t>(mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
     if (frame_buffer.size() >= mfsk_span) {
         return false;
+    }
+    if (mcDpskBurstProvenByChirp()) {
+        return true;
     }
     const size_t data_start = static_cast<size_t>(
         std::max(0, mc->getMinSamplesForCWCount(1) - mc->getDataOnlySamplesForCWCount(1)));

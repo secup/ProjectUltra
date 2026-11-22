@@ -50,7 +50,8 @@
 #include "sync/sco_tracker.hpp"       // ScoTracker — session clock-drift model for member slicing
 #include "frame_demodulator.hpp"      // FrameDemodulator — per-frame demod stage(s) (refactor §7 C-FD)
 #include "frame_decoder.hpp"          // FrameDecoder — soft-bits→frame FEC decode (refactor §7 C-FDec)
-#include "streaming_decode_policy.hpp"  // commandedGeometryEnabled / cadence constant
+#include "streaming_decode_policy.hpp"
+#include "streaming_frame_policy.hpp"  // commandedGeometryEnabled / cadence constant
 #include "protocol/waveform_selection.hpp"  // kRungIdx* canonical rung indices
 #include <array>
 #include <vector>
@@ -1059,6 +1060,16 @@ private:
                                     CodeRate rate, size_t bytes_per_cw,
                                     float snr, float cfo);
     bool mcDpskMfskLookaheadWanted(const std::vector<float>& frame_buffer) const;
+    // A connected MC-DPSK session's frame was a real burst: its dual chirp cleared the
+    // noise-referenced detector (about one false lock per hour of noise) at a spacing inside the
+    // acquisition range, and nothing else in a session carries a chirp (no PING, tone ACKs have
+    // none). Below ~-7 dB the data-energy test cannot tell: its noise reference is the 80 ms
+    // inter-chirp gap, whose spread needs a ~20 % power excess (GUI AWGN -8 dB, 2026-11-22: every
+    // failed DBPSK probe read as "no frame", so the receiver kept commanding it).
+    bool mcDpskBurstProvenByChirp() const {
+        return connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
+               streaming_frame_policy::chirpSignatureReal(sync_correlation_, sync_chirp_cfo_hz_);
+    }
     // A burst's first frame failed at the DPSK rungs with data energy: the next pass waits for a
     // 16-FSK frame's span (mcDpskControlPeekSamples) and tries every rung again.
     bool mc_mfsk_lookahead_pending_ = false;
