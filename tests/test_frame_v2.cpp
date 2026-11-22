@@ -149,7 +149,7 @@ void test_channel_report_and_quantizers() {
         assert(std::strcmp(flutter.getConditionName(), "Flutter") == 0);
 
         assert(encodeSNR(-99.0f) == 0);
-        assert(std::abs(decodeSNR(0) + 10.0f) < 0.001f);
+        assert(std::abs(decodeSNR(0) - kSnrByteFloorDb) < 0.001f);  // -20 dB since 2026-11-22
         assert(encodeSNR(99.0f) == 255);
         assert(std::abs(decodeSNR(encodeSNR(15.25f)) - 15.25f) < 0.001f);
 

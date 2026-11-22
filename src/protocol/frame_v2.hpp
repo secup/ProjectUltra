@@ -353,13 +353,17 @@ namespace ModeChangeReason {
 }
 
 // SNR encoding for MODE_CHANGE (maps 0-255 to -10 to +53.75 dB, 0.25 dB steps)
+// The SNR byte (CONNECT_ACK, MODE_CHANGE): 0.25 dB steps over -20..+43.75 dB since 2026-11-22
+// (-10..+53.75 before): the 16-FSK handshake connects below -10 dB, where the old floor clipped every
+// reading to -10; no reading the modem makes exceeds ~44 dB. Wire change.
+inline constexpr float kSnrByteFloorDb = -20.0f;
 inline uint8_t encodeSNR(float snr_db) {
-    float clamped = std::max(-10.0f, std::min(53.75f, snr_db));
-    return static_cast<uint8_t>((clamped + 10.0f) * 4.0f);
+    float clamped = std::max(kSnrByteFloorDb, std::min(kSnrByteFloorDb + 63.75f, snr_db));
+    return static_cast<uint8_t>((clamped - kSnrByteFloorDb) * 4.0f);
 }
 
 inline float decodeSNR(uint8_t encoded) {
-    return (encoded / 4.0f) - 10.0f;
+    return (encoded / 4.0f) + kSnrByteFloorDb;
 }
 
 // Fading index encoding.

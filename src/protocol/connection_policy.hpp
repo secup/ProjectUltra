@@ -1256,11 +1256,12 @@ private:
     size_t count_ = 0;
 };
 
-// Wire stale sentinel: encodeSNR(-10) == wire byte 0, which the receiver ALREADY
-// renders as "peer SNR n/a" (app.cpp validity check snr_db >= 0) — zero receiver
-// change. Physically collision-free: no control frame decodes at a true -10 dB
-// effective SNR (all floors >= 5 dB), so byte 0 is unreachable as a measurement.
-inline constexpr float kConnectSnrStaleSentinelDb = -10.0f;
+// Wire stale sentinel: wire byte 0 = the SNR byte's floor (v2::kSnrByteFloorDb), which the receiver
+// renders as "peer SNR n/a". Physically collision-free: no frame decodes at a true -20 dB effective SNR
+// (the 16-FSK handshake's floor is ~-12 dB), so byte 0 is unreachable as a measurement. It was -10 dB
+// until 2026-11-22, when the 16-FSK handshake made -10 dB a real reading (screened as stale: GUI AWGN
+// -8/-10 dB connects read "SNR=-10.0 dB (wire_peer)").
+inline constexpr float kConnectSnrStaleSentinelDb = v2::kSnrByteFloorDb;
 
 // ...but "unreachable as a measurement" justifies the ENCODING, not the CONSUMPTION.
 // The sentinel is a finite float, so every numeric consumer accepts it silently:

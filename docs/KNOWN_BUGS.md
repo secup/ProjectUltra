@@ -1,12 +1,24 @@
 # Known Bugs
 
-Last updated: 2026-11-13
+Last updated: 2026-11-22
 
 ## Purpose
 Track only currently relevant issues that can affect reliability, throughput, or release quality.
 Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
+
+### BUG-MCDPSK-PEAK-CONTROL-NO-GAIN (open, 2026-11-22) — P3: the h = 0 clip may buy MC-DPSK data bursts nothing
+
+`tools/lowsnr_floor` (production encoder/decoder, peak-limited TX at 0.5, AWGN, 7.3 Hz, 10 trials, 3-4
+codeword DBPSK R1/4 data frames): with ModemEngine's h = 0 data clip (`applyPeakControl`, MC-DPSK branch)
+the frame decodes 8/10 at the gate's -6 dB and 0/10 at -8; unclipped 10/10 and 3/10. The data-aided reading
+is the same either way (-5.6 dB at -6), so the clip did not raise the payload's average power. Suspect: the
+clip's level reference is the whole span's mean envelope, which the chirp (amplitude 0.5, constant) and the
+in-phase training symbols dominate, and the burst's peak after the clip is the chirp's, so the payload gains
+little while it takes the clip's distortion. Not verified on the GUI gate (the 2026-11-21 A/B measured OFDM;
+MC-DPSK at 0 dB "transferred" without an A/B). Next: GUI A/B `ULTRA_PEAK_CONTROL=0` vs default at an AWGN
+-4..-6 dB MC-DPSK session, and the clip's reference over the payload span only. 16-FSK bursts are not clipped.
 
 ### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
 

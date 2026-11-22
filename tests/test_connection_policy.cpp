@@ -1583,7 +1583,7 @@ void test_connect_snr_pool_wire_freshness() {
     CHECK(std::isnan(pool.clusteredDbMeanDb(tc_ms, false, fresh_ms)),
           "readings older than 3*Tc age out of the wire aggregate");
     CHECK(v2::encodeSNR(kConnectSnrStaleSentinelDb) == 0,
-          "stale sentinel -10 dB encodes to wire byte 0");
+          "stale sentinel (the SNR byte's floor) encodes to wire byte 0");
     CHECK(v2::decodeSNR(0) < 0.0f,
           "wire byte 0 decodes below the receiver's >=0 validity gate (renders n/a)");
 
@@ -1701,14 +1701,17 @@ void test_stale_snr_sentinel_is_screened_from_decisions() {
           "the sentinel itself must be recognised");
     CHECK(isStaleSnrSentinel(std::numeric_limits<float>::quiet_NaN()),
           "a non-finite reading is equally 'no measurement'");
-    CHECK(isStaleSnrSentinel(-10.4f) && isStaleSnrSentinel(-9.6f),
+    const float sentinel = kConnectSnrStaleSentinelDb;  // -20 dB since 2026-11-22 (was -10)
+    CHECK(isStaleSnrSentinel(sentinel - 0.4f) && isStaleSnrSentinel(sentinel + 0.4f),
           "the 0.5 dB tolerance must match the GUI's n/a render, so display and "
           "decision agree on what counts as no-measurement");
+    CHECK(!isStaleSnrSentinel(-10.0f),
+          "-10 dB is a real reading since the 16-FSK handshake (it was the sentinel)");
 
     // The whole point: real readings must survive the screen untouched. A floor-adjacent
     // but genuine value must NOT be discarded, or the screen becomes its own bug.
-    CHECK(!isStaleSnrSentinel(-9.0f),
-          "-9.0 is outside the tolerance band and must be treated as a measurement");
+    CHECK(!isStaleSnrSentinel(sentinel + 1.0f),
+          "1 dB above the sentinel is outside the tolerance band and must be treated as a measurement");
     CHECK(!isStaleSnrSentinel(0.0f) && !isStaleSnrSentinel(5.0f) &&
               !isStaleSnrSentinel(20.0f),
           "ordinary operating SNRs must never be screened out");
