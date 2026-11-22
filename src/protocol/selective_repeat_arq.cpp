@@ -1525,7 +1525,11 @@ void SelectiveRepeatARQ::handleNackFrame(const v2::ControlFrame& frame) {
 }
 
 bool SelectiveRepeatARQ::timeoutRetransmitDue(uint32_t elapsed_ms) const {
-    for (size_t i = 0, n = txSpan(); i < n; i++) {
+    // Resends stay inside the CURRENT window (the burst length both ends expect), unlike
+    // ACK acceptance (txSpan): after a shrink the receiver ends its turn after one window
+    // and would ACK into the rest of an over-long resend burst. Frames past the window go
+    // out as the base advances.
+    for (size_t i = 0; i < config_.window_size; i++) {
         const size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         const TXSlot& s = tx_window_[slot];
         if (!s.active || s.acked || s.timeout_suspended) {
@@ -1582,7 +1586,7 @@ void SelectiveRepeatARQ::tick(uint32_t elapsed_ms) {
     std::vector<Bytes> timeout_retx_batch;
     std::vector<Bytes>* timeout_retx_batch_ptr =
         on_transmit_batch_ ? &timeout_retx_batch : nullptr;
-    for (size_t i = 0, n = txSpan(); i < n; i++) {
+    for (size_t i = 0; i < config_.window_size; i++) {  // window, not txSpan: see timeoutRetransmitDue
         size_t slot = seqToSlot((tx_base_seq_ + i) & 0xFFFF);
         TXSlot& s = tx_window_[slot];
 

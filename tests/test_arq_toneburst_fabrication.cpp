@@ -242,6 +242,26 @@ static bool test_ack_after_window_shrink_accepted() {
     return true;
 }
 
+// Same shrink, the timeout side: a resend after the shrink carries ONE window (the burst
+// length the receiver now expects), not every outstanding frame. A 3-frame 16-FSK resend
+// ran ~35 s; the receiver ended its turn after frame 1 and ACKed into the sender's own
+// transmission (half-duplex: never heard), every round (GUI Good 0 dB seed 71).
+static bool test_timeout_resend_after_shrink_is_one_window() {
+    TEST("timeout resend after the window shrinks carries one window");
+
+    Harness h(8);
+    if (!h.walkBaseTo(22)) FAIL("setup: could not walk base to 22");
+    h.arq.setWindowSize(3);
+    if (!h.sendFrames(3)) FAIL("setup: could not queue 3 frames");  // seqs 22..24
+    h.arq.setWindowSize(1);
+    const int txed_before = h.frames_txed;
+    h.arq.tick(61000);  // past the 60 s ack timeout
+    const int resent = h.frames_txed - txed_before;
+    if (resent != 1) FAIL("resent " + std::to_string(resent) + " frames, want 1");
+    PASS();
+    return true;
+}
+
 int main() {
     std::cout << "BUG-TONEACK-FABRICATION regression suite\n";
     bool ok = true;
@@ -251,6 +271,7 @@ int main() {
     ok &= test_precommit_plausibility_matches_sent_support();
     ok &= test_legit_tone_acks_still_work();
     ok &= test_ack_after_window_shrink_accepted();
+    ok &= test_timeout_resend_after_shrink_is_one_window();
     std::cout << tests_passed << "/" << tests_run << " passed\n";
     return (ok && tests_passed == tests_run) ? 0 : 1;
 }
