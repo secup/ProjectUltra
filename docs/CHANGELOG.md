@@ -100,16 +100,28 @@ PASS 867 s, ITU Good -8 dB PASS 806 s; AWGN -12 dB connected, ACKs lost (before 
   and measured 1.9 dB. Now: 16-FSK readings less 6.0 dB; ROBUST_LOW below -12 (AWGN) / -6.5 (fading) = the
   measured crossovers (-6.5 / -1 dB channel SNR) minus the CONNECT offset.
 
-- *Rate controller on a fading channel.* With 16-FSK under DBPSK, "down on any loss above the bottom rung"
-  stepped a DBPSK session down on every frame a fade took (GUI ITU Good 0 dB seed 61: five DBPSK <-> 16-FSK
-  cycles, FAIL at 1800 s; main 1135 s). That rule dated from v2 frames (a failed frame lost the rest of the
-  burst); compact frames go on past one. Now a lossy burst that delivered at least half its window holds
-  the rung (each step halves the rate) and only resets the streak (`McDpskRateController::observe`
-  `majority_delivered`).
-- *Tone ACK and MC-DPSK readings.* The staircase read MC-DPSK readings raw against edges measured on the
-  channel scale; with the 200 ms floor that keyed 6.8 s ACKs at AWGN -2 dB (845 vs 731 s for 4 KB, 0
-  retx either way). `kMcDpskReadingBelowChannelDb` = 5.4 maps them to the channel; the connect pick's
-  16-FSK thresholds are the measured channel crossovers minus it.
+- *Into 16-FSK on evidence only.* With 16-FSK under DBPSK, single fades on ITU Good 0/3 dB dropped DBPSK
+  sessions to 16-FSK about once a minute (each excursion 2+ clean 16-FSK bursts long; 1509 / 1048 s for 4
+  KB vs main's 1135 / 877). Now the receiver steps into 16-FSK only when `sessionLadderPick()` on the
+  spell's readings names it (`McDpskRateController::observe` `lowest_allowed`, both the burst verdict and
+  the frame-lost report; DQPSK -> DBPSK unchanged), the sender's timeout fallback into 16-FSK waits for
+  its second silent timeout in a row, and the receiver arms its 16-FSK look-ahead only from its second
+  failed burst start in a row (a first frame lost in a fade waited ~5 s more: 18 waits in one transfer).
+- *Tone ACK and MC-DPSK readings.* With the 200 ms floor the staircase, reading MC-DPSK readings raw
+  against channel-scale edges, keyed 6.8 s ACKs at AWGN -2 dB (845 vs 731 s for 4 KB, 0 retx either way);
+  mapping every rung to the channel instead shortened fading ACKs to 25 ms (Good 0/3 dB: 32/10 retx). Now
+  the rungs up to 100 ms are chosen from the raw reading as before, the 200 ms floor only when reading +
+  `kMcDpskReadingBelowChannelDb` (5.4) is under its edge. The connect pick's 16-FSK thresholds are the
+  measured channel crossovers minus the same constant.
+
+**Final GUI state (branch `lowsnr-minus10`, 7.3 Hz, `--tx-model hardware`):** AWGN -10 dB PASS 8/8 seeds
+(1 KB ~500 s, 20 bps; 4 KB 1767 s); AWGN -12 dB PASS 2/2 (549-604 s); AWGN -8 PASS; ITU Good -10 dB PASS
+(1024 s); ITU Good -8 PASS 2/3 (one seed never answered a PING); ITU Good -6 PASS. Paired with main
+(same seeds): AWGN 0 dB 373 / 372 s, AWGN -2 dB 735 / 731 s, AWGN 20 dB 3490 / 3490 bps, ITU Good 12 dB
+1400 / 1370 bps, ITU Moderate 18 dB 1750 / 1590 bps; ITU Good 3 dB seeds 61/62/63: 1078 / 989 / 914 s vs
+877 / 945 / 827 s (branch ~7 % slower, within fading's run-to-run spread, NOT resolved - seed 63 had 55 vs
+14 retransmissions); ITU Good 0 dB seed 61 FAIL once on the branch at 846 s (16-FSK, 10 retries of one
+frame), PASS in earlier rounds; main PASS 1135 s.
 
 Wire change (rung words, SNR byte, the new handshake frame): not compatible with v0.6.3. Open: the h = 0
 clip may give MC-DPSK DPSK data nothing (BUG-MCDPSK-PEAK-CONTROL-NO-GAIN); the tone-ACK table's upper
