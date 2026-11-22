@@ -37,6 +37,7 @@ namespace gui {
 
 // The MC-DPSK data modulation a preset carries (its bits per symbol).
 inline Modulation mcDpskModulationForConfig(const MultiCarrierDPSKConfig& config) {
+    if (config.isMfsk()) return Modulation::MFSK16;
     if (config.bits_per_symbol == 1) return Modulation::DBPSK;
     if (config.bits_per_symbol == 3) return Modulation::D8PSK;
     return Modulation::DQPSK;

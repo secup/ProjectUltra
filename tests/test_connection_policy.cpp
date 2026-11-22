@@ -1078,21 +1078,34 @@ void test_connect_affine_basis() {
 void test_mcdpsk_rate_controller() {
     // Codec: the session ladder word. 0 = no command, 11 + rung for MC-DPSK (above the OFDM rungs
     // 1..10); words outside a waveform's range carry no command for it.
-    CHECK(kMcDpskRungCount == 2 && kMcDpskRungModulations[0] == Modulation::DBPSK &&
-              kMcDpskRungModulations[1] == Modulation::DQPSK,
-          "MC-DPSK data rungs are DBPSK then DQPSK (slowest first)");
-    CHECK(mcDpskRungIndexFor(Modulation::DBPSK) == 0 && mcDpskRungIndexFor(Modulation::DQPSK) == 1 &&
+    CHECK(kMcDpskRungCount == 3 && kMcDpskRungModulations[0] == Modulation::MFSK16 &&
+              kMcDpskRungModulations[1] == Modulation::DBPSK &&
+              kMcDpskRungModulations[2] == Modulation::DQPSK,
+          "MC-DPSK data rungs are 16-FSK, DBPSK, DQPSK (slowest first)");
+    CHECK(mcDpskRungIndexFor(Modulation::MFSK16) == 0 && mcDpskRungIndexFor(Modulation::DBPSK) == 1 &&
+              mcDpskRungIndexFor(Modulation::DQPSK) == 2 &&
               mcDpskRungIndexFor(Modulation::QPSK) == -1,
           "rung index of each constellation");
-    // 13, 14 since 2026-11-21 (64QAM took OFDM rungs 11, 12); 11, 12 before.
+    // 13..15 since 2026-11-22 (16-FSK at the bottom); 13, 14 = DBPSK, DQPSK from 2026-11-21 (64QAM
+    // took OFDM rungs 11, 12); 11, 12 before.
     CHECK(encodeMcDpskRungCommand(0) == 13 && encodeMcDpskRungCommand(1) == 14 &&
-              encodeMcDpskRungCommand(-1) == 0 && encodeMcDpskRungCommand(2) == 0,
+              encodeMcDpskRungCommand(2) == 15 &&
+              encodeMcDpskRungCommand(-1) == 0 && encodeMcDpskRungCommand(3) == 0,
           "command encoding");
     CHECK(decodeMcDpskRungCommand(0) == -1 && decodeMcDpskRungCommand(13) == 0 &&
-              decodeMcDpskRungCommand(14) == 1 && decodeMcDpskRungCommand(1) == -1 &&
+              decodeMcDpskRungCommand(14) == 1 && decodeMcDpskRungCommand(15) == 2 &&
+              decodeMcDpskRungCommand(1) == -1 &&
               decodeMcDpskRungCommand(11) == -1 && decodeMcDpskRungCommand(12) == -1 &&
-              decodeMcDpskRungCommand(15) == -1 && decodeMcDpskRungCommand(0x1F) == -1,
+              decodeMcDpskRungCommand(16) == -1 && decodeMcDpskRungCommand(0x1F) == -1,
           "command decoding (0, OFDM rungs and unknown words carry no MC-DPSK command)");
+    CHECK(mcDpskRungBelow(Modulation::DQPSK) == Modulation::DBPSK &&
+              mcDpskRungBelow(Modulation::DBPSK) == Modulation::MFSK16 &&
+              mcDpskRungBelow(Modulation::MFSK16) == Modulation::MFSK16,
+          "the rung a sender may drop to unannounced");
+    CHECK(mcDpskBitsPerSymbolTime(Modulation::MFSK16, 8) == 4 &&
+              mcDpskBitsPerSymbolTime(Modulation::DBPSK, 8) == 8 &&
+              mcDpskBitsPerSymbolTime(Modulation::DQPSK, 8) == 16,
+          "coded bits per symbol time on the 8-carrier profile");
     for (int r = 0; r < kMcDpskRungCount; ++r) {
         CHECK(decodeMcDpskRungCommand(encodeMcDpskRungCommand(r)) == r, "codec round trip");
         CHECK(decodeOfdmRungCommand(encodeMcDpskRungCommand(r)) == kRungIdxNone,
@@ -1189,13 +1202,18 @@ void test_mcdpsk_rate_controller() {
     // 16.1 s -> 2 (a full 3-frame probe priced 42.0 s -> 3).
     // A receiver buffers a slowest-rung frame before decoding a first frame: a DQPSK burst's ACK
     // can come 5184 - 2624 = 2560 ms later than its own frame time (the measured timeout's guard).
-    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DBPSK, 8, 1024, 3) == 0,
-          "no first-frame look-ahead at the slowest rung");
+    // The look-ahead is the rung BELOW (what the sender may drop to unannounced): 16-FSK under
+    // DBPSK since 2026-11-22 (a 3-codeword frame: 486 symbols vs 243 -> 5184 ms), DBPSK under DQPSK.
+    const int kDbpskRung = mcDpskRungIndexFor(Modulation::DBPSK);
+    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::MFSK16, 8, 1024, 3) == 0,
+          "no first-frame look-ahead at the bottom rung");
+    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DBPSK, 8, 1024, 3) == 5184,
+          "a DBPSK first frame waits a 16-FSK frame: 5184 ms at the production geometry");
     CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DQPSK, 8, 1024, 3) == 2560,
           "a DQPSK first frame waits a DBPSK frame: 2560 ms at the production geometry");
-    CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 3) == 2,
+    CHECK(mcDpskFirstProbeAfterCleanBursts(kDbpskRung, 8, 1024, 3) == 2,
           "first probe after 2 clean DBPSK bursts at the production 3-codeword geometry");
-    CHECK(mcDpskFirstProbeAfterCleanBursts(0, 8, 1024, 4) == 2,
+    CHECK(mcDpskFirstProbeAfterCleanBursts(kDbpskRung, 8, 1024, 4) == 2,
           "first probe after 2 clean DBPSK bursts with 4 codewords per frame (2-frame probe)");
     {
         const auto lo4 = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 4);
@@ -1207,59 +1225,62 @@ void test_mcdpsk_rate_controller() {
         CHECK(mcDpskProbeBurstFrames(lo3, hi3) == mcDpskWindowSizeForTiming(hi3),
               "at the production geometry the probe is a full window (no cap)");
     }
-    CHECK(mcDpskFirstProbeAfterCleanBursts(1, 8, 1024, 3) ==
+    CHECK(mcDpskFirstProbeAfterCleanBursts(mcDpskRungIndexFor(Modulation::DQPSK), 8, 1024, 3) ==
               McDpskRateController::kMinFirstProbeAfterCleanBursts,
           "no rung above DQPSK: the minimum");
 
+    // Rungs: 0 = 16-FSK, 1 = DBPSK, 2 = DQPSK (2026-11-22); the walk below runs DBPSK <-> DQPSK.
     McDpskRateController c;
-    c.reset(0, 2);
+    c.reset(1, 2);
     CHECK(c.firstProbeAfterCleanBursts() == 2, "the run is the caller's");
-    c.reset(0, 1);
+    c.reset(1, 1);
     CHECK(c.firstProbeAfterCleanBursts() == McDpskRateController::kMinFirstProbeAfterCleanBursts,
           "never below the minimum (one clean burst is no trend)");
-    c.reset(0, 2);
+    c.reset(1, 2);
     const int k0 = c.firstProbeAfterCleanBursts();
     // UP: k0 clean bursts at the commanded rung, then a probe.
     for (int i = 0; i < k0 - 1; ++i) {
-        CHECK(!c.observe(0, true) && c.command() == 0, "clean bursts below the probe count hold");
+        CHECK(!c.observe(1, true) && c.command() == 1, "clean bursts below the probe count hold");
     }
-    CHECK(c.observe(0, true) && c.command() == 1, "the k0-th clean burst probes DQPSK");
+    CHECK(c.observe(1, true) && c.command() == 2, "the k0-th clean burst probes DQPSK");
     // Bursts still at DBPSK were on the air before the sender heard the command (the receiver
     // decodes seconds behind, the sender queues bursts back to back): neutral, clean or not.
-    CHECK(!c.observe(0, true) && c.command() == 1, "a clean burst at another rung is neutral");
-    CHECK(!c.observe(0, false) && c.command() == 1, "a lossy burst at another rung is neutral");
+    CHECK(!c.observe(1, true) && c.command() == 2, "a clean burst at another rung is neutral");
+    CHECK(!c.observe(1, false) && c.command() == 2, "a lossy burst at another rung is neutral");
     // The probe fails: a loss AT DQPSK steps down and doubles the clean run.
-    CHECK(c.observe(1, false) && c.command() == 0 && c.probeAfterCleanBursts() == 2 * k0,
+    CHECK(c.observe(2, false) && c.command() == 1 && c.probeAfterCleanBursts() == 2 * k0,
           "a failed probe steps down and doubles the clean run");
     for (int i = 0; i < 2 * k0 - 1; ++i) {
-        CHECK(!c.observe(0, true) && c.command() == 0, "the doubled clean run must complete");
+        CHECK(!c.observe(1, true) && c.command() == 1, "the doubled clean run must complete");
     }
-    CHECK(c.observe(0, true) && c.command() == 1, "second probe after the doubled run");
+    CHECK(c.observe(1, true) && c.command() == 2, "second probe after the doubled run");
     // The probe's first burst arrives clean at DQPSK: held, backoff reset.
-    CHECK(!c.observe(1, true) && c.command() == 1 && c.probeAfterCleanBursts() == k0,
+    CHECK(!c.observe(2, true) && c.command() == 2 && c.probeAfterCleanBursts() == k0,
           "a clean probe burst holds DQPSK and resets the backoff");
-    CHECK(!c.observe(1, true) && c.command() == 1, "top rung: clean bursts hold");
+    CHECK(!c.observe(2, true) && c.command() == 2, "top rung (DQPSK): clean bursts hold");
     // DOWN on any loss above the bottom rung.
-    CHECK(c.observe(1, false) && c.command() == 0 && c.probeAfterCleanBursts() == 2 * k0,
+    CHECK(c.observe(2, false) && c.command() == 1 && c.probeAfterCleanBursts() == 2 * k0,
           "a loss at DQPSK steps down and doubles the backoff");
-    // A loss at the bottom rung changes nothing but the streak.
-    CHECK(!c.observe(0, false) && c.command() == 0, "a loss at DBPSK holds DBPSK");
+    // A loss at DBPSK steps down to the bottom rung (16-FSK); a loss there changes nothing but the
+    // streak.
+    CHECK(c.observe(1, false) && c.command() == 0, "a loss at DBPSK steps down to 16-FSK");
+    CHECK(!c.observe(0, false) && c.command() == 0, "a loss at 16-FSK holds 16-FSK");
     // Unknown rung: the evidence is taken at the commanded rung.
-    c.reset(1, k0);
-    CHECK(c.observe(-1, false) && c.command() == 0, "a loss at an unknown rung counts at the command");
+    c.reset(2, k0);
+    CHECK(c.observe(-1, false) && c.command() == 1, "a loss at an unknown rung counts at the command");
     // A clean burst without the next rung's margin does not count toward a probe, and resets the run.
-    c.reset(0, k0);
-    for (int i = 0; i < k0 - 1; ++i) c.observe(0, true, true);
-    CHECK(!c.observe(0, true, false) && c.command() == 0, "a clean burst without margin resets the run");
+    c.reset(1, k0);
+    for (int i = 0; i < k0 - 1; ++i) c.observe(1, true, true);
+    CHECK(!c.observe(1, true, false) && c.command() == 1, "a clean burst without margin resets the run");
     for (int i = 0; i < k0 - 1; ++i) {
-        CHECK(!c.observe(0, true, true) && c.command() == 0, "the run restarts after a no-margin burst");
+        CHECK(!c.observe(1, true, true) && c.command() == 1, "the run restarts after a no-margin burst");
     }
-    CHECK(c.observe(0, true, true) && c.command() == 1, "k0 clean bursts with margin probe");
+    CHECK(c.observe(1, true, true) && c.command() == 2, "k0 clean bursts with margin probe");
     // The backoff is capped.
-    c.reset(0, k0);
+    c.reset(1, k0);
     for (int round = 0; round < 10; ++round) {
-        while (c.command() == 0) c.observe(0, true);
-        c.observe(1, false);
+        while (c.command() == 1) c.observe(1, true);
+        c.observe(2, false);
     }
     CHECK(c.probeAfterCleanBursts() == k0 * McDpskRateController::kMaxBackoffFactor,
           "repeated failed probes cap the clean run");

@@ -812,7 +812,12 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
 // The rungs share sps, code rate (R1/4) and codewords per frame, so a change is a pure
 // constellation change: frames already cut stay valid (MC-DPSK frames are variable-length, the
 // codeword count rides in each frame's header) and the ARQ geometry is untouched. Slowest first.
-inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::DBPSK, Modulation::DQPSK};
+// 16-FSK (2026-11-22) is the bottom rung: one tone of 16 per symbol time (4 bits, half DBPSK's 8 on
+// the 8-carrier profile), noncoherent and constant envelope, so on a peak-limited transmitter it
+// decodes ~4 dB below DBPSK at the same code rate (tools/lowsnr_floor: 16-FSK R1/4 10/10 at the gate's
+// -10 dB AWGN, DBPSK R1/4 0/10 at -10 and 3/10 at -8). Same sps, code rate, codewords per frame.
+inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::MFSK16, Modulation::DBPSK,
+                                                         Modulation::DQPSK};
 inline constexpr int kMcDpskRungCount =
     static_cast<int>(sizeof(kMcDpskRungModulations) / sizeof(kMcDpskRungModulations[0]));
 
@@ -828,8 +833,9 @@ inline int mcDpskRungIndexFor(Modulation mod) {
 //   0        no command
 //   1..12    the canonical wideband OFDM rungs (kRungIdx*, waveform_selection.hpp), bit 4 being
 //            the OFDM startup-probe flag
-//   13, 14   MC-DPSK DBPSK, DQPSK at the session's MC-DPSK geometry (11, 12 until 2026-11-21,
-//            when the 64QAM rungs took 11 and 12 - a wire change, v0.6.3 is not 0.6.2-compatible)
+//   13..15   MC-DPSK 16-FSK, DBPSK, DQPSK at the session's MC-DPSK geometry (11, 12 = DBPSK,
+//            DQPSK until 2026-11-21, when the 64QAM rungs took 11 and 12; 13, 14 = DBPSK, DQPSK
+//            until 2026-11-22, when 16-FSK became the bottom rung - wire changes)
 // So an MC-DPSK session reads an OFDM value as an up-crossing and an OFDM session reads an MC-DPSK
 // value as a down-crossing (ULTRA_WAVEFORM_FOLLOW); a constellation change stays 11 <-> 12.
 inline constexpr uint8_t kSessionRungWordMcDpskBase = 13;
@@ -2669,6 +2675,25 @@ inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {
     }
 }
 
+// Coded bits per symbol time of an MC-DPSK-family rung: every carrier's constellation bits, or
+// log2(16) for 16-FSK whatever the carrier count (one tone per symbol time).
+inline uint32_t mcDpskBitsPerSymbolTime(Modulation mod, int num_carriers) {
+    if (mod == Modulation::MFSK16) return 4;
+    return static_cast<uint32_t>(std::clamp(num_carriers, 1, 64)) * bitsPerMCDPSKCarrier(mod);
+}
+
+// The rung below `mod` (itself at the bottom): what a sender may drop to unannounced (its
+// retransmission timeout goes one rung down), so what a receiver configured at `mod` must be able to
+// demodulate a burst's first frame at.
+inline Modulation mcDpskRungBelow(Modulation mod) {
+    int rung = -1;
+    for (int i = 0; i < static_cast<int>(sizeof(kMcDpskRungModulations) /
+                                         sizeof(kMcDpskRungModulations[0])); ++i) {
+        if (kMcDpskRungModulations[i] == mod) rung = i;
+    }
+    return rung > 0 ? kMcDpskRungModulations[rung - 1] : (rung == 0 ? mod : Modulation::DBPSK);
+}
+
 inline uint32_t mcDpskSymbolsToMs(uint32_t symbols, int samples_per_symbol) {
     const int sps = std::clamp(samples_per_symbol, 1, 8192);
     return static_cast<uint32_t>(
@@ -2683,7 +2708,7 @@ inline MCDPSKFrameTiming mcDpskFrameTiming(Modulation mod,
     const int carriers = std::clamp(num_carriers, 1, 64);
     const int sps = std::clamp(samples_per_symbol, 1, 8192);
     const int cw_count = v2::sanitizeFixedFrameCodewords(data_cw_count);
-    const uint32_t bits_per_symbol = static_cast<uint32_t>(carriers) * bitsPerMCDPSKCarrier(mod);
+    const uint32_t bits_per_symbol = mcDpskBitsPerSymbolTime(mod, carriers);
     const uint32_t data_symbols_per_cw =
         (kLDPCBitsPerCodeword + bits_per_symbol - 1) / bits_per_symbol;
 
@@ -2871,14 +2896,15 @@ inline uint32_t mcDpskPartialSackHoldMs(const MCDPSKFrameTiming& timing) {
 // falls back only then); a clean cycle at the lower rung is its window burst plus the ACK. The run
 // is the first divided by the second, so probing never spends more airtime than the evidence took.
 // How long a receiver may hold a burst's first frame before decoding it, beyond the frame itself: it
-// buffers a whole frame at the slowest constellation (it cannot know which one the sender used), so a
+// buffers a whole frame at the rung below its own (mcDpskRungBelow: the sender drops one rung on a
+// timeout without telling it; until 2026-11-22, with DBPSK at the bottom, "the slowest"), so a
 // one-frame burst at a faster rung is decoded - and acknowledged - that much later. GUI 2026-11-12:
 // a one-frame DQPSK burst was decoded 2.8 s after it ended; 5184 - 2624 = 2560 ms of it is this.
 // 0 at the slowest rung. Part of the ACK latency a sender must allow (ULTRA_MCDPSK_MEASURED_RTO).
 inline uint32_t mcDpskFirstFrameLookaheadMs(Modulation mod, int num_carriers,
                                             int samples_per_symbol, int cw_count) {
     const auto self = mcDpskFrameTiming(mod, num_carriers, samples_per_symbol, cw_count);
-    const auto slowest = mcDpskFrameTiming(kMcDpskRungModulations[0], num_carriers,
+    const auto slowest = mcDpskFrameTiming(mcDpskRungBelow(mod), num_carriers,
                                            samples_per_symbol, cw_count);
     return slowest.data_only_ms > self.data_only_ms ? slowest.data_only_ms - self.data_only_ms
                                                     : 0u;

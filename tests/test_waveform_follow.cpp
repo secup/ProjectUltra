@@ -1470,24 +1470,27 @@ void test_tail_demote_commits_by_descriptor() {
 // ACK newer than the commanding one keeps DQPSK (4 codewords: the entry pick's Robust rung). At the
 // 3 codewords almost every session uses both windows are 3 and nothing is capped.
 void test_mcdpsk_up_step_probes_small() {
+    // Rung indices by modulation (16-FSK became the bottom rung on 2026-11-22).
+    const int kDbpsk = connection_policy::mcDpskRungIndexFor(Modulation::DBPSK);
+    const int kDqpsk = connection_policy::mcDpskRungIndexFor(Modulation::DQPSK);
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
     ConnectionAdaptiveTestAccess::setDataFrameCodewords(c, 4);
     CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0, "no cap at DBPSK");
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 5);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDqpsk, 5);
     CHECK(ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DQPSK, "steps up to DQPSK");
     CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2,
           "the probe carries the DBPSK window (2 frames), not DQPSK's 3");
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 5);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDqpsk, 5);
     CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2,
           "a repeated copy of the commanding ACK confirms nothing");
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 8);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDqpsk, 8);
     CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0,
           "the probe's own ACK keeps DQPSK: the full window");
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 0, 11);
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 1, 14);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDbpsk, 11);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDqpsk, 14);
     CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2, "a second up-step probes small again");
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, 0, 17);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDbpsk, 17);
     CHECK(ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK &&
               ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0,
           "a failed probe steps down and clears the cap");
@@ -1495,7 +1498,7 @@ void test_mcdpsk_up_step_probes_small() {
     Connection p;
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(p);
     ConnectionAdaptiveTestAccess::setDataFrameCodewords(p, 3);  // the production MC-DPSK frame
-    ConnectionAdaptiveTestAccess::obeyMcDpskRung(p, 1, 5);
+    ConnectionAdaptiveTestAccess::obeyMcDpskRung(p, kDqpsk, 5);
     CHECK(ConnectionAdaptiveTestAccess::dataModulation(p) == Modulation::DQPSK &&
               ConnectionAdaptiveTestAccess::txInFlightCap(p) == 0,
           "at 3 codewords both windows are 3: no cap (unchanged behaviour)");

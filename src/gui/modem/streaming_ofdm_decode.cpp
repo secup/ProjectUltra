@@ -2238,6 +2238,7 @@ void StreamingDecoder::decodeCurrentFrame() {
         // frame, a PING, a lost frame — goes on to the v2 path with the constellation retry.
         if (mcDpskCompactActive()) {
             if (auto compact = decodeMcDpskCompactFirstFrame(frame_buffer, decode_cfo, soft_bits)) {
+                mc_mfsk_lookahead_pending_ = false;
                 // Evidence for the receiver's up-step, before the frame (and the burst's ACK) is
                 // delivered: only at a rung with one above it.
                 const int rung = protocol::connection_policy::mcDpskRungIndexFor(
@@ -2250,6 +2251,18 @@ void StreamingDecoder::decodeCurrentFrame() {
                 return;
             }
         }
+        // The frame failed at every DPSK rung in a DPSK-sized window. If the session can drop to
+        // 16-FSK below the configured rung and the data section carries energy, wait for a 16-FSK
+        // frame's span and try again (the compact first-frame decode iterates every rung).
+        if (!mc_mfsk_lookahead_pending_ && mcDpskCompactActive() &&
+            mcDpskMfskLookaheadWanted(frame_buffer)) {
+            mc_mfsk_lookahead_pending_ = true;
+            state_ = DecoderState::SYNC_FOUND;
+            LOG_MODEM(INFO, "[%s] MC-DPSK first frame failed at the DPSK rungs with data energy: "
+                      "waiting for a 16-FSK frame's span", log_prefix_.c_str());
+            return;
+        }
+        mc_mfsk_lookahead_pending_ = false;
         retryMcDpskFirstFrameConstellation(frame_buffer, decode_cfo, soft_bits, frame_sync_abs);
     }
     if (soft_bits.empty()) {
@@ -4165,14 +4178,56 @@ std::vector<int> StreamingDecoder::mcDpskCompactCodewordHypotheses() const {
     return cws;
 }
 
+// Whether a burst's failed first frame may be a 16-FSK frame the DPSK-sized window cut short: the
+// configured rung has 16-FSK below it, the window is shorter than a 16-FSK frame, and the data
+// section reads above this burst's own inter-chirp noise (a bare chirp or a sync on noise does not).
+bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame_buffer) const {
+    const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get());
+    if (!mc || !connected_ || mode_ != protocol::WaveformMode::MC_DPSK ||
+        protocol::connection_policy::mcDpskRungBelow(mc->getModulation()) != Modulation::MFSK16 ||
+        mc->getModulation() == Modulation::MFSK16) {
+        return false;
+    }
+    const size_t mfsk_span =
+        static_cast<size_t>(mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
+    if (frame_buffer.size() >= mfsk_span) {
+        return false;
+    }
+    const size_t data_start = static_cast<size_t>(
+        std::max(0, mc->getMinSamplesForCWCount(1) - mc->getDataOnlySamplesForCWCount(1)));
+    if (!(sync_noise_ref_rms_ > 0.0f) || sync_noise_ref_samples_ == 0 ||
+        frame_buffer.size() <= data_start + 200) {
+        return false;
+    }
+    FIRFilter band = FIRFilter::bandpass(101, 50.0f, 2950.0f, 48000.0f);
+    const size_t prime = 100;
+    for (size_t i = data_start; i < data_start + prime; ++i) band.process(frame_buffer[i]);
+    double sum_sq = 0.0;
+    size_t measured = 0;
+    for (size_t i = data_start + prime; i < frame_buffer.size(); ++i, ++measured) {
+        const float y = band.process(frame_buffer[i]);
+        sum_sq += static_cast<double>(y) * static_cast<double>(y);
+    }
+    const double noise_power =
+        static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
+    return !frame_policy::inBandPowerReadsAsNoise(sum_sq / static_cast<double>(measured), measured,
+                                                  noise_power, sync_noise_ref_samples_, 2900.0,
+                                                  48000.0);
+}
+
 size_t StreamingDecoder::mcDpskControlPeekSamples() const {
     if (mcDpskCompactActive()) {
         if (const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get())) {
-            // Long enough for the longest frame the peer may send (every geometry hypothesis at
-            // the slowest constellation).
+            // Long enough for the longest DPSK frame the peer may send (every geometry hypothesis
+            // at DBPSK). A 16-FSK frame (the rung below DBPSK, 2026-11-22) is twice as long; the
+            // decoder waits for it only after the frame failed at every DPSK rung with energy in
+            // its data section (mc_mfsk_lookahead_pending_), so no DPSK frame waits longer.
             int longest = 0;
             for (const int cw : mcDpskCompactCodewordHypotheses()) {
-                longest = std::max(longest, mc->getSamplesForCWCountAtSlowest(cw));
+                longest = std::max(longest, mc->getSamplesForCWCountAtDbpsk(cw));
+            }
+            if (mc_mfsk_lookahead_pending_) {
+                longest = std::max(longest, mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
             }
             return static_cast<size_t>(longest);
         }

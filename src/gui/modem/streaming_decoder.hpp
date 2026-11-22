@@ -1058,6 +1058,10 @@ private:
     DecodeResult decodeMCDPSKFrame(const std::vector<float>& soft_bits,
                                     CodeRate rate, size_t bytes_per_cw,
                                     float snr, float cfo);
+    bool mcDpskMfskLookaheadWanted(const std::vector<float>& frame_buffer) const;
+    // A burst's first frame failed at the DPSK rungs with data energy: the next pass waits for a
+    // 16-FSK frame's span (mcDpskControlPeekSamples) and tries every rung again.
+    bool mc_mfsk_lookahead_pending_ = false;
     DecodeResult decodeMCDPSKFrameImpl(const std::vector<float>& soft_bits,
                                         CodeRate rate, size_t bytes_per_cw,
                                         float snr, float cfo);

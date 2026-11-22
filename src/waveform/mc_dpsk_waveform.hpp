@@ -121,9 +121,13 @@ public:
     int getMinSamplesForFrame() const override;
     int getMinSamplesForCWCount(int num_cw) const override;
     int getDataOnlySamplesForCWCount(int num_cw) const;
-    // Training + reference + num_cw codewords at ONE bit per carrier symbol (DBPSK, the slowest
-    // data constellation): a look-ahead long enough for a frame at any constellation.
+    // Training + reference + num_cw codewords at the rung below the configured one (DBPSK below
+    // DQPSK, 16-FSK below DBPSK): a session burst's first-frame look-ahead long enough for what the
+    // sender may have dropped to unannounced.
     int getSamplesForCWCountAtSlowest(int num_cw) const;
+    // Training + reference + num_cw codewords at DBPSK (one bit per carrier): another ladder
+    // geometry's frame, which is DPSK (16-FSK keeps the session's codeword count).
+    int getSamplesForCWCountAtDbpsk(int num_cw) const;
 
     // ========================================================================
     // MC-DPSK Specific

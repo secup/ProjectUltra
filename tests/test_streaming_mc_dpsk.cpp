@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <vector>
 
@@ -719,7 +720,7 @@ bool runConnectedOFDMHalfOpenConnectFallback() {
 }  // namespace
 
 int main() {
-    setLogLevel(LogLevel::ERROR);
+    setLogLevel(std::getenv("TEST_LOG") ? LogLevel::INFO : LogLevel::ERROR);
 
     const Bytes payload = {
         0x55, 0x4c, 0x54, 0x52, 0x41, 0x20, 0x4d, 0x43,
