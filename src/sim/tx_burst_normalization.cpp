@@ -150,6 +150,10 @@ TxBurstRmsMeasurement measureTxBurstInBandRms(std::span<const float> samples) {
     size_t delay_idx = 0;
     double broadband_sum_sq = 0.0;
     double in_band_sum_sq = 0.0;
+    constexpr size_t kTypicalWindow = 2400;  // 50 ms at 48 kHz
+    std::vector<double> window_power;
+    double window_sum = 0.0;
+    size_t window_n = 0;
 
     for (size_t i = 0; i < end; ++i) {
         const float sample = samples[i];
@@ -158,8 +162,28 @@ TxBurstRmsMeasurement measureTxBurstInBandRms(std::span<const float> samples) {
         if (i >= begin) {
             broadband_sum_sq += static_cast<double>(sample) *
                                 static_cast<double>(sample);
-            in_band_sum_sq += static_cast<double>(filtered) *
-                              static_cast<double>(filtered);
+            const double f2 = static_cast<double>(filtered) * static_cast<double>(filtered);
+            in_band_sum_sq += f2;
+            window_sum += f2;
+            if (++window_n == kTypicalWindow) {
+                window_power.push_back(window_sum / static_cast<double>(kTypicalWindow));
+                window_sum = 0.0;
+                window_n = 0;
+            }
+        }
+    }
+    if (!window_power.empty()) {
+        // Near-silent windows (inter-chirp gap, lead-in/tail inside the active span) are not level.
+        const double max_p = *std::max_element(window_power.begin(), window_power.end());
+        std::vector<double> live;
+        live.reserve(window_power.size());
+        for (double p : window_power) {
+            if (p > 1e-3 * max_p) live.push_back(p);
+        }
+        if (!live.empty()) {
+            const auto mid = live.begin() + static_cast<std::ptrdiff_t>(live.size() / 2);
+            std::nth_element(live.begin(), mid, live.end());
+            result.in_band_typical_rms = static_cast<float>(std::sqrt(*mid));
         }
     }
 

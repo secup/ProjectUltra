@@ -10,6 +10,49 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-22 — fix(ladder): OFDM entry on a peak-limited TX at AWGN 3-6 dB (fading index, PAPR offset, dead-rung veto)
+
+**Was.** On the default `--tx-model hardware` a true AWGN 3-6 dB link stayed in MC-DPSK (~78-90 bps)
+where OFDM carries 300-550. Three causes, each measured in GUI logs:
+1. **BUG-MCDPSK-FADING-NOISE-INFLATED.** The MC-DPSK temporal fading index was the raw coefficient
+   of variation of |x|^2; at low SNR the noise alone puts it above `kFadingAwgnMax` (0.15), so AWGN
+   read as "Good" and took the 5 dB Good floor. Now noise-corrected: P = |a+n|^2 has noise variance
+   2a^2 s2 + s2^2, s2 estimated per carrier from the differential residual
+   (median |x_k - x_{k-1} e^{j dphi}|^2 / (2 ln 2), DBPSK/DQPSK decided phase), subtracted before the
+   index (`multi_carrier_dpsk.hpp demodulateSoft`, >= 8 valid symbols).
+2. **BUG-PAPR-PRIOR-STALE-PEAK-CONTROL.** The connect pick assumed OFDM rides 1.0 dB BELOW the
+   MC-DPSK CONNECT (pre-peak-control prior) and clamped the measured offset to >= 0. With peak
+   control ON (default since 2026-11-21) OFDM data averages ~2.9 dB ABOVE it (GUI logs: -2.9..-3.8).
+   The prior is now `kPeakControlledOfdmBelowMcDpskDb = -2.9` when `peak_control::enabled()`, the
+   measured offset is signed and unclamped, and both bursts are measured by their TYPICAL in-band
+   level (`TxBurstNormalization::in_band_typical_rms`: median of 50 ms windows above 1e-3 x max -
+   a whole-burst RMS counts the silent gaps) (`app.cpp noteTxBurstLevelForPapr`,
+   `selectLadderRungPaprCorrected` now also corrects upward).
+3. **BUG-LATENT-DEAD-RUNG-HOLD** (exposed by 1+2). Entering OFDM QPSK R1/4 at EVM 5 dB, the latent
+   rate posterior (seeded high, one clean group) climbed to R1/2 and held it for three groups at
+   0/32 codewords each while the EVM window predicted 4 % success; under `ULTRA_RATE_EVM=climb` the
+   selector could only lift. Now a pick whose window frames predict p < `kDeadProb` (0.10, the
+   controller's own "dead" criterion) is vetoed down to the best rung they do not rule out
+   (`connection.cpp`, CLIMB branch).
+
+**Verified (GUI gate, `--tx-model hardware`, 7.3 Hz CFO, paired vs main 2ac630ce, seconds for the file):**
+
+| case | main | 1+2 only | 1+2+3 |
+|---|---|---|---|
+| AWGN 3 s41 (2 KB) | 211 | 428 | **115** |
+| AWGN 4 s41 / s42 | 211 / 211 | 439 / 478 | **131 / 106** |
+| AWGN 5 s41 / s42 | 211 / 211 | 186 / 197 | - |
+| AWGN 6 s41 / s42 | 211 / 78 | 50 / 52 | **50** |
+| AWGN 8 s41 | 74 | 53 | - |
+| Good 5 s42 / 8 s43 / 12 s42 (4 KB) | 170 / 217 / 82 | 112 / 92 / 67 | **146 / 162 / 67** |
+| Moderate 18 s42 | 55 | 75 | **48** |
+| AWGN 20 s42 | 48 | 44 | - |
+| AWGN -6 / -8 / -10, Good 0 (1-4 KB) | 409,305 / 588 / 500 / 1173 | 423,400 / 588 / 500 / 1151 | - |
+
+All PASS. The -6 s42 and Moderate 18 differences under 1+2 were traced: identical decisions until a
+lost ACK (-6) or a later rate climb (Moderate) - variance, not the change. Fading cells are single
+seeds (spread is large on Good, see the 2026-11-13 feedback). ctest 128/128.
+
 ## 2026-11-22 — feat(ack): tone-ACK candidate floor from a false-ACK budget and the span in flight
 
 **Was.** Every tone-ACK candidate had to reach 2.2x the noise-only Costas expectation

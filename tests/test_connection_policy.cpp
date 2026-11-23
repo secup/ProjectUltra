@@ -2035,6 +2035,17 @@ void test_ladder_papr_correction() {
     CHECK(selectLadderRungPaprCorrected(awgn_floor - 2.0f, awgn, 3.4f).id ==
               selectLadderRung(awgn_floor - 2.0f, awgn).id,
           "PAPR correction: below the OFDM floor the MC-DPSK pick is the measured-SNR one");
+    // Peak control lifts the OFDM body above the DPSK payload (2026-11-22: offset -2.9 dB): OFDM
+    // is judged ABOVE the reading, so a reading under the floor enters OFDM once reading + 2.9
+    // clears it; below that the MC-DPSK pick is still the measured-SNR one.
+    CHECK(selectLadderRung(awgn_floor - 2.0f, awgn).waveform == WaveformMode::MC_DPSK &&
+              selectLadderRungPaprCorrected(awgn_floor - 2.0f, awgn, -2.9f).id ==
+                  LadderRungId::OFDM_CHIRP,
+          "PAPR correction: a negative offset enters OFDM below the reading's floor");
+    CHECK(selectLadderRungPaprCorrected(awgn_floor - 3.5f, awgn, -2.9f).id ==
+              selectLadderRung(awgn_floor - 3.5f, awgn).id,
+          "PAPR correction: a negative offset still leaves a reading too far under the floor "
+          "on its MC-DPSK pick");
 }
 
 int main() {

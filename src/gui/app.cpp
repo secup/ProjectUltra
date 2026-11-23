@@ -3902,8 +3902,11 @@ void App::noteTxBurstLevelForPapr(const std::vector<float>& normalized, const ch
                             state == protocol::ConnectionState::PROBING ||
                             state == protocol::ConnectionState::CONNECTING);
     float rms = 0.0f;
+    float whole_rms = 0.0f;
     if (ofdm_data || handshake) {
-        rms = ultra::sim::measureTxBurstInBandRms(normalized).in_band_rms;
+        const auto m = ultra::sim::measureTxBurstInBandRms(normalized);
+        rms = m.in_band_typical_rms;
+        whole_rms = m.in_band_rms;
     }
     float offset = 0.0f;
     {
@@ -3913,9 +3916,19 @@ void App::noteTxBurstLevelForPapr(const std::vector<float>& normalized, const ch
             float& slot = ofdm_data ? tx_level_ofdm_db_ : tx_level_mcdpsk_db_;
             slot = std::isfinite(slot) ? slot + 0.3f * (db - slot) : db;
         }
+        // Signed: with peak control the OFDM payload rides ABOVE the 8-carrier DPSK payload (the
+        // reading's level), so OFDM is judged above the reading. Was clamped at 0 and measured on
+        // the whole burst, chirp included: +1.0 dB where OFDM measured +1.5-2 dB over the reading
+        // (GUI AWGN 6-8 dB, 2026-11-22).
         offset = (std::isfinite(tx_level_mcdpsk_db_) && std::isfinite(tx_level_ofdm_db_))
-                     ? std::max(0.0f, tx_level_mcdpsk_db_ - tx_level_ofdm_db_)
+                     ? tx_level_mcdpsk_db_ - tx_level_ofdm_db_
                      : txPaprPriorDb();
+    }
+    if (rms > 0.0f && std::isfinite(rms)) {
+        LOG_MODEM(INFO,
+                  "TX level (%s): typical %.2f dB, whole burst %.2f dB in-band -> PAPR offset %.2f dB",
+                  ofdm_data ? "OFDM data" : "MC-DPSK handshake", 20.0f * std::log10(rms),
+                  20.0f * std::log10(std::max(whole_rms, 1e-9f)), offset);
     }
     protocol_.setTxPaprOffsetDb(offset);  // lock-free (atomic store in Connection)
 }

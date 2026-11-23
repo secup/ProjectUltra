@@ -817,6 +817,8 @@ public:
 
         // Cache differential phases for two-pass demodulation
         std::vector<float> cached_phases(num_symbols * config_.num_carriers);
+        // Complex symbols per carrier, for the noise-corrected temporal fading index.
+        std::vector<Complex> cached_syms(static_cast<size_t>(num_symbols) * config_.num_carriers);
 
         // Phase noise estimation accumulators
         float noise_sum = 0.0f;
@@ -829,6 +831,7 @@ public:
             for (int c = 0; c < config_.num_carriers; c++) {
                 Complex current = demodulateOneSymbol(sym_data, c);
                 float mag = std::abs(current);
+                cached_syms[static_cast<size_t>(sym) * config_.num_carriers + c] = current;
 
                 sym_total_mag[sym] += mag;
 
@@ -1186,19 +1189,50 @@ public:
 
         // Compute temporal fading index from symbol-to-symbol magnitude variance
         // Uses E[x^2] - E[x]^2 formula per carrier, then averages CV across carriers
-        if (valid_symbols >= 4) {
-            float temporal_cv_sum = 0.0f;
+        // Noise-corrected (2026-11-22). Per carrier the symbol power P = |a + n|^2, n ~ CN(0, s2): without
+        // fading P has mean a^2 + s2 and variance 2 a^2 s2 + s2^2; only the variance beyond that is the
+        // channel's, read as an amplitude CV (power CV / 2) as for 16-FSK. s2 from adjacent symbols:
+        // x_k - x_{k-1} e^{j dphi_k} (the decided differential step) is n_k - n_{k-1} e^{j dphi_k} plus
+        // the fade between two symbols (negligible at HF Doppler), |.|^2 exponential with mean 2 s2;
+        // its median / (2 ln 2) ignores the odd wrong decision. The raw amplitude CV read AWGN as
+        // fading: 0.33 at 0 dB, 0.23 at 4, 0.17 at 8 (tools/lowsnr_floor --connect), over the 0.15
+        // AWGN bound below ~10 dB, so a clean link took the fading class's OFDM entry floor.
+        if (valid_symbols >= 8) {
+            const int bps = config_.bits_per_symbol;
+            const double step = 2.0 * M_PI / static_cast<double>(1 << bps);
+            const double offset = (bps == 2) ? M_PI / 4.0 : 0.0;
+            double temporal_cv_sum = 0.0;
             int valid_carriers = 0;
+            std::vector<double> d2;
+            d2.reserve(static_cast<size_t>(valid_symbols));
             for (int c = 0; c < config_.num_carriers; c++) {
-                float mean = carrier_mag_sum[c] / valid_symbols;
-                if (mean < 0.001f) continue;  // Skip dead carriers
-                float mean_sq = carrier_mag_sq_sum[c] / valid_symbols;
-                float variance = std::max(0.0f, mean_sq - mean * mean);
-                float cv = std::sqrt(variance) / mean;
-                temporal_cv_sum += cv;
+                if (carrier_mag_sum[c] / valid_symbols < 0.001f) continue;  // dead carrier
+                d2.clear();
+                double p_sum = 0.0, p_sq = 0.0;
+                for (int sym = 0; sym < valid_symbols; sym++) {
+                    const std::complex<double> x(cached_syms[static_cast<size_t>(sym) * config_.num_carriers + c]);
+                    const double p = std::norm(x);
+                    p_sum += p;
+                    p_sq += p * p;
+                    if (sym == 0) continue;
+                    const std::complex<double> xp(
+                        cached_syms[static_cast<size_t>(sym - 1) * config_.num_carriers + c]);
+                    const double dphi = std::arg(x * std::conj(xp));
+                    const double dhat = std::round((dphi - offset) / step) * step + offset;
+                    d2.push_back(std::norm(x - xp * std::polar(1.0, dhat)));
+                }
+                const auto mid = d2.begin() + static_cast<std::ptrdiff_t>(d2.size() / 2);
+                std::nth_element(d2.begin(), mid, d2.end());
+                const double s2 = std::max(*mid / (2.0 * std::log(2.0)), 1e-30);
+                const double mean_p = p_sum / valid_symbols;
+                const double a2 = std::max(mean_p - s2, 1e-3 * s2);
+                const double var_p = std::max(0.0, p_sq / valid_symbols - mean_p * mean_p);
+                const double fade_var = std::max(0.0, var_p - (2.0 * a2 * s2 + s2 * s2));
+                temporal_cv_sum += 0.5 * std::sqrt(fade_var) / a2;
                 valid_carriers++;
             }
-            temporal_fading_index_ = (valid_carriers > 0) ? temporal_cv_sum / valid_carriers : 0.0f;
+            temporal_fading_index_ =
+                (valid_carriers > 0) ? static_cast<float>(temporal_cv_sum / valid_carriers) : 0.0f;
         } else {
             temporal_fading_index_ = 0.0f;
         }

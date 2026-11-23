@@ -290,14 +290,17 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             ? connection_policy::selectLadderRungPaprCorrected(selection_snr_db, rate_fading,
                                                                papr_offset_db)
             : connection_policy::ladderRungForId(LadderRungId::ROBUST);
-        if (rate_selection_snr_valid && papr_offset_db > 0.0f) {
+        if (rate_selection_snr_valid && papr_offset_db != 0.0f) {
             const auto uncorrected =
                 connection_policy::selectLadderRung(selection_snr_db, rate_fading);
             LOG_MODEM(INFO,
                       "Connection: PAPR correction %.1f dB (peak-limited TX): OFDM judged at "
                       "%.1f dB, measured %.1f dB -> %s%s",
                       papr_offset_db, ofdm_selection_snr_db, selection_snr_db, selected_rung.name,
-                      uncorrected.id != selected_rung.id ? " (uncorrected pick would be OFDM)" : "");
+                      uncorrected.id != selected_rung.id
+                          ? (isOFDMMode(uncorrected.waveform) ? " (uncorrected pick would be OFDM)"
+                                                              : " (uncorrected pick would be MC-DPSK)")
+                          : "");
         }
         const bool ladder_selected =
             rate_selection_snr_valid &&

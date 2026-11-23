@@ -3,6 +3,7 @@
 #include "frame_v2.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
+#include "ultra/peak_control.hpp"
 #include "ultra/types.hpp"
 
 #include <algorithm>
@@ -1773,20 +1774,32 @@ inline bool paprSnrCorrectionEnabled() {
 // data's own peak statistics). 3.4 dB was the gap while the unscrambled BURST_HEADER symbol set
 // every OFDM burst's peak (2.7-3.2 dB on the bodies); it still applies to a sender running
 // ULTRA_CONTROL_WHITEN=0.
+// PEAK CONTROL (default since 2026-11-21) clips each OFDM burst at its rung's headroom, which
+// lifts its average under the same peak: the OFDM data body now rides ABOVE the 8-carrier DPSK
+// payload the reading is taken on. MEASURED 2026-11-22 (GUI gate AWGN 20, `TX level` log, median
+// 50 ms in-band window): CONNECT -16.3 dB, OFDM data -13.3..-13.8 dB -> -2.9 dB. The +1.0 prior
+// predated peak control; with it (and the offset clamped at 0) OFDM was judged 3.9 dB below the
+// SNR it gets, and a true AWGN 4-5 dB stayed on MC-DPSK at 90 bps where OFDM carries ~300.
 inline constexpr float kPeakNormalizedOfdmBelowMcDpskDb = 1.0f;
+inline constexpr float kPeakControlledOfdmBelowMcDpskDb = -2.9f;
 inline constexpr float kPeakNormalizedOfdmBelowMcDpskUnwhitenedDb = 3.4f;
 inline float peakNormalizedOfdmBelowMcDpskPriorDb() {
-    return v2::controlFrameWhiteningEnabled() ? kPeakNormalizedOfdmBelowMcDpskDb
-                                              : kPeakNormalizedOfdmBelowMcDpskUnwhitenedDb;
+    if (!v2::controlFrameWhiteningEnabled()) return kPeakNormalizedOfdmBelowMcDpskUnwhitenedDb;
+    return ultra::peak_control::enabled() ? kPeakControlledOfdmBelowMcDpskDb
+                                          : kPeakNormalizedOfdmBelowMcDpskDb;
 }
 
 inline LadderRung selectLadderRungPaprCorrected(float snr_db, float fading_index,
                                                 float ofdm_offset_db) {
     const ChannelClassification channel = classifyChannel(fading_index);
     const LadderRung measured = selectLadderRung(snr_db, channel);
-    if (!(ofdm_offset_db > 0.0f) || !isOFDMMode(measured.waveform)) return measured;
+    if (ofdm_offset_db == 0.0f || !std::isfinite(ofdm_offset_db)) return measured;
+    // OFDM judged at the SNR its own payload will see: below the reading when it rides lower
+    // (offset > 0), above when it rides higher (offset < 0, peak-controlled OFDM over the
+    // 8-carrier DPSK payload the reading measured).
     const LadderRung corrected = selectLadderRung(snr_db - ofdm_offset_db, channel);
     if (isOFDMMode(corrected.waveform)) return corrected;
+    if (!isOFDMMode(measured.waveform)) return measured;
     // OFDM would land below its floor: the best MC-DPSK rung at the MEASURED SNR, on the MC-DPSK
     // rungs' own floors. (Capping the SNR just under the OFDM floor instead threw the reading away
     // once that floor sat below the MC-DPSK floors: AWGN floor 4 picked the deepest DBPSK fallback

@@ -8,6 +8,16 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### BUG-FORCE-DATA-MOD-QPSK-MCDPSK (open, 2026-11-22) — P3 (test knob)
+- `ULTRA_FORCE_DATA_MOD=QPSK` in an MC-DPSK session yields "MC-DPSK QPSK" (a coherent modulation
+  name on the differential waveform) instead of forcing OFDM QPSK; the force path does not pick the
+  waveform. Do not use it for OFDM A/Bs until fixed.
+
+### BUG-MEASURE-ACK-FER-SESSION-CONFIGS (open, 2026-11-22) — P3 (tool)
+- `measure_ack_fer` configs `data4_light` and `burst_chunk` do not model a connected session's
+  burst (descriptor, compact frames, structure acquisition); their FER does not predict the GUI.
+  Use the GUI gate or the `--frame-log` paths that run the production geometry.
+
 ### BUG-MCDPSK-PEAK-CONTROL-NO-GAIN (open, 2026-11-22) — P3: the h = 0 clip may buy MC-DPSK data bursts nothing
 
 `tools/lowsnr_floor` (production encoder/decoder, peak-limited TX at 0.5, AWGN, 7.3 Hz, 10 trials, 3-4
@@ -2780,6 +2790,20 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-FADING-NOISE-INFLATED (FIXED 2026-11-22) — was P1 on AWGN 3-6 dB
+- The MC-DPSK temporal fading index (raw CV of |x|^2) read noise as fading: AWGN at low SNR
+  classified Good and took the 5 dB Good OFDM floor. Fixed with a per-carrier noise-variance
+  subtraction (`multi_carrier_dpsk.hpp demodulateSoft`). CHANGELOG 2026-11-22 (fix(ladder)).
+
+### BUG-PAPR-PRIOR-STALE-PEAK-CONTROL (FIXED 2026-11-22) — was P1 on a peak-limited TX
+- The connect pick's PAPR prior (+1.0 dB, OFDM below MC-DPSK) predated peak control, which puts
+  OFDM data ~2.9 dB ABOVE the CONNECT; the measured offset was clamped >= 0 and taken over the whole
+  burst (gaps included). Prior -2.9 with peak control, signed offset, typical in-band level.
+
+### BUG-LATENT-DEAD-RUNG-HOLD (FIXED 2026-11-22) — was P1 at OFDM entry rates
+- The latent posterior held QPSK R1/2 for three 0/32-codeword groups while the EVM window predicted
+  4 % success (CLIMB mode could only lift). Dead-rung veto (p < kDeadProb) in `connection.cpp`.
 
 ### BUG-ARQ-WINDOW-SHRINK-ACK-DROP (FIXED 2026-11-22) — was P1 on MC-DPSK rate steps down
 

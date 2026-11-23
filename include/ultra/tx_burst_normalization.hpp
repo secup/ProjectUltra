@@ -58,6 +58,11 @@ struct TxBurstRmsMeasurement {
     size_t active_samples = 0;     // active_end - active_begin
     float broadband_rms = 0.0f;    // RMS over [active_begin, active_end)
     float in_band_rms = 0.0f;      // RMS after referenceBandFir over active region
+    // The burst's typical sustained in-band level: the median 50 ms window RMS over the active
+    // region, near-silent windows excluded. A preamble shorter than half the burst (a chirp at
+    // full peak over a DPSK payload ~5 dB below it) does not move it, so it is the level the
+    // peer's payload SNR reading is taken on (the TX PAPR offset compares these, 2026-11-22).
+    float in_band_typical_rms = 0.0f;
     float gain_to_reference = 1.0f; // kModemReferenceInBandRms / in_band_rms
     float peak_after_gain = 0.0f;  // Max |x * gain| over the full burst
     size_t peak_warning_samples = 0; // Full-burst samples with |x * gain| > 0.95

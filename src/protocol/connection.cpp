@@ -3651,6 +3651,31 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                                        static_cast<float>(geometry[up].frames_per_cycle) *
                                        LatentRateController::kCapProb / geometry[up].cycle_s;
                     evm_decided = true;
+                } else if (latent_rung != kRungIdxNone &&
+                           evm_selector_.successProb(latent_rung) <
+                               LatentRateController::kDeadProb) {
+                    // DEAD-RUNG VETO, the climb's mirror (2026-11-22). The posterior learns
+                    // only from outcomes and, seeded high, held a rung whose measured frames
+                    // predicted 4 % success for three whole groups (QPSK R1/2 at EVM 5.0 dB,
+                    // 0/32 codewords each; AWGN 4 dB, peak-limited TX). The window's own
+                    // frames say it is DEAD by the criterion the controller itself uses
+                    // (p < kDeadProb: "dead, not merely bad"), so command the best rung below
+                    // it they do not rule out, or the most robust one when they rule out all.
+                    const uint8_t below = latent_rung > kRungIdxQpskR14
+                                              ? static_cast<uint8_t>(latent_rung - 1)
+                                              : kRungIdxQpskR14;
+                    const uint8_t down = evm_selector_.bestReliable(
+                        geometry, below, LatentRateController::kDeadProb);
+                    evm_pick.rung = down != kRungIdxNone ? down : kRungIdxQpskR14;
+                    evm_pick.goodput = geometry[evm_pick.rung].valid()
+                        ? geometry[evm_pick.rung].useful_bytes_per_frame *
+                              static_cast<float>(geometry[evm_pick.rung].frames_per_cycle) *
+                              std::min(evm_selector_.successProb(evm_pick.rung),
+                                       LatentRateController::kCapProb) /
+                              geometry[evm_pick.rung].cycle_s
+                        : 0.0f;
+                    evm_decided = evm_pick.rung < latent_rung;
+                    if (!evm_decided) evm_pick = {};
                 }
             }
         }

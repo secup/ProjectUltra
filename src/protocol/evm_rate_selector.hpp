@@ -76,7 +76,9 @@ inline std::atomic<int>& evmRateSelectionFlag() {
 //   =climb  CLIMB: the latent controller decides; the selector may only lift its pick to a
 //           higher rung whose predicted success is at least LatentRateController::kCapProb
 //           (the most the controller ever credits any rung) — an upward move that costs no
-//           reliability. Demotions stay with the outcome-fitted posterior.
+//           reliability. Demotions stay with the outcome-fitted posterior, except that a
+//           pick its window's frames predict DEAD (p < LatentRateController::kDeadProb) is
+//           vetoed down to the best rung they do not rule out (2026-11-22, connection.cpp).
 enum class EvmRateMode : int { Off = 0, Full = 1, Climb = 2 };
 inline EvmRateMode evmRateSelectionMode() {
     int v = evmRateSelectionFlag().load(std::memory_order_relaxed);
