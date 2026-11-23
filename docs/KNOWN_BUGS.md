@@ -2791,6 +2791,15 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-MFSK-PHYSICAL-SNR-SCALE (FIXED 2026-11-23) — was P1 on ITU Good -5..+2 dB (v0.6.4)
+- A 16-FSK frame's physical SNR (measured on its constant-envelope payload since 16-FSK-F) was
+  published raw, ~6 dB above the DPSK-span scale its consumers were calibrated on (the fading
+  selection's physical cap, the follow's OFDM judgment and initial OFDM rate), while its reading was
+  already reported DPSK-equivalent (`kMfskOverDbpskReadingDb`). On fading the cap set the selection
+  SNR, so a 16-FSK-F session commanded OFDM at ITU Good -2..-5 dB (1-2 failed excursions per run) and
+  at +2 dB entered OFDM at R1/2 instead of R1/4. Now published less `kMfskOverDbpskReadingDb`
+  (`MultiCarrierDPSKDemodulator::updateDataSpanPhysicalSNR`); the presence gate stays on raw power.
+
 ### BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING (FIXED 2026-11-23) — was P1 on fading near the OFDM floor
 - `SelectiveRepeatARQ::setAckTimeout` kept the RTT estimator across a changed configured timeout, and
   the default RTO floor pins the estimate to the value it was sampled under. After a waveform-follow

@@ -563,9 +563,12 @@ int main(int argc, char** argv) {
     }
     {
         const float physical = listenerThroughOfdmSpellMeasuresFallbackPhysical();
-        check(std::isfinite(physical) && physical > 3.0f && physical < 11.0f,
+        // The noise is set on the 16-FSK-F burst's own power (~7 dB); a 16-FSK physical SNR is
+        // published on the DPSK scale, kMfskOverDbpskReadingDb under it (BUG-MFSK-PHYSICAL-SNR-SCALE).
+        const float on_burst = physical + kMfskOverDbpskReadingDb;
+        check(std::isfinite(physical) && on_burst > 3.0f && on_burst < 11.0f,
               "a listener that sat through OFDM traffic measures the fallback frame's physical SNR "
-              "(~7 dB)");
+              "(~7 dB on the burst, published on the DPSK scale)");
     }
     {
         const bool heard = connectedDqpskResponderHearsConnect();

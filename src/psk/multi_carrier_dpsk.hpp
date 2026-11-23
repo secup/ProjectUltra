@@ -1286,7 +1286,15 @@ public:
             static_cast<double>(noise_ref_rms_) * static_cast<double>(noise_ref_rms_);
         // The training span's signal-presence gate (3 dB over the reference).
         if (p_n > 0.0 && rx_power > 2.0 * p_n) {
-            last_physical_snr_db_ = static_cast<float>(10.0 * std::log10((rx_power - p_n) / p_n));
+            // A 16-FSK payload (constant envelope at the peak) carries kMfskOverDbpskReadingDb more
+            // average power than the DPSK span every consumer of the physical SNR was calibrated on
+            // (the fading selection's physical cap, the follow's OFDM judgment): it is published on
+            // the DPSK scale, as its reading is (BUG-MFSK-PHYSICAL-SNR-SCALE: published raw, a
+            // 16-FSK-F burst at a fade crest capped the selection ~6 dB high and commanded OFDM at
+            // ITU Good -2..-5 dB, GUI 2026-11-23). The presence gate above stays on the raw power.
+            const float scale_db = config_.isMfsk() ? kMfskOverDbpskReadingDb : 0.0f;
+            last_physical_snr_db_ =
+                static_cast<float>(10.0 * std::log10((rx_power - p_n) / p_n)) - scale_db;
             last_physical_snr_valid_ = true;
         }
     }

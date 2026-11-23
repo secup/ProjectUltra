@@ -10,6 +10,41 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 — fix(mcdpsk): 16-FSK physical SNR on the DPSK scale (BUG-MFSK-PHYSICAL-SNR-SCALE)
+
+**Was.** Since 16-FSK-F, a 16-FSK frame's physical SNR is measured on its payload (constant envelope
+at the transmitter's peak), not its DPSK training span. It was published raw: ~6 dB above the DPSK
+span's average power at the same peak, the scale every consumer was calibrated on. Its reading is
+reported DPSK-equivalent (`kMfskOverDbpskReadingDb` = 6.0), the physical SNR was not. On fading the
+selection SNR is the affine-corrected reading capped at physical + 2 dB, so the cap, ~6 dB high, set
+the selection: the receiver commanded OFDM at ITU Good -2..-5 dB on bursts reading "physical
+0.2-0.9 dB" (GUI: one or two failed OFDM excursions in nearly every Good -2 dB run, ~17-80 s each),
+and at Good +2 dB the inflated selection picked OFDM QPSK R1/2, which failed and fell back.
+
+**Now.** `updateDataSpanPhysicalSNR` publishes a 16-FSK frame's physical SNR less
+`kMfskOverDbpskReadingDb`, the same scale as its reading; the 3 dB signal-presence gate stays on the
+raw power. CTest DualListenEngine's fallback-physical check reads the burst scale through the constant.
+
+**Verified.** GUI, ITU Good, 1 KB, 7.3 Hz, `--tx-model hardware`, on top of the ARQ fix (seconds;
+"timer fix" = 0a1d3c83 alone, v0.6.4 from the runs above):
+
+| SNR | seed | v0.6.4 | timer fix | + this fix |
+|---|---|---|---|---|
+| -5 | 42 | 414-578 | 413 | 359 |
+| -5 | 44 | - | 409 | 267 |
+| -2 | 42 | FAIL 1207 | 316 | 303 |
+| -2 | 43 | 308 | 285 | 235 |
+| -2 | 44 | 352 | 352 | 233 |
+| -2 | 45 | 362 | 318 | 251 |
+| 0 | 43 | 354 | 345 | 300 |
+| 0 | 44 | 324 | 334 | 231 |
+| +2 | 42 | 316 | 329-336 | 150 |
+
+OFDM excursions at -5..0 dB: 9 in the timer-fix runs, 1 here (a genuine fade crest, reading -0.6).
+Unchanged where no 16-FSK frame decides: AWGN 3 / 4 dB (2 KB) 123 / 113 s vs 122 / 151 s, ITU Good
+5 / 8 dB (4 KB) 117 / 93 s vs 110 / 82 s with the same decisions at the same times (fading spread).
+Full ctest 128/128.
+
 ## 2026-11-23 — fix(arq): a changed ACK timeout restarts the RTT estimator (BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING)
 
 **Was.** `SelectiveRepeatARQ::setAckTimeout` updated the configured timeout but left the RTT
