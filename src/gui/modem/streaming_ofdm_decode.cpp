@@ -4368,7 +4368,7 @@ bool StreamingDecoder::mcDpskUpperRungMarginTest(const std::vector<float>& frame
                                                   float decode_cfo) {
     // The frame that just decoded, with the measured in-band noise raised by the gap between this
     // rung's decode threshold and the next one's (connection_policy::mcDpskUpMarginDbFor: 3 dB
-    // 16-FSK -> 16-FSK-F, 9 dB 16-FSK-F -> DQPSK, 6.02 dB for a DPSK constellation step, whose
+    // 16-FSK -> 16-FSK-F, 10 dB 16-FSK-F -> DQPSK, 6.02 dB for a DPSK constellation step, whose
     // phase decision distance halves). The noise rides the real, faded signal, so the test needs
     // no channel model.
     auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());

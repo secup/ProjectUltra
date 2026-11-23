@@ -3896,7 +3896,11 @@ void App::noteTxBurstLevelForPapr(const std::vector<float>& normalized, const ch
     // data that follows. The state is the atomic cache (this can run on the RX thread); a
     // DISCONNECT sent while DISCONNECTING is in the session's waveform and is not counted.
     const auto state = conn_state_cached_.load(std::memory_order_relaxed);
-    const bool ofdm_data = context && std::strcmp(context, "TX burst audio") == 0;
+    // Only an OFDM burst: an MC-DPSK session's data bursts share the "TX burst audio" context. A
+    // 16-FSK-F burst (constant envelope, ~3 dB above OFDM) counted as OFDM data put the offset at
+    // -7.1 dB where OFDM measures -3.8 (GUI 2026-11-23); DBPSK data, near OFDM's level, had hidden it.
+    const bool ofdm_data = context && std::strcmp(context, "TX burst audio") == 0 &&
+                           protocol::isOFDMMode(modem_.getWaveformMode());
     const bool handshake = context && std::strcmp(context, "TX audio") == 0 &&
                            (state == protocol::ConnectionState::DISCONNECTED ||
                             state == protocol::ConnectionState::PROBING ||

@@ -846,12 +846,17 @@ inline constexpr float kMcDpskReadingBelowChannelDb = 5.4f;
 inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::MFSK16, Modulation::MFSK16_FAST,
                                                          Modulation::DQPSK};
 // Up-step margins (dB), indexed by the LOWER rung: how much more noise the lower rung's frame must
-// survive for the upper rung to decode on this channel - the gap between the rungs' 50 % points in
-// the table above (16-FSK -> 16-FSK-F ~1.5 dB AWGN / ~2.5 dB Good; 16-FSK-F -> DQPSK ~8.5 / ~7.5),
-// the larger of the two channels plus 0.5 dB for the estimate. The receiver re-decodes the frame
-// it just decoded with that much more noise (StreamingDecoder::mcDpskUpperRungMarginTest); until
-// 2026-11-23 the test was 6.02 dB for every step (a phase-decision-distance halving, DBPSK->DQPSK).
-inline constexpr float kMcDpskUpMarginDb[] = {3.0f, 9.0f};
+// survive for the upper rung to decode on this channel. The test is one decode of the lower rung's
+// frame with that much more noise (StreamingDecoder::mcDpskUpperRungMarginTest), which passes about
+// half the time at the lower rung's 50 % point, so the margin is the gap from the lower rung's 50 %
+// point to the point where the upper one decodes well enough to pay for its losses:
+//   16-FSK -> 16-FSK-F (2x the rate: pays from ~50 %): 50 %-to-50 % gap ~1.5 dB AWGN / ~2.5 dB Good
+//     (table above) -> 3 dB.
+//   16-FSK-F -> DQPSK: 16-FSK-F 50 % ~-11 dB AWGN, DQPSK 90 % ~-1 dB (16/20 at -2, 20/20 at 0)
+//     -> 10 dB. 9 dB (the 50 %-to-50 % gap + 0.5) probed DQPSK at a true -2 dB, lost the burst and
+//     fell back (GUI 2026-11-23, AWGN -2 s41: 406 s vs DBPSK-main 376 s).
+// Until 2026-11-23 the test was 6.02 dB for every step (a phase-decision-distance halving, DBPSK->DQPSK).
+inline constexpr float kMcDpskUpMarginDb[] = {3.0f, 10.0f};
 inline float mcDpskUpMarginDbFor(Modulation lower) {
     if (lower == Modulation::MFSK16) return kMcDpskUpMarginDb[0];
     if (lower == Modulation::MFSK16_FAST) return kMcDpskUpMarginDb[1];

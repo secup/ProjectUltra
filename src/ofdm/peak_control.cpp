@@ -90,6 +90,27 @@ Choice chooseHeadroomOnCurve(const std::vector<CurvePoint>& curve, float eta_db)
     return best;
 }
 
+float curveGainAtDb(const std::vector<CurvePoint>& curve, float h_db) {
+    if (curve.empty()) return 0.0f;
+    if (h_db <= curve.front().h_db) return curve.front().gain_db;
+    for (size_t i = 1; i < curve.size(); ++i) {
+        if (h_db <= curve[i].h_db) {
+            const float t = (h_db - curve[i - 1].h_db) / (curve[i].h_db - curve[i - 1].h_db);
+            return curve[i - 1].gain_db + t * (curve[i].gain_db - curve[i - 1].gain_db);
+        }
+    }
+    return curve.back().gain_db;
+}
+
+float mcDpskDbpskDataOverControlReadingDb() {
+    if (!enabled()) return 0.0f;
+    const auto& curve = mcDpsk8x1024Curve();
+    const Choice data = chooseHeadroomOnCurve(
+        curve, mcDpskToneBandThresholdDb(/*dqpsk=*/false, 8, 1024));
+    const float g_data = data.h_db < 0.0f ? 0.0f : data.curve_g_db;
+    return g_data - curveGainAtDb(curve, kMcDpskControlHeadroomDb);
+}
+
 namespace {
 double invDb(float db) { return std::pow(10.0, -static_cast<double>(db) / 10.0); }
 double inv(const Choice& c) { return c.h_db < 0.0f ? 0.0 : invDb(c.sdr_db); }  // 1/D

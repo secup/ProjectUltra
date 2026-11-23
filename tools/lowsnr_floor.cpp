@@ -158,7 +158,12 @@ int main(int argc, char** argv) {
         {"16FSK  R1/4", Modulation::MFSK16, CodeRate::R1_4, 0, 30},
         {"16FSK  R1/2", Modulation::MFSK16, CodeRate::R1_2, 0, 30},
         {"DQPSK  R1/4", Modulation::DQPSK, CodeRate::R1_4, 0, 30},
+        {"16FSK-F", Modulation::MFSK16_FAST, CodeRate::R1_4, 0, 30},
     };
+    // LOW_COMPACT=1: the session's compact DATA frame (one turbo codeword of 3 x 648 air bits, half
+    // for 16-FSK-F; 52 payload bytes, the production MC-DPSK geometry) instead of the v2 LDPC chain:
+    // what a connected session actually sends at each rung.
+    const bool compact = std::getenv("LOW_COMPACT") != nullptr;
     std::vector<float> snrs = {-14, -12, -10, -8, -6, -4, -2, 0};
     if (const char* e = std::getenv("LOW_SNR")) snrs = {float(std::atof(e))};
     if (connect_mode) return runConnect(trials, cfo, ch_type, snrs);
@@ -172,7 +177,7 @@ int main(int argc, char** argv) {
         auto cfg = ultra::mc_dpsk_presets::level8();
         cfg.samples_per_symbol = 1024;
         cfg.mfsk_tones = c.mfsk_tones;
-        const Bytes payload(c.payload, 0x5A);
+        const Bytes payload(compact ? 52 : c.payload, 0x5A);
         const Bytes ser =
             v2::DataFrame::makeData("ALPHA", "BRAVO", 7, payload, c.rate).serialize();
         std::vector<int> ok(snrs.size(), 0), nread(snrs.size(), 0);
@@ -184,6 +189,10 @@ int main(int argc, char** argv) {
                 enc.setMode(protocol::WaveformMode::MC_DPSK);
                 enc.setMCDPSKConfig(cfg);
                 enc.setDataMode(c.mod, c.rate);
+                if (compact) {
+                    enc.setFixedFrameCodewords(3);
+                    enc.setMcDpskCompactFrames(true);
+                }
                 auto frame = enc.encodeFrame(ser);
                 air = double(frame.size()) / 48000.0;
                 // ModemEngine clips MC-DPSK data bursts at h = 0 (applyPeakControl, 8x1024 tones)
@@ -191,7 +200,9 @@ int main(int argc, char** argv) {
                 (void)sim::normalizeTxBurstForHardware(frame, 0.5f);
                 std::vector<float> audio(48000, 0.0f);
                 audio.insert(audio.end(), frame.begin(), frame.end());
-                audio.resize(audio.size() + 96000, 0.0f);
+                // A connected receiver peeks the longest frame any rung may send (~7 s): give it
+                // that much air after the frame, as a live stream would.
+                audio.resize(audio.size() + (compact ? 480000 : 96000), 0.0f);
                 ota_channel_core::SimulatedChannel ch;
                 ch.setSeed(uint64_t(t) * 1000 + si);
                 ch.configure(snrs[si], ch_type);
@@ -222,6 +233,10 @@ int main(int argc, char** argv) {
                 dec.setMode(protocol::WaveformMode::MC_DPSK, std::getenv("LOW_DISCONNECTED") == nullptr);
                 dec.setMCDPSKConfig(cfg);
                 dec.setDataMode(c.mod, c.rate);
+                if (compact) {
+                    dec.setFixedFrameCodewords(3);
+                    dec.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
+                }
                 for (size_t pos = 0; pos < audio.size(); pos += 4800) {
                     dec.feedAudio(audio.data() + pos, std::min<size_t>(4800, audio.size() - pos));
                     dec.processBuffer();

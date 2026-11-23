@@ -8863,10 +8863,16 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // MC-DPSK rate change: a negotiated data mode is a fresh start for the receiver's controller
     // (the peer begins at this constellation) and for the sender's command ordering.
     if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        // The first probe's run is priced for the step the session actually starts at (its rung
+        // and the one above), not the bottom pair: since 2026-11-23 the 16-FSK -> 16-FSK-F pair
+        // (a full-length 16-FSK control ACK in the timeout) priced a session starting at 16-FSK-F
+        // at 3 clean bursts where its own 16-FSK-F -> DQPSK step costs 2 (GUI AWGN 0 dB: one extra
+        // 21 s burst on a 2 KB transfer, 230 vs 213 s).
+        const int start_rung = std::max(0, connection_policy::mcDpskRungIndexFor(data_modulation_));
         mcdpsk_rate_ctl_.reset(
-            std::max(0, connection_policy::mcDpskRungIndexFor(data_modulation_)),
+            start_rung,
             connection_policy::mcDpskFirstProbeAfterCleanBursts(
-                0, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
+                start_rung, config_.mc_dpsk_num_carriers, config_.mc_dpsk_samples_per_symbol,
                 data_frame_cw_count_));
         rx_mcdpsk_frames_since_command_ = 0;
         mcdpsk_last_command_group_seq_ = -1;
@@ -9281,7 +9287,17 @@ Connection::SessionPick Connection::sessionLadderPick() const {
         pick.physical_n);
     const float rate_fading = connection_policy::coherenceAdjustedFadingIndex(
         entry_fading, coherence_score_, coherence_valid_);
-    const float papr_offset_db = txPaprOffsetDb();
+    // The OFDM judgment in a session was validated on the session's DBPSK DATA readings, which ride
+    // above the control-frame scale (the scale of the PAPR offset's reference) by the data's
+    // peak-control gain. A 16-FSK frame reports on the control scale (kMfskOverDbpskReadingDb), so
+    // when this burst's readings are 16-FSK the OFDM judgment carries them to the data scale of the
+    // rung they replace (16-FSK-F took DBPSK's, 2026-11-23); the MC-DPSK rungs keep the control
+    // scale their crossovers were set on. Without it a true AWGN 3-4 dB link stayed on 16-FSK-F
+    // until a DQPSK burst read high enough (GUI: 152 vs 110 s for 2 KB).
+    const float mfsk_to_data_db = isMfskModulation(rx_mcdpsk_last_modulation_)
+                                      ? peak_control::mcDpskDbpskDataOverControlReadingDb()
+                                      : 0.0f;
+    const float papr_offset_db = txPaprOffsetDb() - mfsk_to_data_db;
     pick.rung = connection_policy::selectLadderRungPaprCorrected(pick.selection_snr_db,
                                                                  rate_fading, papr_offset_db);
     pick.mod = pick.rung.modulation;

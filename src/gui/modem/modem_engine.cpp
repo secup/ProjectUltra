@@ -501,7 +501,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
 // floor (50 % point -3.2 vs -3.3 dB), net +2.6 dB for the handshake. So h = the largest clip whose
 // reading stays unbiased through the highest connect decision threshold.
 void ModemEngine::applyControlPeakControl(std::vector<float>& samples) const {
-    constexpr float kMcDpskControlHeadroomDb = 6.0f;
+    using peak_control::kMcDpskControlHeadroomDb;
     if (!peak_control::enabled()) return;
     const auto& mc = mc_dpsk_config_;
     if (mc.num_carriers != 8 || mc.samples_per_symbol != 1024 || mc.freq_low != 500.0f ||

@@ -92,7 +92,8 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 
 ### Mode 1: MC-DPSK (below wide-OFDM floor, or heavy fading)
 - Constellation changes during the session (2026-11-11, `ULTRA_MCDPSK_RATE_ADAPT`, INV-MCDPSK-RATE-001):
-  the receiver commands 16-FSK/DBPSK/DQPSK in each tone ACK (rung words 13/14/15), the sender switches
+  the receiver commands 16-FSK/16-FSK-F/DQPSK in each tone ACK (rung words 13/14/15; 16-FSK-F = 16-FSK
+  with half-length compact frames, DBPSK's rate, the middle rung since 2026-11-23), the sender switches
   between bursts (and drops a rung on a retransmission timeout), the receiver re-demodulates a failed
   first frame at the other rungs. Up-steps need margin: the receiver re-decodes a first frame with 4x
   the noise (6.02 dB).
@@ -141,7 +142,7 @@ The modem has distinct operating modes selected by SNR/channel. **Never mix thei
 3. After CONNECT_ACK, SNR measured, mode negotiated on the selection SNR (`connectSelectionSnrDb`: the reading, plus the fading basis bounded by the physical measurement): below the class floor (AWGN 2.5 / Good 5 / Moderate 14 under `ULTRA_FAST`; 8 / 8 / 14 with `ULTRA_FAST=0`) stay MC-DPSK, at or above → OFDM_CHIRP; narrowband → OFDM_NARROW. The fading index cannot tell ITU Poor from Good (it reads ~0.5-0.65), so a Poor 15 dB channel selects ~17 dB and runs OFDM QPSK R1/2 (GUI 2026-11-13: 5/5 seeds, ~390 bps, the same with an 8 dB Good floor).
 4. Waveform follow (2026-11-11, INV-FOLLOW-001, default ON as dual-listen; `ULTRA_WAVEFORM_FOLLOW=0` off, `=1` agreement A/B): a connected wideband session
    then crosses between MC-DPSK and OFDM_CHIRP as the channel moves: the receiver commands the crossing in
-   its tone ACK (session rung word 1..12 OFDM, 13..15 MC-DPSK 16-FSK/DBPSK/DQPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
+   its tone ACK (session rung word 1..12 OFDM, 13..15 MC-DPSK 16-FSK/16-FSK-F/DQPSK), see docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md.
    Dual-listen (the default, INV-DUAL-LISTEN-001): the receiver runs a second decoder on the other waveform
    and follows whatever arrives; only the sender switches (docs/DUAL_LISTEN_DESIGN_2026_11_11.md). GUI
    2026-11-12 at HEAD vs follow off (same build, 38 runs): 1-2.5-min 0 dB outages ~3-4 % slower (it

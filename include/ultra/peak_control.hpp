@@ -49,6 +49,20 @@ float mcDpskToneBandThresholdDb(bool dqpsk, int carriers, int samples_per_symbol
 struct Choice;
 Choice chooseHeadroomOnCurve(const std::vector<CurvePoint>& curve, float eta_db);
 
+// The clip level of MC-DPSK control frames (CONNECT, CONNECT_ACK, control frames sent through
+// ModemEngine::transmit): the largest h whose data-aided reading stays unbiased (modem_engine.cpp).
+inline constexpr float kMcDpskControlHeadroomDb = 6.0f;
+
+// G(h) on a measured curve, linear between its points (clamped to its ends).
+float curveGainAtDb(const std::vector<CurvePoint>& curve, float h_db);
+
+// How far above the control frames' reading scale a DBPSK DATA frame of the session reads: both are
+// the same 8-carrier DPSK payload, the data clipped at its own chooseHeadroom choice and the control
+// frame at kMcDpskControlHeadroomDb, so G(h_data) - G(h_control) on the MC-DPSK curve (+2.94 dB:
+// 5.62 at h=0 vs 2.68 at h=6; GUI 2026-11-23 at AWGN 3 dB: DBPSK data read -0.2 where the handshake
+// read -3.2). 0 with peak control off.
+float mcDpskDbpskDataOverControlReadingDb();
+
 // h_r* for a rung whose EVM decode threshold is eta_db; also returns its predicted gain and the
 // distortion floor it transmits with. A rung whose threshold no clip level beats returns
 // h_db < 0 (send unclipped).

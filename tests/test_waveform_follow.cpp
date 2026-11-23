@@ -553,6 +553,9 @@ void test_waveform_follow_down_crossing_forgets_stale_evidence() {
     CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
               c, connection_policy::encodeMcDpskRungCommand(0)),
           "the collapse crosses down");
+    // The readings below are DPSK data readings (a 16-FSK frame reports on the control scale and
+    // its OFDM judgment is carried to this one, Connection::sessionLadderPick).
+    ConnectionAdaptiveTestAccess::setDataMode(c, Modulation::DQPSK, CodeRate::R1_4);
     for (int burst = 0; burst < 4; ++burst) {
         ConnectionAdaptiveTestAccess::feedMcDpskSnr(c, -1.0f, 0.6f);  // no physical reading
         const uint8_t word = ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
@@ -1047,6 +1050,8 @@ void test_waveform_follow_return_reads_the_burst_physical_evidence() {
         CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
                   c, connection_policy::encodeMcDpskRungCommand(0)),
               "the fade crosses down");
+        // DPSK data readings (see test_waveform_follow_down_crossing_forgets_stale_evidence).
+        ConnectionAdaptiveTestAccess::setDataMode(c, Modulation::DQPSK, CodeRate::R1_4);
         for (float fade : {-3.0f, -5.0f, -1.0f}) {
             ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, fade, 0.6f, fade + 0.5f);
             (void)ConnectionAdaptiveTestAccess::mcDpskAckWord(c, true);
@@ -1081,6 +1086,8 @@ void test_waveform_follow_spell_keeps_the_measured_channel_class() {
         CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(
                   c, connection_policy::encodeMcDpskRungCommand(0)),
               "the fade crosses down");
+        // DPSK data readings (see test_waveform_follow_down_crossing_forgets_stale_evidence).
+        ConnectionAdaptiveTestAccess::setDataMode(c, Modulation::DQPSK, CodeRate::R1_4);
         const float spell_fading = read_as_awgn ? 0.0f : NAN;
         for (float fade : {-3.0f, -5.0f}) {
             ConnectionAdaptiveTestAccess::feedMcDpskFrame(c, fade, spell_fading, fade + 0.5f);
