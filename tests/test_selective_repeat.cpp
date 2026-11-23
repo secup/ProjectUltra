@@ -2294,7 +2294,7 @@ bool test_transmit_round_timeout_shrinks_live_tail_after_rtt_sample() {
     std::vector<Bytes> transmitted;
     tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
 
-    // Establish RTT-estimator state first. setAckTimeout() intentionally preserves
+    // Establish RTT-estimator state first. setAckTimeout() with the SAME value preserves
     // that estimator, so this proves the per-round override is a distinct mechanism
     // and still wins after a real sample exists.
     if (!tx.sendData(Bytes{0x11}))
@@ -2325,6 +2325,47 @@ bool test_transmit_round_timeout_shrinks_live_tail_after_rtt_sample() {
     auto retry = v2::DataFrame::deserialize(transmitted.back());
     if (!retry || retry->seq != 1 || retry->payload != Bytes{0x22})
         FAIL("round-timeout retry changed the live tail frame");
+
+    PASS();
+    return true;
+}
+
+// BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING: an RTT sample taken under one timing regime pinned the
+// RTO to that regime's configured timeout; a new configured timeout (waveform crossing) was
+// ignored, so an MC-DPSK burst was resent at OFDM's 15.6 s, before its ACK could arrive.
+bool test_changed_ack_timeout_restarts_rtt_estimator() {
+    TEST("a changed ACK timeout (new waveform) restarts the RTT estimator");
+
+    ARQConfig config;
+    config.window_size = 1;
+    config.ack_timeout_ms = 1000;  // "OFDM"
+    config.max_retries = 4;
+
+    SelectiveRepeatARQ tx(config);
+    tx.setCallsigns("TX1", "RX1");
+    std::vector<Bytes> transmitted;
+    tx.setTransmitCallback([&](const Bytes& data) { transmitted.push_back(data); });
+
+    if (!tx.sendData(Bytes{0x11}))
+        FAIL("failed to send RTT-training frame");
+    tx.tick(200);
+    tx.onFrameReceived(v2::ControlFrame::makeAck("RX1", "TX1", 0).serialize());
+    if (tx.ackTimeoutForFrameCount(1) != 1000)
+        FAIL("legacy RTO must sit at the configured timeout after a sample");
+
+    tx.setAckTimeout(1000);  // same regime again: estimator kept
+    tx.setAckTimeout(3000);  // "MC-DPSK": the new regime's timeout governs
+    if (tx.ackTimeoutForFrameCount(1) != 3000)
+        FAIL("changed timeout did not take effect over the old regime's RTT state");
+
+    if (!tx.sendData(Bytes{0x22}))
+        FAIL("failed to send frame after the crossing");
+    tx.tick(2999);
+    if (transmitted.size() != 2)
+        FAIL("frame resent before the new regime's timeout (old regime's RTO survived)");
+    tx.tick(1);
+    if (transmitted.size() != 3)
+        FAIL("frame not resent at the new regime's timeout");
 
     PASS();
     return true;
@@ -3336,6 +3377,7 @@ int main() {
     test_long_lifting_fixed_frame_preserves_full_payload();
     test_lifting_only_geometry_change_aborts_old_window();
     test_transmit_round_timeout_shrinks_live_tail_after_rtt_sample();
+    test_changed_ack_timeout_restarts_rtt_estimator();
     test_transmitted_frame_timeout_does_not_rearm_unsent_hole();
     test_transmitted_round_suspends_wrapped_window_slots();
     test_waiting_rebase_unsuspends_near_expiry_base();

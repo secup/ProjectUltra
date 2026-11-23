@@ -340,7 +340,20 @@ public:
     float postBurstLatencyRttvarMs() const { return post_burst_latency_rttvar_ms_; }
     uint32_t silentTimeoutRounds() const { return silent_timeout_rounds_; }
 
+    // A CHANGED timeout means a new timing regime (waveform crossing, MC-DPSK rung, OFDM rate):
+    // the RTT estimator's samples describe the old one, so it restarts (RFC 6298: a new path
+    // starts from the initial RTO). Until 2026-11-23 the estimator survived, and the default
+    // floor pins it to the configured value it was sampled under: after an OFDM -> MC-DPSK
+    // crossing the sender kept OFDM's 15.6 s instead of MC-DPSK's 24-45 s, resent every burst
+    // just before its ACK arrived (Karn then discarded every sample, so it never corrected) and
+    // keyed over the ACKs (GUI ITU Good -2 dB seed 42: FAIL after 1207 s, 91 retransmissions;
+    // BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING). The same value again keeps the estimator.
     void setAckTimeout(uint32_t timeout_ms) {
+        if (timeout_ms != config_.ack_timeout_ms) {
+            have_rtt_estimator_ = false;
+            srtt_ms_ = 0.0f;
+            rttvar_ms_ = 0.0f;
+        }
         config_.ack_timeout_ms = timeout_ms;
         if (!have_rtt_estimator_) {
             adaptive_ack_timeout_ms_ = timeout_ms;

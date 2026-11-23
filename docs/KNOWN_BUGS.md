@@ -2791,6 +2791,16 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING (FIXED 2026-11-23) — was P1 on fading near the OFDM floor
+- `SelectiveRepeatARQ::setAckTimeout` kept the RTT estimator across a changed configured timeout, and
+  the default RTO floor pins the estimate to the value it was sampled under. After a waveform-follow
+  excursion OFDM -> MC-DPSK the sender kept OFDM's 15.6 s instead of MC-DPSK's 24-45 s: every burst
+  was resent just before its ACK arrived, Karn discarded every sample (so it never corrected), and the
+  resend keyed over the peer's ACK. GUI ITU Good -2 dB seed 42 (v0.6.4): FAIL after 1207 s, 91
+  retransmissions. The reverse crossing left OFDM waiting MC-DPSK's 45 s. A changed timeout now
+  restarts the estimator (RFC 6298, new path). CTest SelectiveRepeatARQ
+  `test_changed_ack_timeout_restarts_rtt_estimator` (fails without the fix).
+
 ### BUG-PAPR-LEVEL-COUNTS-MCDPSK-BURSTS (FIXED 2026-11-23) — was P2
 - `App::noteTxBurstLevelForPapr` counted every "TX burst audio" as OFDM data, MC-DPSK session bursts
   included: 16-FSK-F bursts (constant envelope) put the measured PAPR offset at -7.1 dB where OFDM

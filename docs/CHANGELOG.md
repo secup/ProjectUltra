@@ -10,6 +10,40 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 — fix(arq): a changed ACK timeout restarts the RTT estimator (BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING)
+
+**Was.** `SelectiveRepeatARQ::setAckTimeout` updated the configured timeout but left the RTT
+estimator, and the RTO it computes, untouched once it held a sample. On the default path the RTO floor
+is the configured timeout the sample was taken under, so the estimator pinned the OLD regime's value.
+After a waveform-follow excursion to OFDM and back (Connection reconfigures MC-DPSK's 45.4 s), the
+sender kept OFDM's 15.57 s: on a 16-FSK-F session the 7 s tone ACK arrives ~15.7 s after the burst, so
+every burst was resent ~0.1 s before its ACK, the resend went out back-to-back with the next burst and
+keyed over the peer's following ACK, and every frame being a retransmission, Karn discarded every RTT
+sample, so nothing corrected it. GUI (v0.6.4, ITU Good -2 dB, seed 42, 1 KB): FAIL after 1207 s, 91
+retransmissions, BRAVO decoding most bursts while ALPHA heard 13 of 46 ACKs.
+
+**Now.** A changed configured timeout (waveform crossing, MC-DPSK rung, OFDM rate) restarts the
+estimator, as RFC 6298 restarts on a new path; the same value again keeps it
+(`selective_repeat_arq.hpp`).
+
+**Verified.**
+- CTest SelectiveRepeatARQ `test_changed_ack_timeout_restarts_rtt_estimator`: fails on the old code
+  ("changed timeout did not take effect"), passes now. Full ctest 128/128.
+- GUI, ITU Good, 1 KB, 7.3 Hz, `--tx-model hardware`, fix vs v0.6.4 (seconds):
+
+  | SNR | seed | v0.6.4 | fix |
+  |---|---|---|---|
+  | -2 | 42 | FAIL 1207 | 316 |
+  | -2 | 43 | 308 | 285 |
+  | -2 | 44 | 352 | 352 |
+  | -2 | 45 | 362 | 318 |
+  | -5 | 43 | 391 | 390 |
+  | 0 | 43 | 354 | 345 |
+  | 0 | 44 | 324 | 334 |
+  | +2 | 42 | 316 | 336 |
+
+  No case worse beyond the fading spread; the failure is gone.
+
 ## 2026-11-23 — RELEASE: v0.6.4-pre-alpha
 
 Version 0.6.3 -> 0.6.4 in `CMakeLists.txt`. **Not compatible over the air with 0.6.3**: both stations
