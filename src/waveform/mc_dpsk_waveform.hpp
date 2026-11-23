@@ -121,13 +121,20 @@ public:
     int getMinSamplesForFrame() const override;
     int getMinSamplesForCWCount(int num_cw) const override;
     int getDataOnlySamplesForCWCount(int num_cw) const;
-    // Training + reference + num_cw codewords at the rung below the configured one (DBPSK below
-    // DQPSK, 16-FSK below DBPSK): a session burst's first-frame look-ahead long enough for what the
-    // sender may have dropped to unannounced.
-    int getSamplesForCWCountAtSlowest(int num_cw) const;
-    // Training + reference + num_cw codewords at DBPSK (one bit per carrier): another ladder
-    // geometry's frame, which is DPSK (16-FSK keeps the session's codeword count).
-    int getSamplesForCWCountAtDbpsk(int num_cw) const;
+    // COMPACT SESSION DATA FRAMES (INV-MCDPSK-FRAME-001): a frame of num_cw session codewords at
+    // rung `mod` occupies protocol::mcdpsk_frame::airBitsFor(num_cw, mod) air bits - num_cw x 648
+    // except MFSK16_FAST (half). Control frames and v2 chains keep getMinSamplesForCWCount.
+    // Training + reference + data, at `mod` on this profile (another rung: the look-ahead for what
+    // the sender may have dropped to, a peek covering every rung the peer may send at).
+    int getCompactFrameSamplesAt(Modulation mod, int num_cw) const;
+    int getCompactDataSamplesAt(Modulation mod, int num_cw) const;
+    // The same at the configured rung.
+    int getMinSamplesForCompactFrame(int num_cw) const {
+        return getCompactFrameSamplesAt(modulation_, num_cw);
+    }
+    int getDataOnlySamplesForCompactFrame(int num_cw) const {
+        return getCompactDataSamplesAt(modulation_, num_cw);
+    }
 
     // ========================================================================
     // MC-DPSK Specific

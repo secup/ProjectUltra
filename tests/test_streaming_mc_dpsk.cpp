@@ -4,6 +4,7 @@
 #include "ota_channel_core/channel.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/connection_policy.hpp"
+#include "protocol/mcdpsk_frame.hpp"
 #include "ultra/logging.hpp"
 
 #include <algorithm>
@@ -181,7 +182,7 @@ bool runLowAmplitudePing(const char* name,
 // follows it. Production geometry: 8 carriers, 1024 samples/symbol, R1/4.
 bool runConstellationChangeBurst(Modulation tx_mod, Modulation rx_configured) {
     const char* name = (tx_mod == Modulation::DQPSK) ? "DQPSK burst at a DBPSK receiver"
-                                                     : "DBPSK burst at a DQPSK receiver";
+                                                     : "16-FSK-F burst at a DQPSK receiver";
     StreamingEncoder encoder;
     encoder.setMode(protocol::WaveformMode::MC_DPSK);
     encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
@@ -224,7 +225,11 @@ bool runConstellationChangeBurst(Modulation tx_mod, Modulation rx_configured) {
                   << serialized_frames.size() << " frames\n";
         return false;
     }
-    if (decoder.lastMcDpskRxModulation() != tx_mod) {
+    // v2 frames (not compact) are full length at either 16-FSK rung: the PHY cannot tell them apart.
+    const bool same_rung = decoder.lastMcDpskRxModulation() == tx_mod ||
+                           (isMfskModulation(tx_mod) &&
+                            isMfskModulation(decoder.lastMcDpskRxModulation()));
+    if (!same_rung) {
         std::cout << "FAIL: " << name << ": recorded constellation "
                   << modulationToString(decoder.lastMcDpskRxModulation()) << "\n";
         return false;
@@ -358,11 +363,14 @@ bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle,
         serialized_frames.push_back(frame.serialize());
     }
     auto samples = encoder.encodeBurstLight(serialized_frames);
-    // 3 x 648 air bits per frame: on 8 carriers (DBPSK, DQPSK) or 4 bits per symbol time (16-FSK).
+    // 3 x 648 air bits per frame (half for 16-FSK-F): on 8 carriers (DBPSK, DQPSK) or 4 bits per
+    // symbol time (16-FSK).
     const size_t bits_per_symbol_time =
         protocol::connection_policy::mcDpskBitsPerSymbolTime(tx_mod, 8);
+    const size_t air_bits =
+        static_cast<size_t>(protocol::mcdpsk_frame::airBitsFor(3, tx_mod));
     const size_t frame_samples =
-        ((3 * 648 + bits_per_symbol_time - 1) / bits_per_symbol_time) * 1024;
+        ((air_bits + bits_per_symbol_time - 1) / bits_per_symbol_time) * 1024;
     if (samples.size() <= n_frames * frame_samples) {
         std::cout << "FAIL: " << name << ": burst shorter than three frames\n";
         return false;
@@ -522,7 +530,7 @@ bool runMarginTest(float snr_db, bool expect_margin) {
     StreamingEncoder encoder;
     encoder.setMode(protocol::WaveformMode::MC_DPSK);
     encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
-    encoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    encoder.setDataMode(Modulation::MFSK16_FAST, CodeRate::R1_4);
     encoder.setFixedFrameCodewords(3);
     encoder.setMcDpskCompactFrames(true);
     std::vector<Bytes> frames;
@@ -543,7 +551,7 @@ bool runMarginTest(float snr_db, bool expect_margin) {
     decoder.setLogPrefix("TEST");
     decoder.setMode(protocol::WaveformMode::MC_DPSK, true);
     decoder.setMCDPSKConfig(mc_dpsk_presets::robust());
-    decoder.setDataMode(Modulation::DBPSK, CodeRate::R1_4);
+    decoder.setDataMode(Modulation::MFSK16_FAST, CodeRate::R1_4);
     decoder.setFixedFrameCodewords(3);
     decoder.setMcDpskSessionAddresses(bravo, alpha);
     std::vector<int> margins;
@@ -801,7 +809,8 @@ int main() {
                      connect_serialized, v2::FrameType::CONNECT)) return 1;
     if (!runContinuousBurstLoopback()) return 1;
     if (!runConstellationChangeBurst(Modulation::DQPSK, Modulation::DBPSK)) return 1;
-    if (!runConstellationChangeBurst(Modulation::DBPSK, Modulation::DQPSK)) return 1;
+    // (The DBPSK-burst-at-a-DQPSK-receiver case went with DBPSK as a data rung, 2026-11-23: the
+    // middle rung is 16-FSK-F, whose frames are compact-only - covered below.)
     if (!runLostFrameReport()) return 1;
     if (!runCompactBurst("compact burst", Modulation::DBPSK, false)) return 1;
     if (!runCompactBurst("compact burst, middle frame lost", Modulation::DBPSK, true)) return 1;
@@ -816,6 +825,20 @@ int main() {
     if (!runCompactBurst("compact 16-FSK burst at a 16-FSK receiver", Modulation::MFSK16, false,
                          Modulation::MFSK16, mfsk_window)) return 1;
     if (!runMfskBurstsAtDbpskReceiver()) return 1;
+    // 16-FSK-F, the middle rung (2026-11-23): half-length frames at its own receiver, under a DQPSK
+    // receiver (the sender dropped one rung on a timeout; the DQPSK receiver's peek covers its
+    // frame), and DQPSK above it (a probe the receiver commanded but has not configured yet).
+    const uint16_t fast_window = static_cast<uint16_t>(
+        protocol::connection_policy::mcDpskWindowSizeForTiming(
+            protocol::connection_policy::mcDpskFrameTiming(Modulation::MFSK16_FAST, 8, 1024, 3)));
+    if (!runCompactBurst("compact 16-FSK-F burst at a 16-FSK-F receiver", Modulation::MFSK16_FAST,
+                         false, Modulation::MFSK16_FAST, fast_window)) return 1;
+    if (!runCompactBurst("compact 16-FSK-F burst, middle frame lost", Modulation::MFSK16_FAST,
+                         true, Modulation::MFSK16_FAST, fast_window)) return 1;
+    if (!runCompactBurst("compact 16-FSK-F burst at a DQPSK receiver", Modulation::MFSK16_FAST,
+                         false, Modulation::DQPSK, fast_window)) return 1;
+    if (!runCompactBurst("compact DQPSK burst at a 16-FSK-F receiver", Modulation::DQPSK, false,
+                         Modulation::MFSK16_FAST)) return 1;
     if (!runCompactBurstPhysicalPerFrame(Modulation::DBPSK, Modulation::DBPSK)) return 1;
     if (!runCompactBurstPhysicalPerFrame(Modulation::DQPSK, Modulation::DBPSK)) return 1;
     if (!runMarginTest(20.0f, true)) return 1;

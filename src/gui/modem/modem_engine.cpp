@@ -482,7 +482,7 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     // (GUI 2026-11-22: crest 2.28 -> 2.28 dB, peak 0.80 -> 0.97, so the hardware TX path scaled the
     // payload ~1.7 dB down).
     const bool constant_envelope = streaming_encoder_->lastFrameWasHandshakeMfsk() ||
-                                   tx_modulation == Modulation::MFSK16;
+                                   isMfskModulation(tx_modulation);
     if (!is_ofdm && !constant_envelope) applyControlPeakControl(processed);
     if (is_ofdm && streaming_decoder_) {
         const size_t turn_samples =
@@ -748,7 +748,7 @@ void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
         }
         // A 16-FSK burst is constant-envelope already (its training is scaled to the chirp's peak):
         // there is no crest to trade, only distortion to add.
-        if (data_modulation_ == Modulation::MFSK16) return;
+        if (isMfskModulation(data_modulation_)) return;
         const bool dqpsk = mc.bits_per_symbol == 2;
         const auto choice = peak_control::chooseHeadroomOnCurve(
             peak_control::mcDpsk8x1024Curve(),

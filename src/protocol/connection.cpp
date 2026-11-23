@@ -9089,8 +9089,8 @@ uint8_t Connection::mcDpskRungCommandForAck(uint32_t sack_bitmap) {
         // -1: no margin test ran (v2 frames): the up-step falls back to the clean run alone.
         const bool upper_margin = rx_mcdpsk_margin_ != 0;
         // A loss steps into 16-FSK only when this spell's readings name it (the connect pick on
-        // them): otherwise the channel carries DBPSK and the loss was a fade.
-        const int dbpsk_rung = connection_policy::mcDpskRungIndexFor(Modulation::DBPSK);
+        // them): otherwise the channel carries the middle rung and the loss was a fade.
+        const int dbpsk_rung = connection_policy::mcDpskRungIndexFor(Modulation::MFSK16_FAST);
         const bool readings_name_mfsk =
             sessionLadderPick().rung.modulation == Modulation::MFSK16;
         const int lowest_allowed = readings_name_mfsk ? 0 : dbpsk_rung;
@@ -9166,7 +9166,7 @@ void Connection::noteRxMcDpskFrameLost(int modulation) {
     // spell's readings name it.
     const bool readings_name_mfsk = sessionLadderPick().rung.modulation == Modulation::MFSK16;
     const int lowest_allowed =
-        readings_name_mfsk ? 0 : connection_policy::mcDpskRungIndexFor(Modulation::DBPSK);
+        readings_name_mfsk ? 0 : connection_policy::mcDpskRungIndexFor(Modulation::MFSK16_FAST);
     const bool changed = mcdpsk_rate_ctl_.observe(rung, /*clean=*/false, true, lowest_allowed);
     LOG_MODEM(INFO, "Connection: MC-DPSK RATE rx: frame lost at %s -> command %s%s "
               "(probe after %d clean bursts)",

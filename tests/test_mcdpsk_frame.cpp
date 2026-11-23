@@ -85,6 +85,31 @@ int main() {
               "another session's seed rejects the frame");
     }
 
+    // 16-FSK-F (MFSK16_FAST, 2026-11-23): the same information block in half the air bits, rounded
+    // up to the turbo codec's 8-bit granularity; the payload capacity is the session's (the rung
+    // never changes what a frame carries, so a frame cut at one rung resends at another).
+    CHECK(mcdpsk_frame::airBitsFor(3, Modulation::MFSK16_FAST) == 976 &&
+              mcdpsk_frame::airBitsFor(4, Modulation::MFSK16_FAST) == 1296 &&
+              mcdpsk_frame::airBitsFor(3, Modulation::MFSK16) == 1944 &&
+              mcdpsk_frame::airBitsFor(3, Modulation::DQPSK) == 1944,
+          "air bits per rung: 16-FSK-F half (976 for 3 codewords), every other rung full");
+    for (int cw : {1, 2, 3, 4}) {
+        const Bytes original = dataFrame(4321, mcdpsk_frame::payloadCapacity(cw, CodeRate::R1_4), flags);
+        const auto air = mcdpsk_frame::encode(original, cw, CodeRate::R1_4, Modulation::MFSK16_FAST);
+        CHECK(air.has_value() &&
+                  air->size() == static_cast<size_t>(mcdpsk_frame::airBitsFor(cw, Modulation::MFSK16_FAST)) / 8,
+              "16-FSK-F encode: a full-capacity frame in half the air bits");
+        if (!air) continue;
+        const auto llr = llrsFor(*air, 6.0f);
+        const auto r = mcdpsk_frame::decode(llr, cw, CodeRate::R1_4, Modulation::MFSK16_FAST, alpha, bravo);
+        const auto rebuilt = r.ok ? v2::DataFrame::deserialize(r.v2_frame) : std::nullopt;
+        const auto expect = v2::DataFrame::deserialize(original);
+        CHECK(rebuilt && expect && rebuilt->payload == expect->payload && rebuilt->seq == expect->seq,
+              "16-FSK-F round trip carries the full payload");
+        CHECK(!mcdpsk_frame::decode(llr, cw, CodeRate::R1_4, Modulation::MFSK16, alpha, bravo).ok,
+              "a 16-FSK-F frame does not decode as a full-length frame");
+    }
+
     // What does not fit, or is not DATA, is refused.
     CHECK(!mcdpsk_frame::encode(dataFrame(1, 53, flags), 3, CodeRate::R1_4).has_value(),
           "53 bytes do not fit in 3 codewords");

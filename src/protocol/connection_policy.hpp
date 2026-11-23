@@ -1,6 +1,7 @@
 #pragma once
 
 #include "frame_v2.hpp"
+#include "mcdpsk_frame.hpp"
 #include "waveform_selection.hpp"
 #include "ultra/ofdm_link_adaptation.hpp"
 #include "ultra/peak_control.hpp"
@@ -751,8 +752,10 @@ inline LadderRung ladderRungForId(LadderRungId id) {
             return {id, "Robust-Low", WaveformMode::MC_DPSK,
                     Modulation::MFSK16, CodeRate::R1_4, 8, 1024, 3};
         case LadderRungId::ROBUST_MID:
+            // 2026-11-23: 16-FSK-F (16-FSK, half-length compact frames: DBPSK's rate at 16-FSK's
+            // floor on a peak-limited TX; kMcDpskRungModulations). Was DBPSK R1/4.
             return {id, "Robust-Mid", WaveformMode::MC_DPSK,
-                    Modulation::DBPSK, CodeRate::R1_4, 8, 1024, 3};
+                    Modulation::MFSK16_FAST, CodeRate::R1_4, 8, 1024, 3};
         case LadderRungId::ROBUST:
             return {id, "Robust", WaveformMode::MC_DPSK,
                     Modulation::DQPSK, CodeRate::R1_4, 8, 1024,
@@ -792,7 +795,8 @@ inline LadderRung rungForMCDPSKConfig(Modulation modulation,
     if (modulation == Modulation::MFSK16 && samples_per_symbol == 1024 && cw_count == 3) {
         return ladderRungForId(LadderRungId::ROBUST_LOW);
     }
-    if (modulation == Modulation::DBPSK && samples_per_symbol == 1024 && cw_count == 3) {
+    if ((modulation == Modulation::MFSK16_FAST || modulation == Modulation::DBPSK) &&
+        samples_per_symbol == 1024 && cw_count == 3) {
         return ladderRungForId(LadderRungId::ROBUST_MID);
     }
     if (modulation == Modulation::DQPSK && samples_per_symbol == 1024 &&
@@ -827,8 +831,32 @@ inline constexpr float kMcDpskReadingBelowChannelDb = 5.4f;
 // the 8-carrier profile), noncoherent and constant envelope, so on a peak-limited transmitter it
 // decodes ~4 dB below DBPSK at the same code rate (tools/lowsnr_floor: 16-FSK R1/4 10/10 at the gate's
 // -10 dB AWGN, DBPSK R1/4 0/10 at -10 and 3/10 at -8). Same sps, code rate, codewords per frame.
-inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::MFSK16, Modulation::DBPSK,
+//
+// 16-FSK-F (2026-11-23, MFSK16_FAST) replaced DBPSK as the middle rung: the same 16-FSK PHY with
+// compact DATA frames half as long (the session's information block at turbo rate ~1/2), so DBPSK's
+// rate (2 information bits per symbol time) at 16-FSK's constant envelope. tools/lowsnr_floor
+// (production encoder/decoder, peak-limited TX, 7.3 Hz, 20 trials; 16-FSK R1/2 = the same rate):
+//             AWGN -12  -10  -8  -6  -4     ITU Good -10  -8  -6  -4  -2   0
+//   DBPSK R1/4      0    0   4  20  20                0   4   2   9  13  16
+//   16-FSK R1/2     0   20  20  20  20                6   7  14  16  18  20
+//   16-FSK R1/4     8   20  20  20  20               10  11  15  19  19  20
+//   DQPSK R1/4      0    0   0   0   1                0   0   1   1   3  11  (AWGN -2: 16, 0: 20)
+// DBPSK never beat 16-FSK at its rate on a peak-limited transmitter; it stays the control profile
+// (handshake frames, INV-MCDPSK-HANDSHAKE-001), not a data rung.
+inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::MFSK16, Modulation::MFSK16_FAST,
                                                          Modulation::DQPSK};
+// Up-step margins (dB), indexed by the LOWER rung: how much more noise the lower rung's frame must
+// survive for the upper rung to decode on this channel - the gap between the rungs' 50 % points in
+// the table above (16-FSK -> 16-FSK-F ~1.5 dB AWGN / ~2.5 dB Good; 16-FSK-F -> DQPSK ~8.5 / ~7.5),
+// the larger of the two channels plus 0.5 dB for the estimate. The receiver re-decodes the frame
+// it just decoded with that much more noise (StreamingDecoder::mcDpskUpperRungMarginTest); until
+// 2026-11-23 the test was 6.02 dB for every step (a phase-decision-distance halving, DBPSK->DQPSK).
+inline constexpr float kMcDpskUpMarginDb[] = {3.0f, 9.0f};
+inline float mcDpskUpMarginDbFor(Modulation lower) {
+    if (lower == Modulation::MFSK16) return kMcDpskUpMarginDb[0];
+    if (lower == Modulation::MFSK16_FAST) return kMcDpskUpMarginDb[1];
+    return 6.02f;  // a DPSK constellation step (DBPSK -> DQPSK): the decision distance halves
+}
 inline constexpr int kMcDpskRungCount =
     static_cast<int>(sizeof(kMcDpskRungModulations) / sizeof(kMcDpskRungModulations[0]));
 
@@ -1732,8 +1760,14 @@ inline LadderRung mcDpskLadderRung(float snr_db, ChannelClassification channel, 
     // (16-FSK is noncoherent; the differential detector loses more as Doppler grows). The receiver's
     // rate commands move the session from there in either direction. (Until a GUI A/B the same night
     // these were -6 / -2.5 on the harness's reading scale: AWGN 0 dB and Good 3 dB started at 16-FSK.)
-    constexpr float kDbpskCrossoverAwgnDb = -6.5f;    // channel SNR, measured (above)
-    constexpr float kDbpskCrossoverFadingDb = -1.0f;
+    // 2026-11-23: the rung above 16-FSK is 16-FSK-F (twice the rate, the same PHY), whose floor sits
+    // 1-2 dB above 16-FSK's (kMcDpskRungModulations' table, 20 trials): AWGN 16-FSK 8/20 at -12 dB
+    // where 16-FSK-F is 0/20, both 20/20 at -10 -> crossover ~-11; ITU Good 16-FSK-F carries more
+    // at -10 (6 vs 10 of 20 at half the rate) and the same at -12 (1 vs 2) -> ~-12. The DBPSK
+    // crossovers (-6.5 / -1, kept below for the record) no longer apply.
+    //   was: kDbpskCrossoverAwgnDb = -6.5f, kDbpskCrossoverFadingDb = -1.0f
+    constexpr float kDbpskCrossoverAwgnDb = -11.0f;   // channel SNR, measured (above)
+    constexpr float kDbpskCrossoverFadingDb = -12.0f;
     const float mfsk_below_db =
         ((channel == ChannelClassification::AWGN) ? kDbpskCrossoverAwgnDb : kDbpskCrossoverFadingDb) -
         kMcDpskReadingBelowChannelDb;
@@ -2483,7 +2517,8 @@ inline int recommendCWCount(CodeRate rate, WaveformMode waveform) {
 // a 37-byte ARQ payload, i.e. 32 file bytes after FILE_DATA overhead. 1 CW
 // cannot carry file data and 2 CW is too slow to be operationally useful.
 inline int recommendCWCount(Modulation mod, CodeRate rate, WaveformMode waveform) {
-    if (waveform == WaveformMode::MC_DPSK && mod == Modulation::DBPSK) {
+    if (waveform == WaveformMode::MC_DPSK &&
+        (mod == Modulation::DBPSK || mod == Modulation::MFSK16_FAST)) {  // 16-FSK-F: DBPSK's slot
         (void)rate;
         return 3;
     }
@@ -2728,7 +2763,7 @@ inline uint32_t bitsPerMCDPSKCarrier(Modulation mod) {
 // Coded bits per symbol time of an MC-DPSK-family rung: every carrier's constellation bits, or
 // log2(16) for 16-FSK whatever the carrier count (one tone per symbol time).
 inline uint32_t mcDpskBitsPerSymbolTime(Modulation mod, int num_carriers) {
-    if (mod == Modulation::MFSK16) return 4;
+    if (isMfskModulation(mod)) return 4;
     return static_cast<uint32_t>(std::clamp(num_carriers, 1, 64)) * bitsPerMCDPSKCarrier(mod);
 }
 
@@ -2741,7 +2776,11 @@ inline Modulation mcDpskRungBelow(Modulation mod) {
                                          sizeof(kMcDpskRungModulations[0])); ++i) {
         if (kMcDpskRungModulations[i] == mod) rung = i;
     }
-    return rung > 0 ? kMcDpskRungModulations[rung - 1] : (rung == 0 ? mod : Modulation::DBPSK);
+    if (rung > 0) return kMcDpskRungModulations[rung - 1];
+    if (rung == 0) return mod;
+    // Not a session rung: DBPSK (the control profile) sits at 16-FSK-F's rate, so below it is
+    // 16-FSK; a higher DPSK constellation drops to the middle rung.
+    return mod == Modulation::DBPSK ? Modulation::MFSK16 : Modulation::MFSK16_FAST;
 }
 
 inline uint32_t mcDpskSymbolsToMs(uint32_t symbols, int samples_per_symbol) {
@@ -2768,7 +2807,14 @@ inline MCDPSKFrameTiming mcDpskFrameTiming(Modulation mod,
 
     MCDPSKFrameTiming timing;
     timing.overhead_symbols = overhead_symbols;
-    timing.data_only_symbols = static_cast<uint32_t>(cw_count) * data_symbols_per_cw;
+    // A compact DATA frame's air bits (mcdpsk_frame::airBitsFor): cw_count x 648 at every rung but
+    // MFSK16_FAST, which sends the same block in half. The ACK-sized control frame stays one full
+    // codeword (v2 control frames are not compact).
+    timing.data_only_symbols =
+        mod == Modulation::MFSK16_FAST
+            ? (static_cast<uint32_t>(mcdpsk_frame::airBitsFor(cw_count, mod)) + bits_per_symbol - 1) /
+                  bits_per_symbol
+            : static_cast<uint32_t>(cw_count) * data_symbols_per_cw;
     timing.data_symbols = overhead_symbols + timing.data_only_symbols;
     timing.ack_symbols = overhead_symbols + data_symbols_per_cw;
     timing.overhead_ms = mcDpskSymbolsToMs(timing.overhead_symbols, sps);

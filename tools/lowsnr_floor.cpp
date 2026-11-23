@@ -157,6 +157,7 @@ int main(int argc, char** argv) {
         {"DBPSK  R1/4", Modulation::DBPSK, CodeRate::R1_4, 0, 30},
         {"16FSK  R1/4", Modulation::MFSK16, CodeRate::R1_4, 0, 30},
         {"16FSK  R1/2", Modulation::MFSK16, CodeRate::R1_2, 0, 30},
+        {"DQPSK  R1/4", Modulation::DQPSK, CodeRate::R1_4, 0, 30},
     };
     std::vector<float> snrs = {-14, -12, -10, -8, -6, -4, -2, 0};
     if (const char* e = std::getenv("LOW_SNR")) snrs = {float(std::atof(e))};

@@ -50,7 +50,7 @@ SenderAudio senderAudio() {
     tx.setLogPrefix("ALPHA");
     tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
-    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     out.mcdpsk = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 1, kMcText).serialize());
     const int cw = protocol::connection_policy::recommendCWCount(Modulation::QPSK, CodeRate::R1_4,
                                                                  WaveformMode::OFDM_CHIRP);
@@ -93,7 +93,7 @@ std::vector<Heard> receive(bool dual_listen, const SenderAudio& audio,
     rx.setRxWaveformObservedCallback([&](WaveformMode mode) {
         reports.push_back(mode);
         if (mode == WaveformMode::MC_DPSK) {
-            rx.crossConnectedWaveform(mode, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+            rx.crossConnectedWaveform(mode, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
         } else {
             rx.crossConnectedWaveform(mode, Modulation::QPSK, CodeRate::R1_4, audio.ofdm_cw, 0, 0);
         }
@@ -163,7 +163,7 @@ LossRun receiveBurstWithLostFrame(bool repair, int lost) {
     tx.setLogPrefix("ALPHA");
     tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
-    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     std::vector<Bytes> frames;
     for (int i = 0; i < 3; ++i) {
         auto f = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(i + 1),
@@ -177,10 +177,10 @@ LossRun receiveBurstWithLostFrame(bool repair, int lost) {
     cfg.num_carriers = 8;
     cfg.samples_per_symbol = 1024;
     MCDPSKWaveform geo(cfg);
-    geo.configure(Modulation::DBPSK, CodeRate::R1_4);
+    geo.configure(Modulation::MFSK16_FAST, CodeRate::R1_4);
     // Data frames have a fixed length; the preamble (dual chirp + training) is whatever the burst's
     // audible span holds beyond its three data frames.
-    const size_t data_len = static_cast<size_t>(geo.getDataOnlySamplesForCWCount(3));
+    const size_t data_len = static_cast<size_t>(geo.getDataOnlySamplesForCompactFrame(3));
     size_t start = 0;
     while (start < burst.size() && std::abs(burst[start]) < 1e-6f) ++start;
     size_t end = burst.size();
@@ -190,7 +190,7 @@ LossRun receiveBurstWithLostFrame(bool repair, int lost) {
     for (size_t i = start; i < std::min(burst.size(), start + first_len); ++i) sum += burst[i] * burst[i];
     const double rms = std::sqrt(sum / static_cast<double>(std::max<size_t>(1, first_len)));
     std::mt19937 rng(5);
-    std::normal_distribution<double> nd(0.0, 10.0 * rms);
+    std::normal_distribution<double> nd(0.0, 20.0 * rms);  // ~-17 dB in band: 16-FSK-F decodes at -10
     // Frame k's data: frame 1's after the preamble, frame k > 1's at the stride after it.
     const size_t lost_begin = start + first_len - data_len + static_cast<size_t>(lost - 1) * data_len;
     for (size_t i = lost_begin; i < std::min(burst.size(), lost_begin + data_len); ++i) {
@@ -202,7 +202,7 @@ LossRun receiveBurstWithLostFrame(bool repair, int lost) {
     rx.setSynchronousMode(true);
     rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
-    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     LossRun run;
     rx.setRawDataCallback([&](const Bytes& data, bool) { run.heard.push_back(payloadText(data)); });
     rx.setMcDpskTurnLossCallback([&](bool turn_over) { run.turn_losses.push_back(turn_over); });
@@ -231,7 +231,7 @@ std::vector<std::string> receiveBurstWithGapCrash() {
     tx.setLogPrefix("ALPHA");
     tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
-    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     std::vector<Bytes> frames;
     for (int i = 0; i < 3; ++i) {
         auto f = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(i + 1),
@@ -275,7 +275,7 @@ std::vector<std::string> receiveBurstWithGapCrash() {
     rx.setSynchronousMode(true);
     rx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
-    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     std::vector<std::string> heard;
     rx.setRawDataCallback([&](const Bytes& data, bool) { heard.push_back(payloadText(data)); });
     std::vector<float> air(24000, 0.0f);
@@ -349,7 +349,7 @@ std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
                                                        Bytes(up_text.begin(), up_text.end()),
                                                        CodeRate::R1_4, ofdm_cw)
                                     .serialize());
-    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     const auto down = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 2, down_text).serialize());
 
     setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
@@ -363,7 +363,7 @@ std::vector<std::string> robustSessionHearsFallbackAfterUpCrossing() {
     rx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DQPSK, CodeRate::R1_4, 4, 8, 1024);
     rx.setRxWaveformObservedCallback([&](WaveformMode mode) {
         if (mode == WaveformMode::MC_DPSK) {
-            rx.crossConnectedWaveform(mode, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+            rx.crossConnectedWaveform(mode, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
         } else {
             rx.crossConnectedWaveform(mode, Modulation::QPSK, CodeRate::R1_4, ofdm_cw, 0, 0);
         }
@@ -417,7 +417,7 @@ FallbackHeard robustSessionHearsFallbackWithoutTheOfdmBurst() {
     tx.setLogPrefix("ALPHA");
     tx.joinConnectedSession(WaveformMode::OFDM_CHIRP, Modulation::QPSK, CodeRate::R1_4);
     tx.setMcDpskSessionAddresses(v2::hashCallsign("ALPHA"), v2::hashCallsign("BRAVO"));
-    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     const auto down = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 2, down_text).serialize());
 
     setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
@@ -473,7 +473,7 @@ float listenerThroughOfdmSpellMeasuresFallbackPhysical() {
     }
     const auto ofdm = tx.transmitBurst(group);
     const std::string down_text = "the fallback after an OFDM spell";
-    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+    tx.crossConnectedWaveform(WaveformMode::MC_DPSK, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
     const auto down = tx.transmit(v2::DataFrame::makeData("ALPHA", "BRAVO", 2, down_text).serialize());
 
     // Noise for ~7 dB in-band SNR on the MC-DPSK burst (white: 2900/24000 of it in band).
@@ -494,7 +494,7 @@ float listenerThroughOfdmSpellMeasuresFallbackPhysical() {
     rx.setMcDpskSessionAddresses(v2::hashCallsign("BRAVO"), v2::hashCallsign("ALPHA"));
     rx.setRxWaveformObservedCallback([&](WaveformMode mode) {
         if (mode == WaveformMode::MC_DPSK) {
-            rx.crossConnectedWaveform(mode, Modulation::DBPSK, CodeRate::R1_4, 3, 8, 1024);
+            rx.crossConnectedWaveform(mode, Modulation::MFSK16_FAST, CodeRate::R1_4, 3, 8, 1024);
         }
     });
     float physical = NAN;

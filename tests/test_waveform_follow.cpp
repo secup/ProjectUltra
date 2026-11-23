@@ -104,7 +104,7 @@ struct ConnectionAdaptiveTestAccess {
         c.is_initiator_ = true;
         c.handshake_confirmed_ = true;
         c.negotiated_mode_ = WaveformMode::MC_DPSK;
-        c.data_modulation_ = Modulation::DBPSK;
+        c.data_modulation_ = Modulation::MFSK16_FAST;
         c.data_code_rate_ = CodeRate::R1_4;
         c.data_frame_cw_count_ = v2::kDefaultFixedFrameCodewords;
         c.config_.fixed_frame_codewords = v2::kDefaultFixedFrameCodewords;
@@ -386,10 +386,10 @@ void test_waveform_follow_sender_crossings_switch_modem_first() {
               c, connection_policy::encodeMcDpskRungCommand(0)),
           "an MC-DPSK rung in an OFDM session crosses down");
     CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
-              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK &&
+              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::MFSK16_FAST &&
               ConnectionAdaptiveTestAccess::dataCodeRate(c) == CodeRate::R1_4 &&
               ConnectionAdaptiveTestAccess::dataFrameCodewords(c) == 3,
-          "down-crossing lands on DBPSK at the standard 3-codeword geometry");
+          "down-crossing lands on the middle rung (16-FSK-F) at the standard 3-codeword geometry");
     CHECK(events.size() == 2 && cross_carriers == 8 && cross_sps == 1024 && cross_cw == 3,
           "the modem gets the MC-DPSK profile with the crossing");
 }
@@ -884,8 +884,8 @@ void test_dual_listen_receiver_commands_down_and_follows_the_peer() {
           "OFDM delivers again: the down command is withdrawn");
     ConnectionAdaptiveTestAccess::noteRxWaveform(c, WaveformMode::MC_DPSK);
     CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
-              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK,
-          "MC-DPSK arrived: the receiver follows, DBPSK");
+              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::MFSK16_FAST,
+          "MC-DPSK arrived: the receiver follows, 16-FSK-F");
 }
 
 // Dual-listen receiver: it commanded OFDM and the peer's next burst is MC-DPSK again - the crossing
@@ -935,8 +935,8 @@ void test_receiver_follows_the_peer_to_the_fallback_geometry() {
     c.noteRxMcDpskGeometry(3);
     CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
               ConnectionAdaptiveTestAccess::dataFrameCodewords(c) == 3 &&
-              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK,
-          "the peer is on the fallback geometry: the receiver follows it (DBPSK, 3 codewords)");
+              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::MFSK16_FAST,
+          "the peer is on the fallback geometry: the receiver follows it (16-FSK-F, 3 codewords)");
     CHECK(!ConnectionAdaptiveTestAccess::dualUpCommanded(c) &&
               ConnectionAdaptiveTestAccess::upCrossingRun(c) == 2,
           "the up-crossing it commanded failed: the next one waits a longer run");
@@ -1471,7 +1471,7 @@ void test_tail_demote_commits_by_descriptor() {
 // 3 codewords almost every session uses both windows are 3 and nothing is capped.
 void test_mcdpsk_up_step_probes_small() {
     // Rung indices by modulation (16-FSK became the bottom rung on 2026-11-22).
-    const int kDbpsk = connection_policy::mcDpskRungIndexFor(Modulation::DBPSK);
+    const int kDbpsk = connection_policy::mcDpskRungIndexFor(Modulation::MFSK16_FAST);
     const int kDqpsk = connection_policy::mcDpskRungIndexFor(Modulation::DQPSK);
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
@@ -1491,7 +1491,7 @@ void test_mcdpsk_up_step_probes_small() {
     ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDqpsk, 14);
     CHECK(ConnectionAdaptiveTestAccess::txInFlightCap(c) == 2, "a second up-step probes small again");
     ConnectionAdaptiveTestAccess::obeyMcDpskRung(c, kDbpsk, 17);
-    CHECK(ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DBPSK &&
+    CHECK(ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::MFSK16_FAST &&
               ConnectionAdaptiveTestAccess::txInFlightCap(c) == 0,
           "a failed probe steps down and clears the cap");
 

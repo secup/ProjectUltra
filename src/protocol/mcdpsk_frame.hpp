@@ -37,6 +37,19 @@ constexpr size_t kHeaderBytes = 4;
 
 inline int airBitsFor(int codewords) { return kCodewordAirBits * codewords; }
 
+// The air bits of a frame of `codewords` at the session rung `mod`. Every rung carries the same
+// information block (infoBytesFor(codewords, session rate)), so a frame cut for one rung resends at
+// any other unchanged. MFSK16_FAST sends it in half the air bits (code rate ~1/2), rounded up to the
+// turbo codec's 8-bit granularity: 3 codewords -> 976 air bits, 244 16-FSK symbols, against
+// MFSK16's 1944 (486). The PHY is MFSK16's; only the frame's length differs.
+inline int airBitsFor(int codewords, Modulation mod) {
+    if (mod == Modulation::MFSK16_FAST) {
+        const int half = (kCodewordAirBits * codewords + 1) / 2;
+        return (half + 7) / 8 * 8;
+    }
+    return airBitsFor(codewords);
+}
+
 // Information bytes in the turbo codeword: floor(air_bits x rate / 8) minus the codec's 4-byte
 // CRC. 0 when the frame is too small to carry a header.
 size_t infoBytesFor(int codewords, CodeRate rate);
@@ -51,6 +64,8 @@ uint32_t sessionCrcSeed(uint32_t src_hash, uint32_t dst_hash);
 // (airBitsFor(codewords) / 8 bytes). nullopt when the bytes are not a valid v2 DATA frame or
 // the payload does not fit.
 std::optional<Bytes> encode(ByteSpan v2_data_frame, int codewords, CodeRate rate);
+// The same at the session rung `mod`: air bits airBitsFor(codewords, mod).
+std::optional<Bytes> encode(ByteSpan v2_data_frame, int codewords, CodeRate rate, Modulation mod);
 
 struct DecodeResult {
     bool ok = false;
@@ -62,6 +77,8 @@ struct DecodeResult {
 // Decode one frame from its air LLRs (positive = bit 0, air order; at least
 // airBitsFor(codewords) values). src_hash/dst_hash: the direction the frame travelled.
 DecodeResult decode(std::span<const float> air_llrs, int codewords, CodeRate rate,
+                    uint32_t src_hash, uint32_t dst_hash);
+DecodeResult decode(std::span<const float> air_llrs, int codewords, CodeRate rate, Modulation mod,
                     uint32_t src_hash, uint32_t dst_hash);
 
 }  // namespace mcdpsk_frame

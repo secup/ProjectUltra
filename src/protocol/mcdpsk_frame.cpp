@@ -56,6 +56,10 @@ uint32_t sessionCrcSeed(uint32_t src_hash, uint32_t dst_hash) {
 }
 
 std::optional<Bytes> encode(ByteSpan v2_data_frame, int codewords, CodeRate rate) {
+    return encode(v2_data_frame, codewords, rate, Modulation::DBPSK);
+}
+
+std::optional<Bytes> encode(ByteSpan v2_data_frame, int codewords, CodeRate rate, Modulation mod) {
     const auto frame = v2::DataFrame::deserialize(v2_data_frame);
     if (!frame || frame->type != v2::FrameType::DATA) {
         return std::nullopt;
@@ -70,15 +74,20 @@ std::optional<Bytes> encode(ByteSpan v2_data_frame, int codewords, CodeRate rate
     block[2] = static_cast<uint8_t>(frame->seq & 0xFF);
     block[3] = static_cast<uint8_t>(frame->payload.size());
     std::copy(frame->payload.begin(), frame->payload.end(), block.begin() + kHeaderBytes);
-    return fec::turbo::encode(block, airBitsFor(codewords),
+    return fec::turbo::encode(block, airBitsFor(codewords, mod),
                               sessionCrcSeed(frame->src_hash, frame->dst_hash));
 }
 
 DecodeResult decode(std::span<const float> air_llrs, int codewords, CodeRate rate,
                     uint32_t src_hash, uint32_t dst_hash) {
+    return decode(air_llrs, codewords, rate, Modulation::DBPSK, src_hash, dst_hash);
+}
+
+DecodeResult decode(std::span<const float> air_llrs, int codewords, CodeRate rate, Modulation mod,
+                    uint32_t src_hash, uint32_t dst_hash) {
     DecodeResult out;
     const size_t info = infoBytesFor(codewords, rate);
-    const size_t air_bits = static_cast<size_t>(airBitsFor(codewords));
+    const size_t air_bits = static_cast<size_t>(airBitsFor(codewords, mod));
     if (info == 0 || air_llrs.size() < air_bits) {
         return out;
     }

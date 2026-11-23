@@ -200,7 +200,7 @@ void ModemEngine::crossConnectedWaveform(protocol::WaveformMode mode, Modulation
     if (mode == protocol::WaveformMode::MC_DPSK && mc_dpsk_num_carriers > 0 &&
         mc_dpsk_samples_per_symbol > 0) {
         setMCDPSKProfile(mc_dpsk_num_carriers, mc_dpsk_samples_per_symbol,
-                         (mod == Modulation::DBPSK || mod == Modulation::MFSK16) ? 1 : mod == Modulation::D8PSK ? 3 : 2);
+                         (mod == Modulation::DBPSK || isMfskModulation(mod)) ? 1 : mod == Modulation::D8PSK ? 3 : 2);
     }
     // The data mode the new waveform is built with (setWaveformMode reads these); the encoder and
     // decoder are reconfigured once the waveform is the new one.

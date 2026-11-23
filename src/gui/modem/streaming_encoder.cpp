@@ -1292,8 +1292,9 @@ Bytes StreamingEncoder::encodeFrameBytes(const Bytes& frame_data) {
             protocol::connection_policy::mcDpskCompactFrameEnabled() &&
             tx_data.size() >= 3 &&
             tx_data[2] == static_cast<uint8_t>(v2::FrameType::DATA)) {
+            // At the session rung: MFSK16_FAST carries the same block in half the air bits.
             if (auto air = protocol::mcdpsk_frame::encode(tx_data, fixed_frame_codewords_,
-                                                          code_rate_)) {
+                                                          code_rate_, modulation_)) {
                 LOG_MODEM(DEBUG, "[%s] MC-DPSK compact DATA: %zu bytes -> %d codewords",
                           log_prefix_.c_str(), tx_data.size(), fixed_frame_codewords_);
                 return *air;

@@ -73,8 +73,16 @@ enum class Modulation : uint8_t {
     QAM256 = 10, // 8 bits/symbol - highest throughput, needs 30+ dB SNR
     MFSK16 = 11, // 4 bits/symbol time - 16-FSK, noncoherent, constant envelope (MC-DPSK family,
                  // the low-SNR rung; MultiCarrierDPSKConfig::mfsk_tones)
+    MFSK16_FAST = 12, // 16-FSK whose compact session DATA frames carry the same payload in half the
+                      // air bits (turbo code rate ~1/2 instead of 1/4): twice the rate of MFSK16,
+                      // the PHY identical (protocol/mcdpsk_frame.hpp airBitsFor, 2026-11-23)
     AUTO = 0xFF, // Let responder decide based on SNR (for CONNECT frame)
 };
+
+// The 16-FSK family (one tone of 16 per symbol time, constant envelope).
+inline bool isMfskModulation(Modulation mod) {
+    return mod == Modulation::MFSK16 || mod == Modulation::MFSK16_FAST;
+}
 
 // Get bits per symbol for a modulation scheme
 inline uint32_t getBitsPerSymbol(Modulation mod) {
@@ -90,6 +98,7 @@ inline uint32_t getBitsPerSymbol(Modulation mod) {
         case Modulation::QAM64:  return 6;
         case Modulation::QAM256: return 8;
         case Modulation::MFSK16: return 4;
+        case Modulation::MFSK16_FAST: return 4;
         default: return 1;
     }
 }
@@ -108,6 +117,7 @@ inline const char* modulationToString(Modulation mod) {
         case Modulation::QAM64:  return "64QAM";
         case Modulation::QAM256: return "256QAM";
         case Modulation::MFSK16: return "16FSK";
+        case Modulation::MFSK16_FAST: return "16FSK-F";
         default: return "UNKNOWN";
     }
 }

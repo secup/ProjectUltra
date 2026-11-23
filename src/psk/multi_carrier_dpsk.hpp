@@ -1447,6 +1447,15 @@ private:
         size_t data_start = full_preamble;
         SampleSpan data_span(sample_buffer_.data() + data_start, data_samples);
         soft_bits_ = demodulateSoft(data_span);
+        if (config_.isMfsk()) {
+            // A 16-FSK frame's payload is constant-envelope at the full peak while its training is
+            // the 8-carrier DPSK pattern (several dB lower in average power on a peak-normalized
+            // burst): the payload-referenced physical SNR (handoff §2 option (a)) is its data span's.
+            // On the training it read ~6 dB low and failed the 3 dB presence gate at a 7 dB channel,
+            // so a 16-FSK-F fallback frame carried no physical evidence for the up-crossing
+            // (DualListenEngine, 2026-11-23).
+            updateDataSpanPhysicalSNR(data_span);
+        }
 
         // Consume processed samples. The CFO phase continues at the next sample (a data-only
         // burst continuation starts exactly there).

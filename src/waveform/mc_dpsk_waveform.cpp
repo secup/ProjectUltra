@@ -1,6 +1,7 @@
 // MCDPSKWaveform - Implementation
 
 #include "mc_dpsk_waveform.hpp"
+#include "protocol/mcdpsk_frame.hpp"
 #include "ultra/logging.hpp"
 #include <algorithm>
 #include <cmath>
@@ -55,7 +56,7 @@ void MCDPSKWaveform::configure(Modulation mod, CodeRate rate) {
     // MC-DPSK always uses DQPSK internally
     // The modulation parameter affects how we interpret the throughput
     if (mod != Modulation::DQPSK && mod != Modulation::DBPSK && mod != Modulation::D8PSK &&
-        mod != Modulation::MFSK16) {
+        !isMfskModulation(mod)) {
         LOG_MODEM(WARN, "MCDPSKWaveform: Unsupported modulation %d, using DQPSK",
                   static_cast<int>(mod));
         modulation_ = Modulation::DQPSK;
@@ -63,8 +64,9 @@ void MCDPSKWaveform::configure(Modulation mod, CodeRate rate) {
 
     // Update demodulator if modulation changed. 16-FSK keeps the profile's geometry (sps, band)
     // and sends one of 16 tones per symbol time (MultiCarrierDPSKConfig::mfsk_tones).
-    config_.mfsk_tones = (modulation_ == Modulation::MFSK16) ? 16 : 0;
-    if (modulation_ == Modulation::DBPSK || modulation_ == Modulation::MFSK16) {
+    // MFSK16_FAST is the same PHY; only a compact DATA frame's length differs.
+    config_.mfsk_tones = isMfskModulation(modulation_) ? 16 : 0;
+    if (modulation_ == Modulation::DBPSK || isMfskModulation(modulation_)) {
         config_.bits_per_symbol = 1;
     } else if (modulation_ == Modulation::D8PSK) {
         config_.bits_per_symbol = 3;
@@ -367,23 +369,12 @@ void MCDPSKWaveform::setCarrierCount(int carriers) {
     initComponents();
 }
 
-// Coded bits per symbol time of the rung below the configured one: what the sender may drop to
-// unannounced (one rung on a retransmission timeout; connection_policy::mcDpskRungBelow). DQPSK and
-// D8PSK -> DBPSK, one bit per carrier; DBPSK -> 16-FSK, 4 bits whatever the carrier count; 16-FSK is
-// the bottom.
-static int lookaheadBitsPerSymbolTime(const MultiCarrierDPSKConfig& cfg) {
-    const int carriers = std::max(1, cfg.num_carriers);
-    if (cfg.isMfsk()) return cfg.bitsPerSymbolTime();
-    if (cfg.bits_per_symbol > 1) return carriers;
-    return std::min(carriers, 4);
-}
-
 int MCDPSKWaveform::getMinSamplesForFrame() const {
     // The handshake / control peek: one codeword at DBPSK (one bit per carrier) whatever is
     // configured - a DQPSK data frame has at least two codewords, the same span, so it waits no
     // longer; a CONNECT's failed first codeword extends the wait to the whole fixed frame
     // (StreamingDecoder), which also covers the M-FSK handshake frame (the same span). A session's
-    // burst peek covers the rung below instead (getSamplesForCWCountAtSlowest).
+    // burst peek covers every rung the peer may send at (getCompactFrameSamplesAt).
     const int training_samples = config_.training_symbols * config_.samples_per_symbol;
     const int ref_samples = config_.samples_per_symbol;
     if (config_.bits_per_symbol > 1 && !config_.isMfsk()) {
@@ -395,20 +386,21 @@ int MCDPSKWaveform::getMinSamplesForFrame() const {
     return training_samples + ref_samples + getDataOnlySamplesForCWCount(1);
 }
 
-int MCDPSKWaveform::getSamplesForCWCountAtSlowest(int num_cw) const {
-    constexpr int LDPC_BLOCK_SIZE = 648;
-    const int bps = lookaheadBitsPerSymbolTime(config_);
-    const int data_symbols = (std::max(1, num_cw) * LDPC_BLOCK_SIZE + bps - 1) / bps;
-    return config_.training_symbols * config_.samples_per_symbol + config_.samples_per_symbol +
-           data_symbols * config_.samples_per_symbol;
+int MCDPSKWaveform::getCompactDataSamplesAt(Modulation mod, int num_cw) const {
+    const int air_bits = protocol::mcdpsk_frame::airBitsFor(std::max(1, num_cw), mod);
+    int bps = 0;
+    if (isMfskModulation(mod)) {
+        bps = 4;  // log2(16): one tone per symbol time
+    } else {
+        const int per_carrier = mod == Modulation::DBPSK ? 1 : mod == Modulation::D8PSK ? 3 : 2;
+        bps = std::max(1, config_.num_carriers) * per_carrier;
+    }
+    return (air_bits + bps - 1) / bps * config_.samples_per_symbol;
 }
 
-int MCDPSKWaveform::getSamplesForCWCountAtDbpsk(int num_cw) const {
-    constexpr int LDPC_BLOCK_SIZE = 648;
-    const int carriers = std::max(1, config_.num_carriers);
-    const int data_symbols = (std::max(1, num_cw) * LDPC_BLOCK_SIZE + carriers - 1) / carriers;
+int MCDPSKWaveform::getCompactFrameSamplesAt(Modulation mod, int num_cw) const {
     return config_.training_symbols * config_.samples_per_symbol + config_.samples_per_symbol +
-           data_symbols * config_.samples_per_symbol;
+           getCompactDataSamplesAt(mod, num_cw);
 }
 
 int MCDPSKWaveform::getMinSamplesForCWCount(int num_cw) const {

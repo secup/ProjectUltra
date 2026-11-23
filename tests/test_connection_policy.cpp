@@ -66,7 +66,7 @@ void test_ladder_rung_selection() {
 
     const auto robust_mid = ladderRungForId(LadderRungId::ROBUST_MID);
     CHECK(robust_mid.waveform == WaveformMode::MC_DPSK, "Robust-Mid waveform");
-    CHECK(robust_mid.modulation == Modulation::DBPSK, "Robust-Mid modulation");
+    CHECK(robust_mid.modulation == Modulation::MFSK16_FAST, "Robust-Mid modulation (16-FSK-F since 2026-11-23)");
     CHECK(robust_mid.samples_per_symbol == 1024, "Robust-Mid SPS");
     CHECK(robust_mid.cw_count == 3, "Robust-Mid CW count");
 
@@ -86,18 +86,19 @@ void test_ladder_rung_selection() {
     CHECK(std::string(ladderRungIdToString(LadderRungId::ROBUST_LOW)) == "Robust-Low",
           "Robust-Low rung string");
 
-    // Below the DQPSK floor: DBPSK (ROBUST_MID; ROBUST_LOW was the same DBPSK rung until
-    // 2026-11-22) down to the DBPSK crossover, 16-FSK (ROBUST_LOW) under it.
+    // Below the DQPSK floor: the middle rung (ROBUST_MID: 16-FSK-F since 2026-11-23, DBPSK before)
+    // down to its crossover with 16-FSK (ROBUST_LOW) - channel AWGN -11 / fading -12 dB, readings
+    // 5.4 dB lower (-16.4 / -17.4).
     CHECK(selectLadderRung(6.9f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
-          "Moderate below in-band 7 dB selects DBPSK (Robust-Mid)");
-    CHECK(selectLadderRung(-7.0f, ChannelClassification::MODERATE).id ==
+          "Moderate below in-band 7 dB selects the middle rung (Robust-Mid)");
+    CHECK(selectLadderRung(-18.0f, ChannelClassification::MODERATE).id ==
                   LadderRungId::ROBUST_LOW &&
-              selectLadderRung(-6.0f, ChannelClassification::MODERATE).id ==
+              selectLadderRung(-17.0f, ChannelClassification::MODERATE).id ==
                   LadderRungId::ROBUST_MID &&
-              selectLadderRung(-11.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_MID &&
-              selectLadderRung(-13.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_LOW,
-          "16-FSK below the DBPSK crossover (readings: AWGN -12, fading -6.5 dB)");
+              selectLadderRung(-16.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_MID &&
+              selectLadderRung(-17.0f, ChannelClassification::AWGN).id == LadderRungId::ROBUST_LOW,
+          "16-FSK below the 16-FSK-F crossover (readings: AWGN -16.4, fading -17.4 dB)");
     CHECK(selectLadderRung(7.0f, ChannelClassification::MODERATE).id ==
               LadderRungId::ROBUST_MID,
           "Moderate in-band 7 dB boundary selects Robust-Mid (DBPSK)");
@@ -1088,10 +1089,12 @@ void test_mcdpsk_rate_controller() {
     // Codec: the session ladder word. 0 = no command, 11 + rung for MC-DPSK (above the OFDM rungs
     // 1..10); words outside a waveform's range carry no command for it.
     CHECK(kMcDpskRungCount == 3 && kMcDpskRungModulations[0] == Modulation::MFSK16 &&
-              kMcDpskRungModulations[1] == Modulation::DBPSK &&
+              kMcDpskRungModulations[1] == Modulation::MFSK16_FAST &&
               kMcDpskRungModulations[2] == Modulation::DQPSK,
-          "MC-DPSK data rungs are 16-FSK, DBPSK, DQPSK (slowest first)");
-    CHECK(mcDpskRungIndexFor(Modulation::MFSK16) == 0 && mcDpskRungIndexFor(Modulation::DBPSK) == 1 &&
+          "MC-DPSK data rungs are 16-FSK, 16-FSK-F, DQPSK (slowest first; DBPSK until 2026-11-23)");
+    CHECK(mcDpskRungIndexFor(Modulation::MFSK16) == 0 &&
+              mcDpskRungIndexFor(Modulation::MFSK16_FAST) == 1 &&
+              mcDpskRungIndexFor(Modulation::DBPSK) == -1 &&
               mcDpskRungIndexFor(Modulation::DQPSK) == 2 &&
               mcDpskRungIndexFor(Modulation::QPSK) == -1,
           "rung index of each constellation");
@@ -1107,11 +1110,15 @@ void test_mcdpsk_rate_controller() {
               decodeMcDpskRungCommand(11) == -1 && decodeMcDpskRungCommand(12) == -1 &&
               decodeMcDpskRungCommand(16) == -1 && decodeMcDpskRungCommand(0x1F) == -1,
           "command decoding (0, OFDM rungs and unknown words carry no MC-DPSK command)");
-    CHECK(mcDpskRungBelow(Modulation::DQPSK) == Modulation::DBPSK &&
+    CHECK(mcDpskRungBelow(Modulation::DQPSK) == Modulation::MFSK16_FAST &&
+              mcDpskRungBelow(Modulation::MFSK16_FAST) == Modulation::MFSK16 &&
               mcDpskRungBelow(Modulation::DBPSK) == Modulation::MFSK16 &&
               mcDpskRungBelow(Modulation::MFSK16) == Modulation::MFSK16,
           "the rung a sender may drop to unannounced");
     CHECK(mcDpskBitsPerSymbolTime(Modulation::MFSK16, 8) == 4 &&
+              mcDpskBitsPerSymbolTime(Modulation::MFSK16_FAST, 8) == 4 &&
+              mcDpskFrameTiming(Modulation::MFSK16_FAST, 8, 1024, 3).data_only_symbols == 244 &&
+              mcDpskFrameTiming(Modulation::MFSK16, 8, 1024, 3).data_only_symbols == 486 &&
               mcDpskBitsPerSymbolTime(Modulation::DBPSK, 8) == 8 &&
               mcDpskBitsPerSymbolTime(Modulation::DQPSK, 8) == 16,
           "coded bits per symbol time on the 8-carrier profile");
@@ -1212,18 +1219,19 @@ void test_mcdpsk_rate_controller() {
     // A receiver buffers a slowest-rung frame before decoding a first frame: a DQPSK burst's ACK
     // can come 5184 - 2624 = 2560 ms later than its own frame time (the measured timeout's guard).
     // The look-ahead is the rung BELOW (what the sender may drop to unannounced): 16-FSK under
-    // DBPSK since 2026-11-22 (a 3-codeword frame: 486 symbols vs 243 -> 5184 ms), DBPSK under DQPSK.
-    const int kDbpskRung = mcDpskRungIndexFor(Modulation::DBPSK);
+    // 16-FSK-F (a 3-codeword frame: 486 symbols vs 244 -> 5163 ms), 16-FSK-F under DQPSK (5205 vs
+    // 2624 ms -> 2581 ms) since 2026-11-23 (DBPSK, 243 symbols, was the middle rung before).
+    const int kDbpskRung = mcDpskRungIndexFor(Modulation::MFSK16_FAST);  // the middle rung
     CHECK(mcDpskFirstFrameLookaheadMs(Modulation::MFSK16, 8, 1024, 3) == 0,
           "no first-frame look-ahead at the bottom rung");
-    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DBPSK, 8, 1024, 3) == 5184,
-          "a DBPSK first frame waits a 16-FSK frame: 5184 ms at the production geometry");
-    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DQPSK, 8, 1024, 3) == 2560,
-          "a DQPSK first frame waits a DBPSK frame: 2560 ms at the production geometry");
+    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::MFSK16_FAST, 8, 1024, 3) == 5163,
+          "a 16-FSK-F first frame waits a 16-FSK frame: 5163 ms at the production geometry");
+    CHECK(mcDpskFirstFrameLookaheadMs(Modulation::DQPSK, 8, 1024, 3) == 2581,
+          "a DQPSK first frame waits a 16-FSK-F frame: 2581 ms at the production geometry");
     CHECK(mcDpskFirstProbeAfterCleanBursts(kDbpskRung, 8, 1024, 3) == 2,
-          "first probe after 2 clean DBPSK bursts at the production 3-codeword geometry");
+          "first probe after 2 clean middle-rung bursts at the production 3-codeword geometry");
     CHECK(mcDpskFirstProbeAfterCleanBursts(kDbpskRung, 8, 1024, 4) == 2,
-          "first probe after 2 clean DBPSK bursts with 4 codewords per frame (2-frame probe)");
+          "first probe after 2 clean middle-rung bursts with 4 codewords per frame (2-frame probe)");
     {
         const auto lo4 = mcDpskFrameTiming(Modulation::DBPSK, 8, 1024, 4);
         const auto hi4 = mcDpskFrameTiming(Modulation::DQPSK, 8, 1024, 4);
@@ -1338,8 +1346,8 @@ void test_connect_selection_needs_physical_evidence() {
     const float weak = connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/true, 0.0f, 0);
     CHECK(std::fabs(weak - (-3.9f)) < 1e-4f,
           "no physical measurement: the reading is the selection (affine basis)");
-    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::DBPSK,
-          "a -3.9 dB reading on Good picks DBPSK (above the -6.5 dB 16-FSK crossover), not DQPSK");
+    CHECK(selectLadderRung(weak, 0.53f).modulation == Modulation::MFSK16_FAST,
+          "a -3.9 dB reading on Good picks the middle rung (16-FSK-F, above the 16-FSK crossover), not DQPSK");
     CHECK(std::fabs(connectSelectionSnrDb(-3.9f, 0.53f, true, /*affine=*/false, 0.0f, 0) -
                     (-3.9f)) < 1e-4f,
           "no physical measurement: the reading is the selection (flat basis)");

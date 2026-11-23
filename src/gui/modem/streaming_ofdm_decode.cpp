@@ -3726,7 +3726,7 @@ void StreamingDecoder::decodeCurrentFrame() {
             mc_burst_compact_fail_abs_ = mc_first_lost_next_abs_;
             publishMcDpskCompactAirEnd(
                 true, mc_first_lost_next_abs_,
-                static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords)),
+                static_cast<size_t>(mc->getDataOnlySamplesForCompactFrame(codewords)),
                 mc_first_lost_window_ - 1);
             LOG_MODEM(INFO, "[%s] MC-DPSK compact first frame lost: continuing the burst at its "
                       "stride (window %d)", log_prefix_.c_str(), mc_first_lost_window_);
@@ -4141,12 +4141,21 @@ void StreamingDecoder::retryMcDpskFirstFrameConstellation(const std::vector<floa
                 // lost with it, having no chirp of their own - and the continuation's tail, or
                 // the last decoded frame's end-of-turn ACK, closes the turn for the protocol.
                 // decodeCurrentFrame enters the continuation when this frame's decode fails.
+                // At the SESSION's rung (current_modulation_): a frame that also failed as a
+                // CONNECT ran here with the waveform at the handshake's DBPSK profile, whose frame
+                // is a few symbols shorter than 16-FSK-F's - the stride then missed every later
+                // frame (DualListenEngine, 2026-11-23; DBPSK sessions matched it by coincidence).
+                const Modulation session_mod =
+                    protocol::connection_policy::mcDpskRungIndexFor(current_modulation_) >= 0
+                        ? current_modulation_
+                        : mc->getModulation();
                 const int codewords = mcDpskCompactCodewords();
-                const size_t consumed = static_cast<size_t>(mc->getMinSamplesForCWCount(codewords));
+                const size_t consumed =
+                    static_cast<size_t>(mc->getCompactFrameSamplesAt(session_mod, codewords));
                 mc_first_lost_window_ = static_cast<int>(
                     protocol::connection_policy::mcDpskWindowSizeForTiming(
                         protocol::connection_policy::mcDpskFrameTiming(
-                            mc->getModulation(), mc_dpsk_config_.num_carriers,
+                            session_mod, mc_dpsk_config_.num_carriers,
                             mc_dpsk_config_.samples_per_symbol, codewords)));
                 {
                     std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
@@ -4193,8 +4202,8 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
         mc->getModulation() == Modulation::MFSK16) {
         return false;
     }
-    const size_t mfsk_span =
-        static_cast<size_t>(mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
+    const size_t mfsk_span = static_cast<size_t>(
+        mc->getCompactFrameSamplesAt(Modulation::MFSK16, mcDpskCompactCodewords()));
     if (frame_buffer.size() >= mfsk_span) {
         return false;
     }
@@ -4237,20 +4246,26 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
 size_t StreamingDecoder::mcDpskControlPeekSamples() const {
     if (mcDpskCompactActive()) {
         if (const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get())) {
-            // Long enough for the longest DPSK frame the peer may send (every geometry hypothesis
-            // at DBPSK). A 16-FSK frame (the rung below DBPSK, 2026-11-22) is twice as long; the
-            // decoder waits for it only after the frame failed at every DPSK rung with energy in
-            // its data section (mc_mfsk_lookahead_pending_), so no DPSK frame waits longer.
+            // Long enough for the longest frame the peer may send at any rung above 16-FSK, at
+            // every geometry hypothesis (16-FSK-F's half-length frame is a few symbols longer than
+            // DBPSK's was; DQPSK's is shorter). A 16-FSK frame (the bottom rung) is about twice as
+            // long; the decoder waits for it only after the frame failed at every other rung with
+            // energy in its data section (mc_mfsk_lookahead_pending_), so no faster frame waits
+            // longer.
             int longest = 0;
             for (const int cw : mcDpskCompactCodewordHypotheses()) {
-                longest = std::max(longest, mc->getSamplesForCWCountAtDbpsk(cw));
+                for (const Modulation m : protocol::connection_policy::kMcDpskRungModulations) {
+                    if (m == Modulation::MFSK16) continue;
+                    longest = std::max(longest, mc->getCompactFrameSamplesAt(m, cw));
+                }
             }
             // A frame at the configured rung itself: 16-FSK's is the longest (GUI 2026-11-22, AWGN
             // -8 dB: a receiver commanded to 16-FSK peeked a 4-codeword DBPSK span, 324 symbols, at
             // 486-symbol 16-FSK frames and lost every one).
-            longest = std::max(longest, mc->getMinSamplesForCWCount(mcDpskCompactCodewords()));
+            longest = std::max(longest, mc->getMinSamplesForCompactFrame(mcDpskCompactCodewords()));
             if (mc_mfsk_lookahead_pending_) {
-                longest = std::max(longest, mc->getSamplesForCWCountAtSlowest(mcDpskCompactCodewords()));
+                longest = std::max(longest, mc->getCompactFrameSamplesAt(Modulation::MFSK16,
+                                                                         mcDpskCompactCodewords()));
             }
             return static_cast<size_t>(longest);
         }
@@ -4297,7 +4312,8 @@ std::optional<DecodeResult> StreamingDecoder::decodeMcDpskCompactFirstFrame(
     const auto codeword_hypotheses = mcDpskCompactCodewordHypotheses();
     auto attempt = [&](const std::vector<float>& bits, int& decoded_cw) {
         for (const int cw : codeword_hypotheses) {
-            auto d = protocol::mcdpsk_frame::decode(bits, cw, code_rate_, peer, local);
+            auto d = protocol::mcdpsk_frame::decode(bits, cw, code_rate_, mc->getModulation(),
+                                                    peer, local);
             if (d.ok) {
                 decoded_cw = cw;
                 return d;
@@ -4350,10 +4366,11 @@ std::optional<DecodeResult> StreamingDecoder::decodeMcDpskCompactFirstFrame(
 
 bool StreamingDecoder::mcDpskUpperRungMarginTest(const std::vector<float>& frame_buffer,
                                                   float decode_cfo) {
-    // The frame that just decoded, with three times the measured in-band noise added (4x in all):
-    // the next rung up halves the phase decision distance, so at this channel it sees what this
-    // rung would see at a quarter of the SNR (20 log10 2 = 6.02 dB). The noise rides the real,
-    // faded signal, so the test needs no channel model.
+    // The frame that just decoded, with the measured in-band noise raised by the gap between this
+    // rung's decode threshold and the next one's (connection_policy::mcDpskUpMarginDbFor: 3 dB
+    // 16-FSK -> 16-FSK-F, 9 dB 16-FSK-F -> DQPSK, 6.02 dB for a DPSK constellation step, whose
+    // phase decision distance halves). The noise rides the real, faded signal, so the test needs
+    // no channel model.
     auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
     if (!mc || sync_noise_ref_rms_ <= 0.0f || frame_buffer.empty()) {
         return false;
@@ -4362,7 +4379,10 @@ bool StreamingDecoder::mcDpskUpperRungMarginTest(const std::vector<float>& frame
     // at 48 kHz has PSD v/24000. Adding 3x the PSD: v = 3 P 24000/2900.
     const double inband_power =
         static_cast<double>(sync_noise_ref_rms_) * static_cast<double>(sync_noise_ref_rms_);
-    const double sigma = std::sqrt(3.0 * inband_power * 24000.0 / 2900.0);
+    const double margin_db = static_cast<double>(
+        protocol::connection_policy::mcDpskUpMarginDbFor(mc->getModulation()));
+    const double total_factor = std::pow(10.0, margin_db / 10.0);  // noise power, all of it
+    const double sigma = std::sqrt((total_factor - 1.0) * inband_power * 24000.0 / 2900.0);
     std::vector<float> noisy(frame_buffer);
     for (size_t i = 0; i + 1 < noisy.size(); i += 2) {
         // Box-Muller from SplitMix64 (deterministic, platform-independent).
@@ -4382,13 +4402,13 @@ bool StreamingDecoder::mcDpskUpperRungMarginTest(const std::vector<float>& frame
     MCDPSKWaveform scratch(mc_dpsk_config_);
     scratch.configure(mc->getModulation(), code_rate_);
     scratch.setFrequencyOffset(decode_cfo);
-    scratch.setNoiseReferenceRMS(static_cast<float>(std::sqrt(4.0 * inband_power)));
+    scratch.setNoiseReferenceRMS(static_cast<float>(std::sqrt(total_factor * inband_power)));
     if (!scratch.process(SampleSpan(noisy.data(), noisy.size()))) {
         return false;
     }
     const auto bits = scratch.getSoftBits();
     return protocol::mcdpsk_frame::decode(bits, mcDpskCompactCodewords(), code_rate_,
-                                          mc_compact_peer_hash_.load(),
+                                          mc->getModulation(), mc_compact_peer_hash_.load(),
                                           mc_compact_local_hash_.load()).ok;
 }
 
@@ -4408,7 +4428,7 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
     }
     const int codewords = mcDpskCompactCodewords();
     const size_t consumed =
-        mc ? static_cast<size_t>(mc->getMinSamplesForCWCount(codewords)) : 0;
+        mc ? static_cast<size_t>(mc->getMinSamplesForCompactFrame(codewords)) : 0;
     const int window = mc ? static_cast<int>(protocol::connection_policy::mcDpskWindowSizeForTiming(
                                 protocol::connection_policy::mcDpskFrameTiming(
                                     mc->getModulation(), mc_dpsk_config_.num_carriers,
@@ -4418,7 +4438,7 @@ void StreamingDecoder::deliverMcDpskCompactFirstFrame(DecodeResult result, size_
     publishMcDpskCompactAirEnd(
         mc != nullptr && !result.physical_turn_complete && decodedFrameHasMoreFrag(result),
         frame_sync_abs + consumed,
-        mc ? static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords)) : 0, window - 1);
+        mc ? static_cast<size_t>(mc->getDataOnlySamplesForCompactFrame(codewords)) : 0, window - 1);
     {
         std::lock_guard<std::mutex> qlock(queue_mutex_);
         frame_queue_.push(result);
@@ -4510,7 +4530,8 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
     }
     constexpr int kSampleRateHz = 48000;
     const int codewords = mcDpskCompactCodewords();
-    const size_t frame_samples = static_cast<size_t>(mc->getDataOnlySamplesForCWCount(codewords));
+    const size_t frame_samples =
+        static_cast<size_t>(mc->getDataOnlySamplesForCompactFrame(codewords));
 
     size_t available = 0;
     {
@@ -4571,7 +4592,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
         return;
     }
     const auto soft = mc->getSoftBits();
-    auto decoded = protocol::mcdpsk_frame::decode(soft, codewords, code_rate_,
+    auto decoded = protocol::mcdpsk_frame::decode(soft, codewords, code_rate_, mc->getModulation(),
                                                   mc_compact_peer_hash_.load(),
                                                   mc_compact_local_hash_.load());
     const size_t frame_pos = mc_burst_next_pos_;
