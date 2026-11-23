@@ -17,7 +17,7 @@ view.
 > versions, so both stations must run the same build. Performance is measured on software and
 > hardware HF channel simulators; it is not yet characterized over the air at scale.
 
-*Updated 2026-11-23. Latest release: [`v0.6.4-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.4-pre-alpha).*
+*Updated 2026-11-23. Latest release: [`v0.6.4.1-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.4.1-pre-alpha).*
 
 ---
 
@@ -50,6 +50,23 @@ view.
 All figures are goodput: file bytes delivered and CRC-verified per second of transfer, with
 retransmissions and turnarounds included. Connection setup (about 14 s since v0.6.2, 24 s before) is
 not included.
+
+### v0.6.4.1, fading fixes
+
+A bug-fix release on top of v0.6.4, over the air compatible with it. Two fading bugs: after a step
+down from OFDM the sender kept OFDM's short resend timer and talked over the receiver's ACKs (one
+ITU Good -2 dB run failed after 20 minutes), and 16-FSK bursts read the channel about 6 dB high, so
+the link tried OFDM where it cannot work. Same simulator and scale as below; ITU Good, 1 KB, 1-4
+seeds per cell, seconds:
+
+| Peak SNR | v0.6.4 | v0.6.4.1 |
+|---:|---:|---:|
+| -5 dB | 414-578 s | 267-359 s |
+| -2 dB | 308-362 s, one failure | 233-303 s |
+| 0 dB | 324-354 s | 231-300 s |
+| 2 dB | 316 s | 150 s |
+
+AWGN 3-4 dB and ITU Good 5-8 dB are unchanged.
 
 ### v0.6.4, low SNR, software channel simulator, real transmitter levels
 

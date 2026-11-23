@@ -10,6 +10,15 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 — release: v0.6.4.1-pre-alpha
+
+Bug-fix release on top of v0.6.4 (over-the-air compatible with 0.6.4: no frame or wire change).
+Contains BUG-ARQ-RTO-SURVIVES-WAVEFORM-CROSSING (0a1d3c83) and BUG-MFSK-PHYSICAL-SNR-SCALE
+(bf827180), both below. CMakeLists VERSION 0.6.4.1; README latest release + v0.6.4.1 table.
+Verified: ctest 128/128 (TNCSession disabled); GUI A/B tables in the two entries below.
+
+---
+
 ## 2026-11-23 — fix(mcdpsk): 16-FSK physical SNR on the DPSK scale (BUG-MFSK-PHYSICAL-SNR-SCALE)
 
 **Was.** Since 16-FSK-F, a 16-FSK frame's physical SNR is measured on its payload (constant envelope
