@@ -852,11 +852,15 @@ inline constexpr Modulation kMcDpskRungModulations[] = {Modulation::MFSK16, Modu
 // point to the point where the upper one decodes well enough to pay for its losses:
 //   16-FSK -> 16-FSK-F (2x the rate: pays from ~50 %): 50 %-to-50 % gap ~1.5 dB AWGN / ~2.5 dB Good
 //     (table above) -> 3 dB.
-//   16-FSK-F -> DQPSK: 16-FSK-F 50 % ~-11 dB AWGN, DQPSK 90 % ~-1 dB (16/20 at -2, 20/20 at 0)
-//     -> 10 dB. 9 dB (the 50 %-to-50 % gap + 0.5) probed DQPSK at a true -2 dB, lost the burst and
-//     fell back (GUI 2026-11-23, AWGN -2 s41: 406 s vs DBPSK-main 376 s).
+//   16-FSK-F -> DQPSK: on the GUI gate (production frames, peak-limited TX) 16-FSK-F decodes every
+//     frame down to -10 dB (its 50 % point ~-12.5) and DQPSK is clean only from ~0 dB: at a true
+//     -2 dB a DQPSK probe decodes 2 of 3 frames, and the lost last frame leaves no end-of-turn ACK
+//     (ULTRA_MCDPSK_ACK_REPAIR off), so the sender waits out its timeout. 9 and 10 dB both probed
+//     DQPSK there (GUI 2026-11-23, AWGN -2: 389-482 s vs 351-376 s on DBPSK-main, which never
+//     probed); the gap from -12.5 to ~-1.5 is 11 dB. tools/lowsnr_floor (LOW_COMPACT) reads the
+//     same rungs ~1.5-2 dB apart from the GUI scale (no TX chain), so the GUI gap decides.
 // Until 2026-11-23 the test was 6.02 dB for every step (a phase-decision-distance halving, DBPSK->DQPSK).
-inline constexpr float kMcDpskUpMarginDb[] = {3.0f, 10.0f};
+inline constexpr float kMcDpskUpMarginDb[] = {3.0f, 11.0f};
 inline float mcDpskUpMarginDbFor(Modulation lower) {
     if (lower == Modulation::MFSK16) return kMcDpskUpMarginDb[0];
     if (lower == Modulation::MFSK16_FAST) return kMcDpskUpMarginDb[1];

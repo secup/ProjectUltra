@@ -2791,6 +2791,17 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-PAPR-LEVEL-COUNTS-MCDPSK-BURSTS (FIXED 2026-11-23) — was P2
+- `App::noteTxBurstLevelForPapr` counted every "TX burst audio" as OFDM data, MC-DPSK session bursts
+  included: 16-FSK-F bursts (constant envelope) put the measured PAPR offset at -7.1 dB where OFDM
+  measures -3.8. DBPSK data, near OFDM's level, had hidden it. Now only bursts in an OFDM mode count.
+
+### BUG-MCDPSK-LOST-FIRST-STRIDE-HANDSHAKE-PROFILE (FIXED 2026-11-23) — was P2
+- A compact burst whose first frame failed also as a CONNECT left the waveform at the handshake's DBPSK
+  profile, and the "continue at the stride" position was computed there; DBPSK sessions matched by
+  coincidence, a 16-FSK-F session (one symbol longer) lost every later frame. Computed at the
+  session rung (`current_modulation_`).
+
 ### BUG-MCDPSK-FADING-NOISE-INFLATED (FIXED 2026-11-22) — was P1 on AWGN 3-6 dB
 - The MC-DPSK temporal fading index (raw CV of |x|^2) read noise as fading: AWGN at low SNR
   classified Good and took the 5 dB Good OFDM floor. Fixed with a per-carrier noise-variance

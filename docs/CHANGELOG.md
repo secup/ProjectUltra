@@ -10,6 +10,61 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 — feat(mcdpsk): 16-FSK-F middle rung (DBPSK's rate at 16-FSK's floor)
+
+**Was.** The MC-DPSK session ladder was 16-FSK R1/4 -> DBPSK R1/4 -> DQPSK R1/4. On a peak-limited
+transmitter (`--tx-model hardware`, the default) the 8-carrier DBPSK payload rides ~5 dB under its
+peak while 16-FSK is constant-envelope, so DBPSK decoded worse than 16-FSK at the same rate:
+`tools/lowsnr_floor` (production encoder/decoder, 7.3 Hz, 20 trials) at AWGN -10 dB 16-FSK R1/2
+decodes 20/20 where DBPSK R1/4 decodes 0/20 (4/20 at -8); on ITU Good it is ahead at every SNR <= 0.
+
+**Changed.**
+- `Modulation::MFSK16_FAST` ("16FSK-F"): the 16-FSK PHY with compact session DATA frames half as long,
+  the session's information block in `mcdpsk_frame::airBitsFor(cw, mod)` = roundup8(324 cw) air bits
+  (turbo rate ~1/2; 3 codewords: 976 bits, 244 symbols, 5.2 s, against DBPSK's 243). Every rung
+  carries the same block, so frames cut at one rung resend at another unchanged. Control frames and
+  v2 chains stay full length. It replaces DBPSK as rung word 14 and `ROBUST_MID` (wire change);
+  DBPSK stays the handshake control profile.
+- Waveform sizing for compact frames (`MCDPSKWaveform::getCompactFrameSamplesAt` and friends) used by
+  every compact-path site in the decoder; the control peek covers every rung above 16-FSK.
+- Up-step margin test per rung pair (`mcDpskUpMarginDbFor`): 3 dB 16-FSK -> 16-FSK-F, 11 dB 16-FSK-F
+  -> DQPSK (GUI: 16-FSK-F decodes to -10 dB, DQPSK clean only from ~0 dB; 9 and 10 dB probed DQPSK at
+  -2 dB and paid a timeout each time); was 6.02 dB for every step.
+- First up-probe priced for the rung the session starts at (was the bottom pair: 3 clean bursts
+  instead of 2 at 16-FSK-F, one extra burst per transfer).
+- Connect crossover 16-FSK / middle rung: channel -11 dB AWGN / -12 dB fading (readings -16.4 / -17.4).
+- The in-session OFDM judgment carries 16-FSK readings (control scale, `kMfskOverDbpskReadingDb`) to
+  the DBPSK data scale it was validated on: G(h_data) - G(h_control) on the MC-DPSK peak-control
+  curve, 2.94 dB (`peak_control::mcDpskDbpskDataOverControlReadingDb`; measured 2.7-3.0). Without it
+  a true AWGN 3-4 dB link stayed on 16-FSK-F until a DQPSK burst (152 vs 110 s).
+- 16-FSK frames measure physical SNR on the payload (constant envelope; the training read ~6 dB low
+  and failed the presence gate at 7 dB, so a fallback frame carried no up-crossing evidence).
+- Fixed BUG-PAPR-LEVEL-COUNTS-MCDPSK-BURSTS and BUG-MCDPSK-LOST-FIRST-STRIDE-HANDSHAKE-PROFILE
+  (KNOWN_BUGS).
+- `tools/lowsnr_floor` `LOW_COMPACT=1`: the production compact frames per rung.
+
+**Verified (GUI gate, `--tx-model hardware`, 7.3 Hz, paired vs main 2daecf08, seconds for the file;
+final build except where noted).**
+
+| case | main | 16-FSK-F |
+|---|---|---|
+| AWGN -10 s41 / s42 (1 KB) | 500 / 500 | **246 / 244** |
+| AWGN -8 s41 / s42 (1 KB) | 587 / 632 | **247 / 246** |
+| AWGN -8 s41 (2 KB) | 1010 | **421** |
+| AWGN -6 s41 / s42 (1 KB) | 364 / 306 | **247 / 246** |
+| AWGN -4 s41 / s42 | 218 / 373 | 231 / 375 |
+| AWGN -2 s41 / s42 (2 KB) | 353 / 354 | 351 / 356 |
+| AWGN -1 s43 / 0 s41 / 0 s42 / +1 s43 (2 KB) | 277 / 213 / 214 / 214 | **220** / 218 / 220 / 220 |
+| AWGN -6 s44 / +2 s44 (2 KB) | 873 / 404 | **422 / 196** |
+| AWGN 3 s41 / 4 s42 / 6 s41 (2 KB) | 115 / 113 / 50 | 115 / **104** / 52 |
+| Good -8 s45 / -5 s41 / -5 s46 (1 KB) | 762 / 558 / 566 | **563 / 352 / 407** |
+| Good -2 s42 / -2 s47 / 0 s43 / 0 s49 (1 KB) | 619 / 637 / 409 / 323 | **402 / 295 / 357 / 294** |
+| Good 5 s42 / 8 s43, AWGN 20, Moderate 18 (4 KB) | 114 / 83 / 44 / 61 | 114 / 81 / 44 / 57 |
+
+All PASS. -4 dB and below the -6 / -4 rows from the first build (9 dB margin, same low-SNR path).
+2-2.4x faster from -10 to -6 dB on AWGN, 1.2-2.2x on ITU Good -8..0 dB, even elsewhere (0..+1 dB:
++2-3 %, the 16-FSK control frames of the first bursts). Fading cells are single seeds. ctest 128/128.
+
 ## 2026-11-22 — fix(ladder): OFDM entry on a peak-limited TX at AWGN 3-6 dB (fading index, PAPR offset, dead-rung veto)
 
 **Was.** On the default `--tx-model hardware` a true AWGN 3-6 dB link stayed in MC-DPSK (~78-90 bps)
