@@ -57,6 +57,10 @@ private:
     bool chat_enabled_ = false;
     bool cwid_enabled_ = false;
     bool pending_inbound_ = false;
+    // The host's standing LISTEN ON (until LISTEN OFF). A session that ends returns to listening:
+    // it used to return to READY, so the second call the modem accepted never reached the host
+    // (BUG-TNC-LISTEN-LOST-AFTER-SESSION).
+    bool listen_enabled_ = false;
     uint32_t iamalive_timer_ms_ = 0;
     int last_buffer_level_ = -1;
     uint32_t last_buffer_emit_ms_ = 0;
@@ -123,6 +127,8 @@ private:
     static constexpr uint32_t kBufferKeepaliveMs = 20000;
 
     static std::pair<std::string, std::string> parseCommand(std::string_view line);
+
+    void endSessionForHost();
 
     void emitOK();
     void emitWrong();

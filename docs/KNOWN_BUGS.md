@@ -8,6 +8,32 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 
 ## Active Issues
 
+### TNC host-facing gaps found 2026-11-23 (`tools/tnc_scenario.py`, open) — P2/P3
+- **BUG-FIRST-OFDM-FRAME-LTS-CFO** (P1, intermittent, pre-existing): on the first OFDM frame after the
+  MC-DPSK handshake the LTS residual "corrects" the handshake's accurate dual-chirp CFO by ~1.2-1.3 Hz
+  (AWGN 10 dB, true 7.3 Hz: 7.30 -> 8.64 in one run, 7.30 -> 6.11 in another, both logged
+  `pre_corr=0.00 + residual=...` on a frame-structure-acquired anchor). At 6.11 Hz the QPSK R1/2 frame
+  failed 0/8 twice, the sender's follow crossed to MC-DPSK and the session never confirmed (TNC
+  `cancel` scenario). Not explained yet: a 2-symbol LTS should resolve far better than 1 Hz at 10 dB;
+  suspect the structure anchor's timing (ramp_late) biasing the residual. Repro: tnc_scenario
+  `cancel`, AWGN 10, seed 42 (intermittent).
+- **Sticky narrowband idle receiver** (P3): a genuine narrowband PING that never becomes a session leaves
+  an idle receiver on the narrowband chirp until its next reset (false locks are gated since
+  BUG-FALSE-NARROWBAND-LOCK, real ones are not undone).
+- **BUG-TNC-BUFFER-WIRE-BYTES** (P3): `BUFFER` counts the engine's wire bytes (1-byte payload marker,
+  fragment headers): a 1-byte write reports BUFFER 2, an 8000-byte write peaks at 8070.
+- **BUG-TNC-PEER-DISCONNECTED-LATE** (P2): the station that receives DISCONNECT holds a 23.6 s
+  re-ACK grace (for a lost DISCONNECT ACK) and tells its host DISCONNECTED only at its end, 26 s after the
+  peer's host. Reporting it at teardown start needs a defined answer for a host CONNECT inside the grace.
+- **BUG-TNC-PENDING-ONLY-AT-CONNECTED** (P3): PENDING reaches the host together with CONNECTED, not when
+  the inbound call is first heard.
+- **Interactive turn cost** (P2): with the fixes above a direction change still costs the TNC's 1.5 s
+  bulk-quiet staging + the TURN_REQUEST/TURNOVER exchange (two full-anchor control frames) + the data-turn
+  guard: a short reply takes ~10 s (AWGN 10 dB, TNC ping-pong) against ~4 s for a same-direction message.
+- **Anchor age ignores light-LTS singletons** (P3): `ModemEngine::msSinceLastGroupAnchor` reads only the
+  primary decoder's last full anchor; a standalone frame acquired by light LTS does not stamp it. Moot for
+  marked singletons (their ACK is a completed-turn ACK) but stale for unmarked asynchronous ACKs.
+
 ### BUG-FORCE-DATA-MOD-QPSK-MCDPSK (open, 2026-11-22) — P3 (test knob)
 - `ULTRA_FORCE_DATA_MOD=QPSK` in an MC-DPSK session yields "MC-DPSK QPSK" (a coherent modulation
   name on the differential waveform) instead of forcing OFDM QPSK; the force path does not pick the
@@ -2790,6 +2816,127 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### TNC + short-message polish, 2026-11-23 (found by `tools/tnc_scenario.py`: two real `ultra_tnc` stations over OTASim, driven like a messaging client)
+
+### BUG-SINGLE-FRAME-MESSAGE-UNMARKED (FIXED 2026-11-23) — was P1 for every short message (GUI and TNC)
+- A payload that fits one frame went from the ARQ straight to the transmitter without the CRC-protected
+  PHYSICAL_BURST_END marker (BUG-OFDM-SINGLETON-UNMARKED marked the resend paths only). The receiver
+  could not prove the turn was over, held its ACK to the ~11 s air ceiling past the sender's 8.75 s ACK
+  window, and the message was resent: the host's BUFFER 0 came ~14 s after a 1-byte write delivered in
+  4.8 s. `Connection::startPayloadNow` marks its single-frame submission (`single_frame_payload_submit_`).
+  CTest ConnectionAdaptive `test_single_frame_message_carries_turn_end_marker` (fails without the fix).
+
+### BUG-BINARY-FRAGMENT-OVERSIZE (FIXED 2026-11-23) — was P0 for TNC blocks over one frame
+- A binary payload (every TNC data-port block) travels as DATA_START/DATA_CONT/DATA_END frames, which keep
+  the v2 layout; only a plain DATA frame rides the compact layout. The fragmenter cut it to the compact
+  capacity (312 B at QPSK R1/2 vs 301 B v2), the encoder truncated every fragment ("exceed the v2 layout -
+  truncated"), and no block between one frame and the 4 KB file threshold ever arrived (900 B: 0 bytes in
+  240 s, then a rate collapse to R1/4). Binary blocks now ride plain DATA frames (MORE_FRAG/FINAL) behind
+  their BINARY_OBJECT identity, so they use the compact frame and its capacity like messages (also 56 vs
+  37 bytes a frame on a 3-codeword MC-DPSK rung). CTest WaveformFollow
+  `test_binary_fragments_fit_the_v2_frame` (production defaults: every fragment a DATA frame the compact
+  encoder accepts).
+
+### BUG-TURN-YIELD-DEADLOCK (FIXED 2026-11-23) — was P1 for any non-B2F use
+- The interactive initiator yields its first DATA turn ("the B2F responder speaks first") and then waited
+  for the peer's DATA before it would ask for the turn back. A peer with nothing to say never sent any:
+  a TNC block written ~1 s after CONNECTED waited forever (0/400 B in 240 s). The yield now asks for the
+  turn after one TURN_REQUEST round trip with no peer DATA (`yielded_turn_wait_ms_`).
+
+### BUG-TURN-REQUEST-RETRANSMIT-RACE (FIXED 2026-11-23) — was P1 for interactive turn changes
+- The TURN_REQUEST retransmit (3.8 s) was shorter than the token round trip (two full-anchor control
+  frames, 1.41 s each, plus the search latency): the duplicate request keyed just as TURNOVER arrived, the
+  peer re-asserted TURNOVER over the first DATA frame, missed it, and every direction change cost an
+  8.4 s resend (15-19 s per turn). On MC-DPSK the same race ran in lock step (a 2.3 s token found ~6 s
+  after it ends against a 10 s retransmit): the turn never changed (TNC ping-pong, AWGN 0 dB, 400 s).
+  `turnRequestRetransmitMs()` now covers the round trip: two full-anchor tokens plus two search windows,
+  and at least the ARQ's one-frame timeout for the waveform.
+
+### BUG-IRS-NEVER-NOTICES-LOST-PEER (FIXED 2026-11-23) — was P1 (TNC host stuck CONNECTED)
+- A receiver owed more of a transfer by a peer it no longer heard (the sender ABORTed, or vanished) had
+  no exit: 230 s of silence, still CONNECTED. It now declares the link lost after the sender's whole retry
+  budget ((max_retries + 1) x the full-window RTO, `peerSilentLinkLostMs`); an idle session is left to the
+  hosts. CTest ConnectionAdaptive `test_receiver_declares_lost_peer_only_past_the_retry_budget`.
+
+### BUG-SECOND-SESSION-CONNECT-GEOMETRY (FIXED 2026-11-23) — was P0 for a second session on one engine
+- After an OFDM session the decoder slot that ran OFDM becomes the idle MC-DPSK primary on its own default
+  constellation (DQPSK); the fixed CONNECT wait sized the frame at 90 symbols instead of the handshake's
+  171 (DBPSK R1/4) and never decoded the next caller. Only a connected decoder switched to the handshake
+  profile; now every one does. The TNCSession integration case that failed this way since 2026-05
+  ("session 2 did not connect") was this bug.
+
+### BUG-DECODER-RESET-MID-DECODE (FIXED 2026-11-23) — was P0 (crash)
+- `StreamingDecoder::reset()` reset the waveform in place from the protocol/host thread while the decode
+  thread could be inside it: ultra_tnc SIGBUS in `MultiCarrierDPSKDemodulator::processGotChirp`
+  (memmove) when a disconnect met an MC-DPSK first-frame retry. Off the decode thread the reset is now
+  applied by the decode thread at the top of its next iteration.
+
+### BUG-TNC-ANSWERS-WHILE-NOT-LISTENING (FIXED 2026-11-23) — was P1 (keys the transmitter unasked)
+- The engine defaults to auto-accept and answering PINGs; a TNC starts not listening. A TNC whose host
+  never said LISTEN ON answered every PING (keying the radio) and could accept a CONNECT its host was never
+  told about; a caller of a non-listening station saw a PONG and spent 210 s on 10 CONNECTs. LISTEN OFF
+  (the default) now neither accepts nor answers probes (`Connection::setAnswerProbes`); the GUI unchanged.
+
+### BUG-TNC-LISTEN-LOST-AFTER-SESSION (FIXED 2026-11-23) — was P1 for a TNC that takes calls
+- After a session the TNC returned to READY while the modem still accepted calls: the second inbound
+  session never reached the host. MYCALL did the same. A standing LISTEN ON now persists (`listen_enabled_`).
+
+### BUG-TNC-ABORT-NO-DISCONNECTED (FIXED 2026-11-23) — was P2
+- ABORT (and DISCONNECT during call setup) set the session READY before the modem's link-down arrived, so
+  the host never got DISCONNECTED and its last BUFFER level stayed non-zero. `TNCSession::endSessionForHost`.
+
+### BUG-BINARY-LOST-ON-GEOMETRY-CHANGE (FIXED 2026-11-23) — was P0 (silent TNC data loss)
+- A binary block in flight across a geometry change (waveform follow, forced demote, rate change that
+  re-cuts the ARQ) was abandoned - text messages were re-gridded by object id, binary blocks "failed
+  explicitly" to a TNC layer that never listened - and the TNC host was told BUFFER 0. TNC, AWGN 10 dB
+  after a cancelled call: a 30-byte block lost, sender BUFFER 0, receiver never got it. Binary blocks
+  now carry the text object's identity (`PayloadType::BINARY_OBJECT` {0x05, id}), are re-gridded the
+  same way and de-duplicated at the receiver; a bare block from an older sender is still delivered.
+  WIRE CHANGE for TNC binary traffic (a 0.6.4.x receiver hands the 2-byte prefix to its host). CTest
+  ConnectionAdaptive `test_midwindow_binary_geometry_change_regrids_block`.
+
+### BUG-SIMULTANEOUS-CALL-LOCKSTEP (FIXED 2026-11-23) — was P1 (two stations calling each other)
+- Two TNCs that called each other at the same moment never connected, three ways: (1) identical PING
+  retry timers kept both PINGs on the air together, so on half-duplex radios neither heard the other
+  (both "No response after 5 PINGs"); (2) once one heard the other, each cancelled its own call for the
+  peer's CONNECT, but a TNC turns acceptance off while it calls, so nobody accepted it; (3) once
+  connected, both hosts claimed to be the caller. PING retries now wait a random extra 0..timeout/2
+  (`pingRetryJitterMs`, per-station seed), a CONNECT from the station being called is accepted whatever
+  the listen state, and the TNC reports the protocol's own role (`ProtocolEngine::connectedAsInitiator`).
+  `tools/tnc_scenario.py --scenario simultaneous`: 5/5 seeds connect (54-102 s), one session, both hosts
+  agree. (The OTASim scenario test `two_endpoint_simultaneous_probe` that covered this case ran on the
+  scripted runner deleted 2026-05-30 and had not run since.)
+
+### BUG-ORPHANED-DATA-TURN (FIXED 2026-11-23) — was P1 on fading
+- A TURNOVER lost on fading left neither station with the DATA turn: the yielding side believed the peer
+  had it, the peer never heard it and ignored every TURN_REQUEST because it did not hold the turn (TNC,
+  ITU Good 8 dB: 26 requests over 220 s, the block never sent). A TURN_REQUEST received while not holding
+  the turn proves it is orphaned; the receiver grants it, and when both want it the initiator keeps its
+  claim and the responder grants. CTest ConnectionAdaptive `test_orphaned_data_turn_is_granted`.
+
+### BUG-MCDPSK-MESSAGE-STOP-AND-WAIT (FIXED 2026-11-23) — was P2 (low-SNR messages)
+- `Connection::sendNextFragment` burst-buffered and pipelined message fragments on OFDM only; on MC-DPSK a
+  multi-frame message or TNC block went out one fragment per turn (~16 s each on 16-FSK-F at AWGN 0 dB)
+  while the file path burst the same frames. Fragments now burst on MC-DPSK exactly like file chunks (same
+  ARQ, compact frames, tone ACK, timing-derived window). CTest ConnectionAdaptive
+  `test_mcdpsk_message_fragments_burst`.
+
+### BUG-FALSE-NARROWBAND-LOCK (FIXED 2026-11-23) — was P1 (station deaf to wideband callers)
+- An idle receiver's dual-listen narrowband search (run when the wideband search found nothing in a
+  window) accepted a fragment of a wideband PONG's sweep as a narrowband dual chirp: corr 0.039 (the
+  detection threshold is 0.15), a 21 % gap error read as 58.9 Hz on the narrow chirp's 96 samples/Hz,
+  under ChirpSync's 100 Hz sanity bound. The receiver switched to the narrowband chirp for good and missed
+  every later wideband PONG (TNC: the call after an unanswered call failed after 5 PINGs). The switch now
+  needs corr >= `CORR_DETECT_THRESHOLD` and |CFO| <= `kPingMaxChirpCfoHz` (50 Hz).
+
+### BUG-TNC-BITRATE-NOMINAL (FIXED 2026-11-23) — P3
+- `BITRATE` was the bandwidth's nominal OFDM rate (2208 bps) whatever the session ran. It now reports the
+  rung's information rate (`connection_policy::sessionDataRateBps`: one frame's payload over its airtime)
+  at CONNECTED and on every rung change; STATS `bps` the same.
+
+### TNC STATS reported idle placeholders as link values (FIXED 2026-11-23) — P3
+- Outside a session STATS showed `snr=20 mode=OFDM-CHIRP bps=2208`; now `none`/0.
 
 ### BUG-MFSK-PHYSICAL-SNR-SCALE (FIXED 2026-11-23) — was P1 on ITU Good -5..+2 dB (v0.6.4)
 - A 16-FSK frame's physical SNR (measured on its constant-envelope payload since 16-FSK-F) was

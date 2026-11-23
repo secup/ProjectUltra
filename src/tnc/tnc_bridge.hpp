@@ -45,6 +45,9 @@ public:
     virtual void setLocalCallsign(const std::string& call) = 0;
     virtual std::string getLocalCallsign() const = 0;
     virtual void setAutoAccept(bool auto_accept) = 0;
+    virtual void setAnswerProbes(bool answer) { (void)answer; }
+    // 1 initiator / 0 responder of the session that reached CONNECTED, -1 unknown. Lock-free.
+    virtual int connectedAsInitiator() const { return -1; }
     virtual bool connect(const std::string& remote_call) = 0;
     virtual void disconnect() = 0;
     virtual void abortTxNow() = 0;
@@ -99,6 +102,7 @@ public:
     void setMyCall(const std::vector<std::string>& calls) override;
     void setBandwidth(int hz) override;
     void setListen(bool on) override;
+    void applyListen(bool on);
     void startConnect(const std::string& src, const std::string& dst) override;
     void disconnect() override;
     void abort() override;
@@ -109,6 +113,8 @@ public:
     int getTxBacklogBytes() const;
     int getCurrentSNR_db() const override;
     int getCurrentBitrate_bps() const override;
+    // The data rung changed: report its information rate to the host (BITRATE) and to STATS.
+    void reportSessionDataRate(int bps);
     State getState() const override;
     ModemStats getStats() const override;
 
@@ -169,6 +175,8 @@ private:
     std::atomic<State> state_{State::IDLE};
     std::atomic<bool> started_{false};
     std::atomic<bool> ptt_active_{false};
+    // The session rung's information rate (connection_policy::sessionDataRateBps), 0 outside one.
+    std::atomic<int> session_rate_bps_{0};
     std::mutex ptt_mutex_;
     uint32_t ptt_tail_ms_ = 0;
 

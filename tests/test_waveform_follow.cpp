@@ -9,6 +9,7 @@
 #include "protocol/connection.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
+#include "protocol/ofdm_data_frame.hpp"
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "helpers/temp_dir.hpp"
 
@@ -46,6 +47,9 @@ namespace ultra {
 namespace protocol {
 
 struct ConnectionAdaptiveTestAccess {
+    static int physicalDataFrameCWCount(const Connection& c) {
+        return c.physicalDataFrameCodewords();
+    }
     static void makeLocalIss(Connection& c) {
         c.local_data_turn_ = true;
         c.peer_data_turn_requested_ = false;
@@ -1539,6 +1543,43 @@ void test_startup_probe_launch_copy_is_not_a_candidate() {
 
 }  // namespace
 
+// BUG-BINARY-FRAGMENT-OVERSIZE: a binary block (the TNC's data port) was cut to the compact DATA
+// frame's capacity but sent in DATA_START/DATA_CONT/DATA_END frames, which keep the smaller v2
+// layout, so the encoder truncated every fragment and no block over one frame arrived. Binary blocks
+// now ride plain DATA frames behind their BINARY_OBJECT identity: every fragment must be a DATA frame
+// the session's compact encoder accepts whole. Here (production defaults) because the compact layout
+// exists only with the turbo data FEC.
+void test_binary_fragments_fit_the_v2_frame() {
+    for (const CodeRate rate : {CodeRate::R1_2, CodeRate::R2_3, CodeRate::R3_4}) {
+        Connection c;
+        std::vector<Bytes> frames;
+        c.setTransmitCallback([&](const Bytes& frame) { frames.push_back(frame); });
+        c.setTransmitBurstCallback([&](const std::vector<Bytes>& group, uint16_t, uint8_t) {
+            frames.insert(frames.end(), group.begin(), group.end());
+        });
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, rate, 20.0f, 0.10f, Modulation::QPSK);
+        Bytes block(900);
+        for (size_t i = 0; i < block.size(); ++i) block[i] = static_cast<uint8_t>(i * 7 + 3);
+        CHECK(c.sendBinary(block), "900-byte binary block should be accepted");
+        for (int i = 0; i < 20 && frames.empty(); ++i) {
+            c.tick(100);
+        }
+        CHECK(frames.size() >= 2, "a 900-byte block should go out as several fragments");
+        const int cw = ConnectionAdaptiveTestAccess::physicalDataFrameCWCount(c);
+        const int z = c.selectBurstLiftingZ();
+        for (const auto& f : frames) {
+            const auto header = v2::parseHeader(f);
+            CHECK(header.valid && header.type == v2::FrameType::DATA,
+                  "a binary fragment must be a plain DATA frame");
+            protocol::ofdm_frame::Position position;
+            position.index = 0;
+            position.count = 1;
+            CHECK(protocol::ofdm_frame::encode(f, rate, cw, z, position).has_value(),
+                  "every binary fragment must fit the compact frame the encoder sends it in");
+        }
+    }
+}
+
 int main() {
     // Production defaults on purpose (see the header); only the follow knob is set per test.
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
@@ -1584,6 +1625,7 @@ int main() {
     test_startup_probe_launch_copy_is_not_a_candidate();
     test_mcdpsk_up_step_probes_small();
     test_tail_demote_commits_by_descriptor();
+    test_binary_fragments_fit_the_v2_frame();
 
     if (tests_failed != 0) {
         std::cout << "WaveformFollow: " << tests_failed << "/" << tests_run << " failed\n";

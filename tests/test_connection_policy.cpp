@@ -2056,12 +2056,34 @@ void test_ladder_papr_correction() {
           "on its MC-DPSK pick");
 }
 
+// BUG-TNC-BITRATE-NOMINAL: a TNC's BITRATE reports the rung's information rate, from the same frame
+// capacity and airtime the ARQ uses: ordered by rung, OFDM above MC-DPSK, and within the raw ceiling.
+static void test_session_data_rate_orders_the_rungs() {
+    using namespace connection_policy;
+    const uint32_t q12 = sessionDataRateBps(WaveformMode::OFDM_CHIRP, Modulation::QPSK,
+                                            CodeRate::R1_2, 8, 0, 0);
+    const uint32_t q34 = sessionDataRateBps(WaveformMode::OFDM_CHIRP, Modulation::QPSK,
+                                            CodeRate::R3_4, 8, 0, 0);
+    const uint32_t fsk = sessionDataRateBps(WaveformMode::MC_DPSK, Modulation::MFSK16,
+                                            CodeRate::R1_4, 3, 8, 1024);
+    const uint32_t dq = sessionDataRateBps(WaveformMode::MC_DPSK, Modulation::DQPSK,
+                                           CodeRate::R1_4, 3, 8, 1024);
+    CHECK(q12 > 0 && q34 > q12, "a higher OFDM code rate carries more");
+    CHECK(fsk > 0 && dq > fsk, "DQPSK carries more than 16-FSK");
+    CHECK(q12 > dq, "OFDM QPSK R1/2 carries more than any MC-DPSK rung");
+    // Raw ceiling: 47 data carriers x 2 bits x 1/2 x 46.875 symbols/s (minus the CP) ~ 2.2 kbps.
+    CHECK(q12 < 2300, "the rate never exceeds the rung's raw ceiling");
+    CHECK(sessionDataRateBps(WaveformMode::MC_DPSK, Modulation::DQPSK, CodeRate::R1_4, 3, 0, 0) == 0,
+          "an unknown MC-DPSK geometry reports no rate");
+}
+
 int main() {
     // The coherent-window A/B knob (ULTRA_COHERENT_WINDOW) is latched ONCE via a
     // function-local static on the first policy call — pin it to the disabled
     // baseline BEFORE any test runs so this binary deterministically tests the
     // default (byte-identical) window-selection path.
     setenv("ULTRA_COHERENT_WINDOW", "0", 1);
+    test_session_data_rate_orders_the_rungs();
     // Same latch-once pattern: pin the 16QAM R3/4 crest-rung A/B knob to its disabled
     // default so this binary deterministically tests the byte-identical baseline cap.
     setenv("ULTRA_QAM16_R34", "0", 1);

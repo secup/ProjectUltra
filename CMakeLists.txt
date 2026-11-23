@@ -701,16 +701,12 @@ if(ULTRA_BUILD_TOOLS)
     # was removed 2026-05-30 with the cli_simulator retirement.
     add_executable(ota_simulator
         tools/ota_simulator.cpp
-        tools/ota_simulator/scenario.cpp
         tools/ota_simulator/clip_gen.cpp
-        tools/ota_simulator/session_log.cpp
         ${ULTRA_STREAMING_MODEM_SOURCES}
     )
     ultra_enable_tool_test_warnings(
         tools/ota_simulator.cpp
-        tools/ota_simulator/scenario.cpp
         tools/ota_simulator/clip_gen.cpp
-        tools/ota_simulator/session_log.cpp
     )
     target_include_directories(ota_simulator PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -31,7 +31,8 @@ void expect(bool condition, const std::string& message) {
 struct FakeProtocolEngine : ProtocolEnginePort {
     std::string local_call;
     std::string remote_call;
-    bool auto_accept = false;
+    bool auto_accept = true;     // the real engine's default
+    bool answer_probes = true;   // the real engine's default
     bool connect_result = true;
     int set_local_calls = 0;
     int connect_calls = 0;
@@ -59,6 +60,10 @@ struct FakeProtocolEngine : ProtocolEnginePort {
 
     std::string getLocalCallsign() const override {
         return local_call;
+    }
+
+    void setAnswerProbes(bool answer) override {
+        answer_probes = answer;
     }
 
     void setAutoAccept(bool enabled) override {
@@ -268,6 +273,20 @@ int main() {
         Harness h;
         h.bridge.setMyCall({});
         expect(h.engine.set_local_calls == 0, "empty MYCALL should not call engine");
+    });
+
+    runner.run("a new bridge takes no calls until LISTEN ON", [] {
+        // BUG-TNC-ANSWERS-WHILE-NOT-LISTENING: the engine defaults to auto-accept and answering
+        // PINGs; a TNC whose host never said LISTEN ON must do neither.
+        Harness h;
+        expect(!h.engine.auto_accept, "a new bridge must not auto-accept calls");
+        expect(!h.engine.answer_probes, "a new bridge must not answer PING probes");
+        h.bridge.setListen(true);
+        expect(h.engine.auto_accept && h.engine.answer_probes,
+               "LISTEN ON must accept calls and answer probes");
+        h.bridge.setListen(false);
+        expect(!h.engine.auto_accept && !h.engine.answer_probes,
+               "LISTEN OFF must stop both");
     });
 
     runner.run("setListen toggles auto accept and state", [] {

@@ -204,11 +204,9 @@ if(SDL2_FOUND)
     )
 endif()
 add_test(NAME TNCSession COMMAND test_tnc_session)
-# Marked off 2026-05-30: the TNC session harness predates the OTASim rework and
-# must be re-authored to drive the channel through OTASim like the GUI does
-# (TwoSessionsSameEnginePairBothSucceed is pre-existing RED — confirmed identical
-# at parent c384b6a). Re-enable after the TNC->OTASim rework.
-set_tests_properties(TNCSession PROPERTIES DISABLED TRUE)
+# Re-enabled 2026-11-23 (off since 2026-05-30): the stale cases were updated to the flush-batching
+# default and the host-facing fixes, and the in-process two-engine integration case was removed -
+# two real ultra_tnc stations over OTASim cover it (tools/tnc_scenario.py, UltraTncSimAudio).
 
 # ultra_tnc config parsing — pure unit tests, no SDL/audio.
 add_executable(test_ultra_tnc_config
@@ -984,93 +982,40 @@ if(TARGET ota_simulator)
             TIMEOUT 300
             RUN_SERIAL TRUE
             LABELS regression)
+
+        # Two real ultra_tnc stations over OTASim, driven through the command and data ports like
+        # a messaging client (tools/tnc_scenario.py, 2026-11-23). This harness found the TNC and
+        # short-message bugs of 2026-11-23 (none of them visible to the unit suites). Each test is
+        # its own OTASim server and port pair, so they run in parallel; real time, hence "slow".
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND AND NOT WIN32)
+            foreach(_tnc_case IN ITEMS
+                    "Short:short"
+                    "Turns:pingpong,both"
+                    "Sessions:reconnect,cancel"
+                    "Listen:not_listening,commands,simultaneous")
+                string(REPLACE ":" ";" _tnc_pair "${_tnc_case}")
+                list(GET _tnc_pair 0 _tnc_name)
+                list(GET _tnc_pair 1 _tnc_scenarios)
+                add_test(NAME TncScenario${_tnc_name}
+                    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/tnc_scenario.py
+                            --scenario ${_tnc_scenarios}
+                            --channel awgn --snr-db 10 --seed 42
+                            --bin-dir $<TARGET_FILE_DIR:ultra_tnc>
+                            --out ${CMAKE_BINARY_DIR}/tnc_scenarios/${_tnc_name})
+                set_tests_properties(TncScenario${_tnc_name} PROPERTIES
+                    TIMEOUT 900
+                    LABELS "regression;slow;tnc_scenario")
+            endforeach()
+        endif()
     endif()
 
-    # OTASim scenario tests (ota_simulator run --scenario *.json).
-    # These predate Task #92's sample-clock-paced refactor and use
-    # wall-clock event timestamps (e.g. "t_s": 95.0 means wait 95s of
-    # real time). The 7 tests below combined add ~12+ minutes to ctest.
-    # Disabled by default; re-enable once the scenario runner is taught
-    # to consume scenario time from the sample clock.
-    # Tracking: TODO-SCENARIO-SAMPLE-CLOCK.
-    option(ULTRA_RUN_SLOW_SCENARIO_TESTS
-        "Run the wall-clock-paced OTASim scenario regression tests" OFF)
-
-    if(ULTRA_RUN_SLOW_SCENARIO_TESTS)
-        add_test(NAME OTASimulatorSmoke
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/smoke_ping_disconnected.json)
-        set_tests_properties(OTASimulatorSmoke PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 60
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-
-        # Locks in BUG-PING-DETECTOR-001: real-HF OTA PING capture from
-        # KC3VPB injected over real-HF noise bed must classify as PING and
-        # trigger PONG TX from a DISCONNECTED endpoint.
-        add_test(NAME OTASimulatorRealOTAPing
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/real_ota_ping_to_pong.json)
-        set_tests_properties(OTASimulatorRealOTAPing PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 60
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-
-        add_test(NAME OTASimulatorTwoEndpointClean
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/two_endpoint_clean_handshake.json)
-        set_tests_properties(OTASimulatorTwoEndpointClean PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 120
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-
-        # Locks in the call-collision NAK fix: both stations probe each other
-        # near-simultaneously, exercise the PROBING + CONNECTING-state acceptance
-        # of inbound CONNECT plus the callsign-lex tiebreaker. Pre-fix would NAK.
-        add_test(NAME OTASimulatorTwoEndpointSimultaneousProbe
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/two_endpoint_simultaneous_probe.json)
-        set_tests_properties(OTASimulatorTwoEndpointSimultaneousProbe PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 120
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-
-        add_test(NAME OTASimulatorTwoEndpointNoisy
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/two_endpoint_noisy_handshake.json)
-        set_tests_properties(OTASimulatorTwoEndpointNoisy PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 120
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-
-        add_test(NAME OTASimulatorTwoEndpointMCDPSKLowSNR
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/two_endpoint_mcdpsk_low_snr_qso.json)
-        set_tests_properties(OTASimulatorTwoEndpointMCDPSKLowSNR PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 150
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-
-        add_test(NAME OTASimulatorFileTransferSNR15
-            COMMAND $<TARGET_FILE:ota_simulator> run
-                    --scenario tests/fixtures/ota_simulator/two_endpoint_file_transfer_snr15.json)
-        set_tests_properties(OTASimulatorFileTransferSNR15 PROPERTIES
-            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-            TIMEOUT 360
-            RUN_SERIAL TRUE
-            LABELS "regression;slow_scenario")
-    else()
-        message(STATUS
-            "OTASim scenario regression tests DISABLED (wall-clock-paced; ~12+ min). "
-            "Re-enable with -DULTRA_RUN_SLOW_SCENARIO_TESTS=ON once scenario runner "
-            "consumes time from the sample clock (see TODO-SCENARIO-SAMPLE-CLOCK).")
-    endif()
+    # The OTASim scripted-scenario tests (`ota_simulator run --scenario *.json`, behind
+    # ULTRA_RUN_SLOW_SCENARIO_TESTS) were removed 2026-11-23: their runner drove the retired
+    # SimulatedStation and was deleted with it on 2026-05-30, so they could not run at all. What
+    # they covered runs on the production stations now: tools/tnc_scenario.py (two real ultra_tnc
+    # over OTASim; the TncScenario* tests below), tools/gui_qso_scenario.sh, and the real-radio
+    # PING captures in CTest PingDetector.
 endif()
 
 ultra_enable_test_warnings(

@@ -321,17 +321,36 @@ void TNCSession::onModemDisconnected() {
     }
 
     if (state_ == State::CONNECTED || state_ == State::CONNECTING || state_ == State::DISCONNECTING) {
-        pending_inbound_ = false;
-        state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
-        data_tx_buffer_.clear();
-        if (!last_tx_temp_path_.empty()) {
-            std::error_code ec;
-            std::filesystem::remove(last_tx_temp_path_, ec);
-            last_tx_temp_path_.clear();
-        }
-        data_tx_quiet_ms_ = 0;
-        emitDisconnected();
+        endSessionForHost();
     }
+}
+
+// The session is over for the host: drop what it queued, report the empty queue, and say
+// DISCONNECTED once. Used when the modem reports the link down and when the host ends it itself
+// (ABORT, DISCONNECT during call setup): those used to move the state to READY first, so the
+// modem's later link-down found nothing to report and the host never got DISCONNECTED, with its
+// last BUFFER level stuck non-zero (BUG-TNC-ABORT-NO-DISCONNECTED).
+void TNCSession::endSessionForHost() {
+    pending_inbound_ = false;
+    if (listen_enabled_ && isReadyAfterDisconnect(mycall_)) {
+        // An outbound call turned the modem's acceptance off; a standing LISTEN ON resumes.
+        modem_.setListen(true);
+        state_ = State::LISTENING;
+    } else {
+        state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
+    }
+    data_tx_buffer_.clear();
+    if (!last_tx_temp_path_.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(last_tx_temp_path_, ec);
+        last_tx_temp_path_.clear();
+    }
+    data_tx_quiet_ms_ = 0;
+    pending_buffer_level_ = -1;
+    if (last_buffer_level_ > 0) {
+        emitBuffer(0);
+    }
+    emitDisconnected();
 }
 
 void TNCSession::onModemPTT(bool on) {
@@ -715,7 +734,9 @@ void TNCSession::cmdMyCall(std::string_view args) {
     mycall_ = calls.front();
     secondary_calls_.assign(calls.begin() + 1, calls.end());
     pending_inbound_ = false;
-    state_ = State::READY;
+    // A new callsign does not end a standing LISTEN ON: the modem keeps accepting calls, so
+    // dropping to READY here would hide the next inbound session from the host.
+    state_ = listen_enabled_ ? State::LISTENING : State::READY;
     modem_.setMyCall(calls);
     emitOK();
 }
@@ -753,6 +774,7 @@ void TNCSession::cmdListen(std::string_view args) {
         if (state_ != State::LISTENING) {
             modem_.setListen(true);
         }
+        listen_enabled_ = true;
         state_ = State::LISTENING;
         emitOK();
         return;
@@ -762,6 +784,7 @@ void TNCSession::cmdListen(std::string_view args) {
         pending_inbound_ = false;
         modem_.setListen(false);
     }
+    listen_enabled_ = false;
     state_ = State::READY;
     emitOK();
 }
@@ -793,9 +816,8 @@ void TNCSession::cmdDisconnect() {
     // completed anyway, GitHub #38). The bridge reports DISCONNECTED when the link is down.
     if (state_ == State::CONNECTING) {
         modem_.abort();
-        pending_inbound_ = false;
-        state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
         emitOK();
+        endSessionForHost();
         return;
     }
     if (state_ != State::CONNECTED && state_ != State::DISCONNECTING) {
@@ -817,9 +839,8 @@ void TNCSession::cmdAbort() {
     }
 
     modem_.abort();
-    pending_inbound_ = false;
-    state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
     emitOK();
+    endSessionForHost();
 }
 
 void TNCSession::cmdCompression(std::string_view args) {
@@ -974,18 +995,26 @@ void TNCSession::cmdStats(std::string_view args) {
     }
 
     const ModemStats s = modem_.getStats();
-    char buf[256];
+    // Outside a session there is no rate, modulation, waveform or bitrate: the engine's values are
+    // its idle defaults, and a host would show them as the link's. An SNR with no measurement
+    // behind it (snr_source none) is a placeholder, not a reading.
+    const bool connected = state_ == State::CONNECTED;
+    const bool snr_measured = !s.snr_source.empty() && s.snr_source != "none";
+    const std::string snr_text = snr_measured ? std::to_string(s.snr_db) : std::string("none");
+    auto field = [connected](const std::string& v) {
+        return !connected ? std::string("none") : (v.empty() ? std::string("?") : v);
+    };
+    char buf[320];
     std::snprintf(buf, sizeof(buf),
                   "STATS frames_sent=%d frames_recv=%d retx=%d timeouts=%d "
-                  "failed=%d out_of_order=%d rate=%s mod=%s mode=%s snr=%d "
+                  "failed=%d out_of_order=%d rate=%s mod=%s mode=%s snr=%s "
                   "snr_source=%s bps=%d backlog=%d\r",
                   s.frames_sent, s.frames_received, s.retransmissions,
                   s.timeouts, s.failed, s.out_of_order,
-                  s.code_rate.empty() ? "?" : s.code_rate.c_str(),
-                  s.modulation.empty() ? "?" : s.modulation.c_str(),
-                  s.waveform.empty() ? "?" : s.waveform.c_str(),
-                  s.snr_db, s.snr_source.empty() ? "none" : s.snr_source.c_str(),
-                  s.bitrate_bps, s.tx_backlog_bytes);
+                  field(s.code_rate).c_str(), field(s.modulation).c_str(),
+                  field(s.waveform).c_str(), snr_text.c_str(),
+                  snr_measured ? s.snr_source.c_str() : "none",
+                  connected ? s.bitrate_bps : 0, s.tx_backlog_bytes);
     if (cmd_emit_) {
         cmd_emit_(buf);
     }

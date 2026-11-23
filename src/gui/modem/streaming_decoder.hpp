@@ -59,6 +59,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <thread>
 #include <memory>
 #include <functional>
 #include <chrono>
@@ -1364,6 +1365,11 @@ private:
     // flight. Swap semantics are unchanged — only the free is postponed. Bounded: at most
     // one entry per mode change, cleared on the next decode iteration.
     std::vector<std::unique_ptr<IWaveform>> retired_waveforms_;
+    // A waveform reset requested off the decode thread (reset() from the protocol/host thread),
+    // applied by the decode thread at the top of processBuffer (BUG-DECODER-RESET-MID-DECODE).
+    // Guarded by the ring's buffer_mutex_, like the other pending changes.
+    bool waveform_reset_pending_ = false;
+    std::atomic<std::thread::id> decode_thread_id_{};
     protocol::WaveformMode mode_ = protocol::WaveformMode::MC_DPSK;
     bool connected_ = false;
     // #70: see setBareChirpExpected. Default TRUE so an idle receiver (the common

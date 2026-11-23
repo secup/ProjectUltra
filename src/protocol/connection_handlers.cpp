@@ -42,6 +42,10 @@ void Connection::onPongReceived() {
     if (state_ != ConnectionState::PROBING) {
         // Not in probing state - this might be an incoming ping from someone else
         // Notify via ping_received callback (they're calling us)
+        if (state_ == ConnectionState::DISCONNECTED && !config_.answer_probes) {
+            LOG_MODEM(INFO, "Connection: Received incoming PING while not taking calls - not answering");
+            return;
+        }
         if (state_ == ConnectionState::DISCONNECTED && on_ping_received_) {
             LOG_MODEM(INFO,
                       "Connection: Received incoming PING while disconnected, firing PONG TX callback");
@@ -127,6 +131,14 @@ void Connection::cancelOutboundConnect() {
 // =============================================================================
 
 void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string& src_call) {
+    // A CONNECT from the very station we are calling is the session we asked for: accept it even
+    // when this station takes no unsolicited calls. A TNC turns acceptance off while it places a
+    // call, so in a call collision both sides cancelled their own attempt in favour of the other's
+    // CONNECT and then neither accepted it (BUG-SIMULTANEOUS-CALL-LOCKSTEP).
+    const bool from_station_we_call =
+        (state_ == ConnectionState::PROBING || state_ == ConnectionState::CONNECTING) &&
+        ((!src_call.empty() && src_call == remote_call_) ||
+         (!remote_call_.empty() && frame.src_hash == v2::hashCallsign(remote_call_)));
     if (state_ == ConnectionState::PROBING) {
         LOG_MODEM(INFO,
                   "Connection: Inbound CONNECT during PROBING - accepting "
@@ -214,7 +226,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
     float delay_spread_ms = 1.0f;
     float doppler_spread_hz = 0.5f;
 
-    if (config_.auto_accept) {
+    if (config_.auto_accept || from_station_we_call) {
         // Store callsign if known, otherwise use placeholder with hash for display
         remote_call_ = src_call.empty() ? "REMOTE" : src_call;
         remote_hash_ = frame.src_hash;  // Store hash for routing
@@ -1034,7 +1046,33 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
             turn_request_retransmit_ms_ = 0;
             turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
             armDataTurnTxGuard(dataTurnControlGuardMs());
+            return;
         }
+        // Neither station holds the turn: only a station without it sends TURN_REQUEST, and we do
+        // not have it either. That happens when a TURNOVER is lost - the yielding side believes
+        // the peer took the turn, the peer never heard it - and both waited for the other forever
+        // (TNC on ITU Good 8 dB: 26 TURN_REQUESTs over 220 s, ignored; BUG-ORPHANED-DATA-TURN).
+        // Grant it. If we want the turn too, the initiator keeps its claim and the responder
+        // grants, so the two can never both take it.
+        const bool we_want_turn = hasLocalDataWaitingForTurn();
+        if (we_want_turn && is_initiator_) {
+            LOG_MODEM(INFO,
+                      "Connection: RX TURN_REQUEST from %s with the turn orphaned; both want it, "
+                      "the initiator keeps its request",
+                      src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+            return;
+        }
+        auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
+        LOG_MODEM(INFO,
+                  "Connection: RX TURN_REQUEST from %s with the turn orphaned; granting it (TURNOVER)",
+                  src_call.empty() ? remote_call_.c_str() : src_call.c_str());
+        transmitFrame(turnover.serialize());
+        yielded_data_turn_waiting_for_peer_data_ = true;
+        yielded_turn_wait_ms_ = 0;
+        local_turn_request_pending_ = false;
+        turn_request_retransmit_ms_ = 0;
+        turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
+        armDataTurnTxGuard(dataTurnControlGuardMs());
         return;
     }
 
@@ -1271,8 +1309,28 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
     rx_reassembly_epoch_ = 0;
 
     if (binary_payload) {
+        // A binary object: strip its identity and drop a duplicate a re-grid resent
+        // (BUG-BINARY-LOST-ON-GEOMETRY-CHANGE). A bare block from an older sender is delivered
+        // as it came.
+        size_t binary_start = 0;
+        if (complete_payload.size() >= kMessageObjectPrefixBytes &&
+            complete_payload[0] == static_cast<uint8_t>(PayloadType::BINARY_OBJECT)) {
+            const uint8_t object_id = complete_payload[1];
+            if (messageObjectAlreadyDelivered(object_id)) {
+                LOG_MODEM(INFO,
+                          "Connection: Dropping duplicate binary object id=%u (%zu bytes) — already delivered",
+                          static_cast<unsigned>(object_id),
+                          complete_payload.size() - kMessageObjectPrefixBytes);
+                return;
+            }
+            noteMessageObjectDelivered(object_id);
+            binary_start = kMessageObjectPrefixBytes;
+        }
         if (on_data_received_) {
-            on_data_received_(complete_payload, false);
+            on_data_received_(Bytes(complete_payload.begin() +
+                                        static_cast<std::ptrdiff_t>(binary_start),
+                                    complete_payload.end()),
+                              false);
         }
         return;
     }
@@ -1299,6 +1357,27 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
                 return;
             }
             noteMessageObjectDelivered(object_id);
+        } else if (complete_payload[0] ==
+                       static_cast<uint8_t>(PayloadType::BINARY_OBJECT) &&
+                   complete_payload.size() >= kMessageObjectPrefixBytes) {
+            // A binary object in DATA frames (the framing since 2026-11-23): its bytes go to the
+            // data consumer only, never to the text-message callback.
+            const uint8_t object_id = complete_payload[1];
+            if (messageObjectAlreadyDelivered(object_id)) {
+                LOG_MODEM(INFO,
+                          "Connection: Dropping duplicate binary object id=%u (%zu bytes) — already delivered",
+                          static_cast<unsigned>(object_id),
+                          complete_payload.size() - kMessageObjectPrefixBytes);
+                return;
+            }
+            noteMessageObjectDelivered(object_id);
+            if (on_data_received_) {
+                on_data_received_(Bytes(complete_payload.begin() +
+                                            static_cast<std::ptrdiff_t>(kMessageObjectPrefixBytes),
+                                        complete_payload.end()),
+                                  false);
+            }
+            return;
         } else if (complete_payload[0] ==
                    static_cast<uint8_t>(PayloadType::TEXT_MESSAGE)) {
             // Legacy bare text object: no identity, so no duplicate suppression.

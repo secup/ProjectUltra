@@ -733,6 +733,23 @@ int main() {
         expect(command(cmd, "DISCONNECT") == "OK\r", "DISCONNECT while connecting got WRONG");
         waitUntil([&] { return harness.modem.abortCallCount() == 1; }, 500,
                   "DISCONNECT while connecting did not abort the attempt");
+        // The host learns the attempt is over (BUG-TNC-ABORT-NO-DISCONNECTED).
+        expectLine(cmd, "DISCONNECTED\r");
+        // The modem's own link-down after the abort must not report it twice.
+        harness.server.postModemDisconnected();
+        expect(command(cmd, "VERSION") == versionLine(), "a second DISCONNECTED was reported");
+    });
+
+    runner.run("ABORT while connected reports DISCONNECTED", [] {
+        ServerHarness harness;
+        TestClient cmd(harness.server.getCmdPort());
+        enterConnected(harness, cmd);
+        expect(command(cmd, "ABORT") == "OK\r", "ABORT while connected got WRONG");
+        waitUntil([&] { return harness.modem.abortCallCount() == 1; }, 500,
+                  "ABORT did not abort the modem");
+        expectLine(cmd, "DISCONNECTED\r");
+        harness.server.postModemDisconnected();
+        expect(command(cmd, "VERSION") == versionLine(), "a second DISCONNECTED was reported");
     });
 
     runner.group("Lifecycle");

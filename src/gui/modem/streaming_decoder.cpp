@@ -13,6 +13,7 @@
 // - FFT-based correlation for speed when signal present
 
 #include "streaming_decoder.hpp"
+#include <thread>
 #include "streaming_buffer_policy.hpp"
 #include "streaming_decode_policy.hpp"
 #include "streaming_decoder_debug.hpp"
@@ -658,6 +659,13 @@ void StreamingDecoder::processBuffer() {
         if (shutdown_.load()) return;
         if (!woke_with_data) return;  // Timeout with no new audio; avoid stale re-search churn
         new_data_available_ = false;  // Clear flag after waking
+        decode_thread_id_.store(std::this_thread::get_id(), std::memory_order_release);
+        // A reset requested off this thread (BUG-DECODER-RESET-MID-DECODE): apply it here, before
+        // any pending rebuild below replaces the waveform and before any decode work.
+        if (waveform_reset_pending_) {
+            waveform_reset_pending_ = false;
+            if (waveform_) waveform_->reset();
+        }
         // §14.36: apply pending waveform changes BEFORE any decode work in
         // this processBuffer iteration. The actual configure() / waveform_
         // reconstruction (replaces modulator_/demodulator_/chirp_sync_
@@ -1875,7 +1883,20 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     sync_controller_.ring_.search_floor_abs_valid_ = false;
 
     std::fill(sync_controller_.ring_.buffer_.begin(), sync_controller_.ring_.buffer_.end(), 0.0f);
-    if (waveform_) waveform_->reset();
+    // BUG-DECODER-RESET-MID-DECODE: the decode thread runs waveform_ calls WITHOUT this mutex
+    // (it guards the ring, not the waveform), so resetting the waveform in place from another
+    // thread clears its buffers under a running process(): ultra_tnc SIGBUS in
+    // MultiCarrierDPSKDemodulator::processGotChirp (memmove) when a disconnect's reset met an
+    // in-flight MC-DPSK first-frame retry (2026-11-23). Off the decode thread, the decode thread
+    // applies it at the top of its next iteration (processBuffer), where no waveform call is in
+    // flight; on it, at once.
+    if (waveform_) {
+        if (decode_thread_id_.load(std::memory_order_acquire) == std::this_thread::get_id()) {
+            waveform_->reset();
+        } else {
+            waveform_reset_pending_ = true;
+        }
+    }
     idle_noise_snr_estimator_.reset();
     last_anchor_abs_.store(0, std::memory_order_relaxed);
     // §5: the physical-SNR distribution is per-session — a new QSO (or channel

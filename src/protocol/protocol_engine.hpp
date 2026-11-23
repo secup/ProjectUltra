@@ -4,6 +4,7 @@
 #include "frame_v2.hpp"
 #include <functional>
 #include <mutex>
+#include <atomic>
 #include <optional>
 #include <vector>
 #ifdef _WIN32
@@ -74,6 +75,7 @@ public:
     std::string getLocalCallsign() const;
 
     void setAutoAccept(bool auto_accept);
+    void setAnswerProbes(bool answer);
     bool getAutoAccept() const;
 
     // --- Callbacks ---
@@ -179,6 +181,12 @@ public:
     // True for the station that initiated the current connection. Scripted
     // scenarios use this to give exactly one endpoint teardown ownership.
     bool isInitiator() const;
+    // Whether this station initiated the session that last reached CONNECTED (1), answered it (0),
+    // or none yet (-1). Lock-free: safe inside the connection callbacks. In a call collision the
+    // station that placed a call can end up the responder (BUG-SIMULTANEOUS-CALL-LOCKSTEP).
+    int connectedAsInitiator() const {
+        return connected_as_initiator_.load(std::memory_order_acquire);
+    }
 
     ConnectionStats getStats() const;
     void resetStats();
@@ -382,6 +390,8 @@ private:
     DataReceivedCallback on_data_received_;
 
     mutable ProtocolEngineMutex mutex_;
+    // Role in the current/last session: 1 initiator, 0 responder, -1 none yet. Lock-free.
+    std::atomic<int> connected_as_initiator_{-1};
 
     Bytes rx_buffer_;
 

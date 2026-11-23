@@ -529,6 +529,10 @@ struct ConnectionAdaptiveTestAccess {
         return c.outbound_message_tx_records_[index].geometry_regrid_attempts;
     }
 
+    static void deliverBinaryPayload(Connection& c, const Bytes& payload) {
+        c.handleDataPayload(payload, false, v2::FrameType::DATA_END, v2::Flags::FINAL);
+    }
+
     static void deliverDataPayload(Connection& c, const Bytes& payload,
                                    bool more_data) {
         c.handleDataPayload(payload, more_data, v2::FrameType::DATA,
@@ -673,6 +677,12 @@ struct ConnectionAdaptiveTestAccess {
         c.data_frame_cw_count_ = v2::sanitizeFixedFrameCodewords(logical_cw);
         c.config_.fixed_frame_codewords = c.data_frame_cw_count_;
         c.configureArqForCurrentDataMode();
+    }
+
+    static size_t arqWindowSize(const Connection& c) { return c.arq_.getWindowSize(); }
+
+    static uint32_t peerSilentLinkLostMs(const Connection& c) {
+        return c.peerSilentLinkLostMs();
     }
 
     static int physicalDataFrameCWCount(const Connection& c) {
@@ -3473,6 +3483,69 @@ void test_midwindow_message_geometry_change_regrids_object_and_delivers_once() {
           "one accepted message must yield exactly one SUBMITTED and one DELIVERED across the re-grid");
 }
 
+// BUG-BINARY-LOST-ON-GEOMETRY-CHANGE: a binary block (a TNC data-port block) in flight across a
+// geometry change was dropped and the host told BUFFER 0. It now carries an object identity, is
+// re-gridded like a message, and the receiver drops the duplicate.
+void test_midwindow_binary_geometry_change_regrids_block() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+    const Bytes block = {0x00, 'B', '2', 'F', 'F', 'C'};
+    CHECK(c.sendBinary(block) && transmitted.size() == 1,
+          "binary regrid fixture must put one live frame on the wire");
+    const auto first = v2::DataFrame::deserialize(transmitted.front());
+    CHECK(first && first->payload.size() == block.size() + kMessageObjectPrefixBytes &&
+              first->payload[0] == static_cast<uint8_t>(PayloadType::BINARY_OBJECT),
+          "a binary block must reach the wire behind its object identity");
+    const uint8_t object_id = first ? first->payload[1] : 0;
+
+    ConnectionAdaptiveTestAccess::applyDataMode(
+        c, Modulation::QPSK, CodeRate::R1_3, /*cw_count=*/1);
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 1,
+          "a geometry change must re-admit the in-flight binary block, not drop it");
+    const size_t before = transmitted.size();
+    c.tick(1);
+    CHECK(transmitted.size() == before + 1, "the re-admitted block must go back on the wire");
+    const auto resumed = v2::DataFrame::deserialize(transmitted.back());
+    Bytes expected = {static_cast<uint8_t>(PayloadType::BINARY_OBJECT), object_id};
+    expected.insert(expected.end(), block.begin(), block.end());
+    CHECK(resumed && v2::isDataFrame(resumed->type) && resumed->payload == expected,
+          "the resend must carry the same object id and the exact block");
+
+    // Receiver: a block is delivered once, without its identity; the resend is suppressed; a
+    // bare block from an older sender is delivered as it came.
+    Connection rx;
+    std::vector<Bytes> got;
+    rx.setTransmitCallback([](const Bytes&) {});
+    rx.setDataReceivedCallback([&](const Bytes& data, bool) { got.push_back(data); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        rx, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::deliverBinaryPayload(rx, expected);
+    ConnectionAdaptiveTestAccess::deliverBinaryPayload(rx, expected);
+    CHECK(got.size() == 1 && got.front() == block,
+          "a binary object must be delivered once, without its identity");
+    ConnectionAdaptiveTestAccess::deliverBinaryPayload(rx, block);
+    CHECK(got.size() == 2 && got.back() == block,
+          "a bare block from an older sender must still be delivered");
+    // The framing since 2026-11-23: a binary object in plain DATA frames reaches the data consumer
+    // only - never the text-message callback - and its resend is suppressed too.
+    std::vector<std::string> texts;
+    rx.setMessageReceivedCallback([&](const std::string& t) { texts.push_back(t); });
+    Bytes in_data = {static_cast<uint8_t>(PayloadType::BINARY_OBJECT), 0x33, 0x00, 'X', 'Y'};
+    ConnectionAdaptiveTestAccess::deliverDataPayload(rx, in_data, /*more_data=*/false);
+    ConnectionAdaptiveTestAccess::deliverDataPayload(rx, in_data, /*more_data=*/false);
+    CHECK(got.size() == 3 && got.back() == Bytes({0x00, 'X', 'Y'}) && texts.empty(),
+          "a binary object in DATA frames goes to the data consumer once, never as text");
+}
+
 void test_message_geometry_regrid_recuts_fragments_at_new_capacity() {
     setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
     Connection c;
@@ -3879,8 +3952,13 @@ void test_file_and_payload_queues_preserve_cross_class_fifo() {
               !ConnectionAdaptiveTestAccess::fileControllerSending(c),
           "the earlier short payload, not the queued file, must own the first ARQ slot");
     const auto first = v2::DataFrame::deserialize(transmitted.front());
-    CHECK(first && first->type == v2::FrameType::DATA_END &&
-              first->payload == short_binary,
+    // A binary block rides behind its object identity {BINARY_OBJECT, id}
+    // (BUG-BINARY-LOST-ON-GEOMETRY-CHANGE); the bytes after it are the block, exactly.
+    CHECK(first && first->type == v2::FrameType::DATA &&
+              first->payload.size() == kMessageObjectPrefixBytes + short_binary.size() &&
+              first->payload[0] == static_cast<uint8_t>(PayloadType::BINARY_OBJECT) &&
+              Bytes(first->payload.begin() + kMessageObjectPrefixBytes, first->payload.end()) ==
+                  short_binary,
           "cross-class FIFO must preserve the exact earlier binary payload");
 
     ToneBurstAckDetection ack;
@@ -4605,6 +4683,173 @@ void test_mcdpsk_data_arms_one_waveform_specific_monitor_per_physical_turn() {
     CHECK(singleton_monitor_windows.front() ==
               std::max<uint32_t>(8000u, singleton_timeout),
           "MC-DPSK singleton monitor must retain the waveform-specific RTT");
+}
+
+// BUG-TNC-ANSWERS-WHILE-NOT-LISTENING: a station that takes no calls must not key up to answer a
+// PING; the GUI default (answer) is unchanged.
+void test_ping_answered_only_when_taking_calls() {
+    Connection c;
+    int pongs = 0;
+    c.setPingReceivedCallback([&]() { ++pongs; });
+    c.onPongReceived();
+    CHECK(pongs == 1, "by default an idle station answers a PING");
+    c.setAnswerProbes(false);
+    c.onPongReceived();
+    CHECK(pongs == 1, "a station not taking calls must not answer a PING");
+    c.setAnswerProbes(true);
+    c.onPongReceived();
+    CHECK(pongs == 2, "answering resumes when the station takes calls again");
+}
+
+// BUG-IRS-NEVER-NOTICES-LOST-PEER: a receiver owed more of a transfer by a peer it no longer hears
+// declares the link lost once the sender's whole retry budget has passed - never sooner (a fade
+// lasts that long) - and an idle session is left alone.
+void test_receiver_declares_lost_peer_only_past_the_retry_budget() {
+    auto connected_irs = [](Connection& c) {
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            c, CodeRate::R1_2, 15.0f, 0.10f, Modulation::QPSK);
+        ConnectionAdaptiveTestAccess::makePeerIss(c);
+    };
+    {
+        Connection c;
+        int disconnects = 0;
+        c.setDisconnectedCallback([&](const std::string&) { ++disconnects; });
+        connected_irs(c);
+        auto first = v2::makeFixedDataFrame("K2DEF", "W1ABC", 0, Bytes{0x41, 0x42}, CodeRate::R1_2);
+        first.flags |= v2::Flags::MORE_FRAG;
+        c.onFrameReceived(first.serialize(), /*physical_turn_complete=*/true);
+        const uint32_t horizon = ConnectionAdaptiveTestAccess::peerSilentLinkLostMs(c);
+        CHECK(horizon >= 16u * 8000u, "the horizon must cover the sender's whole retry budget");
+        uint32_t t = 0;
+        while (t + 1000 < horizon) {
+            c.tick(1000);
+            t += 1000;
+        }
+        CHECK(c.getState() == ConnectionState::CONNECTED && disconnects == 0,
+              "a receiver must not give up inside the sender's retry budget");
+        c.tick(2000);
+        CHECK(c.getState() == ConnectionState::DISCONNECTED && disconnects == 1,
+              "a receiver owed data must declare the link lost past the sender's retry budget");
+    }
+    {
+        Connection c;
+        connected_irs(c);
+        auto whole = v2::makeFixedDataFrame("K2DEF", "W1ABC", 0, Bytes{0x41}, CodeRate::R1_2);
+        whole.flags |= v2::Flags::FINAL;
+        c.onFrameReceived(whole.serialize(), /*physical_turn_complete=*/true);
+        const uint32_t horizon = ConnectionAdaptiveTestAccess::peerSilentLinkLostMs(c);
+        for (uint32_t t = 0; t < 2 * horizon; t += 1000) {
+            c.tick(1000);
+        }
+        CHECK(c.getState() == ConnectionState::CONNECTED,
+              "an idle session (nothing owed) is left to the hosts");
+    }
+}
+
+// BUG-MCDPSK-MESSAGE-STOP-AND-WAIT: a multi-frame message or TNC block on MC-DPSK went out one
+// fragment per turn; it now bursts like an MC-DPSK file, up to the timing-derived window.
+void test_mcdpsk_message_fragments_burst() {
+    Connection c;
+    std::vector<std::vector<Bytes>> bursts;
+    std::vector<Bytes> standalone;
+    c.setTransmitCallback([&](const Bytes& frame) { standalone.push_back(frame); });
+    c.setTransmitBurstCallback([&](const std::vector<Bytes>& group, uint16_t, uint8_t) {
+        bursts.push_back(group);
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    Bytes block(400);
+    for (size_t i = 0; i < block.size(); ++i) block[i] = static_cast<uint8_t>(i);
+    CHECK(c.sendBinary(block), "a 400-byte block should be accepted on MC-DPSK");
+    for (int i = 0; i < 20 && bursts.empty() && standalone.empty(); ++i) {
+        c.tick(100);
+    }
+    const size_t window = ConnectionAdaptiveTestAccess::arqWindowSize(c);
+    CHECK(window >= 2, "the MC-DPSK fixture should allow more than one frame in flight");
+    CHECK(bursts.size() == 1 && standalone.empty(),
+          "the first turn of a multi-frame block must be one burst");
+    CHECK(!bursts.empty() && bursts.front().size() == window,
+          "the burst must fill the timing-derived window");
+}
+
+// BUG-ORPHANED-DATA-TURN: a TURNOVER lost on fading left both stations without the turn, each
+// waiting for the other. A TURN_REQUEST received while not holding the turn proves it is orphaned:
+// grant it, unless both want it and we are the initiator (the responder grants then).
+void test_orphaned_data_turn_is_granted() {
+    auto turnovers = [](const std::vector<Bytes>& sent) {
+        size_t n = 0;
+        for (const auto& f : sent) {
+            const auto h = v2::parseHeader(f);
+            if (h.valid && h.type == v2::FrameType::TURNOVER) ++n;
+        }
+        return n;
+    };
+    const Bytes request = v2::ControlFrame::makeTurnRequest("K2DEF", "W1ABC").serialize();
+    {
+        Connection c;
+        std::vector<Bytes> sent;
+        c.setTransmitCallback([&](const Bytes& f) { sent.push_back(f); });
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            c, CodeRate::R1_2, 15.0f, 0.10f, Modulation::QPSK);
+        ConnectionAdaptiveTestAccess::makePeerIss(c);  // we believe the peer holds the turn
+        c.onFrameReceived(request, /*physical_turn_complete=*/true);
+        CHECK(turnovers(sent) == 1, "an orphaned turn must be granted to the requester");
+    }
+    {
+        Connection c;
+        std::vector<Bytes> sent;
+        c.setTransmitCallback([&](const Bytes& f) { sent.push_back(f); });
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            c, CodeRate::R1_2, 15.0f, 0.10f, Modulation::QPSK);
+        ConnectionAdaptiveTestAccess::makePeerIss(c);
+        CHECK(c.sendBinary(Bytes{0x00, 0x41}), "the initiator has data waiting for the turn");
+        sent.clear();
+        c.onFrameReceived(request, /*physical_turn_complete=*/true);
+        CHECK(turnovers(sent) == 0,
+              "when both want an orphaned turn the initiator keeps its claim");
+    }
+}
+
+// BUG-SINGLE-FRAME-MESSAGE-UNMARKED: a message that fits one OFDM frame goes from the ARQ straight
+// to the transmit callback. It is the whole physical turn, so it must carry PHYSICAL_BURST_END, or
+// the receiver holds its ACK past the sender's ACK window and every short message is resent.
+void test_single_frame_message_carries_turn_end_marker() {
+    for (const bool binary : {false, true}) {
+        Connection c;
+        std::vector<Bytes> standalone;
+        c.setTransmitCallback([&](const Bytes& frame) { standalone.push_back(frame); });
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+            c, CodeRate::R1_2, 20.0f, 0.10f, Modulation::QPSK);
+        const bool sent = binary ? c.sendBinary(Bytes{0x01, 0x51, 0x53, 0x4C})
+                                 : c.sendMessage("QSL TNX 73");
+        CHECK(sent, "short payload should be accepted");
+        for (int i = 0; i < 20 && standalone.empty(); ++i) {
+            c.tick(100);
+        }
+        CHECK(standalone.size() == 1, "short payload should go out as one standalone frame");
+        if (standalone.empty()) continue;
+        const auto wire = v2::DataFrame::deserialize(standalone.front());
+        CHECK(wire && v2::isDataFrame(wire->type),
+              "the standalone egress should be a DATA frame");
+        CHECK(wire && (wire->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+              (binary ? "single-frame binary block must carry the turn-end marker"
+                      : "single-frame message must carry the turn-end marker"));
+    }
+    {
+        Connection c;
+        std::vector<Bytes> standalone;
+        c.setTransmitCallback([&](const Bytes& frame) { standalone.push_back(frame); });
+        ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+        CHECK(c.sendMessage("QSL"), "MC-DPSK short message should be accepted");
+        for (int i = 0; i < 20 && standalone.empty(); ++i) {
+            c.tick(100);
+        }
+        CHECK(standalone.size() == 1, "MC-DPSK short message should go out as one frame");
+        if (!standalone.empty()) {
+            const auto wire = v2::DataFrame::deserialize(standalone.front());
+            CHECK(wire && (wire->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
+                  "MC-DPSK single-frame message must carry the turn-end marker");
+        }
+    }
 }
 
 void test_synchronous_burst_ack_cannot_overwrite_outer_committed_frames() {
@@ -7219,6 +7464,12 @@ int main() {
     test_narrow_ofdm_keeps_its_waveform_specific_timeout();
     test_mcdpsk_data_arms_one_waveform_specific_monitor_per_physical_turn();
     test_synchronous_burst_ack_cannot_overwrite_outer_committed_frames();
+    test_single_frame_message_carries_turn_end_marker();
+    test_ping_answered_only_when_taking_calls();
+    test_midwindow_binary_geometry_change_regrids_block();
+    test_mcdpsk_message_fragments_burst();
+    test_orphaned_data_turn_is_granted();
+    test_receiver_declares_lost_peer_only_past_the_retry_budget();
     test_ack_revealed_hole_refill_uses_resend_anchor();
     test_proven_partial_sack_uses_descriptor_only_anchor_and_light_timing();
     test_proven_partial_sack_uses_physical_round_progress_not_cumulative_arq_progress();

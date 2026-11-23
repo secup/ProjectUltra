@@ -1,9 +1,0 @@
-{
-  "version": 1,
-  "frame_type": "PING",
-  "callsign": "W1ABC",
-  "peer_callsign": "W1ABC",
-  "sample_rate": 48000,
-  "sample_count": 62208,
-  "source_bytes_hex": "554c5452"
-}

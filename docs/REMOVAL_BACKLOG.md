@@ -596,6 +596,8 @@ _(none currently — R7 done, see Completed removals)_
 | (earlier) | OFDM_COX as a selectable mode (enum `0x00` now reserved; S-C primitive kept) | — |
 | 2026-11-11 | **R21** `ULTRA_RX_AGC` (receive level normalizer in `feedAudio` + its three members) and the `ULTRA_BURST_ERASURE_ABSOLUTE` A/B arm (legacy fixed 0.015 erasure gate) | _local_ |
 | 2026-11-11 | Unused `ultra::AGC` class (`include/ultra/dsp.hpp`, `src/dsp/filters.cpp`) and its `DSPPrimitives` test | _local_ |
+| 2026-11-23 | Dead OTASim scripted-scenario leftovers of the 2026-05-30 removal: 7 CTests behind `ULTRA_RUN_SLOW_SCENARIO_TESTS` (their `ota_simulator run` path no longer existed), 9 `tests/fixtures/ota_simulator/*.json` + `clips/peer_ping.*`, `tools/ota_simulator/scenario.*` + `session_log.*`. KEEP: `ota_simulator serve`/`gen`, `clip_gen.*`, `tests/fixtures/ota_ping/*` (real-radio PING captures, CTest PingDetector). Replaced by `tools/tnc_scenario.py` (CTest TncScenario*). | this change |
+| 2026-11-23 | TNCSession's in-process two-engine integration case (`TwoSessionsSameEnginePairBothSucceed`, disabled since 2026-05-30) and `Connection::pending_tx_fragment_types_` (binary blocks ride DATA frames now; DATA_START/CONT/END stay RX-only) | this change |
 
 ## R11 (2026-07-07): wideOFDM short-reanchor charge machinery
 - **Scope:** `shouldUseWideOFDMShortReanchor` (now constant false), `wideOFDMShortReanchorChirpDurationMs`, `kWideOFDMShortReanchor*Ms` constants, the `reanchor_ms` parameters threaded through `wideOFDMBurstAirtimeMs`/`wideOFDMSackDelayMs` + 5 connection.cpp call sites + test_connection_policy reanchor rows. The encoder feature was removed in May (R4); the charge was a phantom that mis-priced every airtime budget (GROUP_SIZE_LEVER brief §1).

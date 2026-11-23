@@ -38,6 +38,12 @@ public:
         engine_.setAutoAccept(auto_accept);
     }
 
+    void setAnswerProbes(bool answer) override {
+        engine_.setAnswerProbes(answer);
+    }
+
+    int connectedAsInitiator() const override { return engine_.connectedAsInitiator(); }
+
     bool connect(const std::string& remote_call) override {
         return engine_.connect(remote_call);
     }
@@ -175,11 +181,24 @@ int clampSizeToInt(size_t value) {
 TNCBridge::TNCBridge(protocol::ProtocolEngine& engine, gui::AudioEngine& audio)
     : owned_engine_(std::make_unique<RealProtocolEnginePort>(engine)),
       engine_(*owned_engine_),
-      audio_(audio) {}
+      audio_(audio) {
+    applyListen(false);
+}
 
 TNCBridge::TNCBridge(ProtocolEnginePort& engine, gui::AudioEngine& audio)
     : engine_(engine),
-      audio_(audio) {}
+      audio_(audio) {
+    applyListen(false);
+}
+
+// A TNC takes calls only after its host says LISTEN ON (TNCSession starts not listening). The
+// engine defaults to auto-accept and answering probes, as the GUI wants: a TNC whose host never
+// said LISTEN ON keyed up for every PING it heard and accepted a CONNECT the host was never told
+// about (BUG-TNC-ANSWERS-WHILE-NOT-LISTENING).
+void TNCBridge::applyListen(bool on) {
+    engine_.setAutoAccept(on);
+    engine_.setAnswerProbes(on);
+}
 
 TNCBridge::~TNCBridge() {
     stop();
@@ -284,7 +303,7 @@ void TNCBridge::setBandwidth(int hz) {
 }
 
 void TNCBridge::setListen(bool on) {
-    engine_.setAutoAccept(on);
+    applyListen(on);
     state_.store(on ? State::LISTENING : State::READY, std::memory_order_release);
 }
 
@@ -361,7 +380,21 @@ int TNCBridge::getCurrentSNR_db() const {
 }
 
 int TNCBridge::getCurrentBitrate_bps() const {
-    return bitrateEstimate(engine_.getNegotiatedMode());
+    const int session = session_rate_bps_.load(std::memory_order_acquire);
+    return session > 0 ? session : bitrateEstimate(engine_.getNegotiatedMode());
+}
+
+void TNCBridge::reportSessionDataRate(int bps) {
+    if (bps <= 0 || session_rate_bps_.exchange(bps, std::memory_order_acq_rel) == bps) {
+        return;
+    }
+    // Before CONNECTED the rate rides the CONNECTED report; after it, a change is its own BITRATE.
+    if (state_.load(std::memory_order_acquire) != State::CONNECTED) {
+        return;
+    }
+    if (auto sink = snapshotEventSink()) {
+        sink->postModemBitrate(bps);
+    }
 }
 
 State TNCBridge::getState() const {
@@ -498,6 +531,7 @@ void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::
         bw = requested_bw_;
         if (state == protocol::ConnectionState::DISCONNECTED) {
             inbound_pending_ = false;
+            session_rate_bps_.store(0, std::memory_order_release);
         }
     }
     // Inbound = we didn't initiate. Detect this from the prior TNC state:
@@ -506,7 +540,11 @@ void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::
     // on_incoming_call_ callback only fires when auto_accept is OFF, but
     // pat-vara always sets auto_accept=true and fields the inbound case
     // via the CONNECTED line itself, so we can't rely on that signal.
-    const bool inbound = (previous != State::CONNECTING);
+    // The protocol's own role when it reports one: in a call collision the station that placed a
+    // call can end up answering the peer's CONNECT, and both hosts then claimed to be the caller
+    // (BUG-SIMULTANEOUS-CALL-LOCKSTEP). The prior-state inference remains the fallback.
+    const int role = engine_.connectedAsInitiator();
+    const bool inbound = (role >= 0) ? (role == 0) : (previous != State::CONNECTING);
 
     if (state == protocol::ConnectionState::CONNECTED && previous != State::CONNECTED) {
         if (remote.empty()) {
@@ -519,7 +557,10 @@ void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::
         const std::string& responder = inbound ? local : remote;
         if (auto sink = snapshotEventSink()) {
             sink->postModemConnected(initiator, responder, bw);
-            sink->postModemBitrate(nominalBitrateForBandwidth(bw));
+            // The negotiated rung's rate when the protocol already reported it, else the
+            // bandwidth's nominal rate (the next data-mode report replaces it).
+            const int session = session_rate_bps_.load(std::memory_order_acquire);
+            sink->postModemBitrate(session > 0 ? session : nominalBitrateForBandwidth(bw));
         }
     } else if (state == protocol::ConnectionState::DISCONNECTED && previous != State::IDLE &&
                previous != State::READY && previous != State::LISTENING) {

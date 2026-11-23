@@ -10,6 +10,90 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 — fix: short messages and the TNC (twelve bugs found by a new two-TNC harness)
+
+**Dead tests removed.** The 7 OTASim scenario CTests (`ota_simulator run --scenario`, behind
+`ULTRA_RUN_SLOW_SCENARIO_TESTS`) could not run: their runner drove the retired SimulatedStation and was
+deleted with it on 2026-05-30. Removed with their 9 JSON scenarios, the clip only they used, and the
+unused `tools/ota_simulator/scenario.*` / `session_log.*`. What they covered runs on the production
+stations: the new TncScenario* CTests (below), `gui_qso_scenario.sh`, and the real-radio PING captures
+in CTest PingDetector. The one case nothing else covered (two stations calling each other at once) is
+the new `simultaneous` scenario, and it found BUG-SIMULTANEOUS-CALL-LOCKSTEP.
+
+**CTest.** `TncScenarioShort/Turns/Sessions/Listen` (label `slow;tnc_scenario`) run the harness on every
+build (not on Windows; needs Python 3): 133/133 pass.
+
+**Harness.** `tools/tnc_scenario.py` runs two real `ultra_tnc --sim-audio` stations over `ota_simulator
+serve` and drives their command and data ports like a messaging client: short messages each way, turn
+taking, simultaneous sends, a host writing in pieces, a bulk body then short replies, back-to-back
+sessions, ABORT, a call nobody answers, a call to a station not listening, a cancelled call. Every check
+is what the host sees, timed. The TNCSession unit suite (disabled since 2026-05-30) is back in CTest; its
+in-process two-engine case was removed (it failed because of BUG-SECOND-SESSION-CONNECT-GEOMETRY below;
+the harness covers it through OTASim).
+
+**Shared modem/protocol (GUI and TNC):**
+- BUG-SINGLE-FRAME-MESSAGE-UNMARKED: a one-frame payload went out without PHYSICAL_BURST_END; the
+  receiver held its ACK ~11 s, past the sender's 8.75 s window, and every short message was resent.
+- BUG-BINARY-FRAGMENT-OVERSIZE: binary blocks were cut to the compact DATA frame's capacity but sent in
+  the smaller v2 layout and truncated; nothing between one frame and 4 KB arrived. Binary blocks now
+  ride plain DATA frames like messages (their BINARY_OBJECT prefix marks them binary).
+- BUG-TURN-YIELD-DEADLOCK: after yielding the first turn the initiator never asked for it back if the
+  peer had nothing to say.
+- BUG-TURN-REQUEST-RETRANSMIT-RACE: the TURN_REQUEST retransmit fired before the TURNOVER could arrive;
+  the peer re-asserted TURNOVER over the first DATA frame of every turn.
+- BUG-IRS-NEVER-NOTICES-LOST-PEER: a receiver owed data by a silent peer stayed connected forever; it
+  now declares the link lost past the sender's whole retry budget.
+- BUG-SECOND-SESSION-CONNECT-GEOMETRY: after an OFDM session the idle decoder sized the next CONNECT
+  at the wrong constellation and never decoded it.
+- BUG-DECODER-RESET-MID-DECODE: a reset from the host thread cleared the waveform under the decode
+  thread (ultra_tnc SIGBUS).
+- BUG-FALSE-NARROWBAND-LOCK: a wideband PONG fragment locked the idle receiver onto the narrowband chirp.
+
+- BUG-BINARY-LOST-ON-GEOMETRY-CHANGE: a binary block in flight across a geometry change was dropped
+  and the TNC host told BUFFER 0. Binary blocks now carry an object identity (`BINARY_OBJECT`
+  {0x05, id}), are re-gridded like messages and de-duplicated at the receiver. **Wire change for TNC
+  traffic**: a 0.6.4.x receiver would hand the 2-byte prefix to its host.
+
+- BUG-SIMULTANEOUS-CALL-LOCKSTEP: two stations calling each other at once never connected (identical
+  PING retry timers on half-duplex radios, then neither accepted the other's CONNECT, then both hosts
+  claimed to be the caller). Random PING retry backoff, a CONNECT from the station being called is
+  always accepted, the TNC reports the protocol's role.
+- BUG-ORPHANED-DATA-TURN: a TURNOVER lost on fading left neither side with the turn and every
+  TURN_REQUEST ignored; a request received without the turn now grants it (initiator wins a tie).
+- BUG-MCDPSK-MESSAGE-STOP-AND-WAIT: multi-frame messages and blocks on MC-DPSK went one fragment per
+  turn; they now burst like MC-DPSK file chunks.
+
+**TNC:** BUG-TNC-ANSWERS-WHILE-NOT-LISTENING (keyed up for every PING without LISTEN ON, could accept a
+call its host never saw), BUG-TNC-LISTEN-LOST-AFTER-SESSION, BUG-TNC-ABORT-NO-DISCONNECTED,
+BUG-TNC-BITRATE-NOMINAL, idle STATS placeholders. Details and tests: docs/KNOWN_BUGS.md.
+
+**Verified.** `tools/tnc_scenario.py`, AWGN 10 dB, seed 42, dial offset 7.3 Hz, `--tx-model hardware`
+(seconds from the host's write; "never" = not within 240 s):
+
+| Host-visible step | Before | After |
+|---|---:|---:|
+| 1-byte message, sender's BUFFER 0 | 14.3 | 5.1 |
+| 250-byte message, BUFFER 0 | 13.6 | 7.4 |
+| 900-byte block delivered | never | 13.8 |
+| 400 bytes written in 50-byte pieces | never | 22.3 |
+| first reply in the other direction | 18.8 | 10.4 |
+| ping-pong turn, B to A | 18.3-19.0 | 10.0-10.1 |
+| second session right after the first | never connects | 14.6 |
+| ABORT: host gets DISCONNECTED | never | at once |
+| non-listening station keys its transmitter | every PING | never |
+| call to an absent station gives up | 210 (fake PONG) | 102 |
+
+Whole harness on the final build (`tools/tnc_scenario.py`, 24 scenario runs): AWGN 10 dB all 11
+scenarios PASS; ITU Good 8 dB (seed 43) 8/8 PASS; AWGN 0 dB on MC-DPSK 16-FSK-F (~77 bps) 5/5 PASS
+(ping-pong 16-64 s a turn; before the MC-DPSK turn fix one turn hung 400 s; a 400-byte block in 50-byte
+pieces 58 s, never before).
+
+GUI (`gui_qso_scenario.sh`, AWGN 10 dB): 4 messages + reply 85 s -> 63-69 s, 2 ACK-window expiries -> 0;
+AWGN 0 dB, 3 messages + reply in the script's 239 s budget: 3/3 messages delivered vs 0/3 on v0.6.4.1;
+4 KB file on ITU Good 10 dB 710 bps (v0.6.4.1) vs 710-810 bps. CTest 129/129 (TNCSession re-enabled).
+
+---
+
 ## 2026-11-23 — release: v0.6.4.1-pre-alpha
 
 Bug-fix release on top of v0.6.4 (over-the-air compatible with 0.6.4: no frame or wire change).

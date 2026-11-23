@@ -15,9 +15,10 @@
 #include <string_view>
 #include <vector>
 
-#ifdef ULTRA_TNC_TESTING
-#include "../tools/ultra_tnc.cpp"
-#endif
+// The two-station integration case (two ModemEngines pumping audio by hand, no channel) was
+// removed 2026-11-23: it predated OTASim and had been disabled since 2026-05-30. Two real
+// ultra_tnc stations over ota_simulator now cover it: tools/tnc_scenario.py (reconnect, short,
+// pingpong, abort, ...) and CTest UltraTncSimAudio.
 
 using ultra::tnc::ModemAdapter;
 using ultra::tnc::ModemStats;
@@ -29,6 +30,10 @@ namespace {
 std::string versionLine() {
     return std::string("VERSION ") + ultra::kProjectUltraVersion + "\r";
 }
+
+// The host's data is staged and flushed once the port has been quiet for
+// TNCSession::kDataTxBulkQuietMs (1500 ms, flush-batching is the default); tick past it.
+constexpr uint32_t kBulkQuietFlushMs = 1600;
 
 struct FakeModemAdapter : ModemAdapter {
     struct ConnectCall {
@@ -204,282 +209,6 @@ void enterConnected(Harness& h) {
     h.clear();
 }
 
-#ifdef ULTRA_TNC_TESTING
-
-enum class SessionResult {
-    Timeout,
-    Connected,
-};
-
-struct SessionOutcome {
-    SessionResult result = SessionResult::Timeout;
-    bool connect_detected = false;
-    bool payload_received = false;
-    bool disconnected = false;
-};
-
-struct CapturingTncSink final : ultra::tnc::TNCBridgeEventSink {
-    int connected_events = 0;
-    int disconnected_events = 0;
-    int incoming_events = 0;
-    std::vector<std::vector<uint8_t>> data_received;
-
-    void postModemConnected(const std::string&, const std::string&, int) override {
-        ++connected_events;
-    }
-
-    void postModemDisconnected() override {
-        ++disconnected_events;
-    }
-
-    void postModemPTT(bool) override {}
-
-    void postModemDataReceived(std::vector<uint8_t> bytes) override {
-        data_received.push_back(std::move(bytes));
-    }
-
-    void postModemBufferLevel(int) override {}
-    void postModemSNR(float) override {}
-    void postModemBitrate(int) override {}
-
-    void postModemIncomingCall(std::string) override {
-        ++incoming_events;
-    }
-};
-
-ultra::tnc::config::Config makeTncConfig(const std::string& callsign) {
-    ultra::tnc::config::Config cfg;
-    cfg.callsign = callsign;
-    cfg.audio_input = "none";
-    cfg.audio_output = "none";
-    cfg.snr_db = 20.0f;
-    return cfg;
-}
-
-ultra::protocol::ConnectionConfig makeSessionConnectionConfig() {
-    ultra::protocol::ConnectionConfig cfg;
-    cfg.connect_timeout_ms = 8000;
-    cfg.disconnect_timeout_ms = 1000;
-    cfg.connect_retries = 3;
-    return cfg;
-}
-
-struct TncIntegrationStation {
-    ultra::tnc::config::Config cfg;
-    ultra::protocol::ConnectionConfig connection_cfg;
-    ultra::protocol::ProtocolEngine engine;
-    ultra::gui::AudioEngine audio;
-    ultra::tnc::TNCBridge bridge;
-    UltraTNCStation station;
-    CapturingTncSink sink;
-
-    explicit TncIntegrationStation(const std::string& callsign)
-        : cfg(makeTncConfig(callsign)),
-          connection_cfg(makeSessionConnectionConfig()),
-          engine(connection_cfg),
-          bridge(engine, audio),
-          station(cfg, engine, audio, bridge) {
-        bridge.attachEventSink(&sink);
-        bridge.setMyCall({callsign});
-        bridge.setBandwidth(2300);
-        bridge.start();
-    }
-
-    ~TncIntegrationStation() {
-        bridge.stop();
-        station.stop();
-    }
-};
-
-struct TncIntegrationPair {
-    TncIntegrationStation a{"ALPHA"};
-    TncIntegrationStation b{"BRAVO"};
-    std::deque<std::vector<float>> audio_to_a;
-    std::deque<std::vector<float>> audio_to_b;
-
-    TncIntegrationPair() {
-        installTxCallbacks(a, audio_to_b);
-        installTxCallbacks(b, audio_to_a);
-    }
-
-    void installTxCallbacks(TncIntegrationStation& tx,
-                            std::deque<std::vector<float>>& peer_queue) {
-        tx.engine.setTxDataCallback([this, &tx, &peer_queue](const ultra::Bytes& data, bool) {
-            enqueueAudio(peer_queue, tx.station.testTransmitFrame(data));
-        });
-        tx.engine.setTransmitBurstCallback([this, &tx, &peer_queue](
-                                               const std::vector<ultra::Bytes>& frames,
-                                               uint16_t /*group_seq*/,
-                                               bool /*force_full_preamble*/) {
-            enqueueAudio(peer_queue, tx.station.testTransmitBurst(frames));
-        });
-        tx.engine.setPingTxCallback([this, &tx, &peer_queue]() {
-            enqueueAudio(peer_queue, tx.station.testTransmitPing());
-        });
-        tx.engine.setPingReceivedCallback([this, &tx, &peer_queue]() {
-            enqueueAudio(peer_queue, tx.station.testTransmitPing());
-        });
-    }
-
-    void enqueueAudio(std::deque<std::vector<float>>& queue, std::vector<float> samples) {
-        if (samples.empty()) {
-            return;
-        }
-        std::vector<float> audio;
-        audio.resize(48000, 0.0f);
-        audio.insert(audio.end(), samples.begin(), samples.end());
-        audio.resize(audio.size() + 96000, 0.0f);
-        queue.push_back(std::move(audio));
-    }
-
-    void feedPacket(TncIntegrationStation& rx, const std::vector<float>& audio) {
-        constexpr size_t kChunk = 4800;
-        for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
-            const size_t len = std::min(kChunk, audio.size() - pos);
-            rx.station.testFeedAudio(audio.data() + pos, len);
-            rx.station.testProcessDecoder();
-        }
-    }
-
-    bool deliverOnePacket() {
-        if (!audio_to_a.empty()) {
-            auto audio = std::move(audio_to_a.front());
-            audio_to_a.pop_front();
-            feedPacket(a, audio);
-            return true;
-        }
-        if (!audio_to_b.empty()) {
-            auto audio = std::move(audio_to_b.front());
-            audio_to_b.pop_front();
-            feedPacket(b, audio);
-            return true;
-        }
-        return false;
-    }
-
-    void tickBoth(uint32_t ms) {
-        a.station.tick(ms);
-        b.station.tick(ms);
-    }
-
-    void feedIdleSilence() {
-        const std::vector<float> silence(96000, 0.0f);
-        feedPacket(a, silence);
-        feedPacket(b, silence);
-    }
-
-    template <typename Predicate>
-    bool runUntil(Predicate done, uint32_t timeout_ms) {
-        uint32_t elapsed_ms = 0;
-        int iterations = 0;
-        while (elapsed_ms <= timeout_ms && iterations++ < 20000) {
-            if (done()) {
-                return true;
-            }
-            const bool delivered = deliverOnePacket();
-            tickBoth(delivered ? 20 : 100);
-            elapsed_ms += delivered ? 20 : 100;
-        }
-        return done();
-    }
-
-    SessionOutcome runSession(TncIntegrationStation& initiator,
-                              TncIntegrationStation& responder,
-                              const std::vector<uint8_t>& payload) {
-        SessionOutcome outcome;
-        auto& initiator_rx_queue = (&initiator == &a) ? audio_to_a : audio_to_b;
-        const int responder_connects_before =
-            responder.engine.getStats().connects_received;
-        const size_t responder_payloads_before = responder.sink.data_received.size();
-
-        initiator.bridge.startConnect(initiator.cfg.callsign, responder.cfg.callsign);
-
-        const bool connected = runUntil([&] {
-            return initiator.engine.isConnected() && responder.engine.isConnected();
-        }, 30000);
-        outcome.connect_detected =
-            responder.engine.getStats().connects_received > responder_connects_before;
-        if (!connected) {
-            return outcome;
-        }
-        outcome.result = SessionResult::Connected;
-
-        if (initiator.bridge.sendBinary(payload)) {
-            outcome.payload_received = runUntil([&] {
-                const auto first = responder.sink.data_received.begin() +
-                                   static_cast<std::ptrdiff_t>(responder_payloads_before);
-                return std::find(first, responder.sink.data_received.end(), payload) !=
-                       responder.sink.data_received.end();
-            }, 30000);
-        }
-
-        initiator.bridge.disconnect();
-        const bool initiator_disconnected = runUntil([&] {
-            return initiator.engine.getState() == ultra::protocol::ConnectionState::DISCONNECTED;
-        }, 30000);
-        if (initiator_disconnected) {
-            initiator_rx_queue.clear();
-        }
-        outcome.disconnected = runUntil([&] {
-            if (initiator_disconnected) {
-                initiator_rx_queue.clear();
-            }
-            return initiator.engine.getState() == ultra::protocol::ConnectionState::DISCONNECTED &&
-                   responder.engine.getState() == ultra::protocol::ConnectionState::DISCONNECTED;
-        }, 30000);
-        if (outcome.disconnected) {
-            feedIdleSilence();
-        }
-
-        return outcome;
-    }
-
-    std::string describeStates() const {
-        std::ostringstream out;
-        const auto a_stats = a.engine.getStats();
-        const auto b_stats = b.engine.getStats();
-        const auto a_dec = a.station.testDecoderStats();
-        const auto b_dec = b.station.testDecoderStats();
-        out << "A=" << ultra::protocol::connectionStateToString(a.engine.getState())
-            << " B=" << ultra::protocol::connectionStateToString(b.engine.getState())
-            << " A.rx_connects=" << a_stats.connects_received
-            << " B.rx_connects=" << b_stats.connects_received
-            << " A.failed=" << a_stats.connects_failed
-            << " B.failed=" << b_stats.connects_failed
-            << " A.decoded=" << a_dec.frames_decoded
-            << " A.decode_failed=" << a_dec.frames_failed
-            << " A.pings=" << a_dec.pings_received
-            << " B.decoded=" << b_dec.frames_decoded
-            << " B.decode_failed=" << b_dec.frames_failed
-            << " B.pings=" << b_dec.pings_received
-            << " queued_to_A=" << audio_to_a.size()
-            << " queued_to_B=" << audio_to_b.size();
-        return out.str();
-    }
-};
-
-void testTwoSessionsSameEnginePairBothSucceed() {
-    ultra::setLogLevel(ultra::LogLevel::ERROR);
-
-    TncIntegrationPair pair;
-
-    const std::vector<uint8_t> first_payload = {'s', 'e', 's', 's', 'i', 'o', 'n', '1'};
-    const SessionOutcome first = pair.runSession(pair.a, pair.b, first_payload);
-    expect(first.result == SessionResult::Connected, "session 1 did not connect");
-    expect(first.connect_detected, "session 1 CONNECT was not counted by responder");
-    expect(first.payload_received, "session 1 payload was not delivered");
-    expect(first.disconnected, "session 1 did not disconnect cleanly");
-
-    const std::vector<uint8_t> second_payload = {'s', 'e', 's', 's', 'i', 'o', 'n', '2'};
-    const SessionOutcome second = pair.runSession(pair.b, pair.a, second_payload);
-    expect(second.result == SessionResult::Connected,
-           "session 2 did not connect: " + pair.describeStates());
-    expect(second.connect_detected, "session 2 CONNECT was not counted by responder");
-    expect(second.payload_received, "session 2 payload was not delivered");
-    expect(second.disconnected, "session 2 did not disconnect cleanly");
-}
-
-#endif
 
 } // namespace
 
@@ -630,6 +359,34 @@ int main() {
         expectState(h.session.getState(), State::READY, "state should stay READY");
         expect(h.modem.set_listen_calls.empty(), "READY LISTEN OFF should not call modem");
     });
+    runner.run("LISTEN ON survives the end of an inbound session", [] {
+        // BUG-TNC-LISTEN-LOST-AFTER-SESSION: the modem still accepts calls after a session ends;
+        // the host must still be told about the next one.
+        Harness h;
+        enterListening(h);
+        h.session.onModemConnected("VK2ABC", "VK2XYZ", 2300);
+        h.session.onModemDisconnected();
+        expectState(h.session.getState(), State::LISTENING, "a standing LISTEN ON must resume");
+        h.clear();
+        h.session.onModemConnected("VK2DEF", "VK2XYZ", 2300);
+        expectState(h.session.getState(), State::CONNECTED, "the second call must reach the host");
+    });
+    runner.run("LISTEN ON resumes after an outbound session", [] {
+        Harness h;
+        enterListening(h);
+        h.session.handleControlLine("CONNECT VK2XYZ VK2ABC");
+        h.session.onModemConnected("VK2XYZ", "VK2ABC", 2300);
+        h.session.onModemDisconnected();
+        expectState(h.session.getState(), State::LISTENING, "listening must resume after the call");
+        expect(!h.modem.set_listen_calls.empty() && h.modem.set_listen_calls.back(),
+               "the modem must accept calls again");
+    });
+    runner.run("MYCALL keeps a standing LISTEN ON", [] {
+        Harness h;
+        enterListening(h);
+        h.session.handleControlLine("MYCALL VK2XYZ");
+        expectState(h.session.getState(), State::LISTENING, "MYCALL must not end listening");
+    });
     runner.run("LISTEN OFF while CONNECTED is WRONG", [] {
         Harness h;
         enterConnected(h);
@@ -705,7 +462,7 @@ int main() {
         Harness h;
         enterConnecting(h);
         h.session.handleControlLine("ABORT");
-        expectLines(h, {"OK\r"});
+        expectLines(h, {"OK\r", "DISCONNECTED\r"});  // BUG-TNC-ABORT-NO-DISCONNECTED
         expectState(h.session.getState(), State::READY, "state should be READY");
         expect(h.modem.abort_calls == 1, "abort should be called");
     });
@@ -713,7 +470,7 @@ int main() {
         Harness h;
         enterConnected(h);
         h.session.handleControlLine("ABORT");
-        expectLines(h, {"OK\r"});
+        expectLines(h, {"OK\r", "DISCONNECTED\r"});  // BUG-TNC-ABORT-NO-DISCONNECTED
         expectState(h.session.getState(), State::READY, "state should be READY");
         expect(h.modem.abort_calls == 1, "abort should be called");
     });
@@ -834,7 +591,11 @@ int main() {
         h.session.handleDataBytes(staging);  // stages locally, not yet flushed
         h.clear();
         // Engine reports zero; staging holds 50. Level must be 50.
+        // Staging was already reported as 50 when it arrived; the engine draining to 0 must not
+        // lower the reported level to 0 while those bytes are still staged.
         h.session.onModemBufferLevel(0);
+        expectNoLines(h);
+        h.session.handleControlLine("BUFFER");
         expectLines(h, {"BUFFER 50\r"});
     });
     runner.run("BUFFER 0 transition bypasses rate limit", [] {
@@ -876,7 +637,7 @@ int main() {
         enterConnected(h);
         h.session.handleDataBytes({1, 2, 3});
         expect(h.modem.send_binary_calls.empty(), "sendBinary should not fire immediately");
-        h.session.tick(250);  // exceed kDataTxFlushQuietMs (200)
+        h.session.tick(kBulkQuietFlushMs);  // past the 1.5 s bulk quiet flush
         // 0x00 prefix = raw payload (compression OFF by default).
         expect(h.modem.send_binary_calls ==
                    std::vector<std::vector<uint8_t>>{{0x00, 1, 2, 3}},
@@ -894,7 +655,7 @@ int main() {
         h.session.tick(50);
         h.session.handleDataBytes({7, 8, 9});
         expect(h.modem.send_binary_calls.empty(), "should batch, not fire per chunk");
-        h.session.tick(250);
+        h.session.tick(kBulkQuietFlushMs);
         expect(h.modem.send_binary_calls.size() == 1, "expected exactly one batched sendBinary");
         expect(h.modem.send_binary_calls.front() ==
                    std::vector<uint8_t>{0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9},
@@ -950,7 +711,7 @@ int main() {
         // Highly compressible payload (long run of repeated bytes)
         std::vector<uint8_t> payload(256, 'A');
         h.session.handleDataBytes(payload);
-        h.session.tick(250);
+        h.session.tick(kBulkQuietFlushMs);
         expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
         expect(h.modem.send_binary_calls.front().front() == 0x00,
                "expected raw marker when compression disabled");
@@ -964,7 +725,7 @@ int main() {
         h.clear();
         std::vector<uint8_t> payload(1024, 'A');  // 1KB of repeated 'A'
         h.session.handleDataBytes(payload);
-        h.session.tick(250);
+        h.session.tick(kBulkQuietFlushMs);
         expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
         const auto& wire = h.modem.send_binary_calls.front();
         expect(wire.front() == 0x01, "expected deflate marker");
@@ -978,7 +739,7 @@ int main() {
         h.clear();
         // Below MIN_COMPRESS_SIZE — marker stays 0x00.
         h.session.handleDataBytes({1, 2, 3, 4, 5});
-        h.session.tick(250);
+        h.session.tick(kBulkQuietFlushMs);
         expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
         expect(h.modem.send_binary_calls.front().front() == 0x00,
                "small payloads should stay raw");
@@ -995,7 +756,7 @@ int main() {
             payload.push_back(static_cast<uint8_t>((i * 31 + 7) & 0xFF));
         }
         h.session.handleDataBytes(payload);
-        h.session.tick(250);
+        h.session.tick(kBulkQuietFlushMs);
         expect(h.modem.send_binary_calls.size() == 1, "expected one sendBinary");
         // Uncompressible input should ship raw, not as inflated deflate.
         expect(h.modem.send_binary_calls.front().front() == 0x00,
@@ -1061,7 +822,7 @@ int main() {
         h.modem.send_binary_should_fail = true;
         std::vector<uint8_t> staged(64, 'X');
         h.session.handleDataBytes(staged);
-        h.session.tick(250);  // pushes past kDataTxFlushQuietMs
+        h.session.tick(kBulkQuietFlushMs);  // past the 1.5 s bulk quiet flush
         expect(h.modem.send_binary_calls.size() == 1,
                "flush attempt was made");
         // BUFFER snapshot should still report the staged bytes.
@@ -1070,7 +831,7 @@ int main() {
         expectLines(h, {"BUFFER 64\r"});
         // Now allow success on retry.
         h.modem.send_binary_should_fail = false;
-        h.session.tick(250);
+        h.session.tick(kBulkQuietFlushMs);
         expect(h.modem.send_binary_calls.size() == 2,
                "retry attempt should fire after next quiet period");
         h.clear();
@@ -1098,12 +859,6 @@ int main() {
         expect(h.data_out.front() == plaintext, "decompressed bytes mismatch");
     });
 
-#ifdef ULTRA_TNC_TESTING
-    runner.group("Integration");
-    runner.run("TwoSessionsSameEnginePairBothSucceed", [] {
-        testTwoSessionsSameEnginePairBothSucceed();
-    });
-#endif
 
     runner.group("Tick");
     runner.run("30 seconds does not emit IAMALIVE", [] {
@@ -1223,6 +978,8 @@ int main() {
         h.modem.stats.snr_source = "ofdm_broadband";
         h.modem.stats.bitrate_bps = 2300;
         h.modem.stats.tx_backlog_bytes = 128;
+        enterConnected(h);  // rate/mod/mode/bps describe a session; idle STATS reports none
+        h.clear();
         h.session.handleControlLine("STATS");
         expectLines(h, {"STATS frames_sent=42 frames_recv=38 retx=5 timeouts=2 "
                         "failed=0 out_of_order=1 rate=R1_2 mod=DQPSK "
@@ -1234,11 +991,20 @@ int main() {
         h.session.handleControlLine("STATS extra");
         expectLines(h, {"WRONG\r"});
     });
-    runner.run("STATS on unconfigured modem returns placeholders", [] {
+    runner.run("STATS outside a session reports no link and no SNR", [] {
         Harness h;
         h.session.handleControlLine("STATS");
         expectLines(h, {"STATS frames_sent=0 frames_recv=0 retx=0 timeouts=0 "
-                        "failed=0 out_of_order=0 rate=? mod=? mode=? snr=0 "
+                        "failed=0 out_of_order=0 rate=none mod=none mode=none snr=none "
+                        "snr_source=none bps=0 backlog=0\r"});
+    });
+    runner.run("STATS in a session with unknown fields reports placeholders", [] {
+        Harness h;
+        enterConnected(h);
+        h.clear();
+        h.session.handleControlLine("STATS");
+        expectLines(h, {"STATS frames_sent=0 frames_recv=0 retx=0 timeouts=0 "
+                        "failed=0 out_of_order=0 rate=? mod=? mode=? snr=none "
                         "snr_source=none bps=0 backlog=0\r"});
     });
     runner.run("COMPRESSION TEXT is OK", [] {

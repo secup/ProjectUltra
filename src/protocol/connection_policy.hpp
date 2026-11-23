@@ -3173,6 +3173,32 @@ inline WaveformMode selectNegotiatedMode(uint8_t local_caps,
     return WaveformMode::MC_DPSK;
 }
 
+// The information rate of a session's data rung: one data frame's payload over that frame's
+// airtime - the PHY rate the rung carries, before anchors, ACKs and turnarounds (what a TNC host's
+// BITRATE reports; BUG-TNC-BITRATE-NOMINAL). Derived from the same frame capacity and timing the
+// ARQ uses, for every waveform; 0 when the geometry is unknown.
+inline uint32_t sessionDataRateBps(WaveformMode mode, Modulation mod, CodeRate rate, int cw_count,
+                                   int mc_dpsk_carriers, int mc_dpsk_samples_per_symbol) {
+    size_t payload_bytes = 0;
+    uint32_t frame_ms = 0;
+    if (mode == WaveformMode::OFDM_CHIRP) {
+        payload_bytes = v2::ofdmSessionPayloadCapacity(rate, cw_count, 27);
+        frame_ms = wideOFDMFrameTiming(mod, rate, cw_count).data_ms;
+    } else if (mode == WaveformMode::OFDM_NARROW) {
+        payload_bytes = v2::ofdmSessionPayloadCapacity(rate, cw_count, 27);
+        frame_ms = narrowOFDMFrameTiming(mod, rate, cw_count).data_ms;
+    } else if (mode == WaveformMode::MC_DPSK) {
+        if (mc_dpsk_carriers <= 0 || mc_dpsk_samples_per_symbol <= 0) return 0;
+        payload_bytes = mcDpskCompactFrameEnabled()
+                            ? mcdpsk_frame::payloadCapacity(cw_count, rate)
+                            : v2::getVariableFramePayloadCapacity(rate, cw_count);
+        frame_ms = mcDpskFrameTiming(mod, mc_dpsk_carriers, mc_dpsk_samples_per_symbol, cw_count)
+                       .data_ms;
+    }
+    if (frame_ms == 0 || payload_bytes == 0) return 0;
+    return static_cast<uint32_t>(static_cast<uint64_t>(payload_bytes) * 8ULL * 1000ULL / frame_ms);
+}
+
 }  // namespace connection_policy
 }  // namespace protocol
 }  // namespace ultra

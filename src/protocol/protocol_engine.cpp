@@ -30,6 +30,10 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
     });
 
     connection_.setConnectedCallback([this]() {
+        // Published before the callback: a frontend reads it from inside this callback, where the
+        // engine mutex is held (connectedAsInitiator() takes no lock).
+        connected_as_initiator_.store(connection_.isInitiator() ? 1 : 0,
+                                      std::memory_order_release);
         if (on_connection_changed_) {
             on_connection_changed_(ConnectionState::CONNECTED, connection_.getRemoteCallsign());
         }
@@ -133,6 +137,11 @@ std::string ProtocolEngine::getLocalCallsign() const {
 void ProtocolEngine::setAutoAccept(bool auto_accept) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setAutoAccept(auto_accept);
+}
+
+void ProtocolEngine::setAnswerProbes(bool answer) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setAnswerProbes(answer);
 }
 
 bool ProtocolEngine::getAutoAccept() const {

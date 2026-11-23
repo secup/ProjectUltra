@@ -80,8 +80,10 @@ Bandwidth mapping:
 - `BW2750` is accepted for legacy compatibility and behaves as `BW2300`
 
 Until 2026-11-14 `BW2300`/`BW2750` forced `OFDM_CHIRP`, so a TNC session below the OFDM floor
-started in OFDM (BUG-TNC-BW-FORCES-OFDM). The `BITRATE` line posted at `CONNECTED` is still the
-bandwidth's nominal OFDM rate (2208 bps wideband, 386 bps at `BW500`).
+started in OFDM (BUG-TNC-BW-FORCES-OFDM). `BITRATE` reports the session rung's information rate
+(one data frame's payload over its airtime: 1962 bps at OFDM QPSK R1/2, 77 bps on 16-FSK-F) at
+`CONNECTED` and again whenever the rung changes; `STATS bps` is the same number. Until
+2026-11-23 it was the bandwidth's nominal OFDM rate whatever the session ran.
 
 Binary payload bytes are sent on the data port while connected. Received
 ProtocolEngine binary payloads are emitted on the data port.
@@ -93,8 +95,38 @@ ProtocolEngine binary payloads are emitted on the data port.
 printf 'VERSION\r' | nc 127.0.0.1 18300
 ```
 
-Expected reply:
+Expected reply (the build's version):
 
 ```text
-VERSION 0.3.1
+VERSION 0.6.4.1
 ```
+
+## Session behavior
+
+- **LISTEN** is off when `ultra_tnc` starts. Until the host sends `LISTEN ON` the TNC neither accepts
+  calls nor answers a PING probe, so it never keys the transmitter on its own. `LISTEN ON` stays in
+  force until `LISTEN OFF`: after a session (inbound or outbound) the TNC listens again. (Before
+  2026-11-23 a TNC answered every PING whatever LISTEN said, and dropped back to not listening after
+  its first session while the modem kept accepting calls.)
+- **ABORT** ends the session at once: `OK`, then `BUFFER 0` if data was queued, then `DISCONNECTED`.
+  The peer is not told; a peer that was receiving declares the link lost once the sender's whole
+  retry budget has passed (about 4 minutes on OFDM, up to about 12 minutes on MC-DPSK).
+- **DISCONNECT** during call setup cancels the attempt: `OK`, then `DISCONNECTED`.
+- **STATS** outside a session reports `rate=none mod=none mode=none snr=none bps=0`.
+
+## Testing
+
+`tools/tnc_scenario.py` runs two real `ultra_tnc --sim-audio` stations over `ota_simulator serve`
+and drives them through the command and data ports the way a messaging client does: short messages,
+turn-taking, simultaneous sends, chunked writes, a bulk body then short replies, back-to-back
+sessions, ABORT, a call nobody answers, a call to a station not listening, cancelling a call, two
+stations calling each other at the same moment. CTest runs a set of them on every build
+(`TncScenarioShort`, `TncScenarioTurns`, `TncScenarioSessions`, `TncScenarioListen`).
+
+```bash
+tools/tnc_scenario.py --scenario all --channel awgn --snr-db 10 --out /tmp/tnc_all
+tools/tnc_scenario.py --scenario short,pingpong --channel good --snr-db 8 --seed 43 --out /tmp/tnc_good
+```
+
+Each scenario writes `<out>/<scenario>/{summary.txt,events.log,alpha.log,bravo.log}`; `events.log`
+has every host-visible line with its time.

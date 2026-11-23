@@ -711,6 +711,20 @@ void StreamingDecoder::searchForSync() {
                     SampleSpan(search_buffer.data(), search_buffer.size()),
                     narrow_result, CORR_DETECT_THRESHOLD);
 
+                // A narrowband lock switches this idle receiver to narrowband for good, so it must be
+                // a real narrowband dual chirp: correlation at the detection threshold and an offset
+                // inside the acquisition range. A wideband PONG's sweep crosses 1250-1750 Hz; a
+                // fragment of it matched at corr 0.039 with a 21 % gap error (58.9 Hz on the narrow
+                // chirp's 96 samples/Hz, under ChirpSync's 100 Hz sanity bound) and left the station
+                // deaf to every wideband caller (BUG-FALSE-NARROWBAND-LOCK, TNC 2026-11-23).
+                if (narrow_found &&
+                    (narrow_result.correlation < CORR_DETECT_THRESHOLD ||
+                     std::abs(narrow_result.cfo_hz) > streaming_frame_policy::kPingMaxChirpCfoHz)) {
+                    LOG_MODEM(INFO,
+                              "[%s] Dual-listen: narrowband candidate rejected (corr=%.3f, CFO=%.1f Hz)",
+                              log_prefix_.c_str(), narrow_result.correlation, narrow_result.cfo_hz);
+                    narrow_found = false;
+                }
                 if (narrow_found) {
                     found = true;
                     narrow_sync_found = true;

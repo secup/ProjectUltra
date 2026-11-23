@@ -398,7 +398,18 @@ Connection::Connection(const ConnectionConfig& config)
         if (!unified_group_is_buffering && expects_data_ack) {
             armToneBurstAckListenWindow(explicit_timeout_ms);
         }
-        transmitFrame(data);
+        // A payload that fits one frame is the whole physical turn (startPayloadNow submits it
+        // alone and the turn gate holds the next payload until it is ACKed), so it carries the
+        // CRC-protected PHYSICAL_BURST_END marker like every other singleton egress
+        // (BUG-OFDM-SINGLETON-UNMARKED). Before 2026-11-23 it went out unmarked: the receiver
+        // could not prove the turn was over, held its ACK to the ~11 s air ceiling past the
+        // sender's ACK window (8.75 s for a QPSK R1/2 singleton), and every short message or TNC
+        // block cost a resend (BUG-SINGLE-FRAME-MESSAGE-UNMARKED). Only that submission: frames
+        // the ARQ emits back to back without burst buffering are not each a turn end.
+        transmitFrame((single_frame_payload_submit_ && !unified_group_is_buffering &&
+                       is_slot_data)
+                          ? physicalTurnEndWireCopy(data)
+                          : data);
         // A buffered group is finalized once, after its exact frame+padding count is
         // known. A standalone new send/NACK repair/RTO resend is finalized above and
         // armed once at the transport handoff boundary. DATA_REPAIR keeps its existing
@@ -671,7 +682,6 @@ Connection::Connection(const ConnectionConfig& config)
                           pending_tx_fragments_.size() - next_fragment_idx_);
                 pending_tx_fragments_.clear();
                 pending_tx_fragment_flags_.clear();
-                pending_tx_fragment_types_.clear();
                 pending_tx_fragment_message_tokens_.clear();
                 next_fragment_idx_ = 0;
                 acked_fragment_count_ = 0;
@@ -696,7 +706,6 @@ Connection::Connection(const ConnectionConfig& config)
                               pending_tx_fragments_.size());
                     pending_tx_fragments_.clear();
                     pending_tx_fragment_flags_.clear();
-                    pending_tx_fragment_types_.clear();
                     pending_tx_fragment_message_tokens_.clear();
                     next_fragment_idx_ = 0;
                     acked_fragment_count_ = 0;
@@ -1166,7 +1175,6 @@ void Connection::abortTxNow() {
     queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
-    pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
@@ -1299,12 +1307,13 @@ bool Connection::sendBinary(const Bytes& data) {
     return sendPayload(data, true);
 }
 
-uint64_t Connection::createOutboundMessageRecord(const Bytes& data) {
+uint64_t Connection::createOutboundMessageRecord(const Bytes& data, bool binary) {
     if (data.empty()) {
         return 0;
     }
 
     OutboundMessageTxRecord record;
+    record.binary = binary;
     record.token = next_outbound_message_token_++;
     if (next_outbound_message_token_ == 0) {
         next_outbound_message_token_ = 1;
@@ -1337,7 +1346,8 @@ Bytes Connection::outboundMessageWireBytes(uint64_t token) const {
         }
         Bytes wire;
         wire.reserve(kMessageObjectPrefixBytes + record.text.size());
-        wire.push_back(static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT));
+        wire.push_back(static_cast<uint8_t>(record.binary ? PayloadType::BINARY_OBJECT
+                                                          : PayloadType::TEXT_MESSAGE_OBJECT));
         wire.push_back(record.object_id);
         wire.insert(wire.end(), record.text.begin(), record.text.end());
         return wire;
@@ -1609,11 +1619,13 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         return false;
     }
 
-    const uint64_t message_token = binary_payload ? 0 : createOutboundMessageRecord(data);
+    // Text and binary payloads alike carry an object identity, so a geometry change can re-grid
+    // either and the peer drops the duplicate (BUG-BINARY-LOST-ON-GEOMETRY-CHANGE).
+    const uint64_t message_token = createOutboundMessageRecord(data, binary_payload);
     // Text objects go on the wire behind an identity prefix so the peer can suppress
-    // a duplicate resend. Binary payloads keep their bare framing: the TNC owns that
-    // wire format and does its own retry accounting above us.
-    const Bytes wire = binary_payload ? data : outboundMessageWireBytes(message_token);
+    // a duplicate resend. Binary payloads carry the same identity since 2026-11-23
+    // (PayloadType::BINARY_OBJECT): no layer above retried a dropped block.
+    const Bytes wire = outboundMessageWireBytes(message_token);
     if (wire.empty()) {
         dropOutboundMessageRecord(message_token);
         LOG_MODEM(ERROR, "Connection: Failed to serialize outbound message object");
@@ -1632,8 +1644,7 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         }
         queued_payloads_.push_back(QueuedPayload{
             wire, binary_payload, message_token,
-            binary_payload ? allocateQueuedOperationOrder()
-                           : outboundMessageEnqueueOrder(message_token)});
+            outboundMessageEnqueueOrder(message_token)});
         LOG_MODEM(INFO,
                   "Connection: Queued %zu byte %s until local ISS DATA turn (depth=%zu, local_turn=%d, peer_request=%d)",
                   data.size(), binary_payload ? "binary payload" : "message",
@@ -1887,13 +1898,22 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_
         return started;
     };
 
+    // A single-frame payload is one physical turn: its egress carries the turn-end marker.
+    struct SingleFrameSubmitScope {
+        bool& flag;
+        explicit SingleFrameSubmitScope(bool& f) : flag(f) { flag = true; }
+        ~SingleFrameSubmitScope() { flag = false; }
+    };
+
+    // Text and binary objects share one framing: plain DATA frames (MORE_FRAG/FINAL), so a binary
+    // block rides the session's compact frame like a message. Its BINARY_OBJECT prefix, not a
+    // DATA_START/CONT/END frame type, tells the receiver it is binary. Before 2026-11-23 binary
+    // blocks went in DATA_START/CONT/END frames, which keep the v2 layout: 37 bytes a frame against
+    // 56 compact on a 3-codeword MC-DPSK rung, and on OFDM cut to the compact capacity and
+    // truncated (BUG-BINARY-FRAGMENT-OVERSIZE).
     if (!is_ofdm && !bounded_variable_mc_dpsk) {
+        SingleFrameSubmitScope single_frame(single_frame_payload_submit_);
         setOutboundMessageExpectedFragments(message_token, 1);
-        if (binary_payload) {
-            return markPayloadStarted(
-                sendArqPayloadFrame(data, v2::FrameType::DATA_END, v2::Flags::NONE,
-                                    false, message_token));
-        }
         return markPayloadStarted(
             sendArqPayloadFrame(data, v2::FrameType::DATA, v2::Flags::NONE,
                                 false, message_token));
@@ -1905,15 +1925,8 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_
     }
 
     if (data.size() <= capacity) {
+        SingleFrameSubmitScope single_frame(single_frame_payload_submit_);
         setOutboundMessageExpectedFragments(message_token, 1);
-        if (binary_payload) {
-            return markPayloadStarted(
-                is_ofdm
-                    ? sendArqPayloadFrame(data, v2::FrameType::DATA_END, v2::Flags::FINAL,
-                                          true, message_token)
-                    : sendArqPayloadFrame(data, v2::FrameType::DATA_END, v2::Flags::FINAL,
-                                          false, message_token));
-        }
         return markPayloadStarted(
             sendArqPayloadFrame(data, v2::FrameType::DATA, v2::Flags::FINAL,
                                 is_ofdm, message_token));
@@ -1925,7 +1938,6 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_
 
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
-    pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
@@ -1933,13 +1945,6 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_
     for (size_t offset = 0; offset < data.size(); offset += capacity) {
         size_t chunk_size = std::min(capacity, data.size() - offset);
         pending_tx_fragments_.emplace_back(data.begin() + offset, data.begin() + offset + chunk_size);
-        if (binary_payload) {
-            const bool first = (offset == 0);
-            const bool last = (offset + chunk_size >= data.size());
-            pending_tx_fragment_types_.push_back(
-                first ? v2::FrameType::DATA_START :
-                (last ? v2::FrameType::DATA_END : v2::FrameType::DATA_CONT));
-        }
         const bool last = (offset + chunk_size >= data.size());
         pending_tx_fragment_flags_.push_back(
             last ? v2::Flags::FINAL : v2::Flags::MORE_FRAG);
@@ -1952,7 +1957,6 @@ bool Connection::startPayloadNow(const Bytes& data, bool binary_payload, uint64_
     if (sendNextFragment() == 0) {
         pending_tx_fragments_.clear();
         pending_tx_fragment_flags_.clear();
-        pending_tx_fragment_types_.clear();
         pending_tx_fragment_message_tokens_.clear();
         acked_fragment_count_ = 0;
         return false;
@@ -2145,7 +2149,6 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
     // Pre-fragment all messages into a flat list of frame payloads with flags
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
-    pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
@@ -2192,7 +2195,6 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
         }
         pending_tx_fragments_.clear();
         pending_tx_fragment_flags_.clear();
-        pending_tx_fragment_types_.clear();
         pending_tx_fragment_message_tokens_.clear();
         return false;
     }
@@ -2618,6 +2620,7 @@ bool Connection::isToneBurstAckCandidatePlausible(
 bool Connection::onToneBurstAck(
     const ultra::waveform::tone_burst_ack::ToneBurstAckDetection& detection) {
     MessageTxStatusDeferralGuard status_guard(*this);
+    notePeerHeard();
     if (disconnect_teardown_active_) {
         return false;
     }
@@ -5834,6 +5837,7 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
                                       bool all_ok, float quality, uint16_t frame_mask,
                                       bool interleaved, uint8_t group_size,
                                       bool geometry_proven) {
+    notePeerHeard();
     if (disconnect_teardown_active_ || !use_burst_transport_) {
         return;
     }
@@ -6040,10 +6044,16 @@ size_t Connection::sendNextFragment() {
         return new_fragments_submitted;
     };
     bool is_ofdm = isOFDMMode(negotiated_mode_);
-    const bool pipeline_fragments = is_ofdm;
+    // MC-DPSK fragments burst like MC-DPSK file chunks (sendNextFileChunk): the same ARQ, frames
+    // (compact DATA), tone ACK and timing-derived window (1-5). Stop-and-wait sent a multi-frame
+    // message one fragment per turn: a 400-byte TNC block took ~16 s a fragment on a 16-FSK-F
+    // session where the file path bursts the same bytes (BUG-MCDPSK-MESSAGE-STOP-AND-WAIT).
+    const bool is_mc_dpsk = negotiated_mode_ == WaveformMode::MC_DPSK;
+    const bool burst_fragments = (is_ofdm || is_mc_dpsk) && static_cast<bool>(on_transmit_burst_);
+    const bool pipeline_fragments = is_ofdm || burst_fragments;
 
-    // Enable burst buffering for OFDM mode
-    if (is_ofdm && on_transmit_burst_) {
+    // Enable burst buffering (OFDM and MC-DPSK, as the file path)
+    if (burst_fragments) {
         burst_mode_active_ = true;
         burst_tx_buffer_.clear();
     }
@@ -6094,10 +6104,8 @@ size_t Connection::sendNextFragment() {
             bool is_last = (fragment_index + 1 == pending_tx_fragments_.size());
             flags = is_last ? v2::Flags::NONE : v2::Flags::MORE_FRAG;
         }
-        v2::FrameType frame_type = v2::FrameType::DATA;
-        if (fragment_index < pending_tx_fragment_types_.size()) {
-            frame_type = pending_tx_fragment_types_[fragment_index];
-        }
+        // Text and binary objects alike ride plain DATA frames (their prefix tells them apart).
+        const v2::FrameType frame_type = v2::FrameType::DATA;
         uint64_t message_token = 0;
         if (fragment_index < pending_tx_fragment_message_tokens_.size()) {
             message_token = pending_tx_fragment_message_tokens_[fragment_index];
@@ -6127,17 +6135,15 @@ size_t Connection::sendNextFragment() {
         }
         noteDataTurnPayloadStarted(chunk_size);
 
-        // MC-DPSK bulk-file transfer uses sendNextFileChunk() and is safe to
-        // pipeline. The message-fragment path still shares OFDM-oriented
-        // MORE_FRAG/SACK semantics, so keep it stop-and-wait until it has its
-        // own hardware-validated burst pacing.
+        // Waveforms without a burst transport (narrowband MC-DPSK variants with no burst
+        // callback) stay stop-and-wait.
         if (!pipeline_fragments && submitted_this_call >= 1) {
             break;
         }
     }
 
     // Flush burst buffer
-    if (is_ofdm && on_transmit_burst_) {
+    if (burst_fragments) {
         burst_mode_active_ = false;
         flushBurstBuffer(
             retransmitted_frames > 0,
@@ -6163,6 +6169,7 @@ void Connection::onFrameReceived(const Bytes& frame_data,
         LOG_MODEM(TRACE, "Connection: Ignoring frame with wrong magic");
         return;
     }
+    notePeerHeard();
 
     auto header = v2::parseHeader(frame_data);
     if (!header.valid) {
@@ -6529,6 +6536,7 @@ void Connection::onMCDPSKPartialFrame(const v2::PartialFrameCodewords& partial) 
 }
 
 void Connection::onAcceptedOFDMDataSync(float sync_correlation) {
+    notePeerHeard();
     if (disconnect_teardown_active_ || state_ != ConnectionState::CONNECTED || is_initiator_ ||
         !isOFDMMode(negotiated_mode_)) {
         return;
@@ -6616,7 +6624,6 @@ bool Connection::drainDeferredArqFailureAbort() {
     }
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
-    pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
@@ -6820,7 +6827,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     if (on_ping_tx_) {
                         on_ping_tx_();
                     }
-                    timeout_remaining_ms_ = pingTimeoutMsForCurrentProfile();
+                    timeout_remaining_ms_ = pingTimeoutMsForCurrentProfile() + pingRetryJitterMs();
                 }
             } else {
                 timeout_remaining_ms_ -= elapsed_ms;
@@ -6906,6 +6913,52 @@ void Connection::tick(uint32_t elapsed_ms) {
             // detect / warm-sync DEGRADED), so re-arm periodically until the peer's data
             // actually arrives (yielded_data_turn_waiting_for_peer_data_ clears). The peer
             // force-fulls its first frame on turn-acquire, so this meets it (BUG-TNC-B2F-001).
+            // A yield waits for the peer's DATA (the B2F responder speaks first), but a peer with
+            // nothing to say never sends any and never hands the turn back: this station's own
+            // queued data then waited forever (BUG-TURN-YIELD-DEADLOCK: a TNC block written ~1 s
+            // after CONNECTED never left). A peer with data starts it within one TURN_REQUEST
+            // cadence of our TURNOVER; past that, ask for the turn. A peer that does have data
+            // takes the request through the normal fair-budget path, so asking is harmless.
+            // Receiver link supervision. A receiver owed more of a transfer by a peer it no
+            // longer hears had no way out: after the sender's ABORT (or loss of the sender) its
+            // host stayed CONNECTED indefinitely (BUG-IRS-NEVER-NOTICES-LOST-PEER). Silence is no
+            // proof inside the sender's own retry budget - a deep fade lasts that long - so the
+            // link is declared lost only past it (peerSilentLinkLostMs). An idle session (nothing
+            // owed) is left to the hosts: no traffic there is no evidence either way.
+            ms_since_peer_heard_ = (ms_since_peer_heard_ > UINT32_MAX - elapsed_ms)
+                                       ? UINT32_MAX
+                                       : ms_since_peer_heard_ + elapsed_ms;
+            {
+                const bool peer_owes_data =
+                    !local_data_turn_ && !disconnect_teardown_active_ &&
+                    (arq_.lastRxHadMoreData() || rx_reassembly_active_ ||
+                     file_transfer_.getState() == FileTransferState::RECEIVING);
+                if (peer_owes_data && ms_since_peer_heard_ >= peerSilentLinkLostMs()) {
+                    LOG_MODEM(WARN,
+                              "Connection: link lost - nothing heard from %s for %u ms mid-transfer "
+                              "(past the sender's retry budget, %u ms)",
+                              remote_call_.c_str(), ms_since_peer_heard_, peerSilentLinkLostMs());
+                    enterDisconnected("Link lost (peer silent)");
+                    return;
+                }
+            }
+            if (yielded_data_turn_waiting_for_peer_data_ && !local_data_turn_) {
+                yielded_turn_wait_ms_ += elapsed_ms;
+                if (hasLocalDataWaitingForTurn() &&
+                    yielded_turn_wait_ms_ >= turnRequestRetransmitMs()) {
+                    LOG_MODEM(INFO,
+                              "Connection: peer sent no DATA %u ms after our TURNOVER; "
+                              "requesting the turn for %zu queued payload(s)",
+                              yielded_turn_wait_ms_, queued_payloads_.size());
+                    yielded_data_turn_waiting_for_peer_data_ = false;
+                    yielded_turn_wait_ms_ = 0;
+                    local_turn_request_pending_ = false;
+                    turn_request_holdoff_ms_ = 0;
+                    sendTurnRequestIfNeeded();
+                }
+            } else {
+                yielded_turn_wait_ms_ = 0;
+            }
             if (yielded_data_turn_waiting_for_peer_data_ &&
                 !local_data_turn_ && on_full_ofdm_anchor_expected_) {
                 if (elapsed_ms >= interactive_anchor_rearm_ms_) {
@@ -7434,12 +7487,45 @@ uint32_t Connection::turnRequestHoldoffAfterDataMs() const {
         std::max<uint64_t>(TURN_REQUEST_HOLDOFF_FLOOR_MS, guard_ms));
 }
 
+// How long a receiver owed data waits, hearing nothing, before it declares the link lost: the
+// sender's whole retry budget for the frame it is stuck on - every one of its max_retries resends
+// one retransmission timeout apart, plus the first send - at the session's longest (full-window)
+// timeout. The sender cannot still be trying past that.
+uint32_t Connection::peerSilentLinkLostMs() const {
+    const uint64_t rto = std::max<uint64_t>(
+        arq_.ackTimeoutForFrameCount(std::max<size_t>(1, arq_.getWindowSize())),
+        arq_.ackTimeoutForFrameCount(1));
+    const uint64_t budget = static_cast<uint64_t>(arq_.getMaxRetries() + 1) * rto;
+    return static_cast<uint32_t>(std::min<uint64_t>(budget, UINT32_MAX));
+}
+
 uint32_t Connection::turnRequestRetransmitMs() const {
     const uint64_t guard_ms =
         static_cast<uint64_t>(turnRequestHoldoffAfterDataMs()) +
         static_cast<uint64_t>(currentControlFrameAirtimeMs());
-    return static_cast<uint32_t>(
-        std::max<uint64_t>(TURN_REQUEST_RETRANSMIT_FLOOR_MS, guard_ms));
+    // The request is not lost until its answer could have arrived: our TURN_REQUEST on the air
+    // (a turn token goes behind a full anchor: dataTurnControlGuardMs, with the TX lead-in and
+    // tail), the peer finding it (one full-anchor search window), its TURNOVER on the air the same
+    // way, and us finding that. Retransmitting sooner keyed a duplicate request just as the
+    // TURNOVER arrived; the peer re-asserted TURNOVER over our first DATA frame, which it then
+    // missed, and every direction change cost a resend (TNC ping-pong, AWGN 10 dB: 15-19 s per
+    // turn; BUG-TURN-REQUEST-RETRANSMIT-RACE).
+    const uint64_t token_on_air_ms =
+        static_cast<uint64_t>(connection_policy::kDefaultTxLeadInMs) +
+        static_cast<uint64_t>(dataTurnControlGuardMs()) +
+        static_cast<uint64_t>(connection_policy::kDefaultTxTailMs);
+    const uint64_t round_trip_ms =
+        2ULL * (token_on_air_ms +
+                static_cast<uint64_t>(connection_policy::kFullAnchorSearchWindowMs));
+    // The waveform's own round trip for one frame and its answer, as the ARQ times it: on MC-DPSK
+    // a turn token is 2.3 s on the air and is found ~6 s after it ends (the receiver tries the
+    // session rung's span first), so the OFDM search window above is far short. With a 10 s
+    // retransmit against an ~18 s round trip the request and the TURNOVER collided in lock step
+    // and the turn never changed (TNC ping-pong, AWGN 0 dB, 400 s).
+    const uint64_t arq_round_trip_ms = static_cast<uint64_t>(arq_.ackTimeoutForFrameCount(1));
+    return static_cast<uint32_t>(std::max<uint64_t>(
+        {static_cast<uint64_t>(TURN_REQUEST_RETRANSMIT_FLOOR_MS), guard_ms, round_trip_ms,
+         arq_round_trip_ms}));
 }
 
 uint32_t Connection::turnRequestAckEmbeddedRetransmitMs() const {
@@ -8094,6 +8180,30 @@ void Connection::configureSoftCombineHARQBounds() {
     soft_combine_harq_.setMaxEntries(max_entries);
 }
 
+// A random extra wait before each PING retry. Two stations that call each other at the same moment
+// ran identical retry timers, so on half-duplex radios each PING went out while the other station
+// was keyed for its own and neither ever heard the other (TNC: both "No response after 5 PINGs";
+// BUG-SIMULTANEOUS-CALL-LOCKSTEP). Two PINGs collide while their offset is under w = one PING on
+// the air plus T/R (~1.6 s). With a uniform extra wait over J on each side, a retry collides again
+// with p ~ 1 - (1 - w/J)^2: J = 2.8 s gave p ~ 0.8 (1 failed pair in 3, TNC seed 44). J = half the
+// retry timeout (10 s on the 20 s profile) gives p ~ 0.3, four straight collisions ~1 %, for an
+// average extra wait of J/2 per retry. Seeded per station (callsign hash and clock).
+uint32_t Connection::pingRetryJitterMs() {
+    if (ping_jitter_rng_state_ == 0) {
+        const uint64_t clock = static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        ping_jitter_rng_state_ =
+            (clock ^ (static_cast<uint64_t>(v2::hashCallsign(local_call_)) << 20)) | 1ULL;
+    }
+    // xorshift64*
+    ping_jitter_rng_state_ ^= ping_jitter_rng_state_ >> 12;
+    ping_jitter_rng_state_ ^= ping_jitter_rng_state_ << 25;
+    ping_jitter_rng_state_ ^= ping_jitter_rng_state_ >> 27;
+    const uint64_t r = ping_jitter_rng_state_ * 2685821657736338717ULL;
+    const uint32_t span_ms = pingTimeoutMsForCurrentProfile() / 2u;
+    return static_cast<uint32_t>((r >> 32) % (span_ms + 1u));
+}
+
 uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
     // DBPSK MC-DPSK PING/PONG detection has to wait through the same slower
     // training/ref energy check as CONNECT detection. Keeping the
@@ -8734,8 +8844,9 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // ACK still in flight", and no sender-side heuristic resolves that (both were
     // tried and measured — see BUG-MESSAGE-LOST-ON-FORCED-DEMOTE).
     //
-    // A binary/TNC payload has no such identity on the wire and is NOT re-gridded:
-    // it still fails explicitly, and the TNC session layer above owns its retry.
+    // A binary/TNC payload carries the same identity (PayloadType::BINARY_OBJECT) and is
+    // re-gridded the same way: before 2026-11-23 it was dropped here and the TNC host was told
+    // BUFFER 0 (BUG-BINARY-LOST-ON-GEOMETRY-CHANGE); no layer above retried it.
     std::vector<OutboundMessageTxRecord> geometry_failed_message_records;
     std::vector<OutboundMessageTxRecord> geometry_regridded_message_records;
     bool geometry_failed_nonfile_operation = false;
@@ -8818,7 +8929,6 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
             arq_.abortPendingTx(/*force_move_epoch_bump=*/true);
             pending_tx_fragments_.clear();
             pending_tx_fragment_flags_.clear();
-            pending_tx_fragment_types_.clear();
             pending_tx_fragment_message_tokens_.clear();
             next_fragment_idx_ = 0;
             acked_fragment_count_ = 0;
@@ -8946,7 +9056,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
                 continue;
             }
             queued_payloads_.push_front(QueuedPayload{
-                std::move(wire), false, it->token, it->enqueue_order});
+                std::move(wire), it->binary, it->token, it->enqueue_order});
         }
         LOG_MODEM(INFO,
                   "Connection: Re-queued %zu message object(s) for re-fragmentation at %s %s cw=%d (attempt limit %u; peer suppresses the duplicate by object id)",
@@ -10506,7 +10616,6 @@ void Connection::enterDisconnected(const std::string& reason) {
     queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
-    pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;
@@ -11195,7 +11304,6 @@ void Connection::reset() {
     queued_payloads_.clear();
     pending_tx_fragments_.clear();
     pending_tx_fragment_flags_.clear();
-    pending_tx_fragment_types_.clear();
     pending_tx_fragment_message_tokens_.clear();
     next_fragment_idx_ = 0;
     acked_fragment_count_ = 0;

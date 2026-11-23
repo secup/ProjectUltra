@@ -31,6 +31,13 @@ enum class PayloadType : uint8_t {
     // ripple into control frames and capacity math. This prefix is parsed only by the
     // message reassembly path.
     TEXT_MESSAGE_OBJECT = 0x04,
+    // A binary block (a TNC data-port block) with the same identity: {0x05, object_id, bytes...},
+    // carried in plain DATA frames like a text object. Before 2026-11-23 binary blocks went bare (in
+    // DATA_START/DATA_CONT/DATA_END frames, still accepted from older senders) and
+    // were not re-gridded: a geometry change (waveform follow, forced demote) mid-block dropped the
+    // block silently while the TNC host was told BUFFER 0 (BUG-BINARY-LOST-ON-GEOMETRY-CHANGE). A
+    // receiver still accepts a bare block from an older sender (no duplicate suppression there).
+    BINARY_OBJECT = 0x05,
 };
 
 // {type, object_id} — see PayloadType::TEXT_MESSAGE_OBJECT.

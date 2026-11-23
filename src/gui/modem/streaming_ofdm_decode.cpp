@@ -2752,10 +2752,14 @@ void StreamingDecoder::decodeCurrentFrame() {
             if (wait_for_fixed_connect) {
                 pending_total_cw_ = v2::kConnectFrameCodewords;
                 // The CONNECT rides the handshake's control profile (#72): size and demodulate it
-                // there, not at a connected session's constellation.
+                // there, whatever constellation this decoder holds. Not only while connected: after
+                // a session the decoder that ran OFDM becomes the idle MC-DPSK primary still on its
+                // own default constellation (DQPSK), sized the CONNECT at 90 symbols instead of 171
+                // and never decoded the next caller's (BUG-SECOND-SESSION-CONNECT-GEOMETRY; the
+                // TNC's second session never connected).
                 const auto handshake = streaming_control_profile::profileForMCDPSK();
                 if (auto* mc = dynamic_cast<MCDPSKWaveform*>(waveform_.get());
-                    mc && connected_ && mc->getModulation() != handshake.modulation) {
+                    mc && mc->getModulation() != handshake.modulation) {
                     mc_handshake_saved_waveform_mod_ = mc->getModulation();
                     mc_handshake_saved_session_mod_ = current_modulation_;
                     mc->configure(handshake.modulation, handshake.rate);

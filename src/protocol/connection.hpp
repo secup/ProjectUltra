@@ -58,6 +58,11 @@ struct ConnectionConfig {
     uint32_t disconnect_timeout_ms = 30000;
     int connect_retries = 10;  // Robust MC-DPSK control attempts
     bool auto_accept = true;
+    // Answer a PING probe with a PONG. A station that takes no calls must not key its
+    // transmitter for one: a TNC host's LISTEN OFF clears this with auto_accept
+    // (BUG-TNC-ANSWERS-WHILE-NOT-LISTENING). The GUI leaves it on (its operator can accept a
+    // call by hand).
+    bool answer_probes = true;
 
     uint8_t mode_capabilities = ModeCapabilities::ALL | ModeCapabilities::PHY_MASK_V1;
     WaveformMode preferred_mode = WaveformMode::AUTO;  // Forced waveform (0xFF=AUTO)
@@ -198,6 +203,7 @@ public:
 
     void setAutoAccept(bool auto_accept) { config_.auto_accept = auto_accept; }
     bool getAutoAccept() const { return config_.auto_accept; }
+    void setAnswerProbes(bool answer) { config_.answer_probes = answer; }
 
     // --- Connection Control ---
 
@@ -1064,7 +1070,6 @@ private:
     std::deque<QueuedPayload> queued_payloads_;
     std::vector<Bytes> pending_tx_fragments_;
     std::vector<uint8_t> pending_tx_fragment_flags_;  // Per-fragment flags (for sendMessages batch)
-    std::vector<v2::FrameType> pending_tx_fragment_types_;  // DATA_START/CONT/END for binary streams
     std::vector<uint64_t> pending_tx_fragment_message_tokens_;
     size_t next_fragment_idx_ = 0;
     size_t acked_fragment_count_ = 0;  // Actual ACKs received (vs next_fragment_idx_ = submitted)
@@ -1088,6 +1093,8 @@ private:
         // its original position rather than at the back.
         uint64_t enqueue_order = 0;
         uint8_t geometry_regrid_attempts = 0;
+        // A binary block (PayloadType::BINARY_OBJECT) rather than a text message.
+        bool binary = false;
     };
     std::deque<OutboundMessageTxRecord> outbound_message_tx_records_;
     uint64_t next_outbound_message_token_ = 1;
@@ -1836,6 +1843,16 @@ private:
     bool local_turn_request_pending_ = false;
     bool received_peer_data_since_connect_ = false;
     bool yielded_data_turn_waiting_for_peer_data_ = false;
+    // Time since this station yielded its DATA turn with the peer silent (the wait above).
+    uint32_t yielded_turn_wait_ms_ = 0;
+    // PING retry jitter (BUG-SIMULTANEOUS-CALL-LOCKSTEP): xorshift state, seeded on first use.
+    uint64_t ping_jitter_rng_state_ = 0;
+    uint32_t pingRetryJitterMs();
+    // Audio time since anything was heard from the peer (a frame, a burst group, a tone ACK, an
+    // accepted DATA sync): the receiver's link supervision (BUG-IRS-NEVER-NOTICES-LOST-PEER).
+    uint32_t ms_since_peer_heard_ = 0;
+    void notePeerHeard() { ms_since_peer_heard_ = 0; }
+    uint32_t peerSilentLinkLostMs() const;
     bool data_turn_yield_pending_ = false;
     uint64_t data_turn_payload_bytes_sent_ = 0;
     uint32_t data_turn_contended_ms_ = 0;
@@ -1982,6 +1999,9 @@ private:
     DataReceivedCallback on_data_received_;
     FileSentCallback on_file_sent_;
     ModeNegotiatedCallback on_mode_negotiated_;
+    // True only while startPayloadNow submits a payload that fits one frame: that egress is the
+    // whole physical turn and carries PHYSICAL_BURST_END (BUG-SINGLE-FRAME-MESSAGE-UNMARKED).
+    bool single_frame_payload_submit_ = false;
     WaveformCrossingCallback on_waveform_crossing_;
     DataModeChangedCallback on_data_mode_changed_;
     SessionAddressesCallback on_session_addresses_;
@@ -2027,7 +2047,7 @@ private:
     void handleModeChange(const v2::ControlFrame& frame, const std::string& src_call);
     bool sendPayload(const Bytes& data, bool binary_payload);
     bool startPayloadNow(const Bytes& data, bool binary_payload, uint64_t message_token = 0);
-    uint64_t createOutboundMessageRecord(const Bytes& data);
+    uint64_t createOutboundMessageRecord(const Bytes& data, bool binary = false);
     // Wire bytes for a tracked message object: the identity prefix plus the text.
     // Rebuilt on demand rather than stored, so a re-grid cannot serialize a payload
     // that has drifted from the record the operator sees. Empty if token is unknown.

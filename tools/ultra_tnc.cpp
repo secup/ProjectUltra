@@ -775,6 +775,16 @@ private:
                 modem_.setMCDPSKConfig(cfg);
             }
             setDataMode(mod, rate);
+            // The rung's information rate for the host's BITRATE and STATS: MC-DPSK when the
+            // protocol reports an MC-DPSK geometry, else the session's OFDM waveform.
+            const WaveformMode rate_mode =
+                (mc_dpsk_num_carriers > 0) ? WaveformMode::MC_DPSK
+                : (negotiated_waveform_ == WaveformMode::OFDM_NARROW) ? WaveformMode::OFDM_NARROW
+                                                                     : WaveformMode::OFDM_CHIRP;
+            bridge_.reportSessionDataRate(static_cast<int>(
+                ultra::protocol::connection_policy::sessionDataRateBps(
+                    rate_mode, mod, rate, cw_count, mc_dpsk_num_carriers,
+                    mc_dpsk_samples_per_symbol)));
             LOG_INFO("OPERATOR", "Mode: %s %s cw=%d",
                      ultra::modulationToString(mod), ultra::codeRateToString(rate), cw_count);
             char fields[192];

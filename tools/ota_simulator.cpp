@@ -1,5 +1,4 @@
 #include "ota_simulator/clip_gen.hpp"
-#include "ota_simulator/scenario.hpp"
 #include "ota_channel_core/models.hpp"
 #include "ota_channel_core/session_manager.hpp"
 #include "ota_simulator_service/auth_allowlist.hpp"
