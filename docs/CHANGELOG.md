@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 — RELEASE: v0.6.4-pre-alpha
+
+Version 0.6.3 -> 0.6.4 in `CMakeLists.txt`. **Not compatible over the air with 0.6.3**: both stations
+must upgrade. The 16-FSK handshake frame and session rungs and the moved MC-DPSK rung words (13..15 =
+16-FSK, 16-FSK-F, DQPSK) are wire changes. Since v0.6.3 (36 commits):
+- -10 dB links: 16-FSK handshake frame and 16-FSK rung, PING/chirp floors, SNR byte to -20 dB.
+- 200 ms tone-ACK rung, and the tone-ACK candidate floor from a false-ACK budget and the span in flight.
+- 16-FSK-F middle rung, replacing DBPSK: 2-2.4x faster at AWGN -10..-6 dB, 1.2-2.2x on ITU Good
+  -8..0 dB.
+- OFDM entry at AWGN 3-6 dB on a peak-limited transmitter: noise-corrected fading index, signed PAPR
+  offset, EVM dead-rung veto.
+- ARQ window-shrink ACK fix.
+- CI: bounded build parallelism, the coverage flake, and the gcc/MSVC hang in ToneAckFalseAlarm.
+README: v0.6.4 low-SNR results on the peak-SNR scale. Not yet measured on hardware.
+
 ## 2026-11-23 — feat(mcdpsk): 16-FSK-F middle rung (DBPSK's rate at 16-FSK's floor)
 
 **Was.** The MC-DPSK session ladder was 16-FSK R1/4 -> DBPSK R1/4 -> DQPSK R1/4. On a peak-limited

@@ -17,7 +17,7 @@ view.
 > versions, so both stations must run the same build. Performance is measured on software and
 > hardware HF channel simulators; it is not yet characterized over the air at scale.
 
-*Updated 2026-11-21. Latest release: [`v0.6.3-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.3-pre-alpha).*
+*Updated 2026-11-23. Latest release: [`v0.6.4-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.4-pre-alpha).*
 
 ---
 
@@ -35,8 +35,8 @@ view.
 - **Low overhead.** A sync chirp opens the connection; after that each burst is found from its
   own structure. The receiver tracks the dial offset and the soundcard clock offset between the
   two stations.
-- **Low-SNR and crowded-band modes.** MC-DPSK carries the link down to about 5 dB SNR and
-  through heavy multipath; a 500 Hz narrowband OFDM mode fits crowded bands.
+- **Low-SNR and crowded-band modes.** MC-DPSK, with constant-envelope 16-FSK rungs at the bottom,
+  carries the link down to about -12 dB SNR and through heavy multipath; a 500 Hz narrowband OFDM mode fits crowded bands.
 - **Interference resilience.** Per-carrier erasure turns deep notches and in-band QRM into
   recoverable erasures instead of lost frames.
 - **TNC and GUI.** `ultra_tnc` serves the TCP command (8300) and data (8301) ports used by HF
@@ -50,6 +50,34 @@ view.
 All figures are goodput: file bytes delivered and CRC-verified per second of transfer, with
 retransmissions and turnarounds included. Connection setup (about 14 s since v0.6.2, 24 s before) is
 not included.
+
+### v0.6.4, low SNR, software channel simulator, real transmitter levels
+
+v0.6.4 works the bottom of the range. Connections now hold to -12 dB (one seed at -12; -10 dB on
+every seed tried), using 16-FSK handshake frames and a 16-FSK rung. A new middle rung, 16-FSK-F, carries DBPSK's rate with 16-FSK's constant
+envelope, so it decodes about 4 dB below DBPSK on a peak-limited transmitter. At 3-6 dB the link
+now moves up to OFDM.
+
+The table gives seconds for the whole session, connection included. The peak SNR scale is the same
+as for v0.6.3; the dial offset is 7.3 Hz; each cell is 1-2 seeds. "Before" is main on 2026-11-23,
+just before the 16-FSK-F rung: it already had the -10 dB work, and its DBPSK middle rung is what
+16-FSK-F replaces. v0.6.3 itself did not connect below about -3 dB on this scale.
+
+| Channel | Peak SNR | Before | v0.6.4 | File |
+|---|---:|---:|---:|---|
+| AWGN | -10 dB | 500 s | 244-246 s | 1 KB |
+| AWGN | -8 dB | 587-632 s | 246-247 s | 1 KB |
+| AWGN | -6 dB | 306-364 s | 246-247 s | 1 KB |
+| AWGN | -6 dB | 873 s | 422 s | 2 KB |
+| AWGN | -2 dB | 353-354 s | 351-356 s | 2 KB |
+| AWGN | 2 dB | 404 s | 196 s | 2 KB |
+| ITU Good | -8 dB | 762 s | 563 s | 1 KB |
+| ITU Good | -5 dB | 558-566 s | 352-407 s | 1 KB |
+| ITU Good | -2 dB | 619-637 s | 295-402 s | 1 KB |
+| ITU Good | 0 dB | 323-409 s | 294-357 s | 1 KB |
+
+From 3 dB up the two builds are even. The step up to OFDM at 3-6 dB (AWGN 4 dB: 104-131 s for 2 KB,
+against 211 s on MC-DPSK) landed on 2026-11-22.
 
 ### v0.6.3, software channel simulator, real transmitter levels
 
