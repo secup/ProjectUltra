@@ -38,9 +38,18 @@
 // pricing, dead/cap clamps and operator ceiling as the latent controller; only the success
 // probability changes.
 //
-// OUTER LOOP (calibration, not fade tracking). m is a common-mode margin on every threshold,
-// moved by the incumbent's residual between delivered frames and the success its own frames'
-// EVMs predicted. A fade does not move it — the faded frames' EVMs predicted the losses — only
+// OUTER LOOP (calibration, not fade tracking). m_r is a margin on rung r's threshold, moved by
+// the residual between rung r's delivered frames and the success their own EVMs predicted - only
+// by rung r's own groups (2026-11-24). It was ONE common-mode margin, which cannot hold two rungs
+// whose table errors point opposite ways: at AWGN 3 dB (peak-limited TX) QPSK R1/4 and R1/2 frames
+// read the same EVM (~4.85 dB), R1/4 decoded every frame and R1/2 none; R1/4's groups drove the
+// margin to -1.1 dB (R1/2 then predicted at 0.85, the climb fired), R1/2's drove it back to +0.6
+// (vetoed down), and the link flapped every two groups for the whole transfer
+// (BUG-LATENT-RATE-CLIMB-NO-BACKOFF). A rung with no groups of its own takes the mean of the
+// observed rungs' margins - the common-mode estimate, exactly the old behaviour while one rung
+// has been seen. The margin is an EVM-to-decode calibration, not an SNR, so it persists within a
+// session: a rung learned to need +1.7 dB is climbed to again as soon as the frames' EVM clears
+// its threshold by that much. A fade does not move it — the faded frames' EVMs predicted the losses — only
 // a mismatch between this radio's EVM and the measured thresholds does (non-Gaussian
 // impairments, an estimator scale shift). On the simulator it stays near zero.
 //
@@ -225,6 +234,8 @@ public:
         next_ = 0;
         count_ = 0;
         margin_db_ = 0.0f;
+        rung_margin_db_.fill(0.0f);
+        rung_margin_seen_.fill(false);
         groups_ = 0;
     }
 
@@ -247,7 +258,7 @@ public:
         for (float e : evm_db) {
             if (!std::isfinite(e)) continue;
             ++measured;
-            if (rung < kRungIdxCount) predicted += frameSuccess(e, rung, margin_db_);
+            if (rung < kRungIdxCount) predicted += frameSuccess(e, rung, marginFor(rung));
             ring_[next_] = e;
             ring_mod_[next_] = frame_mod;
             ring_rung_[next_] = coherent_rung ? rung : kRungIdxNone;
@@ -261,8 +272,10 @@ public:
             const float residual =
                 (predicted - static_cast<float>(std::clamp(delivered, 0, frames))) /
                 static_cast<float>(frames);
-            margin_db_ = std::clamp(margin_db_ + kMarginStepDb * residual,
-                                    kMarginMinDb, kMarginMaxDb);
+            rung_margin_db_[rung] = std::clamp(marginFor(rung) + kMarginStepDb * residual,
+                                               kMarginMinDb, kMarginMaxDb);
+            rung_margin_seen_[rung] = true;
+            margin_db_ = rung_margin_db_[rung];  // the incumbent's, for the log
         }
         ++groups_;
     }
@@ -281,6 +294,19 @@ public:
     }
     bool multiRungClimbReady() const { return groupsInWindow() >= kMinGroupsForMultiRungClimb; }
     float marginDb() const { return margin_db_; }
+    // Rung r's own margin, or the common-mode estimate (mean of the observed rungs') without one.
+    float marginFor(uint8_t rung) const {
+        if (rung < kRungIdxCount && rung_margin_seen_[rung]) return rung_margin_db_[rung];
+        float sum = 0.0f;
+        int n = 0;
+        for (size_t r = 0; r < kRungIdxCount; ++r) {
+            if (rung_margin_seen_[r]) {
+                sum += rung_margin_db_[r];
+                ++n;
+            }
+        }
+        return n > 0 ? sum / static_cast<float>(n) : 0.0f;
+    }
 
     // Counterfactual success of rung r over the window.
     float successProb(uint8_t rung) const {
@@ -289,7 +315,7 @@ public:
         for (size_t i = 0; i < count_; ++i) {
             s += successAt(ring_[i], peakAdjusted(thresholdOnFrames(rung, ring_mod_[i]), rung,
                                                   ring_rung_[i]),
-                           margin_db_);
+                           marginFor(rung));
         }
         return s / static_cast<float>(count_);
     }
@@ -456,6 +482,8 @@ private:
     size_t next_ = 0;
     size_t count_ = 0;
     float margin_db_ = 0.0f;
+    std::array<float, kRungIdxCount> rung_margin_db_{};
+    std::array<bool, kRungIdxCount> rung_margin_seen_{};
     int groups_ = 0;
 };
 

@@ -122,6 +122,30 @@ void test_margin_moves_on_calibration_error_only() {
     CHECK(miscal.marginDb() <= EvmRateSelector::kMarginMaxDb + 1e-6f, "margin is clamped");
 }
 
+// BUG-LATENT-RATE-CLIMB-NO-BACKOFF (TNC/GUI AWGN 3 dB, peak-limited TX): R1/4 and R1/2 frames read
+// the same EVM; R1/4 decodes every one, R1/2 none. A common margin swung -1.1 / +0.6 dB with the
+// incumbent and re-certified R1/2 after every R1/4 group. Each rung's margin learns from its own
+// groups only, so after one failed R1/2 group R1/4's successes no longer make R1/2 look viable.
+void test_rung_margins_do_not_cancel() {
+    EvmRateSelector sel;
+    for (int g = 0; g < 3; ++g) sel.observeGroup(kRungIdxQpskR14, frames(4.85f, 8), 8, 8);
+    sel.observeGroup(kRungIdxQpskR12, frames(4.85f, 4), 0, 4);
+    const float after_fail = sel.successProb(kRungIdxQpskR12);
+    for (int g = 0; g < 6; ++g) sel.observeGroup(kRungIdxQpskR14, frames(4.85f, 8), 8, 8);
+    const float later = sel.successProb(kRungIdxQpskR12);
+    CHECK(later <= after_fail + 0.01f,  // window mix only, not a margin leak
+          "R1/4's clean groups do not raise R1/2's predicted success (" << after_fail << " -> "
+                                                                       << later << ")");
+    CHECK(later < 0.3f, "R1/2 stays predicted unviable on these frames (" << later << ")");
+    CHECK(sel.successProb(kRungIdxQpskR14) > 0.85f,
+          "R1/4 stays predicted to decode its frames (" << sel.successProb(kRungIdxQpskR14) << ")");
+    // The calibration is not a ban: frames 2 dB stronger clear R1/2's learned margin.
+    EvmRateSelector up = sel;
+    for (int g = 0; g < 3; ++g) up.observeGroup(kRungIdxQpskR14, frames(7.5f, 8), 8, 8);
+    CHECK(up.successProb(kRungIdxQpskR12) > 0.6f,
+          "a stronger channel makes R1/2 viable again (" << up.successProb(kRungIdxQpskR12) << ")");
+}
+
 void test_window_and_unmeasured_frames() {
     EvmRateSelector sel;
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -297,6 +321,7 @@ int main() {
     test_margin_is_visible_from_any_rung();
     test_fade_is_rung_independent();
     test_margin_moves_on_calibration_error_only();
+    test_rung_margins_do_not_cancel();
     test_window_and_unmeasured_frames();
     test_time_to_finish_objective();
     test_climb_mode_only_takes_reliable_rungs();

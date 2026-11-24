@@ -1848,6 +1848,17 @@ Modulation Connection::robustControlModulation() const {
     return connection_policy::ladderRungForId(LadderRungId::ROBUST_MID).modulation;
 }
 
+// Delivered useful bytes/s the EVM window predicts for rung r: the selector's counterfactual success,
+// capped like every other credited probability, on the same geometry the latent controller prices.
+float Connection::evmPredictedGoodput(const LatentRateController::RungGeometryTable& geometry,
+                                      uint8_t rung) const {
+    if (rung >= kRungIdxCount || !geometry[rung].valid()) return 0.0f;
+    const float p =
+        std::min(evm_selector_.successProb(rung), LatentRateController::kCapProb);
+    return geometry[rung].useful_bytes_per_frame *
+           static_cast<float>(geometry[rung].frames_per_cycle) * p / geometry[rung].cycle_s;
+}
+
 bool Connection::peerDecodesRobustControl() const {
     const uint8_t mc_bit = connection_policy::modeToCapabilityBit(WaveformMode::MC_DPSK);
     return waveform_follow_dual_listen_ && waveform_follow_enabled_ && waveform_follow_allowed_ &&
@@ -3790,6 +3801,26 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                     evm_pick.goodput = geometry[up].useful_bytes_per_frame *
                                        static_cast<float>(geometry[up].frames_per_cycle) *
                                        LatentRateController::kCapProb / geometry[up].cycle_s;
+                    evm_decided = true;
+                } else if (latent_rung != kRungIdxNone && cur < kRungIdxCount &&
+                           latent_rung > cur && geometry[latent_rung].valid() &&
+                           geometry[cur].valid() &&
+                           evmPredictedGoodput(geometry, latent_rung) <
+                               evmPredictedGoodput(geometry, cur)) {
+                    // CLIMB MUST PAY (BUG-LATENT-RATE-CLIMB-NO-BACKOFF, 2026-11-24). The latent
+                    // posterior prices rungs with ONE slope (0.41 /dB, fitted on fading) and the
+                    // ITU Good thetas, so on a steady channel - where a code's waterfall is ~1 dB
+                    // wide and adjacent QPSK rates sit 1.4 dB apart, not 2.4 - clean R1/4 groups
+                    // ("x is well above 4.9") and failing R1/2 groups ("x is below 7.3") settle
+                    // where it predicts R1/2 at ~50 % and, at twice the bytes, commands it: TNC
+                    // AWGN 3 dB, 10-12 R1/4 <-> R1/2 flaps per 6 KB transfer, every R1/2 group
+                    // 0/4, each switch aborting the frames in flight. The window's own frames
+                    // measure the margin the outcome model cannot (channel-independent effective
+                    // SNR): an upward move it predicts to DELIVER LESS than the incumbent is
+                    // held. The mirror of the climb above, which lifts only at no reliability
+                    // cost; demotions stay with the posterior and the dead-rung veto below.
+                    evm_pick.rung = cur;
+                    evm_pick.goodput = evmPredictedGoodput(geometry, cur);
                     evm_decided = true;
                 } else if (latent_rung != kRungIdxNone &&
                            evm_selector_.successProb(latent_rung) <

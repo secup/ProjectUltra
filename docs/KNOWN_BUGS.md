@@ -30,12 +30,6 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   floor and was dropped as consumed). Chirp-anchored OFDM control decodes work (ULTRA_BURST_ACQ=chirp:
   8/8 at 10 and 20 dB), so the defect is in the replay, not the chirp path. Fire the hint only after
   the MC-DPSK decode of that lock failed, and prove a replay decode in a test before relying on it.
-- **BUG-LATENT-RATE-CLIMB-NO-BACKOFF** (P2, open): at a true AWGN 3 dB (peak-limited TX, TNC
-  bulk_then_short seed 301, sweep 7) the receiver's latent-rate controller climbed QPSK R1/4 -> R1/2
-  after every clean R1/4 group (k=8/8), the R1/2 group failed (k=0/4), it dropped back - 10 flaps in
-  ~170 s, each switch aborting 4 in-flight frames (MOVE-EPOCH, re-queue), then a fallback to MC-DPSK:
-  6 KB not done in 600 s. A failed up-step does not raise the evidence the next one needs (compare
-  UpCrossingGate's doubling for waveform crossings). 0-5 dB bucket: after the link state machine.
 - **BUG-OFDM-FLOOR-STAYS-MCDPSK** (P3, open): at a true AWGN 3 dB on a peak-limited TX, OFDM QPSK R1/4 lost
   whole rounds (two ARQ aborts), the sender crossed down, and the DQPSK selection (reading -0.8 dB, PAPR
   correction -2.9 dB) stayed under the 2.5 dB floor for the rest of a 6 KB transfer (~25 bps, TNC seed
@@ -3051,6 +3045,24 @@ Current blockers:
   down-crossing the OFDM decoder is the LISTENER, and the sender's next OFDM group (TNC
   bulk_then_short, AWGN 3 dB seed 102: the MC-DPSK primary locked the chirp, the OFDM listener never
   searched it) arrived there.
+
+### BUG-LATENT-RATE-CLIMB-NO-BACKOFF (FIXED 2026-11-24) — was P2 (AWGN 3 dB transfers out of time)
+- At a true AWGN 3 dB (peak-limited TX) QPSK R1/4 and R1/2 frames read the SAME EVM (~4.85 dB); R1/4
+  decoded every frame, R1/2 none. The effective-SNR selector's outer loop was ONE common-mode margin,
+  moved by whichever rung was in use: R1/4's clean groups drove it to -1.1 dB (R1/2 then predicted at
+  0.85 and the climb went ahead), R1/2's failures drove it to +0.6 (vetoed back down) - 10-12 R1/4 <->
+  R1/2 flaps per 6 KB transfer, each aborting the frames in flight; 4 of 10 TNC sweep-7 seeds ran out
+  of time. Two rungs with opposite table errors cannot share one margin. The selector now keeps a
+  margin per rung, moved only by that rung's own groups; a rung without groups uses the mean of the
+  observed ones (the old common-mode estimate). And a latent climb the window predicts to deliver less
+  than the incumbent is held (`Connection::evmPredictedGoodput`, CLIMB mode). CTest EvmRateSelector
+  `test_rung_margins_do_not_cancel`. GUI A/B (3 seeds, 4 KB, CFO 7.3 Hz, hardware TX, vs 8902cead):
+  AWGN 3 dB 238 -> 199 s, ITU Good 8 dB 114 -> 103 s, AWGN 6/10/20 and Good 20 identical, 0/36 fail.
+- Not the fix, and reverted: re-measuring the QPSK turbo EVM thresholds with measure_ack_fer
+  --frame-log. A failed turbo frame reports no EVM, so "decoded frames' EVM at the 50 %-FER SNR" reads
+  high (it sees only the lucky frames); those numbers (R1/4 4.9, R1/2 5.4) are biased and were not
+  kept. The QPSK turbo thresholds remain derived (LDPC minus the measured turbo gain) - an open
+  measurement, made with a method that counts failed frames' EVM.
 
 ### BUG-SIMULTANEOUS-PING-LOCKSTEP (FIXED 2026-11-24) — was P2 (two stations calling never connect)
 - Two stations that call each other at the same moment PING at the same moment; on half-duplex radios

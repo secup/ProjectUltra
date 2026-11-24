@@ -2122,6 +2122,8 @@ private:
     void noteDataTurnPayloadStarted(size_t payload_bytes);
     void sendTurnRequestIfNeeded(bool retry = false);
     bool peerDecodesRobustControl() const;
+    float evmPredictedGoodput(const LatentRateController::RungGeometryTable& geometry,
+                              uint8_t rung) const;
     // The frame being processed was demodulated as MC-DPSK (set by the frontend before delivery).
     bool last_rx_frame_mcdpsk_ = false;
     uint32_t probe_defer_ms_ = 0;  // PING retry held by carrier sense (bounded)

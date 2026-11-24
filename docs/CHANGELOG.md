@@ -10,6 +10,33 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-24 (evening) — fix: rate flapping at the OFDM floor (per-rung EVM margins)
+
+**What broke.** At a true AWGN 3 dB on a peak-limited TX the receiver flipped QPSK R1/4 <-> R1/2 every
+two groups for whole transfers; every R1/2 group failed and every switch aborted the frames in flight
+(TNC sweep 7: 4/10 AWGN 3 dB 6 KB transfers out of time). Cause: the effective-SNR selector's single
+common-mode margin, moved by whichever rung was in use, cancelled R1/2's failures with R1/4's
+successes (both rungs' frames read the same EVM).
+
+**What changed.** `EvmRateSelector` keeps one margin per rung, moved only by that rung's own groups
+(`marginFor`; an unobserved rung takes the mean of the observed ones). In CLIMB mode a latent climb
+the EVM window predicts to deliver less than the incumbent is held (`Connection::evmPredictedGoodput`).
+A threshold re-measurement was tried and reverted (selection-biased method, see KNOWN_BUGS).
+
+**Verification.** CTest 130/130 (EvmRateSelector 59/59 with the new `test_rung_margins_do_not_cancel`).
+GUI A/B, 3 seeds x 6 cells, 4 KB, CFO 7.3 Hz, hardware TX, baseline 8902cead, mean seconds:
+
+| cell | base | new |
+|---|---|---|
+| AWGN 3 dB | 238 | 199 |
+| AWGN 6 dB | 63 | 63 |
+| AWGN 10 dB | 55 | 55 |
+| AWGN 20 dB | 44 | 44 |
+| ITU Good 8 dB | 114 | 103 |
+| ITU Good 20 dB | 50 | 50 |
+
+0/36 failures; R1/4 <-> R1/2 switches at AWGN 3 dB seed 42: 10 -> 2.
+
 ## 2026-11-23 (later) — fix: a TNC that runs session after session (fading marathon)
 
 **Harness.** New `tools/tnc_scenario.py --scenario marathon`: the same two TNC processes, never
