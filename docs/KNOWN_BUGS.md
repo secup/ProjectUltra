@@ -30,6 +30,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   floor and was dropped as consumed). Chirp-anchored OFDM control decodes work (ULTRA_BURST_ACQ=chirp:
   8/8 at 10 and 20 dB), so the defect is in the replay, not the chirp path. Fire the hint only after
   the MC-DPSK decode of that lock failed, and prove a replay decode in a test before relying on it.
+- **BUG-SIMULTANEOUS-CALL-FADING** (P2, open): the PING listen-before-talk fix (BUG-SIMULTANEOUS-PING-
+  LOCKSTEP) does not cover every collision. TNC simultaneous, ITU Good 8 dB seed 402 (sweep 9): after
+  aligning the two log clocks the rounds started 0.01, 0.73, 2.14, 0.2 and 0.07 s apart - two inside
+  any carrier-sense latency, and the 0.73 / 0.2 s ones not held because BRAVO's CCA read rms 0.12
+  against a 0.24 busy threshold during the faded PING. In the 2.14 s round (no overlap) BRAVO's chirp
+  detector found only a broken pair (gap 15873 vs 28800, CFO -646 Hz, rejected): the start of
+  ALPHA's PING fell in BRAVO's own transmit blanking. Needs: a CCA threshold derived from the noise
+  statistics for a chirp's in-band power on fading, and either a longer randomized retry span or an
+  explicit tie-break (e.g. callsign-ordered slots) once two PINGs collide.
 - **BUG-OFDM-FLOOR-STAYS-MCDPSK** (P3, open): at a true AWGN 3 dB on a peak-limited TX, OFDM QPSK R1/4 lost
   whole rounds (two ARQ aborts), the sender crossed down, and the DQPSK selection (reading -0.8 dB, PAPR
   correction -2.9 dB) stayed under the 2.5 dB floor for the rest of a 6 KB transfer (~25 bps, TNC seed

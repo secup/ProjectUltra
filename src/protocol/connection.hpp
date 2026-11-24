@@ -4,6 +4,7 @@
 #include "arq.hpp"
 #include "selective_repeat_arq.hpp"
 #include "connection_policy.hpp"
+#include "link_control_plan.hpp"
 #include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
@@ -2129,7 +2130,8 @@ private:
     uint32_t probe_defer_ms_ = 0;  // PING retry held by carrier sense (bounded)
     bool peer_turn_request_mcdpsk_ = false;  // the pending TURN_REQUEST arrived on MC-DPSK
     bool disconnect_ack_mcdpsk_ = false;     // the DISCONNECT being acknowledged did
-    void answerOnArrivalWaveform(bool arrived_mcdpsk, const char* what);
+    void answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what);
+    LinkFacts linkFacts() const;
     bool maybeYieldDataTurn();
     void armDataTurnTxGuard(uint32_t guard_ms);
     void transmitFileCancelControl(const char* reason);

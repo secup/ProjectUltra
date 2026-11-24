@@ -797,7 +797,7 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
             : 0;
         setDisconnectTeardownActive(true);
         disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-        answerOnArrivalWaveform(disconnect_ack_mcdpsk_, "DISCONNECT ack");
+        answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
         transmitFrame(disconnect_ack_frame_);
         return;
     }
@@ -818,7 +818,7 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
         : 0;
     setDisconnectTeardownActive(true);
     disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-    answerOnArrivalWaveform(disconnect_ack_mcdpsk_, "DISCONNECT ack");
+    answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
     transmitFrame(disconnect_ack_frame_);
     if (!crossed_close && on_peer_closed_) {
         on_peer_closed_();  // BUG-TNC-PEER-DISCONNECTED-LATE: the host learns now, not after the grace
@@ -861,7 +861,7 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
             : 0;
         setDisconnectTeardownActive(true);
         disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-        answerOnArrivalWaveform(disconnect_ack_mcdpsk_, "DISCONNECT ack");
+        answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
         transmitFrame(disconnect_ack_frame_);
         return;
     }
@@ -879,7 +879,7 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
         : 0;
     setDisconnectTeardownActive(true);
     disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-    answerOnArrivalWaveform(disconnect_ack_mcdpsk_, "DISCONNECT ack");
+    answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
     transmitFrame(disconnect_ack_frame_);
     if (!crossed_close && on_peer_closed_) {
         on_peer_closed_();  // BUG-TNC-PEER-DISCONNECTED-LATE: the host learns now, not after the grace
@@ -1056,7 +1056,7 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
             LOG_MODEM(INFO,
                       "Connection: RX TURN_REQUEST from %s while waiting for peer DATA; reasserting TURNOVER",
                       src_call.empty() ? remote_call_.c_str() : src_call.c_str());
-            answerOnArrivalWaveform(last_rx_frame_mcdpsk_, "TURNOVER (reasserted)");
+            answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (reasserted)");
             transmitFrame(turnover.serialize());
             local_turn_request_pending_ = false;
             turn_request_retransmit_ms_ = 0;
@@ -1082,7 +1082,7 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
         LOG_MODEM(INFO,
                   "Connection: RX TURN_REQUEST from %s with the turn orphaned; granting it (TURNOVER)",
                   src_call.empty() ? remote_call_.c_str() : src_call.c_str());
-        answerOnArrivalWaveform(last_rx_frame_mcdpsk_, "TURNOVER (orphaned turn)");
+        answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (orphaned turn)");
         transmitFrame(turnover.serialize());
         yielded_data_turn_waiting_for_peer_data_ = true;
         yielded_turn_wait_ms_ = 0;

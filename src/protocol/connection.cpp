@@ -4,6 +4,7 @@
 #include <chrono>
 #include <atomic>
 #include "connection.hpp"
+#include "link_control_plan.hpp"
 #include "mcdpsk_frame.hpp"
 #include "connection_policy.hpp"
 #include "descriptor_window_anchor.hpp"
@@ -1133,8 +1134,9 @@ void Connection::disconnect() {
         // learned the session ended (TNC, AWGN 3 dB and ITU Good 8 dB, seed 301: the host closes as
         // soon as its data is acknowledged, and that ACK carried the up-crossing command). Every
         // copy, its retry timing and the ACK then follow the waveform both stations decode.
-        if (crossing_probe_active_ && !crossing_probe_rx_side_ &&
-            negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        ControlEvent close_start;
+        close_start.kind = ControlKind::DisconnectStart;
+        if (planControlTx(linkFacts(), close_start).revert_up_crossing) {
             const int rung = connection_policy::mcDpskRungIndexFor(crossing_return_mod_);
             if (rung >= 0 &&
                 applyWaveformCrossing(connection_policy::encodeMcDpskRungCommand(rung),
@@ -1841,11 +1843,7 @@ void Connection::noteDataTurnPayloadStarted(size_t payload_bytes) {
 // was cut short and lost (TNC reconnect, AWGN 3 dB seed 301: the host's DISCONNECT came 3 ms after
 // a receiver-commanded up-crossing; the robust copy went out at 16-FSK to a DQPSK primary).
 Modulation Connection::robustControlModulation() const {
-    if (crossing_probe_active_ && !crossing_probe_rx_side_ &&
-        connection_policy::mcDpskRungIndexFor(crossing_return_mod_) >= 0) {
-        return crossing_return_mod_;
-    }
-    return connection_policy::ladderRungForId(LadderRungId::ROBUST_MID).modulation;
+    return peerMcDpskDecoderModulation(linkFacts());  // link_control_plan.hpp
 }
 
 // Delivered useful bytes/s the EVM window predicts for rung r: the selector's counterfactual success,
@@ -1870,13 +1868,25 @@ bool Connection::peerDecodesRobustControl() const {
 // waveform does not move the session (a late repeat must not), so the reply used to go out on OFDM -
 // which the peer, just shown unable to get OFDM through, then missed: a TURNOVER at AWGN 3 dB that
 // stalled the turn for minutes, a DISCONNECT ack at ITU Good 15 dB that left the closer retrying.
-void Connection::answerOnArrivalWaveform(bool arrived_mcdpsk, const char* what) {
-    if (!arrived_mcdpsk || negotiated_mode_ != WaveformMode::OFDM_CHIRP ||
-        !peerDecodesRobustControl() || !on_robust_control_once_) {
-        return;
-    }
+void Connection::answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what) {
+    ControlEvent e;
+    e.kind = kind;
+    e.answering_mcdpsk = arrived_mcdpsk;
+    const ControlTxPlan plan = planControlTx(linkFacts(), e);
+    if (!plan.robust_once || !on_robust_control_once_) return;
     LOG_MODEM(INFO, "Connection: %s on MC-DPSK, the waveform its request arrived on", what);
-    on_robust_control_once_(robustControlModulation());
+    on_robust_control_once_(plan.robust_mod);
+}
+
+// The facts the link-control plan reads (link_control_plan.hpp), from this connection's state.
+LinkFacts Connection::linkFacts() const {
+    LinkFacts f;
+    f.session = negotiated_mode_;
+    f.session_mod = data_modulation_;
+    f.peer_decodes_robust = peerDecodesRobustControl();
+    f.up_unconfirmed_tx = crossing_probe_active_ && !crossing_probe_rx_side_;
+    f.up_return_mod = crossing_return_mod_;
+    return f;
 }
 
 void Connection::sendTurnRequestIfNeeded(bool retry) {
@@ -1907,11 +1917,15 @@ void Connection::sendTurnRequestIfNeeded(bool retry) {
     // interval: a peer holding the turn on a working link is sending, and we hear it - a robust
     // frame then would pull its dual-listen receiver down to MC-DPSK in the middle of a good
     // transfer. Silence is either a link OFDM no longer carries or an idle peer; both lose nothing.
-    if (retry && negotiated_mode_ == WaveformMode::OFDM_CHIRP && peerDecodesRobustControl() &&
-        ms_since_peer_heard_ >= turnRequestRetransmitMs() && on_robust_control_once_) {
+    ControlEvent req;
+    req.kind = retry ? ControlKind::TurnRequestRetry : ControlKind::TurnRequest;
+    req.peer_silent_ms = ms_since_peer_heard_;
+    req.retry_interval_ms = turnRequestRetransmitMs();
+    if (const ControlTxPlan plan = planControlTx(linkFacts(), req);
+        plan.robust_once && on_robust_control_once_) {
         LOG_MODEM(INFO, "Connection: TURN_REQUEST retry on the robust waveform (MC-DPSK): peer "
                         "silent %u ms", ms_since_peer_heard_);
-        on_robust_control_once_(robustControlModulation());
+        on_robust_control_once_(plan.robust_mod);
     }
     transmitFrame(request.serialize());
     local_turn_request_pending_ = true;
@@ -1953,7 +1967,7 @@ bool Connection::maybeYieldDataTurn() {
     }
 
     auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
-    answerOnArrivalWaveform(peer_turn_request_mcdpsk_, "TURNOVER");
+    answerOnArrivalWaveform(ControlKind::Turnover, peer_turn_request_mcdpsk_, "TURNOVER");
     LOG_MODEM(INFO,
               "Connection: TX TURNOVER to %s (peer requested DATA turn, turn_bytes=%llu, contended_ms=%u, backlog=%zu)",
               remote_call_.c_str(),
@@ -6984,7 +6998,7 @@ bool Connection::tickDisconnectResponderGrace(uint32_t elapsed_ms) {
                       disconnect_ack_repeat_count_,
                       repeat_limit,
                       disconnect_pending_ms_);
-            answerOnArrivalWaveform(disconnect_ack_mcdpsk_, "DISCONNECT ack repeat");
+            answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack repeat");
             transmitFrame(disconnect_ack_frame_);
         } else {
             disconnect_ack_retransmit_ms_ -= elapsed_ms;
@@ -7509,39 +7523,27 @@ void Connection::tick(uint32_t elapsed_ms) {
                         disconnect_retry_count_++;
                         LOG_MODEM(INFO, "Connection: Retransmitting DISCONNECT (%d/%d)",
                                   disconnect_retry_count_, DISCONNECT_MAX_RETRIES);
-                        // BUG-MCDPSK-CLOSE-STUCK-ON-UNPROVEN-RUNG: an unanswered MC-DPSK close
-                        // steps one rung down per retry, the rule an unanswered data burst already
-                        // follows (maybeFallBackMcDpskRungOnTimeout). A station's own MC-DPSK TX rung
-                        // can be one the link never carried for it (it had been receiving): TNC AWGN
-                        // 3 dB seed 306 sent all four copies at DQPSK, the peer read -5 dB and
-                        // decoded none while 16-FSK-F carried its data.
-                        if (negotiated_mode_ == WaveformMode::MC_DPSK) {
-                            const Modulation below =
-                                connection_policy::mcDpskRungBelow(data_modulation_);
-                            if (below != data_modulation_ &&
-                                connection_policy::mcDpskRungIndexFor(below) >= 0) {
-                                LOG_MODEM(INFO, "Connection: MC-DPSK close retry steps down %s -> %s",
-                                          modulationToString(data_modulation_),
-                                          modulationToString(below));
-                                data_modulation_ = below;
-                                notifyDataModeChanged(measured_snr_db_, wireFadingIndex(),
-                                                      /*snr_is_wire=*/false);
-                            }
+                        // The link-control plan (link_control_plan.hpp): R5 an unanswered MC-DPSK close
+                        // steps one rung down (BUG-MCDPSK-CLOSE-STUCK-ON-UNPROVEN-RUNG); R4 the last
+                        // useful retry of an OFDM session rides MC-DPSK, which the peer's dual-listen
+                        // listener decodes 10+ dB below OFDM (BUG-DISCONNECT-LOST-IN-FADE).
+                        ControlEvent retry_event;
+                        retry_event.kind = ControlKind::DisconnectRetry;
+                        retry_event.retry_count = disconnect_retry_count_;
+                        retry_event.useful_retry_count = disconnectUsefulRetryCount();
+                        const ControlTxPlan retry_plan = planControlTx(linkFacts(), retry_event);
+                        if (retry_plan.step_down_to != Modulation::AUTO) {
+                            LOG_MODEM(INFO, "Connection: MC-DPSK close retry steps down %s -> %s",
+                                      modulationToString(data_modulation_),
+                                      modulationToString(retry_plan.step_down_to));
+                            data_modulation_ = retry_plan.step_down_to;
+                            notifyDataModeChanged(measured_snr_db_, wireFadingIndex(),
+                                                  /*snr_is_wire=*/false);
                         }
-                        // The last useful retry of an OFDM session goes out on MC-DPSK, which the
-                        // peer's dual-listen listener decodes 10+ dB below OFDM: on ITU Good 8 dB
-                        // every OFDM copy of a close can fall in one fade (two copies at 0.0 and
-                        // 0.4 dB LTS SNR, the peer's host never told the session ended -
-                        // BUG-DISCONNECT-LOST-IN-FADE). The peer follows it onto MC-DPSK and
-                        // processes the DISCONNECT.
-                        // (Not dualListenActive(): the close itself has made the follow inactive;
-                        // the peer, still connected, still runs its listener.)
-                        if (negotiated_mode_ == WaveformMode::OFDM_CHIRP && peerDecodesRobustControl() &&
-                            disconnect_retry_count_ >= disconnectUsefulRetryCount() &&
-                            on_robust_control_once_) {
+                        if (retry_plan.robust_once && on_robust_control_once_) {
                             LOG_MODEM(INFO, "Connection: last DISCONNECT retry on the robust "
                                             "waveform (MC-DPSK)");
-                            on_robust_control_once_(robustControlModulation());
+                            on_robust_control_once_(retry_plan.robust_mod);
                         }
                         transmitFrame(disconnect_frame_);
                         // For the rung this copy actually rides (a step down lengthens the frame).

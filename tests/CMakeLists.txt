@@ -1148,3 +1148,10 @@ target_include_directories(test_peak_control PRIVATE
 )
 target_link_libraries(test_peak_control PRIVATE ultra_core ota_channel_core)
 add_test(NAME PeakControl COMMAND test_peak_control)
+
+# Link-control TX plan (docs/LINK_STATE_MACHINE_DESIGN_2026_11_24.md slice 1): every rule's positive
+# case and the conditions that must keep it off.
+add_executable(test_link_control_plan test_link_control_plan.cpp)
+target_include_directories(test_link_control_plan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_link_control_plan PRIVATE ultra_core)
+add_test(NAME LinkControlPlan COMMAND test_link_control_plan)

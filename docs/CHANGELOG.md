@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-24 (night) — refactor: link-control TX plan (state machine slices 1-2)
+
+**What changed.** `src/protocol/link_control_plan.hpp` holds the five link-control rules as one pure
+function (`planControlTx` over `LinkFacts` + `ControlEvent`): R1 reply on the request's waveform, R2
+close during an unconfirmed up-crossing, R3 TURN_REQUEST retry into silence, R4 last useful DISCONNECT
+retry robust, R5 MC-DPSK close step-down; `peerMcDpskDecoderModulation` replaces the robust-rung logic.
+Every one of the 13 call sites in connection.cpp / connection_handlers.cpp now asks the plan
+(`Connection::linkFacts`, `answerOnArrivalWaveform(kind, ...)`). Behaviour-identical by construction.
+
+**Verification.** CTest 131/131 (new LinkControlPlan 20/20; WaveformFollow 248/248, ConnectionAdaptive
+953/953 unchanged). TNC smoke sweep 9 (seeds 401-402, 70 runs): 67/70; none of the plan's rules fired in
+the three failures - AWGN 3 dB bulk (BUG-OFDM-FLOOR-STAYS-MCDPSK), ITU Good 8 dB short (slow MC-DPSK on a
+harsh fading draw, two failed up-crossings) and simultaneous (BUG-SIMULTANEOUS-CALL-FADING, new).
+
 ## 2026-11-24 (evening) — fix: rate flapping at the OFDM floor (per-rung EVM margins)
 
 **What broke.** At a true AWGN 3 dB on a peak-limited TX the receiver flipped QPSK R1/4 <-> R1/2 every
