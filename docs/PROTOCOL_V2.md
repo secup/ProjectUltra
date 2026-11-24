@@ -357,8 +357,12 @@ On DISCONNECT reception:
 ### File transfer payload protocol
 
 All file transfer uses `FrameType::DATA` and a payload type byte:
-- `0x01` `FILE_START`: flags, original size, CRC32, filename
-- `0x02` `FILE_DATA`: 32-bit offset + data chunk
+- `0x01` `FILE_START`: flags, transfer id (8 bits) + original size (24 bits), CRC32, filename
+- `0x02` `FILE_DATA`: transfer id (8 bits) + offset (24 bits) + data chunk
+- `0x03` `FILE_BLOCK`: as FILE_START, transfer id in the original-size field, plus the whole file
+- Transfer id 1..255 per sender, 0 = an older sender without identity (2026-11-23,
+  BUG-FILE-CHUNK-CROSSES-TRANSFERS). The receiver drops frames of the last 8 transfers it finished
+  this session; a transfer is at most 16 MiB.
 
 Sender:
 - Reads full file into memory

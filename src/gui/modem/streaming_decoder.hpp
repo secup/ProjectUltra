@@ -109,6 +109,7 @@ struct DecodeResult {
     int codewords_ok = 0;           // Number of successful LDPC decodes
     int codewords_failed = 0;       // Number of failed LDPC decodes
     bool is_ping = false;           // True if this is a PING (chirp-only) frame
+    bool decoded_mcdpsk = false;    // Demodulated as MC-DPSK (by either dual-listen decoder)
     bool has_idle_in_band_snr_db = false;
     float idle_in_band_snr_db = 0.0f;       // Receiver passband/in-band idle SNR.
     bool has_ofdm_broadband_snr_db = false;
@@ -763,6 +764,25 @@ public:
     void setMcDpskTurnLossCallback(std::function<void(bool turn_over)> cb) {
         mc_dpsk_turn_loss_callback_ = std::move(cb);
     }
+    // Dual-listen chirp hint (BUG-CONNECTED-OFDM-IGNORES-CHIRP). A connected MC-DPSK decoder that
+    // locks a dual chirp reports how many samples ago the frame's training began; the engine hands
+    // it to the OFDM primary (noteExternalChirpAnchor), whose structure-only group search does not
+    // look for chirps. Decode thread, under this decoder's buffer mutex.
+    void setChirpLockCallback(std::function<void(size_t samples_ago)> cb) {
+        chirp_lock_callback_ = std::move(cb);
+    }
+    // A dual chirp whose training began samples_ago samples before this decoder's newest sample
+    // (same audio stream, the other slot's clock): the next search pass runs this decoder's own
+    // chirp+LTS detector on the window around it. Any thread.
+    void noteExternalChirpAnchor(size_t samples_ago);
+    // Whether a failed MC-DPSK first frame may wait for a 16-FSK frame's span (the bottom rung).
+    // Off for a dual-listen listener (BUG-LISTENER-MFSK-LOOKAHEAD-BLIND): a sender leaving OFDM
+    // lands on 16-FSK-F (the listener's rung), never on 16-FSK, while every OFDM frame's dual chirp
+    // is a failed "first frame" here - two of them armed a 10.5 s look-ahead that hid the frames after
+    // it. Any thread.
+    void setMfskLookaheadAllowed(bool allowed) {
+        mfsk_lookahead_allowed_.store(allowed, std::memory_order_relaxed);
+    }
     void setMcDpskFrameLostCallback(std::function<void(int modulation)> cb) {
         mc_dpsk_frame_lost_callback_ = std::move(cb);
     }
@@ -1237,6 +1257,14 @@ private:
         size_t warm_narrow_end_abs = 0;
         size_t warm_narrow_candidate_span_samples = 0;
     } deferred_future_sync_;
+
+    // The dual-listen chirp hint (setChirpLockCallback / noteExternalChirpAnchor), guarded by
+    // ring_.buffer_mutex_: the absolute (this decoder's clock) training start of a chirp the other
+    // decoder locked.
+    std::function<void(size_t samples_ago)> chirp_lock_callback_;
+    std::atomic<bool> mfsk_lookahead_allowed_{true};
+    bool external_anchor_valid_ = false;
+    size_t external_anchor_abs_ = 0;
 
     // BUG-HALFOPEN-CONNECT: CONNECT and the first connected OFDM burst share the
     // full dual-chirp timing anchor.  If CONNECT_ACK was lost, an OFDM-only

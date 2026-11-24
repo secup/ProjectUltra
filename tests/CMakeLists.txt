@@ -769,6 +769,18 @@ target_include_directories(test_descriptor_known_bits PRIVATE
 target_link_libraries(test_descriptor_known_bits PRIVATE ultra_core ota_channel_core)
 add_test(NAME DescriptorKnownBits COMMAND test_descriptor_known_bits)
 
+# Every connected-OFDM control frame type decodes through the production encoder/decoder.
+add_executable(test_ofdm_control_frames
+    test_ofdm_control_frames.cpp
+    ${ULTRA_STREAMING_DECODER_SOURCES}
+    ../src/gui/modem/streaming_encoder.cpp
+)
+target_include_directories(test_ofdm_control_frames PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+target_link_libraries(test_ofdm_control_frames PRIVATE ultra_core ota_channel_core)
+add_test(NAME OFDMControlFrames COMMAND test_ofdm_control_frames)
+
 # BUG-NB-CHIRP-FALSE-LOCK-FILTERED: the chirp threshold is referenced to the noise in its band.
 add_executable(test_chirp_cfar test_chirp_cfar.cpp)
 target_include_directories(test_chirp_cfar PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)

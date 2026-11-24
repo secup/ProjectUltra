@@ -109,8 +109,21 @@ VERSION 0.6.4.1
   2026-11-23 a TNC answered every PING whatever LISTEN said, and dropped back to not listening after
   its first session while the modem kept accepting calls.)
 - **ABORT** ends the session at once: `OK`, then `BUFFER 0` if data was queued, then `DISCONNECTED`.
-  The peer is not told; a peer that was receiving declares the link lost once the sender's whole
-  retry budget has passed (about 4 minutes on OFDM, up to about 12 minutes on MC-DPSK).
+  The peer is not told. A peer that was sending or receiving and hears nothing at all from this
+  station declares the link lost after 3 minutes of total silence (never sooner: a session rides out
+  shorter outages), and its host gets `DISCONNECTED`. An idle peer (nothing owed either way) stays
+  connected until its host ends the session.
+- **The peer hangs up** (its host sent `DISCONNECT`): `DISCONNECTED` reaches the host as soon as the
+  peer's DISCONNECT is received. The TNC keeps answering a repeated DISCONNECT for about 24 s in
+  the background (in case its acknowledgement faded); a `CONNECT` in that time ends it and dials at
+  once. (Before 2026-11-23 the host was told only at the end of those 24 s.)
+- **BUFFER** counts the host's own bytes not yet acknowledged by the peer: a 1-byte write reports
+  `BUFFER 1`. `BUFFER 0` means everything written has been delivered.
+- **A block that fails its integrity check** at the receiver (never expected; a guard against a
+  protocol fault) ends the session: both hosts get `DISCONNECTED` instead of a silent gap in the
+  data, and retry.
+- **PENDING** arrives with `CONNECTED` on an inbound call: the CONNECT is the first frame that names
+  this station (a PING probe carries no callsign), and a listening TNC accepts it at once.
 - **DISCONNECT** during call setup cancels the attempt: `OK`, then `DISCONNECTED`.
 - **STATS** outside a session reports `rate=none mod=none mode=none snr=none bps=0`.
 

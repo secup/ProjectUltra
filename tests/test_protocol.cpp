@@ -794,8 +794,11 @@ bool test_disconnect() {
 
     // The responder intentionally stays connected during a disconnect grace
     // period so it can re-send the final ACK if the initiator retransmits the
-    // DISCONNECT. Advance beyond that production grace window before asserting.
-    channel.run(60, 100);
+    // DISCONNECT. Advance beyond that production grace window before asserting (it scales with
+    // the session's control-frame airtime: tens of seconds on MC-DPSK).
+    for (int i = 0; i < 300 && !(a_disconnected && b_disconnected); ++i) {
+        channel.run(10, 100);
+    }
 
     if (!a_disconnected && stationA.isConnected()) FAIL("A not disconnected");
     if (!b_disconnected && stationB.isConnected()) FAIL("B not disconnected");
@@ -913,7 +916,12 @@ bool test_crossed_disconnect_converges_without_acks() {
         FAIL("Crossed close did not enter mutual DISCONNECTING grace");
     }
 
-    channel.run(60, 100);
+    // The grace scales with the session's control-frame airtime (tens of seconds on MC-DPSK).
+    for (int i = 0; i < 300 && !(stationA.getState() == ConnectionState::DISCONNECTED &&
+                                 stationB.getState() == ConnectionState::DISCONNECTED);
+         ++i) {
+        channel.run(10, 100);
+    }
 
     if (stationA.getState() != ConnectionState::DISCONNECTED ||
         stationB.getState() != ConnectionState::DISCONNECTED) {

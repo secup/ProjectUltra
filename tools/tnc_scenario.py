@@ -209,7 +209,7 @@ class Rig:
              "--lobby-channel", a.channel, "--lobby-snr-db", str(a.snr_db),
              "--lobby-seed", str(a.seed),
              "--lobby-rx-cfo-hz", f"BRAVO:{cfo:g},ALPHA:{-cfo:g}",
-             "--shutdown-deadline-sec", str(int(a.timeout) + 300)],
+             "--shutdown-deadline-sec", "10"],
             stdout=serve_log, stderr=subprocess.STDOUT, env=env)
         self.procs.append(serve)
         grpc = None
@@ -585,6 +585,64 @@ def sc_simultaneous(rig):
     disconnect(rig, a)
 
 
+def sc_marathon(rig):
+    """Many sessions on the same two TNC processes, never restarted: each side calls in turn, each
+    session carries several short messages and several bulk (file-path) blocks both ways, and every
+    byte is checked."""
+    a, b = rig.alpha, rig.bravo
+    setup(rig)
+    _, r = a.command("LISTEN ON")
+    if r != "OK":
+        raise Fail(f"ALPHA: LISTEN ON -> {r}")
+
+    def connect_from(caller, callee, label):
+        mc, me = caller.mark(), callee.mark()
+        t = caller.now()
+        _, r = caller.command(f"CONNECT {caller.name} {callee.name}")
+        if r != "OK":
+            raise Fail(f"{caller.name}: CONNECT -> {r}")
+        tc, lc = caller.wait_line(lambda l: l.startswith("CONNECTED") or l == "DISCONNECTED",
+                                  180, start=mc, what=f"{label} CONNECTED")
+        if lc == "DISCONNECTED":
+            raise Fail(f"{label}: {caller.name} got DISCONNECTED instead of CONNECTED")
+        callee.wait_line(lambda l: l.startswith("CONNECTED"), 60, start=me,
+                         what=f"{label} CONNECTED (callee)")
+        expected = f"CONNECTED {caller.name} {callee.name}"
+        if not lc.startswith(expected):
+            raise Fail(f"{label}: '{lc}', want '{expected} ...'")
+        rig.metric(f"{label}_connect_s", f"{tc - t:.1f}")
+
+    seed = 2000
+    sessions = [(a, b, a), (b, a, b), (a, b, b), (b, a, a), (a, b, a)]
+    for i, (caller, callee, closer) in enumerate(sessions, start=1):
+        label = f"s{i}"
+        connect_from(caller, callee, label)
+        for n in (30, 120):
+            seed += 1
+            deliver(rig, caller, callee, msg_bytes(n, seed), f"{label}_msg_{caller.name[0]}_{n}B",
+                    rig.args.msg_timeout)
+            seed += 1
+            deliver(rig, callee, caller, msg_bytes(n // 2, seed),
+                    f"{label}_msg_{callee.name[0]}_{n // 2}B", rig.args.msg_timeout)
+        # Two bulk blocks (> 4 KB: the TNC sends them as file transfers), then one the other way.
+        for k in range(2):
+            seed += 1
+            deliver(rig, caller, callee, bin_bytes(5000, seed),
+                    f"{label}_bulk{k}_{caller.name[0]}_5000B", rig.args.bulk_timeout)
+        seed += 1
+        deliver(rig, callee, caller, bin_bytes(4500, seed),
+                f"{label}_bulk_{callee.name[0]}_4500B", rig.args.bulk_timeout)
+        seed += 1
+        deliver(rig, caller, callee, msg_bytes(20, seed), f"{label}_after_bulk_{caller.name[0]}_20B",
+                rig.args.msg_timeout)
+        disconnect(rig, closer, label=f"{label}_disconnect")
+        time.sleep(3)
+    rig.metric("sessions_completed", len(sessions))
+    for p in rig.procs:
+        if p.poll() is not None:
+            raise Fail("a process exited during the marathon")
+
+
 def sc_cancel(rig):
     """DISCONNECT while the call is still being set up cancels it on both ends."""
     a, b = rig.alpha, rig.bravo
@@ -642,6 +700,7 @@ SCENARIOS = {
     "noanswer": sc_noanswer,
     "not_listening": sc_not_listening,
     "simultaneous": sc_simultaneous,
+    "marathon": sc_marathon,
     "cancel": sc_cancel,
 }
 

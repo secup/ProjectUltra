@@ -91,6 +91,12 @@ ProtocolEngine::ProtocolEngine(const ConnectionConfig& config)
         }
     });
 
+    connection_.setPeerClosedCallback([this]() {
+        if (on_peer_closed_) {
+            on_peer_closed_();
+        }
+    });
+
     // Forward internal state changes (like PROBING → CONNECTING)
     connection_.setStateChangedCallback([this](ConnectionState state, const std::string& info) {
         if (on_connection_changed_) {
@@ -182,6 +188,16 @@ void ProtocolEngine::setDisconnectTeardownCallback(DisconnectTeardownCallback cb
 void ProtocolEngine::setIncomingCallCallback(IncomingCallCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     on_incoming_call_ = std::move(cb);
+}
+
+void ProtocolEngine::setPeerClosedCallback(PeerClosedCallback cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    on_peer_closed_ = std::move(cb);
+}
+
+bool ProtocolEngine::peerClosedGraceActive() const {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    return connection_.peerClosedGraceActive();
 }
 
 void ProtocolEngine::setDataReceivedCallback(DataReceivedCallback cb) {
@@ -898,6 +914,11 @@ void ProtocolEngine::setWaveformCrossingCallback(Connection::WaveformCrossingCal
     connection_.setWaveformCrossingCallback(std::move(cb));
 }
 
+void ProtocolEngine::setRobustControlOnceCallback(std::function<void(Modulation)> cb) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.setRobustControlOnceCallback(std::move(cb));
+}
+
 void ProtocolEngine::setSessionAddressesCallback(Connection::SessionAddressesCallback cb) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.setSessionAddressesCallback(std::move(cb));
@@ -921,6 +942,11 @@ void ProtocolEngine::noteBurstWindowAnchor(uint8_t epoch, uint16_t base_low) {
 void ProtocolEngine::noteRxMcDpskMargin(bool upper_rung_margin) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
     connection_.noteRxMcDpskMargin(upper_rung_margin);
+}
+
+void ProtocolEngine::noteRxFrameMcDpsk(bool mcdpsk) {
+    std::lock_guard<ProtocolEngineMutex> lock(mutex_);
+    connection_.noteRxFrameMcDpsk(mcdpsk);
 }
 
 void ProtocolEngine::noteRxWaveform(WaveformMode mode) {

@@ -57,6 +57,9 @@ bool ModemEngine::deliverFrame(const DecodeResult& result) {
         rx_data_queue_.push(frame_data);
     }
 
+    if (rx_frame_waveform_cb_) {
+        rx_frame_waveform_cb_(result.decoded_mcdpsk);
+    }
     if (raw_data_callback_) {
         raw_data_callback_(frame_data, result.physical_turn_complete);
     }

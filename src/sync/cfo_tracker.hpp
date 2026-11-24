@@ -198,6 +198,19 @@ public:
         established_.store(true);
     }
 
+    // A value to demodulate the frame in hand with, from evidence too weak to ESTABLISH the tracker
+    // (a chirp below the detection threshold): it neither protects itself against the next chirp
+    // (the drift clamp needs an established value) nor survives as the session's measurement.
+    // BUG-WEAK-CHIRP-ESTABLISHES-CFO: a 0.078-correlation lock during a call collision read
+    // -52 Hz (true +7.3), was established, and the clamp then rejected every correct 7.2-7.3 Hz
+    // chirp of the session - no OFDM frame decoded.
+    void storeProvisional(float cfo_hz) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!std::isfinite(cfo_hz)) return;
+        if (established_.load()) return;  // never overwrite a measurement with weaker evidence
+        cfo_.store(cfo_hz);
+    }
+
     // Reset to 0 for a new connection / mode change (clears the pilot-refined mark).
     void reset() {
         std::lock_guard<std::mutex> lock(state_mutex_);

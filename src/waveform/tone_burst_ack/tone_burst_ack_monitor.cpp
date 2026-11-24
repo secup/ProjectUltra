@@ -48,6 +48,7 @@ void ToneBurstAckMonitor::arm(size_t window_samples) {
         // previous burst with a later deadline).
         return;
     }
+    const bool was_armed = armed_;
     armed_ = true;
     arm_deadline_stream_offset_ = new_deadline;
     // BUG-POSTTX-ACK-MISS forensics (2026-07-05): reset the per-window counters +
@@ -58,7 +59,9 @@ void ToneBurstAckMonitor::arm(size_t window_samples) {
     scan_high_water_stream_ = total_samples_fed_;
     max_feed_chunk_while_armed_ = 0;
     passes_while_armed_ = 0;
-    armed_at_stream_ = total_samples_fed_;
+    // The causality bound for detections (see the accept path): the FIRST arm of this window. A
+    // longer re-arm while armed must not reject an ACK already on the air for the earlier burst.
+    if (!was_armed) armed_at_stream_ = total_samples_fed_;
     LOG_MODEM(INFO, "ToneBurstAckMonitor armed: window_samples=%zu fed=%llu deadline=%llu buf_size=%zu "
               "cfo_prior=%.2f cfo_halfwidth=%.1f",
               window_samples, (unsigned long long)total_samples_fed_,
@@ -297,6 +300,22 @@ void ToneBurstAckMonitor::runDetectionPass() {
         const uint64_t detected_stream_offset =
             buffer_start_stream_offset_ + static_cast<uint64_t>(tail_base) +
             static_cast<uint64_t>(r.detected_offset_samples);
+
+        // CAUSALITY (BUG-TONE-ACK-BEFORE-ARM): an ACK answers the burst that armed this window, so
+        // it cannot start before the arm. The scan window reaches back into audio buffered before
+        // it (the detector needs a whole burst span), and noise there passed CRC, the floor and the
+        // predicate: a 30-byte message was retired as delivered and never resent (TNC cancel, ITU
+        // Good 8 dB seed 304: "ACK" at stream 72136, armed at 85440; the host was told BUFFER 0).
+        // The floor's false-alarm budget assumes only post-arm audio is ever accepted.
+        if (cfg_.armed_only && detected_stream_offset < armed_at_stream_) {
+            ++suppressed_attempts_;
+            LOG_MODEM(WARN,
+                      "ToneBurstAckMonitor: candidate at stream %llu precedes the arm at %llu "
+                      "(symbol_ms=%d) - not an answer to this burst, dropped",
+                      static_cast<unsigned long long>(detected_stream_offset),
+                      static_cast<unsigned long long>(armed_at_stream_), symbol_ms);
+            continue;
+        }
 
         // Duplicate-detection suppression: drop if the previous detection
         // landed within suppress_window_samples of this one.

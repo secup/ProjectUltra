@@ -71,6 +71,12 @@ public:
 
     virtual void setConnectionChangedCallback(ConnectionChangedCallback cb) = 0;
     virtual void setIncomingCallCallback(IncomingCallCallback cb) = 0;
+    // The peer's DISCONNECT started this station's re-ACK grace (defaults for fakes: never).
+    virtual void setPeerClosedCallback(std::function<void()> cb) { (void)cb; }
+    // Something the host wrote will never be delivered (a block the ARQ gave up on, a staged unit
+    // whose transfer failed). Defaults for fakes: never.
+    virtual void setSendFailedCallback(std::function<void(const std::string&)> cb) { (void)cb; }
+    virtual bool peerClosedGraceActive() const { return false; }
     virtual void setDataReceivedCallback(DataReceivedCallback cb) = 0;
     virtual void setFileReceivedCallback(FileReceivedCallback cb) = 0;
 };
@@ -134,6 +140,7 @@ private:
     // the temp file. This is the RX half of the bulk-stream-over-file-transport path.
     void onFileReceived(const std::string& path, bool success, const std::string& error);
     void onIncomingCall(const std::string& peer);
+    void onPeerClosed();
     void onAudioQueueState(bool active, uint32_t elapsed_ms);
 
     static protocol::WaveformMode waveformForBandwidth(int hz);
@@ -177,6 +184,10 @@ private:
     std::atomic<bool> ptt_active_{false};
     // The session rung's information rate (connection_policy::sessionDataRateBps), 0 outside one.
     std::atomic<int> session_rate_bps_{0};
+    // A received block failed its integrity check: the session ends from tick() (the file
+    // callback runs under the engine lock). BUG-TNC-FAILED-BLOCK-SILENT.
+    std::atomic<bool> failed_receive_disconnect_{false};
+    void onSendFailed(const std::string& what);
     std::mutex ptt_mutex_;
     uint32_t ptt_tail_ms_ = 0;
 

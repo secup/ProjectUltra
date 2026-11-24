@@ -96,6 +96,20 @@ struct ConnectionAdaptiveTestAccess {
     // The peer holds the DATA turn: this end only receives - a data receiver's real state (the
     // anchored-burst backstop applies only there; BUG-SENDER-BACKSTOP-STEALS-ACK).
     static void makePeerIss(Connection& c) { c.local_data_turn_ = false; }
+    static void makeUnconfirmedResponder(Connection& c) {
+        c.is_initiator_ = false;
+        c.handshake_confirmed_ = false;
+        c.local_data_turn_ = false;
+        c.responder_half_open_ms_ = 0;
+        c.responder_quiet_ms_ = 0;
+        c.connect_ack_frame_ = Bytes(35, 0x01);
+    }
+    static uint32_t connectRetryIntervalMs(const Connection& c) { return c.connectRetryIntervalMs(); }
+    static uint32_t publishToneAckCap(Connection& c, size_t frames) {
+        c.last_rx_group_frames_ = frames;
+        c.publishToneAckAirtimeCap();
+        return c.toneAckMaxSymbolMs();
+    }
 
     static void makeConnectedOFDM(Connection& c,
                                   CodeRate rate,
@@ -680,6 +694,9 @@ struct ConnectionAdaptiveTestAccess {
     }
 
     static size_t arqWindowSize(const Connection& c) { return c.arq_.getWindowSize(); }
+    static uint32_t ackTimeoutForFrameCount(const Connection& c, size_t n) {
+        return c.arq_.ackTimeoutForFrameCount(n);
+    }
 
     static uint32_t peerSilentLinkLostMs(const Connection& c) {
         return c.peerSilentLinkLostMs();
@@ -1668,17 +1685,28 @@ void test_disconnect_timing_scope_and_timeout_budget() {
 
     Connection narrow;
     ConnectionAdaptiveTestAccess::makeConnectedNarrowOFDM(narrow);
-    CHECK(ConnectionAdaptiveTestAccess::disconnectRetryIntervalMs(narrow) == 5000 &&
-              ConnectionAdaptiveTestAccess::disconnectResponderGraceMs(narrow) == 5000 &&
-              ConnectionAdaptiveTestAccess::disconnectAckRetransmitMs(narrow) == 2000,
-          "narrow OFDM teardown timing must remain on the legacy 5s/5s/2s policy");
+    // BUG-DISCONNECT-TIMING-NON-OFDM: outside wideband OFDM the teardown ran on fixed 5 s / 5 s / 2 s
+    // whatever the control frame's airtime (MC-DPSK 2.3-4.9 s, narrowband behind a 2.2 s anchor): a
+    // retry keyed over the peer's ACK. The physical invariants, on narrowband and MC-DPSK alike.
+    auto checkTeardownTiming = [](const Connection& c, const char* name) {
+        const uint32_t keydown = ConnectionAdaptiveTestAccess::disconnectControlKeydownMs(c);
+        const uint32_t retry = ConnectionAdaptiveTestAccess::disconnectRetryIntervalMs(c);
+        const uint32_t grace = ConnectionAdaptiveTestAccess::disconnectResponderGraceMs(c);
+        const uint32_t repeat = ConnectionAdaptiveTestAccess::disconnectAckRetransmitMs(c);
+        CHECK(retry >= 2 * keydown, std::string(name) +
+                                        ": a DISCONNECT retry must wait out the request and its ACK");
+        CHECK(grace >= retry + keydown,
+              std::string(name) + ": the grace must stay up for the initiator's retries");
+        CHECK(repeat >= keydown,
+              std::string(name) + ": an ACK copy must not queue behind a still-airing ACK");
+        CHECK(ConnectionAdaptiveTestAccess::disconnectUsefulRetryCount(c) >= 2,
+              std::string(name) + ": the close must keep at least two complete retries");
+    };
+    checkTeardownTiming(narrow, "narrow OFDM");
+    Connection mcdpsk_teardown;
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(mcdpsk_teardown);
+    checkTeardownTiming(mcdpsk_teardown, "MC-DPSK");
 
-    Connection mcdpsk;
-    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(mcdpsk);
-    CHECK(ConnectionAdaptiveTestAccess::disconnectRetryIntervalMs(mcdpsk) == 5000 &&
-              ConnectionAdaptiveTestAccess::disconnectResponderGraceMs(mcdpsk) == 5000 &&
-              ConnectionAdaptiveTestAccess::disconnectAckRetransmitMs(mcdpsk) == 2000,
-          "MC-DPSK teardown timing must remain unchanged until separately derived");
 }
 
 void test_disconnect_retries_and_ack_copies_obey_half_duplex_gates() {
@@ -4746,6 +4774,162 @@ void test_receiver_declares_lost_peer_only_past_the_retry_budget() {
     }
 }
 
+// BUG-ABORT-PEER-NOTICE-SLOW: a SENDER whose peer vanished (its host's ABORT) retried every frame
+// max_retries times - ~12 min on MC-DPSK - and with move-epoch stayed CONNECTED for the next
+// message. Hearing nothing at all while awaiting an ACK, it declares the link lost at
+// peerSilentLinkLostMs(): no sooner than 3 min (a total outage a session rides out lasts less),
+// and well inside the 16-round retry budget on MC-DPSK.
+void test_sender_declares_lost_peer_on_total_silence() {
+    Connection c;
+    int disconnects = 0;
+    c.setDisconnectedCallback([&](const std::string&) { ++disconnects; });
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    CHECK(c.sendBinary(Bytes(40, 0x42)), "a block should be accepted on MC-DPSK");
+    const uint32_t bound = ConnectionAdaptiveTestAccess::peerSilentLinkLostMs(c);
+    CHECK(bound >= 180000u, "the silence bound must outlast a 3-minute total outage");
+    CHECK(bound < 400000u, "an MC-DPSK sender must not wait out its whole ~12-minute retry budget");
+    uint32_t t = 0;
+    while (t + 1000 < bound) {
+        c.tick(1000);
+        t += 1000;
+    }
+    CHECK(c.getState() == ConnectionState::CONNECTED && disconnects == 0,
+          "a sender must not give up inside the silence bound");
+    c.tick(2000);
+    CHECK(c.getState() == ConnectionState::DISCONNECTED && disconnects == 1,
+          "a sender hearing nothing past the bound must declare the link lost");
+}
+
+// BUG-RESPONDER-NEVER-ASKS-TURN: an unconfirmed responder with data waited for the initiator's first
+// frame forever; when that frame (its TURNOVER) was lost, both sides waited until the 240 s half-open
+// release. After one CONNECT retry interval with no duplicate CONNECT it asks for the turn; a
+// duplicate CONNECT (the initiator still lacks the ACK) restarts the wait.
+void test_unconfirmed_responder_asks_for_turn() {
+    Connection c;
+    int requests = 0;
+    c.setTransmitCallback([&](const Bytes& f) {
+        const auto h = v2::parseHeader(f);
+        if (h.valid && h.type == v2::FrameType::TURN_REQUEST) ++requests;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.10f,
+                                                    Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::makeUnconfirmedResponder(c);
+    CHECK(c.sendBinary(Bytes(40, 0x41)), "the block should queue for the turn");
+    const uint32_t window = ConnectionAdaptiveTestAccess::connectRetryIntervalMs(c);
+    for (uint32_t t = 0; t + 1000 < window; t += 1000) c.tick(1000);
+    CHECK(requests == 0, "no TURN_REQUEST while the initiator may still retry its CONNECT");
+    auto dup = v2::ConnectFrame::makeConnect("K2DEF", "W1ABC", ModeCapabilities::ALL,
+                                             static_cast<uint8_t>(WaveformMode::AUTO));
+    c.onFrameReceived(dup.serialize());
+    for (uint32_t t = 0; t + 1000 < window; t += 1000) c.tick(1000);
+    CHECK(requests == 0, "a duplicate CONNECT restarts the wait");
+    for (int i = 0; i < 20 && requests == 0; ++i) c.tick(1000);
+    CHECK(requests >= 1, "past a quiet retry interval the responder asks for the turn");
+}
+
+// BUG-RTO-SHORTER-THAN-PEER-ACK (receiver side): a one-frame OFDM round leaves the sender an ~8.4 s
+// deadline from key-up; the ACK the receiver keys must end inside it. The 6.8 s rung does not fit
+// after a 2.4 s frame, the 3.4 s rung does.
+// BUG-SIMULTANEOUS-PING-LOCKSTEP: a PING retry waits while the channel is busy (the peer calling us
+// at the same moment), without spending a retry, and keys anyway after one PING timeout of busy.
+void test_ping_retry_listens_before_talking() {
+    Connection c;
+    c.setLocalCallsign("W1ABC");
+    int pings = 0;
+    c.setPingTxCallback([&]() { ++pings; });
+    bool busy = false;
+    c.setChannelBusyQuery([&] { return busy; });
+    c.connect("K2DEF");
+    const int first = pings;
+    CHECK(first == 1, "connect sends the first PING");
+    busy = true;
+    for (int i = 0; i < 60; ++i) c.tick(500);  // 30 s busy: the retry falls due inside it
+    const int during_busy = pings - first;
+    CHECK(during_busy <= 1, "a busy channel holds the PING retry (bounded: at most one keyed over)");
+    busy = false;
+    for (int i = 0; i < 40 && pings - first == during_busy; ++i) c.tick(500);
+    CHECK(pings - first > during_busy, "the retry goes out once the channel clears");
+    CHECK(c.getState() == ConnectionState::PROBING, "no retry budget was spent waiting");
+}
+
+void test_tone_ack_capped_to_sender_deadline() {
+    namespace tba = ultra::waveform::tone_burst_ack;
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 3.0f, 0.10f,
+                                                    Modulation::QPSK);
+    const uint32_t cap = ConnectionAdaptiveTestAccess::publishToneAckCap(c, 1);
+    const uint32_t chosen = tba::capSymbolMsToRung(tba::kSymbolMsWeakSNR, cap);
+    CHECK(chosen < tba::kSymbolMsWeakSNR, "a 6.8 s ACK must not be keyed into a one-frame round");
+    CHECK(chosen >= tba::kSymbolMsLowSNR, "the cap must still allow a long (low-SNR) rung");
+    CHECK(tba::capSymbolMsToRung(tba::kSymbolMsHighSNR, cap) == tba::kSymbolMsHighSNR,
+          "a short pick is never lengthened");
+    CHECK(tba::capSymbolMsToRung(tba::kSymbolMsWeakSNR, 1) == tba::kSymbolMsHighSNR,
+          "nothing fits: the shortest rung");
+}
+
+// BUG-TNC-BUFFER-WIRE-BYTES: the backlog counts the caller's bytes, not the object prefix and
+// markers on the wire, and still reads 0 only once everything is acknowledged.
+void test_tx_backlog_counts_caller_bytes() {
+    for (size_t n : {size_t{1}, size_t{40}, size_t{900}}) {
+        Connection c;
+        c.setTransmitCallback([](const Bytes&) {});
+        c.setTransmitBurstCallback([](const std::vector<Bytes>&, uint16_t, uint8_t) {});
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.10f,
+                                                        Modulation::QPSK);
+        CHECK(c.sendBinary(Bytes(n, 0x33)), "the block should be accepted");
+        CHECK(c.getTxBacklogBytes() == n, "a fresh block's backlog must be exactly its size");
+        for (int i = 0; i < 20; ++i) c.tick(100);
+        CHECK(c.getTxBacklogBytes() > 0 && c.getTxBacklogBytes() <= n,
+              "an unacknowledged block reads between 1 and its size");
+    }
+}
+
+// BUG-TNC-PEER-DISCONNECTED-LATE: the station that receives DISCONNECT reports it at once (the
+// peer-closed callback), not after its ~24 s re-ACK grace; the grace still answers a duplicate.
+void test_peer_closed_reported_at_grace_start() {
+    Connection c;
+    int closed = 0;
+    std::vector<Bytes> sent;
+    c.setTransmitCallback([&](const Bytes& f) { sent.push_back(f); });
+    c.setPeerClosedCallback([&]() { ++closed; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.10f,
+                                                    Modulation::QPSK);
+    const Bytes disc = v2::ControlFrame::makeDisconnect("K2DEF", "W1ABC").serialize();
+    c.onFrameReceived(disc, /*physical_turn_complete=*/true);
+    CHECK(closed == 1, "the peer's DISCONNECT must be reported when it arrives");
+    CHECK(c.peerClosedGraceActive(), "the re-ACK grace must still run");
+    c.onFrameReceived(disc, /*physical_turn_complete=*/true);
+    CHECK(closed == 1, "a retransmitted DISCONNECT must not report the close twice");
+    for (int i = 0; i < 60 && c.getState() != ConnectionState::DISCONNECTED; ++i) c.tick(1000);
+    CHECK(c.getState() == ConnectionState::DISCONNECTED && !c.peerClosedGraceActive(),
+          "the grace must still end the session");
+
+    // BUG-REDIAL-WAITS-OUT-GRACE: the peer hangs up and calls straight back; its CONNECT ends
+    // the grace and is answered as a new call (it was dropped by the teardown gate).
+    Connection d;
+    int disconnected = 0;
+    std::vector<Bytes> d_sent;
+    d.setTransmitCallback([&](const Bytes& f) { d_sent.push_back(f); });
+    d.setDisconnectedCallback([&](const std::string&) { ++disconnected; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(d, CodeRate::R1_2, 15.0f, 0.10f,
+                                                    Modulation::QPSK);
+    d.onFrameReceived(disc, /*physical_turn_complete=*/true);
+    CHECK(d.peerClosedGraceActive(), "the second station should be in its grace");
+    auto redial = v2::ConnectFrame::makeConnect(
+        "K2DEF", "W1ABC", ModeCapabilities::ALL, static_cast<uint8_t>(WaveformMode::AUTO));
+    d_sent.clear();
+    d.onFrameReceived(redial.serialize());
+    CHECK(disconnected == 1, "the old session must end once");
+    CHECK(d.getState() == ConnectionState::CONNECTED && !d.peerClosedGraceActive(),
+          "the redial must be answered as a new session");
+    bool acked = false;
+    for (const auto& f : d_sent) {
+        const auto h = v2::parseHeader(f);
+        if (h.valid && h.type == v2::FrameType::CONNECT_ACK) acked = true;
+    }
+    CHECK(acked, "the redial must get a CONNECT_ACK");
+}
+
 // BUG-MCDPSK-MESSAGE-STOP-AND-WAIT: a multi-frame message or TNC block on MC-DPSK went out one
 // fragment per turn; it now bursts like an MC-DPSK file, up to the timing-derived window.
 void test_mcdpsk_message_fragments_burst() {
@@ -7470,6 +7654,12 @@ int main() {
     test_mcdpsk_message_fragments_burst();
     test_orphaned_data_turn_is_granted();
     test_receiver_declares_lost_peer_only_past_the_retry_budget();
+    test_sender_declares_lost_peer_on_total_silence();
+    test_peer_closed_reported_at_grace_start();
+    test_tx_backlog_counts_caller_bytes();
+    test_tone_ack_capped_to_sender_deadline();
+    test_ping_retry_listens_before_talking();
+    test_unconfirmed_responder_asks_for_turn();
     test_ack_revealed_hole_refill_uses_resend_anchor();
     test_proven_partial_sack_uses_descriptor_only_anchor_and_light_timing();
     test_proven_partial_sack_uses_physical_round_progress_not_cumulative_arq_progress();

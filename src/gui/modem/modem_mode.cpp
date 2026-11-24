@@ -56,9 +56,11 @@ void ModemEngine::setWaveformMode(protocol::WaveformMode mode) {
         // listener it learned nothing - BUG-PHYSICAL-REF-IDLE-FLOOR-CONTAMINATED); the new listener
         // stops below (configureListener) or here.
         streaming_decoder_.primary()->setIdleNoiseLearning(true);
+        streaming_decoder_.primary()->setMfskLookaheadAllowed(true);  // a primary may see 16-FSK
         if (StreamingDecoder* now_listening =
                 streaming_decoder_.slot(1 - streaming_decoder_.primaryIndex())) {
             now_listening->setIdleNoiseLearning(false);
+            now_listening->setMfskLookaheadAllowed(false);
         }
         LOG_MODEM(INFO, "[%s] Listener: %s decoder is now primary, %s listens",
                   log_prefix_.c_str(), protocol::waveformModeToString(mode),

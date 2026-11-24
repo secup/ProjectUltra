@@ -4,6 +4,7 @@
 #include "ultra/version.hpp"
 
 #include <algorithm>
+#include <random>
 #include <charconv>
 #include <cctype>
 #include <cstdio>
@@ -174,6 +175,13 @@ TNCSession::TNCSession(ModemAdapter& modem, EmitFn cmd_emit, DataOutFn data_out)
     // ALWAYS reported HONESTLY (handleDataBytes -> onModemBufferLevel = true backlog); the old
     // under-report-to-milk-PAT trick is GONE. Opt out with ULTRA_TNC_ACCUM_DISABLE for the
     // legacy per-chunk 200 ms flush (each host chunk bursts on its own via the unified path).
+    {
+        std::random_device rd;
+        const uint64_t token = (static_cast<uint64_t>(rd()) << 32) ^ static_cast<uint64_t>(rd());
+        char buf[17];
+        std::snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(token));
+        tx_temp_token_ = buf;
+    }
     bulk_accum_ = std::getenv("ULTRA_TNC_ACCUM_DISABLE") == nullptr;
     accum_probe_ = std::getenv("ULTRA_TNC_ACCUM_PROBE") != nullptr;
     flush_log_ = std::getenv("ULTRA_TNC_FLUSH_LOG") != nullptr;
@@ -340,11 +348,8 @@ void TNCSession::endSessionForHost() {
         state_ = isReadyAfterDisconnect(mycall_) ? State::READY : State::IDLE;
     }
     data_tx_buffer_.clear();
-    if (!last_tx_temp_path_.empty()) {
-        std::error_code ec;
-        std::filesystem::remove(last_tx_temp_path_, ec);
-        last_tx_temp_path_.clear();
-    }
+    tx_units_.clear();
+    removeTxTempFiles();
     data_tx_quiet_ms_ = 0;
     pending_buffer_level_ = -1;
     if (last_buffer_level_ > 0) {
@@ -386,10 +391,42 @@ void TNCSession::onModemDataReceived(const std::vector<uint8_t>& bytes) {
     data_out_(bytes);
 }
 
-void TNCSession::onModemBufferLevel(int bytes) {
-    if (bytes < 0) {
-        bytes = 0;
+// The modem's backlog (wire bytes of the units it still holds, delivered in order) in the host's
+// bytes: units entirely behind the backlog are delivered and retire; the oldest one still in flight
+// counts its host bytes in proportion to what is left of it (at least 1 while anything is left);
+// the newer ones count in full. 0 exactly when the modem's backlog is 0.
+int TNCSession::hostBacklogFor(int modem_wire_backlog) {
+    if (modem_wire_backlog <= 0) {
+        tx_units_.clear();
+        return 0;
     }
+    size_t remaining = static_cast<size_t>(modem_wire_backlog);
+    size_t total_wire = 0;
+    for (const auto& u : tx_units_) total_wire += u.wire_bytes;
+    // Data the modem holds that is not ours to map (should not happen): report it as it is.
+    if (total_wire == 0 || remaining > total_wire) {
+        return modem_wire_backlog;
+    }
+    while (!tx_units_.empty() && total_wire - tx_units_.front().wire_bytes >= remaining) {
+        total_wire -= tx_units_.front().wire_bytes;
+        tx_units_.pop_front();
+    }
+    size_t host = 0;
+    for (size_t i = 0; i < tx_units_.size(); ++i) {
+        const auto& u = tx_units_[i];
+        if (i == 0) {
+            const size_t left_wire = remaining - (total_wire - u.wire_bytes);
+            const size_t share = u.wire_bytes > 0 ? (u.host_bytes * left_wire) / u.wire_bytes : 0;
+            host += std::max<size_t>(1, share);
+        } else {
+            host += u.host_bytes;
+        }
+    }
+    return static_cast<int>(std::min<size_t>(host, static_cast<size_t>(INT32_MAX)));
+}
+
+void TNCSession::onModemBufferLevel(int bytes) {
+    bytes = hostBacklogFor(bytes);
     // HONEST queue depth (VARA-HF spec): the engine's unacked backlog
     // (getTxBacklogBytes already excludes ACKed ARQ slots, so it decrements on ACK as
     // the spec's "VARA removes acked bytes from queue" requires) PLUS our not-yet-
@@ -561,6 +598,7 @@ void TNCSession::flushDataTxBuffer() {
 
     if (!route_burst) {
         if (modem_.sendBinary(wire)) {
+            tx_units_.push_back({data_tx_buffer_.size(), wire.size()});
             data_tx_buffer_.clear();
         }
         // else: engine refused (queue full / not CONNECTED) — keep data_tx_buffer_ for the
@@ -576,14 +614,15 @@ void TNCSession::flushDataTxBuffer() {
     // delivers out its data port. The callsign keeps the name unique across the two ultra_tnc
     // processes that may share /tmp (e.g. the OTASim test rig).
     std::error_code ec;
-    if (!last_tx_temp_path_.empty()) {
-        std::filesystem::remove(last_tx_temp_path_, ec);
-        last_tx_temp_path_.clear();
+    while (tx_temp_paths_.size() >= kKeptTxTempUnits) {
+        std::filesystem::remove(tx_temp_paths_.front(), ec);
+        tx_temp_paths_.pop_front();
     }
     const std::string call = mycall_.empty() ? "tnc" : mycall_;
     const std::string temp_path =
         (std::filesystem::temp_directory_path() /
-         ("ultra_tnc_tx_" + call + "_" + std::to_string(tx_file_counter_++) + ".bin"))
+         ("ultra_tnc_tx_" + call + "_" + tx_temp_token_ + "_" +
+          std::to_string(tx_file_counter_++) + ".bin"))
             .string();
     {
         std::ofstream out(temp_path, std::ios::binary | std::ios::trunc);
@@ -593,8 +632,9 @@ void TNCSession::flushDataTxBuffer() {
         }
     }
     if (modem_.sendFile(temp_path)) {
+        tx_units_.push_back({data_tx_buffer_.size(), wire.size()});
         data_tx_buffer_.clear();
-        last_tx_temp_path_ = temp_path;
+        tx_temp_paths_.push_back(temp_path);
         // Lock the rest of this feed onto the burst transport (ordering invariant).
         if (bulk_accum_) bulk_burst_started_ = true;
     } else {
@@ -603,6 +643,14 @@ void TNCSession::flushDataTxBuffer() {
         std::filesystem::remove(temp_path, ec);
     }
     data_tx_quiet_ms_ = 0;
+}
+
+void TNCSession::removeTxTempFiles() {
+    std::error_code ec;
+    for (const auto& path : tx_temp_paths_) {
+        std::filesystem::remove(path, ec);
+    }
+    tx_temp_paths_.clear();
 }
 
 std::pair<std::string, std::string> TNCSession::parseCommand(std::string_view line) {
@@ -919,7 +967,7 @@ void TNCSession::cmdBuffer(std::string_view args) {
     }
     // Match the same accounting as the unsolicited BUFFER N event:
     // include both engine backlog and our local TX staging buffer.
-    emitBuffer(modem_.getTxBackloggBytes() +
+    emitBuffer(hostBacklogFor(modem_.getTxBackloggBytes()) +
                static_cast<int>(data_tx_buffer_.size()));
 }
 

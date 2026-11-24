@@ -361,13 +361,13 @@ void StreamingEncoder::setNarrowbandControl(bool narrowband) {
         // When in MC-DPSK mode (handshake), also switch main waveform to narrowband
         // so CONNECT/CONNECT_ACK frames use narrowband chirp + carriers
         if (mode_ == protocol::WaveformMode::MC_DPSK) {
-            waveform_ = WaveformFactory::createNarrowbandMCDPSK(mc_dpsk_config_);
+            createWaveform();  // narrowband, at the session's constellation
         }
         LOG_MODEM(INFO, "[%s] Control waveform: narrowband MC-DPSK (500 Hz)", log_prefix_.c_str());
     } else {
         control_waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
         if (mode_ == protocol::WaveformMode::MC_DPSK) {
-            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+            createWaveform();  // wideband, at the session's constellation
         }
         LOG_MODEM(INFO, "[%s] Control waveform: wideband MC-DPSK (%d carriers)", log_prefix_.c_str(), mc_dpsk_carriers_);
     }
@@ -1161,6 +1161,14 @@ void StreamingEncoder::createWaveform() {
                 waveform_ = WaveformFactory::createNarrowbandMCDPSK(mc_dpsk_config_);
             } else {
                 waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+            }
+            // A rebuilt MC-DPSK waveform starts at the config's bits per symbol; the session's
+            // constellation (16-FSK-F, 16-FSK, ...) is the encoder's, and a rebuild must keep it.
+            // Without this, a carrier/symbol config applied after the data mode (the waveform
+            // follow's crossing back to MC-DPSK) sent DQPSK frames labelled 16-FSK-F
+            // (BUG-MCDPSK-REBUILD-DROPS-MODULATION: 11 dB too weak, the peer never decoded one).
+            if (waveform_ && isMcDpskModulation(modulation_)) {
+                waveform_->configure(modulation_, code_rate_);
             }
             break;
 

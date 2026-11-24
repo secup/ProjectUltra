@@ -179,6 +179,9 @@ public:
     };
     using MessageTxStatusCallback = std::function<void(const MessageTxStatusEvent& event)>;
     using IncomingCallCallback = std::function<void(const std::string& remote_call)>;
+    // The peer closed the session: its DISCONNECT arrived and this station entered its re-ACK grace.
+    // The session is over for the host now; the grace only answers a retransmitted DISCONNECT.
+    using PeerClosedCallback = std::function<void()>;
     using DataReceivedCallback = std::function<void(const Bytes& data, bool more_data)>;
 
     // Ping/Pong callbacks (for fast presence check before full CONNECT)
@@ -348,6 +351,18 @@ public:
     void setMessageSentCallback(MessageSentCallback cb);
     void setMessageTxStatusCallback(MessageTxStatusCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
+    void setPeerClosedCallback(PeerClosedCallback cb) { on_peer_closed_ = std::move(cb); }
+    void noteRxFrameMcDpsk(bool mcdpsk) { last_rx_frame_mcdpsk_ = mcdpsk; }
+    Modulation robustControlModulationForTest() const { return robustControlModulation(); }
+    // The longest tone-ACK symbol duration whose ACK still ends before the sender resends the group
+    // this ACK answers (published before every tone ACK; lock-free for the frontend's ACK callback).
+    uint32_t toneAckMaxSymbolMs() const {
+        return tone_ack_max_symbol_ms_.load(std::memory_order_acquire);
+    }
+    // In the responder's re-ACK grace after the peer's DISCONNECT (still CONNECTED on the wire).
+    bool peerClosedGraceActive() const {
+        return disconnect_pending_ && state_ == ConnectionState::CONNECTED;
+    }
     void setDataReceivedCallback(DataReceivedCallback cb);
 
     // Ping/Pong (fast presence check)
@@ -489,6 +504,13 @@ public:
     void noteRxWaveform(WaveformMode mode);
     void setWaveformCrossingCallback(WaveformCrossingCallback cb) {
         on_waveform_crossing_ = std::move(cb);
+    }
+    // The next frame this connection transmits goes out on the robust waveform (MC-DPSK at the
+    // dual-listen listener's geometry) instead of the session's OFDM: the last DISCONNECT retry
+    // (BUG-DISCONNECT-LOST-IN-FADE). Protocol mutex held (no re-entry).
+    // The argument is the MC-DPSK constellation the peer's MC-DPSK decoder runs (robustControlModulation).
+    void setRobustControlOnceCallback(std::function<void(Modulation)> cb) {
+        on_robust_control_once_ = std::move(cb);
     }
 
     // Callback when handshake is confirmed (safe to switch to negotiated waveform)
@@ -1102,7 +1124,8 @@ private:
     // A message object may be re-fragmented onto a new geometry at most this many
     // times. An object that re-grids forever on a flapping ladder is worse for the
     // operator than one that fails once with an honest reason.
-    static constexpr uint8_t kMaxMessageGeometryRegridAttempts = 2;
+    static constexpr uint8_t kMaxMessageGeometryRegridAttempts = 2;  // failure-driven changes only
+    bool receiver_commanded_geometry_change_ = false;
     uint64_t arq_submit_message_token_ = 0;
     std::deque<MessageTxStatusEvent> pending_message_tx_status_events_;
     size_t message_tx_status_deferral_depth_ = 0;
@@ -1375,6 +1398,10 @@ private:
     // HALF-OPEN timeout accumulator (2026-07-04, F29): ms in CONNECTED with the
     // responder handshake never confirmed; 240 s -> release the session.
     uint32_t responder_half_open_ms_ = 0;
+    // Responder, handshake unconfirmed: time since CONNECT_ACK or the last duplicate CONNECT. Past
+    // one CONNECT retry interval with no duplicate, the initiator has the ACK (it would have retried)
+    // and a TURN_REQUEST is safe (BUG-RESPONDER-NEVER-ASKS-TURN).
+    uint32_t responder_quiet_ms_ = 0;
     // Receiver emit-side decision (called from onBurstGroupReceived before the
     // group's tone-burst ACK is emitted) and sender consume-side action (called
     // from onToneBurstAck; mod/rate_at_ack = the mode snapshot taken BEFORE
@@ -1593,6 +1620,8 @@ private:
         // The reading came from this burst's frames. False: none qualified, and the session's
         // last scalar SNR stood in (with the pool on, that scalar predates the spell).
         bool burst_reading = true;
+        float rate_fading = 0.0f;       // the class input the ladder saw
+        float papr_offset_db = 0.0f;    // the peak-control correction it applied
     };
     SessionPick sessionLadderPick() const;
     uint64_t mcDpskBurstSpanMs() const;
@@ -1848,9 +1877,11 @@ private:
     // PING retry jitter (BUG-SIMULTANEOUS-CALL-LOCKSTEP): xorshift state, seeded on first use.
     uint64_t ping_jitter_rng_state_ = 0;
     uint32_t pingRetryJitterMs();
+    uint32_t retryJitterMs(uint32_t span_ms);
     // Audio time since anything was heard from the peer (a frame, a burst group, a tone ACK, an
     // accepted DATA sync): the receiver's link supervision (BUG-IRS-NEVER-NOTICES-LOST-PEER).
     uint32_t ms_since_peer_heard_ = 0;
+
     void notePeerHeard() { ms_since_peer_heard_ = 0; }
     uint32_t peerSilentLinkLostMs() const;
     bool data_turn_yield_pending_ = false;
@@ -1893,6 +1924,7 @@ private:
     uint32_t disconnectResponderGraceMs() const;
     uint32_t disconnectAckRetransmitMs() const;
     int disconnectUsefulRetryCount() const;
+    uint32_t disconnectHardTimeoutMs() const;
     int disconnectAckMaxProactiveRepeats() const;
     void scheduleModeChangeAckRepeats(const Bytes& ack_data, uint16_t ack_seq);
     void tickModeChangeAckRepeats(uint32_t elapsed_ms);
@@ -1996,6 +2028,9 @@ private:
     MessageSentCallback on_message_sent_;
     MessageTxStatusCallback on_message_tx_status_;
     IncomingCallCallback on_incoming_call_;
+    PeerClosedCallback on_peer_closed_;
+    std::atomic<uint32_t> tone_ack_max_symbol_ms_{UINT32_MAX};
+    void publishToneAckAirtimeCap();
     DataReceivedCallback on_data_received_;
     FileSentCallback on_file_sent_;
     ModeNegotiatedCallback on_mode_negotiated_;
@@ -2003,6 +2038,8 @@ private:
     // whole physical turn and carries PHYSICAL_BURST_END (BUG-SINGLE-FRAME-MESSAGE-UNMARKED).
     bool single_frame_payload_submit_ = false;
     WaveformCrossingCallback on_waveform_crossing_;
+    std::function<void(Modulation)> on_robust_control_once_;
+    Modulation robustControlModulation() const;
     DataModeChangedCallback on_data_mode_changed_;
     SessionAddressesCallback on_session_addresses_;
     ConnectWaveformChangedCallback on_connect_waveform_changed_;
@@ -2083,7 +2120,14 @@ private:
     bool noteTurnRequestOnAckIfNeeded();
     void resetDataTurnFairness();
     void noteDataTurnPayloadStarted(size_t payload_bytes);
-    void sendTurnRequestIfNeeded();
+    void sendTurnRequestIfNeeded(bool retry = false);
+    bool peerDecodesRobustControl() const;
+    // The frame being processed was demodulated as MC-DPSK (set by the frontend before delivery).
+    bool last_rx_frame_mcdpsk_ = false;
+    uint32_t probe_defer_ms_ = 0;  // PING retry held by carrier sense (bounded)
+    bool peer_turn_request_mcdpsk_ = false;  // the pending TURN_REQUEST arrived on MC-DPSK
+    bool disconnect_ack_mcdpsk_ = false;     // the DISCONNECT being acknowledged did
+    void answerOnArrivalWaveform(bool arrived_mcdpsk, const char* what);
     bool maybeYieldDataTurn();
     void armDataTurnTxGuard(uint32_t guard_ms);
     void transmitFileCancelControl(const char* reason);

@@ -2,6 +2,7 @@
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
 #include "ota_channel_core/channel.hpp"
+#include "ota_channel_core/models.hpp"
 #include "protocol/frame_v2.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/mcdpsk_frame.hpp"
@@ -341,6 +342,128 @@ bool runMfskBurstsAtDbpskReceiver() {
               << " decoded" << (seqs.empty() ? "" : ", last seq ") << (seqs.empty() ? 0 : seqs.back())
               << "\n";
     return ok;
+}
+
+// BUG-MCDPSK-REBUILD-DROPS-MODULATION (TNC marathon, ITU Good 10 dB, 2026-11-23): a sender whose
+// follow crossed OFDM -> MC-DPSK got its data mode (16-FSK-F) and THEN a carrier/symbol config of
+// another bits-per-symbol; the config rebuilt the waveform at the config's constellation (DQPSK)
+// while the encoder still called it 16-FSK-F. Every frame went out 11 dB too weak and the peer
+// never decoded one. The rebuilt waveform must send the session's constellation: the same frame,
+// sample for sample, as an encoder configured in the usual order.
+bool runRebuildKeepsModulation() {
+    auto frameFor = [](StreamingEncoder& e) {
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", 9, Bytes(52, 0x5A), CodeRate::R1_4);
+        return e.encodeBurstLight({frame.serialize()});
+    };
+    StreamingEncoder reference;
+    reference.setMode(protocol::WaveformMode::MC_DPSK);
+    reference.setMCDPSKConfig(mc_dpsk_presets::robust());
+    reference.setDataMode(Modulation::MFSK16_FAST, CodeRate::R1_4);
+    reference.setFixedFrameCodewords(3);
+    reference.setMcDpskCompactFrames(true);
+    const auto want = frameFor(reference);
+
+    // The crossing's order (Connection -> ModemEngine): config, waveform, data mode, then the
+    // session profile's config again with another bits-per-symbol.
+    StreamingEncoder crossing;
+    crossing.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    crossing.setMCDPSKConfig(mc_dpsk_presets::robust_mid());
+    crossing.setMode(protocol::WaveformMode::MC_DPSK);
+    crossing.setDataMode(Modulation::MFSK16_FAST, CodeRate::R1_4);
+    crossing.setMCDPSKConfig(mc_dpsk_presets::robust());
+    crossing.setFixedFrameCodewords(3);
+    crossing.setMcDpskCompactFrames(true);
+    const auto got = frameFor(crossing);
+
+    // And a narrowband/wideband control switch rebuilds it too.
+    crossing.setNarrowbandControl(false);
+    const auto got_after_control = frameFor(crossing);
+
+    const bool ok = got.size() == want.size() && got_after_control.size() == want.size();
+    std::cout << (ok ? "" : "FAIL: ") << "rebuilt MC-DPSK waveform keeps 16-FSK-F: " << got.size()
+              << " / " << got_after_control.size() << " samples (want " << want.size() << ")\n";
+    return ok;
+}
+
+// BUG-DISCONNECT-LOST-IN-FADE follow-up: the robust last DISCONNECT is a v2 CONTROL frame at 16-FSK-F
+// on the listener's geometry; a connected MC-DPSK decoder configured exactly as the dual-listen
+// listener (ModemEngine::configureListener) must decode it.
+bool runControlFrameAtListener(Modulation tx_mod, float snr_db, int ofdm_frames_before = 0,
+                               float cfo_hz = 0.0f, bool listener_role = false,
+                               int gap_s = 3) {
+    const uint32_t alpha = v2::hashCallsign("ALPHA");
+    const uint32_t bravo = v2::hashCallsign("BRAVO");
+    MultiCarrierDPSKConfig mc = mc_dpsk_presets::robust();
+    mc.num_carriers = 8;
+    mc.samples_per_symbol = 1024;
+    mc.bits_per_symbol = 1;
+    StreamingEncoder encoder;
+    encoder.setMCDPSKConfig(mc);
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setDataMode(tx_mod, CodeRate::R1_4);
+    const Bytes frame = v2::ControlFrame::makeDisconnect("ALPHA", "BRAVO").serialize();
+    const auto tx = encoder.encodeFrame(frame);
+    std::vector<float> audio(48000, 0.0f);
+    // The session's OFDM frames first: their dual chirps are the MC-DPSK chirps, so a listener
+    // locks each one and fails it (what a listener does all session long).
+    if (ofdm_frames_before > 0) {
+        ModemConfig cfg;
+        cfg.fft_size = 1024;
+        cfg.num_carriers = 59;
+        cfg.sample_rate = 48000;
+        cfg.center_freq = 1500.0f;
+        cfg.modulation = Modulation::QPSK;
+        cfg.code_rate = CodeRate::R1_2;
+        cfg.use_pilots = true;
+        StreamingEncoder ofdm;
+        ofdm.setMode(protocol::WaveformMode::OFDM_CHIRP);
+        ofdm.setOFDMConfig(cfg);
+        ofdm.setDataMode(Modulation::QPSK, CodeRate::R1_2);
+        const auto ctl = ofdm.encodeFrame(
+            v2::ControlFrame::makeTurnRequest("ALPHA", "BRAVO").serialize());
+        for (int i = 0; i < ofdm_frames_before; ++i) {
+            audio.insert(audio.end(), ctl.begin(), ctl.end());
+            audio.resize(audio.size() + static_cast<size_t>(gap_s) * 48000, 0.0f);
+        }
+    }
+    audio.insert(audio.end(), tx.begin(), tx.end());
+    audio.resize(audio.size() + 8 * 48000, 0.0f);
+    ultra::ota_channel_core::SimulatedChannel channel;
+    channel.setSeed(77);
+    channel.configure(snr_db, ultra::ota_channel_core::ChannelType::AWGN);
+    channel.transmitFromA(audio);
+    auto rx = channel.receiveForB(audio.size());
+    if (cfo_hz != 0.0f) {  // the dial offset a real link carries (the session's 7.3 Hz)
+        ultra::ota_channel_core::ChannelConfig cfg;
+        cfg.type = ultra::ota_channel_core::ChannelType::PASSTHROUGH;
+        cfg.cfo_hz = cfo_hz;
+        ultra::ota_channel_core::RngRoot root(0x77u);
+        auto shift = ultra::ota_channel_core::createChannelModel(cfg, root, "cfo");
+        std::vector<float> shifted;
+        shift->process(std::span<const float>(rx.data(), rx.size()), 0, shifted);
+        rx = std::move(shifted);
+    }
+
+    StreamingDecoder decoder;
+    decoder.setLogPrefix("LISTENER");
+    if (cfo_hz != 0.0f) decoder.setKnownCFO(cfo_hz);
+    if (listener_role) decoder.setMfskLookaheadAllowed(false);  // ModemEngine::configureListener
+    decoder.setMode(protocol::WaveformMode::MC_DPSK, /*connected=*/true);
+    decoder.setMCDPSKConfig(mc);
+    decoder.setDataMode(Modulation::MFSK16_FAST, CodeRate::R1_4);  // ROBUST_MID
+    decoder.setFixedFrameCodewords(3);
+    decoder.setMcDpskSessionAddresses(bravo, alpha);
+    feedInChunks(decoder, rx);
+    bool got = false;
+    while (decoder.hasFrame()) {
+        const auto r = decoder.getFrame();
+        const auto h = v2::parseHeader(r.frame_data);
+        if (r.success && h.valid && h.type == v2::FrameType::DISCONNECT) got = true;
+    }
+    std::cout << (got ? "" : "FAIL: ") << "DISCONNECT at " << modulationToString(tx_mod)
+              << " on the listener, AWGN " << snr_db << " dB: " << (got ? "decoded" : "lost")
+              << "\n";
+    return got;
 }
 
 bool runCompactBurst(const char* name, Modulation tx_mod, bool corrupt_middle,
@@ -825,6 +948,19 @@ int main() {
     if (!runCompactBurst("compact 16-FSK burst at a 16-FSK receiver", Modulation::MFSK16, false,
                          Modulation::MFSK16, mfsk_window)) return 1;
     if (!runMfskBurstsAtDbpskReceiver()) return 1;
+    if (!runRebuildKeepsModulation()) return 1;
+    if (!runControlFrameAtListener(Modulation::MFSK16_FAST, 6.0f)) return 1;
+    runControlFrameAtListener(Modulation::MFSK16_FAST, 3.0f);
+    runControlFrameAtListener(Modulation::MFSK16_FAST, 0.0f);
+    runControlFrameAtListener(Modulation::MFSK16_FAST, -3.0f);
+    if (!runControlFrameAtListener(Modulation::MFSK16_FAST, 3.0f, 4)) return 1;
+    runControlFrameAtListener(Modulation::MFSK16_FAST, 3.0f, 0, 7.3f);
+    runControlFrameAtListener(Modulation::MFSK16_FAST, 3.0f, 4, 7.3f);
+    // BUG-LISTENER-MFSK-LOOKAHEAD-BLIND: two OFDM chirps 1 s apart armed the 16-FSK look-ahead, whose
+    // 10.5 s window covered the MC-DPSK frame behind them. A listener never arms it.
+    std::cout << "(look-ahead allowed, for reference:) ";
+    runControlFrameAtListener(Modulation::MFSK16_FAST, 3.0f, 2, 7.3f, false, 1);
+    if (!runControlFrameAtListener(Modulation::MFSK16_FAST, 3.0f, 2, 7.3f, true, 1)) return 1;
     // 16-FSK-F, the middle rung (2026-11-23): half-length frames at its own receiver, under a DQPSK
     // receiver (the sender dropped one rung on a timeout; the DQPSK receiver's peek covers its
     // frame), and DQPSK above it (a probe the receiver commanded but has not configured yet).

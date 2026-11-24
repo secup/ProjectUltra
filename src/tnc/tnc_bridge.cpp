@@ -116,6 +116,29 @@ public:
         engine_.setIncomingCallCallback(std::move(cb));
     }
 
+    void setPeerClosedCallback(std::function<void()> cb) override {
+        engine_.setPeerClosedCallback(std::move(cb));
+    }
+
+    bool peerClosedGraceActive() const override { return engine_.peerClosedGraceActive(); }
+
+    void setSendFailedCallback(std::function<void(const std::string&)> cb) override {
+        if (!cb) {
+            engine_.setFileSentCallback({});
+            engine_.setMessageTxStatusCallback({});
+            return;
+        }
+        engine_.setFileSentCallback([cb](bool success, const std::string& error) {
+            if (!success) cb(error.empty() ? "file unit not delivered" : error);
+        });
+        engine_.setMessageTxStatusCallback(
+            [cb](const protocol::Connection::MessageTxStatusEvent& event) {
+                if (event.status == protocol::Connection::MessageTxStatus::FAILED) {
+                    cb("block not delivered");
+                }
+            });
+    }
+
     void setDataReceivedCallback(DataReceivedCallback cb) override {
         engine_.setDataReceivedCallback(std::move(cb));
     }
@@ -322,6 +345,22 @@ void TNCBridge::startConnect(const std::string& src, const std::string& dst) {
     }
     notifyLocalCallChanged(local);
 
+    // A new call during the re-ACK grace after the peer hung up: the host was told DISCONNECTED
+    // already, so the call ends the grace (quietly - the state is READY) and goes out at once. The
+    // only cost is to a peer whose ACK faded: it retries its DISCONNECT and gives up on its own.
+    if (engine_.peerClosedGraceActive()) {
+        // Drop a queued DISCONNECT-ACK copy with it: left in the TX queue, it delayed the PING by
+        // its own airtime, the peer's PONG then met this station's transmit-to-receive edge and its
+        // first chirp was lost - every quick redial took a 20 s PING retry (TNC marathon: 35 s
+        // connects against 15 s).
+        audio_.clearTxQueue();
+        {
+            std::lock_guard<std::mutex> lock(ptt_mutex_);
+            postPTT(false);
+            ptt_tail_ms_ = 0;
+        }
+        engine_.abortSession();
+    }
     state_.store(State::CONNECTING, std::memory_order_release);
     if (!engine_.connect(remote)) {
         state_.store(State::READY, std::memory_order_release);
@@ -332,6 +371,12 @@ void TNCBridge::startConnect(const std::string& src, const std::string& dst) {
 }
 
 void TNCBridge::disconnect() {
+    if (engine_.peerClosedGraceActive()) {
+        // The peer already closed and the host was told: nothing to send, end the grace quietly.
+        engine_.abortSession();
+        state_.store(State::READY, std::memory_order_release);
+        return;
+    }
     state_.store(State::DISCONNECTING, std::memory_order_release);
     engine_.disconnect();
 }
@@ -473,6 +518,11 @@ void TNCBridge::tick(uint32_t elapsed_ms) {
     tx_queue_last_size_ = audio_.getTxQueueSize();
     onAudioQueueState(!audio_.isTxQueueEmpty(), elapsed_ms);
 
+    if (failed_receive_disconnect_.exchange(false, std::memory_order_acq_rel) &&
+        engine_.getState() == protocol::ConnectionState::CONNECTED) {
+        disconnect();
+    }
+
     // Pat / Winlink need periodic BUFFER N updates to know when their
     // outbound data has finished transmitting. Poll the engine's TX
     // backlog and forward any change. TNCSession rate-limits non-zero
@@ -502,6 +552,8 @@ void TNCBridge::wirePECallbacks() {
     engine_.setIncomingCallCallback([this](const std::string& peer) {
         onIncomingCall(peer);
     });
+    engine_.setPeerClosedCallback([this]() { onPeerClosed(); });
+    engine_.setSendFailedCallback([this](const std::string& what) { onSendFailed(what); });
 }
 
 void TNCBridge::clearPECallbacks() {
@@ -509,6 +561,8 @@ void TNCBridge::clearPECallbacks() {
     engine_.setDataReceivedCallback({});
     engine_.setFileReceivedCallback({});
     engine_.setIncomingCallCallback({});
+    engine_.setPeerClosedCallback({});
+    engine_.setSendFailedCallback({});
 }
 
 void TNCBridge::onConnectionChanged(protocol::ConnectionState state, const std::string& info) {
@@ -592,8 +646,17 @@ void TNCBridge::onDataReceived(const ultra::Bytes& bytes, bool more_data) {
 
 void TNCBridge::onFileReceived(const std::string& path, bool success,
                                const std::string& error) {
-    (void)error;
-    if (!success || path.empty()) {
+    if (!success) {
+        // The host's byte stream now has a hole the far TNC believes it filled (its ARQ
+        // acknowledged every frame): carrying on would hand the host corrupt or missing data
+        // with no error. End the session - both hosts see DISCONNECTED and retry
+        // (BUG-TNC-FAILED-BLOCK-SILENT). Not from here: this runs under the engine lock.
+        LOG_ERROR("TNC", "received block failed (%s); ending the session so the hosts retry",
+                  error.c_str());
+        failed_receive_disconnect_.store(true, std::memory_order_release);
+        return;
+    }
+    if (path.empty()) {
         return;
     }
     // Read the reconstructed transport unit (the wire bytes the far TNC staged for this
@@ -632,6 +695,34 @@ void TNCBridge::onIncomingCall(const std::string& peer) {
     if (auto sink = snapshotEventSink()) {
         sink->postModemIncomingCall(peer);
     }
+}
+
+// The peer hung up (BUG-TNC-PEER-DISCONNECTED-LATE): its DISCONNECT arrived and was ACKed. The
+// protocol stays on the air for its re-ACK grace (~24 s, in case the ACK fades), but for the host
+// the session is over now - its peer's host was told at once. Runs under the engine lock: no
+// engine calls here. READY first, so the protocol's own DISCONNECTED at the grace's end is not
+// reported a second time (onConnectionChanged reports it only from a connected state).
+void TNCBridge::onPeerClosed() {
+    state_.store(State::READY, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        inbound_pending_ = false;
+        session_rate_bps_.store(0, std::memory_order_release);
+    }
+    if (auto sink = snapshotEventSink()) {
+        sink->postModemDisconnected();
+    }
+}
+
+// A piece of the host's byte stream will never reach the peer: the stream the peer's host gets
+// would have a hole while this host saw its BUFFER fall as if delivered. End the session so both
+// hosts retry (BUG-TNC-SEND-FAILURE-SILENT). Under the engine lock: the disconnect runs from tick().
+void TNCBridge::onSendFailed(const std::string& what) {
+    if (state_.load(std::memory_order_acquire) != State::CONNECTED) {
+        return;  // the session is already over (records failed at teardown)
+    }
+    LOG_ERROR("TNC", "outbound data lost (%s); ending the session so the hosts retry", what.c_str());
+    failed_receive_disconnect_.store(true, std::memory_order_release);
 }
 
 void TNCBridge::onAudioQueueState(bool active, uint32_t elapsed_ms) {

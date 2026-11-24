@@ -687,7 +687,10 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             // protocol_ here - this callback runs while protocol_ holds its mutex. The sender's
             // monitor scans every staircase rung (kStaircaseSymbolMs), so any value is decodable.
             const auto staircase = tone_ack_staircase_.choose();
-            const uint32_t symbol_ms = staircase.symbol_ms;
+            // Capped so the ACK ends before the sender's resend (BUG-RTO-SHORTER-THAN-PEER-ACK);
+            // lock-free read, as this callback runs under the protocol mutex.
+            const uint32_t symbol_ms = ultra::waveform::tone_burst_ack::capSymbolMsToRung(
+                staircase.symbol_ms, protocol_.toneAckMaxSymbolMs());
             // Staircase decision trace (BUG-ACK-STAIRCASE-FADE-BIN validation): the
             // inputs behind every ACK duration — greppable on sim and rig.
             LOG_MODEM(INFO,

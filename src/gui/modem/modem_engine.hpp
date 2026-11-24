@@ -313,6 +313,13 @@ public:
         rx_waveform_observed_cb_ = std::move(callback);
     }
 
+    // Every delivered frame: whether it was demodulated as MC-DPSK, reported just before delivery so
+    // the protocol answers a control frame on the waveform it arrived on.
+    using RxFrameWaveformCallback = std::function<void(bool mcdpsk)>;
+    void setRxFrameWaveformCallback(RxFrameWaveformCallback callback) {
+        rx_frame_waveform_cb_ = std::move(callback);
+    }
+
     using DataSyncAcceptedCallback = std::function<void(float sync_correlation)>;
     void setDataSyncAcceptedCallback(DataSyncAcceptedCallback callback) {
         data_sync_accepted_callback_ = callback;
@@ -437,6 +444,12 @@ public:
     }
 
     void setUseConnectedWaveformOnce() { use_connected_waveform_once_ = true; }
+    // The next connected frame goes out on MC-DPSK at the dual-listen listener's geometry
+    // (ROBUST_MID: 16-FSK-F, 8 carriers, 1024 samples/symbol), whatever the session runs.
+    void transmitNextOnRobustWaveform(Modulation mod) {
+        robust_waveform_once_ = true;
+        robust_waveform_modulation_ = mod;
+    }
 
     void setConnectWaveform(protocol::WaveformMode mode);
     protocol::WaveformMode getConnectWaveform() const { return connect_waveform_; }
@@ -617,6 +630,8 @@ private:
     bool connected_ = false;
     bool handshake_complete_ = false;
     bool use_connected_waveform_once_ = false;
+    bool robust_waveform_once_ = false;
+    Modulation robust_waveform_modulation_ = Modulation::MFSK16_FAST;
 
     // Data frame modulation (negotiated after probing)
     Modulation data_modulation_ = Modulation::DBPSK;
@@ -672,6 +687,7 @@ private:
     bool carrier_ldpc_interleaver_ = false;
     bool carrier_ldpc_interleaver_set_ = false;
     RxWaveformObservedCallback rx_waveform_observed_cb_;
+    RxFrameWaveformCallback rx_frame_waveform_cb_;
 
     template <typename Fn>
     void forEachRxDecoder(Fn&& fn) {

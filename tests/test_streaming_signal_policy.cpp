@@ -446,6 +446,23 @@ void test_burst_outcome_cfo_reconciliation() {
 
 }  // namespace
 
+// BUG-WEAK-CHIRP-ESTABLISHES-CFO: a sub-threshold first chirp is provisional - the next clean chirp
+// replaces it instead of being clamped back to it; an established value is never overwritten by one.
+void test_weak_chirp_does_not_establish() {
+    using ultra::sync::CFOTracker;
+    CFOTracker t;
+    t.storeProvisional(-52.15f);
+    CHECK(!t.established(), "a provisional value does not establish the tracker");
+    // What seedFromChirp decides with the tracker's state (cfo_tracker.cpp).
+    const auto d = ultra::sync::signal_policy::limitConnectedCFODrift(
+        /*connected=*/true, 7.3f, t.tracked(), 0.80f, t.established());
+    const float next = d.accepted_cfo;
+    CHECK_CLOSE(next, 7.3f, 1e-3f, "the next clean chirp is accepted, not clamped to -52 Hz");
+    t.store(next);
+    t.storeProvisional(-40.0f);
+    CHECK_CLOSE(t.tracked(), 7.3f, 1e-3f, "weak evidence never overwrites a measurement");
+}
+
 int main() {
     test_mean_abs_llr();
     test_future_training_start_is_deferred_not_clamped();
@@ -457,6 +474,7 @@ int main() {
     test_connected_anchor_cfo_seed();
     test_pilot_cfo_update();
     test_burst_outcome_cfo_reconciliation();
+    test_weak_chirp_does_not_establish();
 
     if (tests_failed != 0) {
         std::cout << "StreamingSignalPolicy: " << (tests_run - tests_failed)

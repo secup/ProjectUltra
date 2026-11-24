@@ -499,12 +499,22 @@ private:
         return cfg;
     }
 
+    // ULTRA_SIM_PAPR_PENALTY=1: the simulated transmitter is peak-limited like a radio (same flag
+    // and meaning as the GUI's sim, set by tnc_scenario.py / gui_qso_scenario.sh --tx-model hardware).
+    static bool simPeakLimitedTx() {
+        static const bool on = [] {
+            const char* e = std::getenv("ULTRA_SIM_PAPR_PENALTY");
+            return e && e[0] == '1';
+        }();
+        return on;
+    }
+
     void configureModem() {
         engine_.setLocalCallsign(cfg_.callsign);
         // Peak-limited TX PAPR correction: the hardware path scales every burst to the same peak,
         // so OFDM data rides below the MC-DPSK handshake the peer measures; --sim-audio scales to
         // the same average level (no gap). The measured prior; the GUI refines it live.
-        engine_.setTxPaprOffsetDb(cfg_.sim_audio
+        engine_.setTxPaprOffsetDb((cfg_.sim_audio && !simPeakLimitedTx())
                                       ? 0.0f
                                       : ultra::protocol::connection_policy::peakNormalizedOfdmBelowMcDpskPriorDb());
         engine_.setMeasuredSNR(cfg_.snr_db, ultra::SNRSource::NONE);
@@ -691,13 +701,16 @@ private:
                     return;
                 }
                 const auto staircase = tone_ack_staircase_.choose();
+                // Capped so the ACK ends before the sender's resend (BUG-RTO-SHORTER-THAN-PEER-ACK).
+                const uint32_t symbol_ms = ultra::waveform::tone_burst_ack::capSymbolMsToRung(
+                    staircase.symbol_ms, engine_.toneAckMaxSymbolMs());
                 LOG_INFO("AUDIO",
-                         "ToneBurstAck staircase: symbol_ms=%u snr_used=%.1f snr_current=%.1f "
-                         "src=%s fading_index=%.2f fading_present=%d",
-                         staircase.symbol_ms, staircase.snr_used, staircase.snr_current,
+                         "ToneBurstAck staircase: symbol_ms=%u (picked %u) snr_used=%.1f "
+                         "snr_current=%.1f src=%s fading_index=%.2f fading_present=%d",
+                         symbol_ms, staircase.symbol_ms, staircase.snr_used, staircase.snr_current,
                          ultra::snrSourceToString(staircase.source), staircase.fading_index,
                          staircase.fading_present ? 1 : 0);
-                auto samples = modem_.transmitToneBurstAck(tba, staircase.symbol_ms);
+                auto samples = modem_.transmitToneBurstAck(tba, symbol_ms);
                 if (samples.empty()) return;
                 if (air_remaining > 0 || uncertain_inbound) {
                     const uint32_t budget_ms =
@@ -766,13 +779,14 @@ private:
                                                   bool snr_is_wire) {
             (void)peer_snr_db;
             (void)snr_is_wire;
+            // Exactly the GUI's call (app.cpp): the profile on the modem's own MC-DPSK config.
+            // Was a fresh default config with 16-FSK at 2 bits per symbol, whose rebuild sent
+            // DQPSK frames labelled 16-FSK-F (BUG-MCDPSK-REBUILD-DROPS-MODULATION).
             if (mc_dpsk_num_carriers > 0 && mc_dpsk_samples_per_symbol > 0) {
-                ultra::MultiCarrierDPSKConfig cfg;
-                cfg.num_carriers = mc_dpsk_num_carriers;
-                cfg.samples_per_symbol = mc_dpsk_samples_per_symbol;
-                cfg.bits_per_symbol = (mod == Modulation::DBPSK) ? 1 :
-                                      (mod == Modulation::D8PSK) ? 3 : 2;
-                modem_.setMCDPSKConfig(cfg);
+                modem_.setMCDPSKProfile(mc_dpsk_num_carriers, mc_dpsk_samples_per_symbol,
+                                        (mod == Modulation::DBPSK || ultra::isMfskModulation(mod))
+                                            ? 1
+                                            : mod == Modulation::D8PSK ? 3 : 2);
             }
             setDataMode(mod, rate);
             // The rung's information rate for the host's BITRATE and STATS: MC-DPSK when the
@@ -911,10 +925,12 @@ private:
         ofdm_config_.use_pilots = true;
         ofdm_config_.pilot_spacing = ultra::ofdm_link_adaptation::recommendedPilotSpacing(mod, rate);
 
-        if (tx_waveform_mode_ != WaveformMode::MC_DPSK) {
-            modem_.setOFDMConfig(ofdm_config_);
-            modem_.setWaveformMode(tx_waveform_mode_);
-        }
+        // The data mode only, like the GUI: the waveform belongs to the protocol (connect pick,
+        // waveform follow), which switches the modem itself. This re-applied the TNC's copy of the
+        // waveform from connect time: after a follow crossing OFDM -> MC-DPSK the modem went back
+        // to OFDM 5 ms later and every resend went out as an OFDM frame labelled 16-FSK - a TNC
+        // session that started on OFDM could never fall back to MC-DPSK
+        // (BUG-TNC-UNDOES-WAVEFORM-CROSSING).
         modem_.setDataMode(mod, rate);
     }
 
@@ -1022,9 +1038,14 @@ private:
                 LOG_WARN("AUDIO", "OTASim TX dropped: audio backend is not connected");
                 return;
             }
-            const auto measurement =
-                ultra::sim::normalizeTxBurstToReference(samples);
-            if (measurement.peak_warning || measurement.peak_clip_error) {
+            if (simPeakLimitedTx()) {
+                // A real transmitter: every burst at the same PEAK (the hardware path below), as
+                // the GUI's sim does under the same flag (tnc_scenario.py --tx-model hardware,
+                // the default). Until 2026-11-24 the TNC ignored it and scaled every burst to the
+                // same AVERAGE level, so every TNC sweep ran the old sim TX model.
+                ultra::sim::normalizeTxBurstForHardware(samples, cfg_.tx_drive);
+            } else if (const auto measurement = ultra::sim::normalizeTxBurstToReference(samples);
+                       measurement.peak_warning || measurement.peak_clip_error) {
                 LOG_WARN("AUDIO",
                          "OTASim TX burst normalization peak_after_gain=%.3f "
                          "clip_samples=%zu gain=%.3f active=%zu in_band_rms=%.6f%s",

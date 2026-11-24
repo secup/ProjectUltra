@@ -179,6 +179,20 @@ void ModemEngine::wireDecoderRoleCallbacks() {
         d->setBurstWindowAnchorCallback([this](uint8_t epoch, uint16_t base_low) {
             if (burst_window_anchor_cb_) burst_window_anchor_cb_(epoch, base_low);
         });
+        // Dual-listen chirp hint: the MC-DPSK listener's chirp lock tells the OFDM primary where a
+        // full-chirp frame began (its structure-only group search does not look for chirps).
+        // A connected MC-DPSK decoder's chirp lock hints the OTHER decoder of the pair when that
+        // one runs wide OFDM (primary or listener: after a receiver-commanded crossing the OFDM
+        // decoder is the listener, and the sender's next OFDM group can still arrive on it).
+        d->setChirpLockCallback([this, d](size_t samples_ago) {
+            // The receiving decoder uses the hint only while its own mode (read on its own thread)
+            // is connected wide OFDM, so no cross-thread mode read here.
+            if (!streaming_decoder_.listenerActive()) return;
+            for (int i = 0; i < 2; ++i) {
+                StreamingDecoder* other = streaming_decoder_.slot(i);
+                if (other && other != d) other->noteExternalChirpAnchor(samples_ago);
+            }
+        });
     });
 }
 
@@ -230,6 +244,10 @@ void ModemEngine::configureListener(StreamingDecoder* listener, protocol::Wavefo
     }
     if (std::abs(peer_cfo_hz_) > 0.01f) {
         listener->setKnownCFO(peer_cfo_hz_);
+    }
+    listener->setMfskLookaheadAllowed(false);  // a listener never sees a 16-FSK frame first
+    if (StreamingDecoder* primary = streaming_decoder_.primary(); primary && primary != listener) {
+        primary->setMfskLookaheadAllowed(true);
     }
     listener_waveform_.store(waveform, std::memory_order_release);
     LOG_MODEM(INFO, "[%s] Listener: listening for %s alongside %s", log_prefix_.c_str(),

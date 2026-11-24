@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <deque>
 #include <vector>
 
 namespace ultra::tnc {
@@ -77,6 +78,16 @@ private:
     // handles correctly.
     std::vector<uint8_t> data_tx_buffer_;
     uint32_t data_tx_quiet_ms_ = 0;
+    // Units handed to the modem and not yet delivered, oldest first: the host's bytes in each and
+    // the wire bytes the modem counts (a 1-byte raw/deflate marker, or the compressed body). The
+    // modem delivers in order, so its backlog maps back to the host's bytes
+    // (BUG-TNC-BUFFER-WIRE-BYTES: a 50-byte write reported BUFFER 51).
+    struct TxUnit {
+        size_t host_bytes = 0;
+        size_t wire_bytes = 0;
+    };
+    std::deque<TxUnit> tx_units_;
+    int hostBacklogFor(int modem_wire_backlog);
     static constexpr uint32_t kDataTxFlushQuietMs = 200;
     static constexpr size_t kDataTxFlushSizeBytes = 64 * 1024;
     // Traffic-class boundary (PHY_ADAPTATION_DESIGN §3/§7). A flushed block at or below
@@ -91,7 +102,21 @@ private:
     // staged to a temp file. Counter keeps each flush's temp name unique; last path is
     // cleaned up on the next flush / disconnect (its transfer has progressed by then).
     uint64_t tx_file_counter_ = 0;
-    std::string last_tx_temp_path_;
+    // Staged units, oldest first. The modem reads a unit's file when its transfer STARTS, which can
+    // be long after the flush (a unit queued behind the peer's DATA turn): deleting the previous
+    // unit at the next flush lost it - "Queued file transfer failed to start", the 4096-byte half of
+    // a 5000-byte write gone while BUFFER fell as if delivered (BUG-TNC-STAGED-UNIT-DELETED-EARLY).
+    // The modem holds at most one transfer in flight and one queued; the last kKeptTxTempUnits
+    // stay on disk, every one is removed when the session ends.
+    std::deque<std::string> tx_temp_paths_;
+    // Unique per TNCSession instance (random at construction): two TNCs with the same callsign on
+    // one machine (two ports, a restart overlapping the old process, parallel test runs) shared
+    // ultra_tnc_tx_<CALL>_<n>.bin and deleted or OVERWROTE each other's staged units - a unit the
+    // other instance rewrote before startSend read it would go out with the wrong bytes and a CRC
+    // that matches them (BUG-TNC-TEMP-NAME-COLLISION).
+    std::string tx_temp_token_;
+    static constexpr size_t kKeptTxTempUnits = 4;
+    void removeTxTempFiles();
 
     // ACCUMULATION (default on; opt out with ULTRA_TNC_ACCUM_DISABLE for the legacy
     // per-chunk flush). The VARA data port delivers the host's byte stream in many small

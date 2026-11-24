@@ -1168,7 +1168,13 @@ void StreamingDecoder::setMode(protocol::WaveformMode mode, bool connected) {
             retired_waveforms_.push_back(std::move(waveform_));
         }
         if (mode == protocol::WaveformMode::MC_DPSK) {
-            waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+            // Configured before it is published: the decode thread reads waveform_ unlocked.
+            // It keeps the session's constellation (BUG-MCDPSK-REBUILD-DROPS-MODULATION).
+            auto mc = WaveformFactory::createMCDPSK(mc_dpsk_config_);
+            if (mc && isMcDpskModulation(current_modulation_)) {
+                mc->configure(current_modulation_, code_rate_);
+            }
+            waveform_ = std::move(mc);
         } else {
             waveform_ = WaveformFactory::create(mode);
         }
@@ -1381,6 +1387,11 @@ void StreamingDecoder::applyPendingMCDPSKConfig() {
         waveform_ = WaveformFactory::createMCDPSK(mc_dpsk_config_);
         frame_decoder_.interleaver_ = std::make_unique<ChannelInterleaver>(
             mcDpskBitsPerSymbol(mc_dpsk_config_), v2::LDPC_CODEWORD_BITS);
+        // The rebuilt waveform keeps the session's constellation, not the config's bits per
+        // symbol (BUG-MCDPSK-REBUILD-DROPS-MODULATION).
+        if (waveform_ && isMcDpskModulation(current_modulation_)) {
+            applyDataModeUnlocked(current_modulation_, code_rate_);
+        }
     }
 
     LOG_MODEM(INFO, "StreamingDecoder: MC-DPSK config carriers=%d sps=%d bits/sym=%d raw=%.1f bps",
@@ -1872,6 +1883,8 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     anchored_burst_payload_seen_ = false;
     burst_data_start_abs_ = 0;
     mc_burst_pending_frame_ = false;
+    mc_mfsk_lookahead_pending_ = false;
+    external_anchor_valid_ = false;  // its absolute position belongs to the rewound clock
     mc_burst_pending_soft_bits_.clear();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};
@@ -1946,6 +1959,14 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
         last_doppler_hz_.store(0.0f);
         last_doppler_coherence_valid_.store(false);
     }
+}
+
+void StreamingDecoder::noteExternalChirpAnchor(size_t samples_ago) {
+    std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+    const size_t total = sync_controller_.ring_.total_fed_;
+    if (samples_ago > total) return;
+    external_anchor_abs_ = total - samples_ago;
+    external_anchor_valid_ = true;
 }
 
 void StreamingDecoder::stop() {

@@ -199,6 +199,17 @@ inline constexpr float kAckEdgeMarginDb = 2.0f;
 inline constexpr float kAck100msAwgnEdgeDb = -6.0f;
 inline constexpr float kAck100msFadingEdgeDb = 0.0f;
 
+// The longest staircase rung no longer than max_symbol_ms (the shortest rung when none fits): the
+// receiver's ACK must end before the sender's retransmission (BUG-RTO-SHORTER-THAN-PEER-ACK).
+inline uint32_t capSymbolMsToRung(uint32_t symbol_ms, uint32_t max_symbol_ms) {
+    if (symbol_ms <= max_symbol_ms) return symbol_ms;
+    uint32_t best = kStaircaseSymbolMs.front();
+    for (const uint32_t ms : kStaircaseSymbolMs) {
+        if (ms <= max_symbol_ms && ms > best) best = ms;
+    }
+    return best;
+}
+
 inline constexpr uint32_t symbolMsForSNR(float snr_db, bool fading_present = false) {
     if (fading_present) {
         if (snr_db >= 8.0f + kAckEdgeMarginDb) return kSymbolMsHighSNR;  // 12 ms -> 408 ms

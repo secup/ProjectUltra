@@ -289,6 +289,14 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
         LOG_MODEM(INFO, "[%s] TX: Connected+handshake -> waveform_mode_=%d",
                   log_prefix_.c_str(), static_cast<int>(tx_waveform_mode));
     }
+    const bool robust_once = robust_waveform_once_ && connected_ && handshake_complete_ &&
+                             !use_connected_waveform_once_;
+    robust_waveform_once_ = false;
+    if (robust_once) {
+        tx_waveform_mode = protocol::WaveformMode::MC_DPSK;
+        LOG_MODEM(INFO, "[%s] TX: robust once -> MC-DPSK (the listener's geometry)",
+                  log_prefix_.c_str());
+    }
     bool is_ofdm = protocol::isOFDMMode(tx_waveform_mode);
 
     // ========================================================================
@@ -307,6 +315,26 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
                   modulationToString(tx_modulation),
                   codeRateToString(tx_code_rate),
                   connected_ ? "negotiated" : "disconnect ACK");
+    }
+
+    if (robust_once) {
+        // The geometry and constellation a dual-listen MC-DPSK listener runs (configureListener).
+        const auto rung = protocol::connection_policy::ladderRungForId(
+            protocol::LadderRungId::ROBUST_MID);
+        MultiCarrierDPSKConfig mc = mc_dpsk_config_;
+        mc.num_carriers = 8;
+        mc.samples_per_symbol = 1024;
+        // The constellation the protocol named (the peer's MC-DPSK decoder: its listener's
+        // ROBUST_MID, or its primary's rung right after an unconfirmed up-crossing).
+        const Modulation mod = isMcDpskModulation(robust_waveform_modulation_)
+                                   ? robust_waveform_modulation_
+                                   : rung.modulation;
+        mc.bits_per_symbol = (mod == Modulation::DBPSK || isMfskModulation(mod))
+                                 ? 1
+                                 : mod == Modulation::D8PSK ? 3 : 2;
+        streaming_encoder_->setMCDPSKConfig(mc);
+        tx_modulation = mod;
+        tx_code_rate = rung.code_rate;
     }
 
     // Save one-shot flag before clearing (needed for light preamble decision below)

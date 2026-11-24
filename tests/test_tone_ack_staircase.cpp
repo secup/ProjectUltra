@@ -25,6 +25,17 @@ int main() {
         CHECK(s.choose().symbol_ms == 25, "no reading yet: the 25 ms baseline");
     }
     {
+        // BUG-ACK-STAIRCASE-NON-SNR-SOURCE: ITU Good 3 dB OFDM readings, then a control frame
+        // decoded off its chirp reports a correlation score of 14.8: the ACK stays long.
+        ToneAckStaircase s;
+        for (int i = 0; i < 5; ++i) s.noteFrame(3.0f, SNRSource::OFDM_BROADBAND, 0.5f);
+        const uint32_t before = s.choose().symbol_ms;
+        s.noteFrame(14.8f, SNRSource::SYNC_QUALITY, 0.0f);
+        CHECK(s.choose().symbol_ms == before && before > 25,
+              "a chirp score must not shorten a fading 3 dB link's ACK to the baseline");
+        CHECK(s.choose().source == SNRSource::OFDM_BROADBAND, "the last SNR reading stays the source");
+    }
+    {
         // ITU Good at 20 dB, then the channel drops to 5 dB.
         ToneAckStaircase s;
         for (int i = 0; i < 5; ++i) s.noteFrame(20.0f, SNRSource::OFDM_BROADBAND, 0.5f);
@@ -70,6 +81,19 @@ int main() {
               "a reading of -11 dB (channel -5.6, under the 100 ms edge + 2): the 200 ms floor");
         for (int i = 0; i < 5; ++i) s.noteFrame(20.0f, SNRSource::MCDPSK_IN_BAND, 0.0f);
         CHECK(s.choose().symbol_ms == 25, "an MC-DPSK reading never shortens below the baseline");
+    }
+    {
+        // BUG-ACK-STAIRCASE-FADING-SPIKE: AWGN 3 dB, one frame's fading index reads 0.35 (noise).
+        // The column follows the median: the ACK stays on the AWGN column.
+        ToneAckStaircase s;
+        for (int i = 0; i < 4; ++i) s.noteFrame(1.5f, SNRSource::OFDM_BROADBAND, 0.02f);
+        s.noteFrame(1.5f, SNRSource::OFDM_BROADBAND, 0.35f);
+        const auto c = s.choose();
+        CHECK(!c.fading_present && c.symbol_ms == 25,
+              "one noisy fading reading on AWGN must not pick the 6.8 s fading floor");
+        // A real fading channel reads fading on most frames: the column follows.
+        for (int i = 0; i < 3; ++i) s.noteFrame(1.5f, SNRSource::OFDM_BROADBAND, 0.5f);
+        CHECK(s.choose().fading_present, "three of five fading frames: the fading column");
     }
     {
         ToneAckStaircase s;

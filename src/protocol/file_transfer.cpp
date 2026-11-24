@@ -125,8 +125,8 @@ bool FileTransferController::startSend(const std::string& filepath) {
     }
 
     auto size = file.tellg();
-    if (size < 0 || static_cast<uint64_t>(size) > UINT32_MAX) {
-        return false;  // File too large
+    if (size < 0 || static_cast<uint64_t>(size) > kFileTransferMaxBytes) {
+        return false;  // File too large for the 24-bit offset/size fields
     }
 
     file.seekg(0, std::ios::beg);
@@ -157,6 +157,9 @@ bool FileTransferController::startSend(const std::string& filepath) {
         tx_data_ = std::move(file_data);
     }
 
+    tx_transfer_id_ = next_tx_transfer_id_;
+    next_tx_transfer_id_ = static_cast<uint8_t>(next_tx_transfer_id_ + 1);
+    if (next_tx_transfer_id_ == 0) next_tx_transfer_id_ = 1;  // 0 = no identity
     tx_offset_ = 0;
     tx_metadata_sent_ = false;
     chunks_sent_ = 0;
@@ -439,8 +442,8 @@ Bytes FileTransferController::buildMetadataPayload() {
     // Flags byte
     payload.push_back(tx_flags_);
 
-    // Original size (big-endian)
-    payload.push_back((tx_original_size_ >> 24) & 0xFF);
+    // Transfer identity + original size (big-endian, 8 + 24 bits)
+    payload.push_back(tx_transfer_id_);
     payload.push_back((tx_original_size_ >> 16) & 0xFF);
     payload.push_back((tx_original_size_ >> 8) & 0xFF);
     payload.push_back(tx_original_size_ & 0xFF);
@@ -464,8 +467,8 @@ Bytes FileTransferController::buildDataPayload() {
 
     payload.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
 
-    // Offset in transmitted data (big-endian)
-    payload.push_back((tx_offset_ >> 24) & 0xFF);
+    // Transfer identity + offset in transmitted data (big-endian, 8 + 24 bits)
+    payload.push_back(tx_transfer_id_);
     payload.push_back((tx_offset_ >> 16) & 0xFF);
     payload.push_back((tx_offset_ >> 8) & 0xFF);
     payload.push_back(tx_offset_ & 0xFF);
@@ -524,7 +527,7 @@ Bytes FileTransferController::buildSingleBlockPayload(size_t max_payload) {
     payload.push_back(static_cast<uint8_t>(PayloadType::FILE_BLOCK));
     payload.push_back(tx_flags_);
 
-    payload.push_back((tx_original_size_ >> 24) & 0xFF);
+    payload.push_back(tx_transfer_id_);  // identity + 24-bit original size
     payload.push_back((tx_original_size_ >> 16) & 0xFF);
     payload.push_back((tx_original_size_ >> 8) & 0xFF);
     payload.push_back(tx_original_size_ & 0xFF);
@@ -556,17 +559,24 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
     // in-progress receive. Only the FIRST FILE_START sets up the buffers / drains the
     // pre-start staging. (CRC is validated at completion, so a stale duplicate here is
     // safely ignored.)
+    const uint32_t size_field = (static_cast<uint32_t>(payload[2]) << 24) |
+                                (static_cast<uint32_t>(payload[3]) << 16) |
+                                (static_cast<uint32_t>(payload[4]) << 8) |
+                                static_cast<uint32_t>(payload[5]);
+    const uint8_t id = fileTransferIdOf(size_field);
     if (state_ == FileTransferState::RECEIVING) {
+        return true;
+    }
+    // A late copy of a finished transfer's FILE_START would open a receive that never completes
+    // and holds the next transfer off.
+    if (rxTransferFinished(id)) {
+        LOG_MODEM(INFO, "FileTransfer: ignoring FILE_START of finished transfer %u", id);
         return true;
     }
 
     rx_flags_ = payload[1];
-
-    // Parse original size (big-endian)
-    rx_expected_size_ = (static_cast<uint32_t>(payload[2]) << 24) |
-                        (static_cast<uint32_t>(payload[3]) << 16) |
-                        (static_cast<uint32_t>(payload[4]) << 8) |
-                        static_cast<uint32_t>(payload[5]);
+    rx_transfer_id_ = id;
+    rx_expected_size_ = id != 0 ? fileTransferValueOf(size_field) : size_field;
 
     // Parse CRC32 (big-endian)
     rx_expected_crc_ = (static_cast<uint32_t>(payload[6]) << 24) |
@@ -586,9 +596,20 @@ bool FileTransferController::processFileStart(const Bytes& payload) {
     // absolute offsets, so adopt them as the out-of-order buffer and stitch in whatever
     // is now contiguous from offset 0 — saving a re-send of already-decoded frames.
     // Offset-based, so it is correct regardless of the descriptor used to carry them.
-    rx_pending_chunks_ = std::move(rx_prestart_chunks_);
+    // Only chunks of THIS transfer: staged chunks of another one are not its bytes.
+    if (rx_prestart_id_ == id) {
+        rx_pending_chunks_ = std::move(rx_prestart_chunks_);
+        rx_final_chunk_seen_ = rx_prestart_final_seen_;
+    } else {
+        if (!rx_prestart_chunks_.empty()) {
+            LOG_MODEM(WARN, "FileTransfer: dropping %zu staged chunk(s) of transfer %u (FILE_START "
+                      "is transfer %u)", rx_prestart_chunks_.size(), rx_prestart_id_, id);
+        }
+        rx_pending_chunks_.clear();
+        rx_final_chunk_seen_ = false;
+    }
     rx_prestart_chunks_.clear();
-    rx_final_chunk_seen_ = rx_prestart_final_seen_;
+    rx_prestart_id_ = 0;
     rx_prestart_final_seen_ = false;
     rx_prestart_overflow_ = false;
     drainPendingChunks();
@@ -639,12 +660,28 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     // The offset is self-describing per frame — independent of the BURST_HEADER's group
     // size / cw / mod / rate / Z — which is what makes both the out-of-order buffer and
     // the pre-FILE_START staging below adaptive to descriptor changes.
-    uint32_t offset = (static_cast<uint32_t>(payload[1]) << 24) |
-                      (static_cast<uint32_t>(payload[2]) << 16) |
-                      (static_cast<uint32_t>(payload[3]) << 8) |
-                      static_cast<uint32_t>(payload[4]);
+    const uint32_t offset_field = (static_cast<uint32_t>(payload[1]) << 24) |
+                                  (static_cast<uint32_t>(payload[2]) << 16) |
+                                  (static_cast<uint32_t>(payload[3]) << 8) |
+                                  static_cast<uint32_t>(payload[4]);
+    const uint8_t id = fileTransferIdOf(offset_field);
+    uint32_t offset = id != 0 ? fileTransferValueOf(offset_field) : offset_field;
     const uint8_t* data = payload.data() + 5;
     size_t data_len = payload.size() - 5;
+
+    // A late copy of a finished transfer's chunk (an ARQ resend arriving below the window, an era
+    // change's salvage): its bytes belong to no transfer now. Consumed (ACKable), never staged.
+    if (rxTransferFinished(id)) {
+        LOG_MODEM(DEBUG, "FileTransfer: dropping chunk offset=%u of finished transfer %u",
+                  offset, id);
+        return true;
+    }
+    if (state_ == FileTransferState::RECEIVING && id != 0 && rx_transfer_id_ != 0 &&
+        id != rx_transfer_id_) {
+        LOG_MODEM(WARN, "FileTransfer: dropping chunk offset=%u of transfer %u while receiving %u",
+                  offset, id, rx_transfer_id_);
+        return true;
+    }
 
     // PRE-START STAGING: this FILE_DATA decoded before FILE_START set up the transfer.
     // The BURST_HEADER already told us a bulk burst is inbound and the offset is
@@ -654,6 +691,18 @@ bool FileTransferController::processFileData(const Bytes& payload, bool more_dat
     if (state_ != FileTransferState::RECEIVING) {
         if (rx_prestart_overflow_) {
             return true;  // staging disabled this transfer; connection will NACK
+        }
+        if (rx_prestart_id_ != id) {
+            // Staged chunks of another (older, unfinished) transfer cannot share the map: offsets
+            // are per transfer. The newer transfer wins.
+            if (!rx_prestart_chunks_.empty()) {
+                LOG_MODEM(WARN, "FileTransfer: dropping %zu staged chunk(s) of transfer %u for "
+                          "transfer %u", rx_prestart_chunks_.size(), rx_prestart_id_, id);
+            }
+            rx_prestart_chunks_.clear();
+            rx_prestart_final_seen_ = false;
+            rx_prestart_overflow_ = false;
+            rx_prestart_id_ = id;
         }
         size_t staged = 0;
         for (const auto& kv : rx_prestart_chunks_) staged += kv.second.size();
@@ -789,6 +838,7 @@ void FileTransferController::checkAndFinalizeReceive() {
             auto decompressed = Compression::decompress(rx_data_, rx_expected_size_ * 2);
             if (!decompressed) {
                 state_ = FileTransferState::ERROR;
+                noteRxTransferFinished(rx_transfer_id_);
                 LOG_MODEM(ERROR, "FileTransfer: Decompression failed (%zu bytes compressed)",
                           rx_data_.size());
                 if (on_received_) {
@@ -835,6 +885,7 @@ void FileTransferController::checkAndFinalizeReceive() {
         }
 
         state_ = success ? FileTransferState::COMPLETE : FileTransferState::ERROR;
+        noteRxTransferFinished(rx_transfer_id_);
 
         if (on_received_) {
             on_received_(success ? rx_filepath_ : "", success,
@@ -851,10 +902,17 @@ bool FileTransferController::processFileBlock(const Bytes& payload) {
     }
 
     const uint8_t flags = payload[1];
-    const uint32_t original_size = (static_cast<uint32_t>(payload[2]) << 24) |
-                                   (static_cast<uint32_t>(payload[3]) << 16) |
-                                   (static_cast<uint32_t>(payload[4]) << 8) |
-                                   static_cast<uint32_t>(payload[5]);
+    const uint32_t size_field = (static_cast<uint32_t>(payload[2]) << 24) |
+                                (static_cast<uint32_t>(payload[3]) << 16) |
+                                (static_cast<uint32_t>(payload[4]) << 8) |
+                                static_cast<uint32_t>(payload[5]);
+    const uint8_t block_id = fileTransferIdOf(size_field);
+    const uint32_t original_size = block_id != 0 ? fileTransferValueOf(size_field) : size_field;
+    // A late copy of a block already delivered would hand the host the same data twice.
+    if (rxTransferFinished(block_id)) {
+        LOG_MODEM(INFO, "FileTransfer: ignoring duplicate FILE_BLOCK of transfer %u", block_id);
+        return true;
+    }
     const uint32_t transmitted_size = (static_cast<uint32_t>(payload[6]) << 24) |
                                       (static_cast<uint32_t>(payload[7]) << 16) |
                                       (static_cast<uint32_t>(payload[8]) << 8) |
@@ -925,6 +983,7 @@ bool FileTransferController::processFileBlock(const Bytes& payload) {
     }
 
     state_ = success ? FileTransferState::COMPLETE : FileTransferState::ERROR;
+    noteRxTransferFinished(block_id);
     if (on_received_) {
         on_received_(success ? filepath : "", success,
                      success ? "" : "CRC mismatch or file write failed");
@@ -968,7 +1027,27 @@ void FileTransferController::resetTxState() {
     state_ = FileTransferState::IDLE;
 }
 
+bool FileTransferController::rxTransferFinished(uint8_t id) const {
+    return id != 0 &&
+           std::find(rx_finished_ids_.begin(), rx_finished_ids_.end(), id) != rx_finished_ids_.end();
+}
+
+void FileTransferController::noteRxTransferFinished(uint8_t id) {
+    if (id == 0 || rxTransferFinished(id)) return;
+    rx_finished_ids_.push_back(id);
+    while (rx_finished_ids_.size() > kFinishedIdMemory) rx_finished_ids_.pop_front();
+}
+
+void FileTransferController::beginSession() {
+    rx_finished_ids_.clear();
+    rx_prestart_chunks_.clear();
+    rx_prestart_id_ = 0;
+    rx_prestart_final_seen_ = false;
+    rx_prestart_overflow_ = false;
+}
+
 void FileTransferController::resetRxState() {
+    rx_transfer_id_ = 0;
     rx_filepath_.clear();
     rx_filename_.clear();
     rx_data_.clear();

@@ -373,11 +373,11 @@ void test_file_start_requires_eleven_bytes_but_later_data_may_use_eight() {
 }
 
 uint32_t dataPayloadOffset(const Bytes& payload) {
-    // FILE_DATA: TYPE(1) + OFFSET(4, big-endian) + DATA
-    return (static_cast<uint32_t>(payload[1]) << 24) |
-           (static_cast<uint32_t>(payload[2]) << 16) |
-           (static_cast<uint32_t>(payload[3]) << 8) |
-           static_cast<uint32_t>(payload[4]);
+    // FILE_DATA: TYPE(1) + TRANSFER ID(1) + OFFSET(3, big-endian) + DATA
+    return fileTransferValueOf((static_cast<uint32_t>(payload[1]) << 24) |
+                               (static_cast<uint32_t>(payload[2]) << 16) |
+                               (static_cast<uint32_t>(payload[3]) << 8) |
+                               static_cast<uint32_t>(payload[4]));
 }
 
 Bytes makeIncompressiblePayload(size_t size) {
@@ -458,11 +458,11 @@ void test_requeue_resumes_exact_offset_across_chunk_size_changes() {
           "requeue with un-retired metadata rebuilds from the metadata chunk");
 }
 
-Bytes makeFileDataPayload(const Bytes& src, uint32_t offset, size_t len) {
-    // FILE_DATA: TYPE(1) + OFFSET(4, big-endian) + DATA
+Bytes makeFileDataPayload(const Bytes& src, uint32_t offset, size_t len, uint8_t transfer_id = 0) {
+    // FILE_DATA: TYPE(1) + TRANSFER ID(1) + OFFSET(3, big-endian) + DATA (id 0: no identity)
     Bytes p;
     p.push_back(static_cast<uint8_t>(PayloadType::FILE_DATA));
-    p.push_back(static_cast<uint8_t>((offset >> 24) & 0xFF));
+    p.push_back(transfer_id != 0 ? transfer_id : static_cast<uint8_t>((offset >> 24) & 0xFF));
     p.push_back(static_cast<uint8_t>((offset >> 16) & 0xFF));
     p.push_back(static_cast<uint8_t>((offset >> 8) & 0xFF));
     p.push_back(static_cast<uint8_t>(offset & 0xFF));
@@ -600,6 +600,7 @@ void test_prestart_staging_coverage_never_shrinks_on_regrid() {
     tx.setMaxChunkPayload(25);
     CHECK(tx.startSend(src_path.string()), "start prestart send");
     Bytes meta = tx.getNextChunk();
+    const uint8_t id = meta.size() > 2 ? meta[2] : 0;  // FILE_START: TYPE, FLAGS, ID + SIZE
 
     FileTransferController rx;
     rx.setReceiveDirectory(dirs.rx_dir.string());
@@ -613,23 +614,85 @@ void test_prestart_staging_coverage_never_shrinks_on_regrid() {
     });
 
     // Data BEFORE FILE_START -> staged by absolute offset.
-    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 20), true),
+    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 20, id), true),
           "staged [0,20) before FILE_START");
     // Rate demote mid-staging: same offset, SHORTER. Must not shrink coverage.
-    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 12), true),
+    CHECK(rx.processPayload(makeFileDataPayload(original, 0, 12, id), true),
           "shorter re-grid of a staged offset accepted");
-    CHECK(rx.processPayload(makeFileDataPayload(original, 20, 20), true),
+    CHECK(rx.processPayload(makeFileDataPayload(original, 20, 20, id), true),
           "staged [20,40)");
     // FILE_START drains the staging map; the drain must see the FULL 20 B at offset 0.
     CHECK(rx.processPayload(meta, true), "metadata accepted (drains staging)");
-    CHECK(rx.processPayload(makeFileDataPayload(original, 40, 20), true),
+    CHECK(rx.processPayload(makeFileDataPayload(original, 40, 20, id), true),
           "chunk [40,60) accepted");
-    CHECK(rx.processPayload(makeFileDataPayload(original, 60, 20), false),
+    CHECK(rx.processPayload(makeFileDataPayload(original, 60, 20, id), false),
           "final chunk [60,80) accepted");
 
     CHECK(callback_called, "receiver finalized (old code stranded on the [12,20) hole)");
     CHECK(callback_success, "receive succeeded (CRC ok)");
     CHECK(readFile(received_path) == original, "received bytes are exact");
+}
+
+// BUG-FILE-CHUNK-CROSSES-TRANSFERS (TNC marathon, ITU Good 10 dB, 2026-11-23): an ARQ resend of a
+// finished transfer's chunks arrived below the window after it completed; the receiver staged them
+// as the NEXT transfer's first bytes, and that 4097-byte block failed its CRC. Every frame now names
+// its transfer: late frames of a finished one are dropped, a late FILE_START opens nothing, a late
+// FILE_BLOCK is not delivered twice, and the next transfer arrives intact.
+void test_late_frames_of_a_finished_transfer_never_reach_the_next() {
+    TransferDirs dirs("ultra_file_transfer_identity_test");
+    CHECK(dirs.ready, "create temp directories");
+    const Bytes first = makeIncompressiblePayload(905);
+    Bytes second = makeIncompressiblePayload(4097);
+    for (auto& b : second) b = static_cast<uint8_t>(b ^ 0x5A);  // different bytes, same offsets
+    const auto first_path = dirs.tx_dir / "first.bin";
+    const auto second_path = dirs.tx_dir / "second.bin";
+    CHECK(writeFile(first_path, first) && writeFile(second_path, second), "write sources");
+
+    FileTransferController tx;
+    tx.setMaxChunkPayload(312);
+    FileTransferController rx;
+    rx.setReceiveDirectory(dirs.rx_dir.string());
+    std::vector<std::pair<bool, std::string>> received;
+    rx.setReceivedCallback([&](const std::string& path, bool ok, const std::string&) {
+        received.emplace_back(ok, path);
+    });
+
+    CHECK(tx.startSend(first_path.string()), "start the first transfer");
+    const auto a = collectChunks(tx);
+    CHECK(a.size() >= 3, "the first transfer should span several chunks");
+    tx.cancel();
+    for (const auto& c : a) rx.processPayload(c.payload, c.more_data);
+    CHECK(received.size() == 1 && received[0].first, "the first transfer arrives");
+    CHECK(readFile(received[0].second) == first, "the first transfer is exact");
+
+    // The late resend: every frame of the finished transfer again, FILE_START included.
+    for (const auto& c : a) rx.processPayload(c.payload, c.more_data);
+    CHECK(rx.getState() != FileTransferState::RECEIVING,
+          "a late FILE_START of a finished transfer must not open a receive");
+    CHECK(!rx.hasHealthyStagedData(), "late chunks of a finished transfer must not be staged");
+    CHECK(received.size() == 1, "nothing is delivered twice");
+
+    CHECK(tx.startSend(second_path.string()), "start the second transfer");
+    const auto b = collectChunks(tx);
+    for (const auto& c : b) rx.processPayload(c.payload, c.more_data);
+    CHECK(received.size() == 2 && received[1].first, "the second transfer passes its CRC");
+    CHECK(readFile(received[1].second) == second, "the second transfer is exact");
+    tx.cancel();
+
+    // A single-frame block resent after delivery is not delivered again.
+    const auto small_path = dirs.tx_dir / "small.bin";
+    CHECK(writeFile(small_path, Bytes{1, 2, 3}), "write a small source");
+    CHECK(tx.startSend(small_path.string()), "start a single-block transfer");
+    const Bytes block = tx.getSingleBlockPayload(312);
+    CHECK(!block.empty(), "a 3-byte file fits one block");
+    rx.processPayload(block, false);
+    rx.processPayload(block, false);
+    CHECK(received.size() == 3, "a resent FILE_BLOCK must not be delivered twice");
+
+    // A new session forgets the identities (a new peer's transfer 1 is not a duplicate).
+    rx.beginSession();
+    rx.processPayload(block, false);
+    CHECK(received.size() == 4, "after a new session the same identity is a new transfer");
 }
 
 int main() {
@@ -643,6 +706,7 @@ int main() {
     test_file_start_requires_eleven_bytes_but_later_data_may_use_eight();
     test_requeue_resumes_exact_offset_across_chunk_size_changes();
     test_receiver_merges_straddling_resend_and_drains_covered_buffered();
+    test_late_frames_of_a_finished_transfer_never_reach_the_next();
 
     if (tests_failed != 0) {
         std::cout << "FileTransferController: " << (tests_run - tests_failed)

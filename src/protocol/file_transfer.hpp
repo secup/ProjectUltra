@@ -43,6 +43,18 @@ enum class PayloadType : uint8_t {
 // {type, object_id} — see PayloadType::TEXT_MESSAGE_OBJECT.
 constexpr size_t kMessageObjectPrefixBytes = 2;
 
+// Transfer identity (BUG-FILE-CHUNK-CROSSES-TRANSFERS, 2026-11-23): the top byte of FILE_DATA's
+// 32-bit offset and of FILE_START's / FILE_BLOCK's original-size field names the transfer; the low
+// 24 bits are the offset / size (a transfer is at most 16 MiB - 7 h at 5 kbps). 0 = an older sender
+// without identity. A late copy of a finished transfer's frame (an ARQ resend below the window, an
+// era change's salvage) was staged as the NEXT file's first bytes and corrupted it (TNC marathon,
+// ITU Good 10 dB: a 4097-byte block failed its CRC and was dropped while the sender's host was
+// told BUFFER 0). The receiver now drops frames of the transfers it already finished.
+constexpr uint32_t kFileTransferFieldMask = 0x00FFFFFFu;
+constexpr uint32_t kFileTransferMaxBytes = kFileTransferFieldMask;
+inline uint8_t fileTransferIdOf(uint32_t field) { return static_cast<uint8_t>(field >> 24); }
+inline uint32_t fileTransferValueOf(uint32_t field) { return field & kFileTransferFieldMask; }
+
 // File transfer flags (in FILE_START payload)
 namespace FileFlags {
     constexpr uint8_t NONE       = 0x00;
@@ -193,6 +205,10 @@ public:
     // Cancel current transfer
     void cancel(const std::string& error = "Transfer cancelled");
 
+    // A new session: the peer's transfer identities start over (a new peer, or the same peer's
+    // new session), so the finished-transfer memory and any staged chunks are dropped.
+    void beginSession();
+
     // --- Callbacks ---
 
     void setProgressCallback(ProgressCallback cb) { on_progress_ = cb; }
@@ -239,6 +255,8 @@ private:
     uint32_t tx_crc_ = 0;      // CRC32 of original file
     uint32_t tx_offset_ = 0;   // Current offset in tx_data_
     uint8_t tx_flags_ = 0;     // FileFlags
+    uint8_t tx_transfer_id_ = 0;       // this transfer's identity (1..255)
+    uint8_t next_tx_transfer_id_ = 1;
     bool tx_metadata_sent_ = false;
     uint32_t chunks_sent_ = 0;      // Chunks queued to ARQ (for window tracking)
     uint32_t chunks_acked_ = 0;     // Chunks confirmed by ARQ
@@ -278,6 +296,14 @@ private:
     // bursts (e.g. adaptive rate). Bounded: on overflow we stop staging and the
     // connection falls back to NACK, so we never ACK data we cannot retain.
     std::map<uint32_t, Bytes> rx_prestart_chunks_;
+    uint8_t rx_prestart_id_ = 0;   // identity of the staged chunks' transfer
+    uint8_t rx_transfer_id_ = 0;   // identity of the transfer being received
+    // Identities of the transfers this session finished (success or failure), newest last: their
+    // late frames are duplicates. Eight is far more than can be in flight (one transfer at a time).
+    std::deque<uint8_t> rx_finished_ids_;
+    static constexpr size_t kFinishedIdMemory = 8;
+    bool rxTransferFinished(uint8_t id) const;
+    void noteRxTransferFinished(uint8_t id);
     bool rx_prestart_final_seen_ = false;
     bool rx_prestart_overflow_ = false;
     static constexpr size_t MAX_PRESTART_STAGE_BYTES = 256u * 1024u;

@@ -10,6 +10,108 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-23 (later) — fix: a TNC that runs session after session (fading marathon)
+
+**Harness.** New `tools/tnc_scenario.py --scenario marathon`: the same two TNC processes, never
+restarted, run 5 back-to-back sessions (callers alternate, either side hangs up), each with 8 short
+messages both ways, three 4.5-5 KB blocks and a closing message; every byte checked. AWGN 10 dB passed
+from the start; ITU Good 10 dB seed 43 found the bugs below, one after another.
+
+**Fixed** (details in KNOWN_BUGS):
+- BUG-MCDPSK-REBUILD-DROPS-MODULATION: an MC-DPSK waveform rebuilt after the data mode lost the
+  session's constellation - after a crossing back from OFDM the sender sent DQPSK labelled 16-FSK-F
+  (~11 dB too weak), the receiver never decoded one and the session stuck. Encoder and decoder rebuilds
+  configure the session constellation (`isMcDpskModulation`).
+- BUG-TNC-UNDOES-WAVEFORM-CROSSING (P0 for the TNC on fading): `ultra_tnc` re-applied its connect-time
+  waveform in its data-mode callback and undid every OFDM -> MC-DPSK follow crossing 5 ms later. The
+  callback now mirrors the GUI's (profile + data mode, never the waveform).
+- BUG-MFSK-LOOKAHEAD-CUT-BY-CONNECT-WAIT: the 16-FSK lookahead window was cut to a CONNECT's span.
+- BUG-FILE-CHUNK-CROSSES-TRANSFERS (P0, silent data loss): late resends of a finished file transfer were
+  merged into the next one. **WIRE CHANGE:** the top byte of FILE_DATA's offset and FILE_START's /
+  FILE_BLOCK's size is the transfer identity; finished transfers' late frames are dropped.
+- BUG-TNC-FAILED-BLOCK-SILENT: a received unit failing its CRC now ends the session (both hosts retry)
+  instead of leaving a silent gap.
+- BUG-TNC-STAGED-UNIT-DELETED-EARLY (P0, silent loss): the TNC deleted a staged bulk unit's file before
+  its queued transfer started; the last 4 units now stay until the session ends.
+- BUG-TNC-SEND-FAILURE-SILENT: a failed outbound unit or abandoned block now ends the session.
+- BUG-TNC-TEMP-NAME-COLLISION (P0): same-callsign TNCs on one machine shared staged-unit file names
+  (deleted/overwrote each other's units); names carry a random per-session token.
+- BUG-TNC-PEER-DISCONNECTED-LATE: DISCONNECTED reaches the host when the peer's DISCONNECT arrives, not
+  24 s later; a CONNECT in the re-ACK grace dials at once.
+- BUG-ABORT-PEER-NOTICE-SLOW: either side, owed an exchange and hearing nothing for 3 min, declares the
+  link lost (was up to ~12 min for a receiver, never for a sender).
+- BUG-TNC-BUFFER-WIRE-BYTES: BUFFER counts the host's bytes (a 1-byte write: BUFFER 1), through the
+  engine's message records and a TNC unit ledger (markers, compression).
+- Diagnostics: the follow pick log prints the fading class input and PAPR correction (open
+  BUG-FOLLOW-STAYS-MCDPSK-ON-GOOD-10DB).
+- BUG-TNC-PENDING-ONLY-AT-CONNECTED closed as correct (a PING names no station).
+- BUG-REDIAL-WAITS-OUT-GRACE: a CONNECT in the peer-close grace ends it (second connects 31 -> 20 s).
+- BUG-SIMULTANEOUS-CONNECT-LOCKSTEP: CONNECT retries get the PING retries' random back-off.
+- BUG-DISCONNECT-TIMING-NON-OFDM: the close's retry/grace/ACK-repeat derive from the control frame's
+  airtime on every waveform (MC-DPSK retried over the peer's ACK on a fixed 5 s, 18/18 closes).
+- BUG-DISCONNECT-LOST-IN-FADE: the last DISCONNECT retry of an OFDM session rides MC-DPSK (the peer's
+  dual-listen listener decodes it 10+ dB below OFDM).
+- BUG-WEAK-CHIRP-ESTABLISHES-CFO: a sub-threshold chirp no longer establishes the CFO tracker (a
+  0.078-correlation false lock at -52 Hz killed a whole session).
+- BUG-RESPONDER-NEVER-ASKS-TURN: an unconfirmed responder asks for the turn once a CONNECT retry interval
+  passes with no duplicate CONNECT (a lost first TURNOVER deadlocked both sides); the half-open timers
+  reset per session.
+- BUG-LISTENER-MFSK-LOOKAHEAD-BLIND: a dual-listen listener never arms the 16-FSK look-ahead (OFDM
+  chirps armed a 10.5 s blind window); proof pending the next sweep.
+- BUG-MCDPSK-FAILED-SPAN-SKIP: a failed MC-DPSK decode resumes the search past its training start, not
+  past the longest hypothesized frame (the listener was blind up to 10.5 s after every OFDM chirp).
+- BUG-ACK-STAIRCASE-FADING-SPIKE: the tone-ACK fading column follows the median fading index of the
+  recent frames (one noisy AWGN reading keyed a 6.8 s ACK past the sender's resend).
+- Tried and removed: lengthening the sender's retransmission deadlines by the peer's tone-ACK length
+  (GUI ITU Good 10 dB, 3 paired seeds: ~10 % slower). Open as BUG-RTO-SHORTER-THAN-PEER-ACK.
+- BUG-CONNECTED-OFDM-IGNORES-CHIRP: the dual-listen MC-DPSK listener's chirp lock hints the OFDM
+  primary to run its chirp+LTS detector at that position (structure-only search missed full-chirp
+  control frames on fading); either decoder's MC-DPSK chirp lock hints the other, so an OFDM listener
+  after a down-crossing is hinted too.
+- BUG-RTO-SHORTER-THAN-PEER-ACK: the receiver caps its tone-ACK symbol duration to the longest
+  staircase rung whose ACK ends before the sender's committed resend (both ends share the timing
+  table); the sender-side deadline extension lost the GUI A/B and is gone.
+- BUG-TNC-SIM-IGNORES-TX-MODEL: `ultra_tnc --sim-audio` honours ULTRA_SIM_PAPR_PENALTY (peak-limited TX,
+  measured PAPR prior) like the GUI; TNC sweeps before this ran the average-level model.
+- BUG-REPLY-ON-WRONG-WAVEFORM: a DISCONNECT ack or TURNOVER answering a frame that arrived on MC-DPSK
+  rides MC-DPSK (decode results carry `decoded_mcdpsk`, reported to the protocol before delivery).
+- BUG-TURN-CONTROL-LOST-AT-OFDM-FLOOR: a TURN_REQUEST retry into a peer silent for a whole retry
+  interval rides MC-DPSK.
+- BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP: receiver-commanded crossings and rungs no longer spend a
+  message's two-regrid allowance.
+- BUG-SIMULTANEOUS-PING-LOCKSTEP: PING retries listen before talking (bounded) and the first retry
+  is jittered, so two stations calling each other stop keying over each other.
+- BUG-MCDPSK-CLOSE-STUCK-ON-UNPROVEN-RUNG: an unanswered MC-DPSK close steps one rung down per retry
+  (retry interval recomputed for the slower rung).
+- BUG-TONE-ACK-BEFORE-ARM (silent data loss): the armed tone-ACK monitor drops a detection that
+  starts before the window's arm - noise in pre-arm audio was accepted as an ACK and a message reported
+  delivered was never received.
+- BUG-CLOSE-DURING-UNCONFIRMED-UPCROSS: a close during this end's unconfirmed up-crossing returns to
+  MC-DPSK at the rung the session left (5 of 70 sweep-6 runs lost their close to it).
+- Robust control copies target the peer's MC-DPSK decoder: the session's last MC-DPSK rung while this
+  end's up-crossing is unconfirmed, ROBUST_MID otherwise (`Connection::robustControlModulation`, the
+  robust-once callback now carries the constellation).
+- BUG-ACK-STAIRCASE-NON-SNR-SOURCE: a chirp-correlation score no longer replaces the staircase's last
+  in-band SNR reading (it dropped fading ACKs to the 25 ms baseline after every chirp-decoded control
+  frame).
+
+**Tests.** StreamingMCDPSK `runRebuildKeepsModulation` (fails without the fix), FileTransferController
+`test_late_frames_of_a_finished_transfer_never_reach_the_next`, ConnectionAdaptive (sender link loss,
+peer close, backlog bytes: 931/931), TNCBridge (3 peer-close cases), plus a regression test for
+every later fix (WaveformFollow 248/248, ConnectionAdaptive 953/953, ToneBurstAckMonitor causality,
+ToneAckStaircase, StreamingSignalPolicy, new OFDMControlFrames). CTest 130/130 (non-scenario).
+
+**Verification (TNC two-station harness over OTASim, `tools/tnc_scenario.py`, 7 scenarios: short,
+pingpong, bulk_then_short, reconnect, simultaneous, abort, cancel; peak-limited TX from sweep 6 on).**
+- Sweep 7 (seeds 301-310, 350 runs, before the last four fixes): 343/350. Failures: 2 pre-arm false
+  ACKs, 1 close on an unproven MC-DPSK rung (all since fixed, re-run PASS), 4 AWGN 3 dB 6 KB transfers
+  out of time on rate flapping (BUG-LATENT-RATE-CLIMB-NO-BACKOFF, open).
+- Sweep 8 (seeds 311-315, 175 runs, all fixes but the PING listen-before-talk): 174/175; the one
+  failure (simultaneous, Moderate 16 dB s313) PASSes on the final build, as do 3 more simultaneous
+  seeds.
+- GUI gate on the final build (seed 42, CFO 7.3 Hz, hardware TX): Good 10 dB 8 KB 1090 bps PASS,
+  AWGN 3 dB 2 KB 140 bps PASS (single-seed locators, not throughput claims).
+
 ## 2026-11-23 — fix: short messages and the TNC (twelve bugs found by a new two-TNC harness)
 
 **Dead tests removed.** The 7 OTASim scenario CTests (`ota_simulator run --scenario`, behind

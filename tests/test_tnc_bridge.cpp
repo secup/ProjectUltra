@@ -177,6 +177,31 @@ struct FakeProtocolEngine : ProtocolEnginePort {
             incoming_cb(peer);
         }
     }
+
+    // The peer's DISCONNECT: the real engine stays CONNECTED for its re-ACK grace.
+    std::function<void()> peer_closed_cb;
+    bool peer_closed_grace = false;
+    int abort_session_calls = 0;
+    void setPeerClosedCallback(std::function<void()> cb) override { peer_closed_cb = std::move(cb); }
+    bool peerClosedGraceActive() const override { return peer_closed_grace; }
+    void abortSession() override {
+        if (!peer_closed_grace) {  // the port's default: stop TX, then disconnect
+            abortTxNow();
+            disconnect();
+            return;
+        }
+        ++abort_session_calls;
+        peer_closed_grace = false;
+        emitConnection(ConnectionState::DISCONNECTED, "Aborted");
+    }
+    std::function<void(const std::string&)> send_failed_cb;
+    void setSendFailedCallback(std::function<void(const std::string&)> cb) override {
+        send_failed_cb = std::move(cb);
+    }
+    void emitPeerClosed() {
+        peer_closed_grace = true;
+        if (peer_closed_cb) peer_closed_cb();
+    }
 };
 
 struct FakeSink : TNCBridgeEventSink {
@@ -267,6 +292,58 @@ int main() {
         expect(h.engine.local_call == "VK2XYZ", "local callsign mismatch");
         expect(h.engine.set_local_calls == 1, "setLocalCallsign not called once");
         expect(h.bridge.getState() == State::READY, "bridge should be READY");
+    });
+
+    runner.run("the peer's DISCONNECT reaches the host at once, and only once", [] {
+        // BUG-TNC-PEER-DISCONNECTED-LATE: the host heard DISCONNECTED ~26 s after its peer's.
+        Harness h;
+        h.bridge.setMyCall({"K2DEF"});
+        h.bridge.setListen(true);
+        h.bridge.start();
+        h.engine.emitConnection(ConnectionState::CONNECTED, "W1ABC");
+        expect(h.sink.connected.size() == 1, "the session should connect");
+        h.engine.emitPeerClosed();
+        expect(h.sink.disconnected == 1, "the peer's close must be reported when it arrives");
+        h.engine.peer_closed_grace = false;
+        h.engine.emitConnection(ConnectionState::DISCONNECTED, "Remote disconnected");
+        expect(h.sink.disconnected == 1, "the grace's end must not report DISCONNECTED again");
+    });
+
+    runner.run("a CONNECT during the peer-close grace dials at once", [] {
+        Harness h;
+        h.bridge.setMyCall({"K2DEF"});
+        h.bridge.start();
+        h.engine.emitConnection(ConnectionState::CONNECTED, "W1ABC");
+        h.engine.emitPeerClosed();
+        h.bridge.startConnect("K2DEF", "N0CALL");
+        expect(h.engine.abort_session_calls == 1, "the grace must end before the new call");
+        expect(h.engine.connect_calls == 1, "the new call must go out");
+        expect(h.sink.disconnected == 1, "ending the grace must not report DISCONNECTED again");
+        expect(h.bridge.getState() == State::CONNECTING, "the bridge should be calling");
+    });
+
+    runner.run("outbound data the modem gave up on ends the session", [] {
+        // BUG-TNC-SEND-FAILURE-SILENT: a staged unit whose transfer failed to start vanished while
+        // the host's BUFFER fell as if it had been delivered.
+        Harness h;
+        h.bridge.setMyCall({"K2DEF"});
+        h.bridge.start();
+        h.engine.emitConnection(ConnectionState::CONNECTED, "W1ABC");
+        expect(static_cast<bool>(h.engine.send_failed_cb), "the bridge must watch for send failures");
+        h.engine.send_failed_cb("Queued file transfer failed to start");
+        h.bridge.tick(10);
+        expect(h.engine.disconnect_calls == 1, "a lost outbound piece must end the session");
+    });
+
+    runner.run("a DISCONNECT during the peer-close grace sends nothing", [] {
+        Harness h;
+        h.bridge.setMyCall({"K2DEF"});
+        h.bridge.start();
+        h.engine.emitConnection(ConnectionState::CONNECTED, "W1ABC");
+        h.engine.emitPeerClosed();
+        h.bridge.disconnect();
+        expect(h.engine.disconnect_calls == 0, "no DISCONNECT handshake after the peer closed");
+        expect(h.sink.disconnected == 1, "still one DISCONNECTED");
     });
 
     runner.run("empty setMyCall is ignored", [] {

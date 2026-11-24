@@ -3,6 +3,7 @@
 #include "protocol/compression.hpp"
 #include "ultra/version.hpp"
 
+#include <filesystem>
 #include <algorithm>
 #include <cstddef>
 #include <deque>
@@ -597,6 +598,47 @@ int main() {
         expectNoLines(h);
         h.session.handleControlLine("BUFFER");
         expectLines(h, {"BUFFER 50\r"});
+    });
+    runner.run("BUFFER counts the host's bytes, not the unit's wire bytes", [] {
+        // BUG-TNC-BUFFER-WIRE-BYTES: a 50-byte write went out as a 51-byte unit (raw marker)
+        // and the host saw BUFFER 51.
+        Harness h;
+        enterConnected(h);
+        h.session.handleDataBytes(std::vector<uint8_t>(50, 'A'));
+        h.session.tick(kBulkQuietFlushMs);
+        expect(h.modem.send_binary_calls.size() == 1, "the write should be flushed as one unit");
+        const int wire = static_cast<int>(h.modem.send_binary_calls[0].size());
+        h.clear();
+        h.modem.backlog_bytes = wire;
+        h.session.onModemBufferLevel(wire);
+        h.session.handleControlLine("BUFFER");
+        std::string got = h.lines.empty() ? "none" : h.lines.back();
+        expect(!h.lines.empty() && h.lines.back() == "BUFFER 50\r",
+               "got " + got + " (wire " + std::to_string(wire) + "): the whole unit outstanding must read as the host's 50 bytes");
+        h.modem.backlog_bytes = 0;
+        h.session.onModemBufferLevel(0);
+        h.session.handleControlLine("BUFFER");
+        expect(!h.lines.empty() && h.lines.back() == "BUFFER 0\r", "delivered must read 0");
+    });
+    runner.run("a staged bulk unit stays on disk until its transfer can start", [] {
+        // BUG-TNC-STAGED-UNIT-DELETED-EARLY: the next flush deleted the previous unit's file while
+        // the modem still held it queued behind the peer's DATA turn; it failed to start and the
+        // 4096-byte half of a 5000-byte write was lost.
+        Harness h;
+        enterConnected(h);
+        std::vector<uint8_t> body(5000);
+        for (size_t i = 0; i < body.size(); ++i) body[i] = static_cast<uint8_t>(i * 131 + 7);
+        h.session.handleDataBytes(body);
+        h.session.tick(kBulkQuietFlushMs);
+        h.session.handleDataBytes(body);
+        h.session.tick(kBulkQuietFlushMs);
+        expect(h.modem.send_file_calls.size() == 2, "two bulk writes should stage two units");
+        expect(std::filesystem::exists(h.modem.send_file_calls[0]),
+               "the first unit must survive the second flush");
+        h.session.onModemDisconnected();
+        expect(!std::filesystem::exists(h.modem.send_file_calls[0]) &&
+                   !std::filesystem::exists(h.modem.send_file_calls[1]),
+               "the session's end removes every staged unit");
     });
     runner.run("BUFFER 0 transition bypasses rate limit", [] {
         // Pat's Flush() blocks on BUFFER 0. If we let the 1 s rate

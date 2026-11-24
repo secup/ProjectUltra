@@ -954,6 +954,13 @@ void StreamingDecoder::decodeCurrentFrame() {
         ofdm_control_samples,
         full_frame_samples,
         control_frame_samples);
+    // A 16-FSK lookahead outranks a pending codeword count: a frame that failed at the DPSK rungs
+    // may first have been taken for a fixed CONNECT (pending_total_cw_ = 2), and that 2-CW span
+    // would cut the 16-FSK frame the lookahead waits for short again, on every resend
+    // (BUG-MFSK-LOOKAHEAD-CUT-BY-CONNECT-WAIT, TNC marathon ITU Good 10 dB: 9 resends lost).
+    if (mc_mfsk_lookahead_pending_ && !is_ofdm && control_frame_samples > requirement.samples) {
+        requirement.samples = control_frame_samples;
+    }
     size_t frame_len = requirement.samples;
 
     // 2026-07-28 DIAGNOSTIC (ULTRA_EQ_TRACE=1)
@@ -1501,10 +1508,26 @@ void StreamingDecoder::decodeCurrentFrame() {
                     }
                 }
 
+                if (ok_r14 && !(data_r14.size() >= 4 && data_r14[0] == 0x55 &&
+                                data_r14[1] == 0x4C)) {
+                    // A converged codeword that is not a frame (a wrong codeword at low SNR, or a
+                    // whitening mismatch): logged so a lost control frame can be told apart.
+                    LOG_MODEM(INFO, "[%s] Control-first codeword decoded but not a frame "
+                              "(%zu bytes, first %02X %02X, |llr|_avg=%.2f)",
+                              log_prefix_.c_str(), data_r14.size(),
+                              data_r14.size() > 0 ? data_r14[0] : 0,
+                              data_r14.size() > 1 ? data_r14[1] : 0, llr_avg);
+                }
                 if (ok_r14 && data_r14.size() >= 4
                     && data_r14[0] == 0x55 && data_r14[1] == 0x4C) {
                     if (data_r14.size() > bpc_r14) data_r14.resize(bpc_r14);
                     auto hdr = v2::parseHeader(data_r14);
+                    if (!(hdr.valid && hdr.total_cw == 1 && v2::isControlFrame(hdr.type))) {
+                        LOG_MODEM(INFO, "[%s] Control-first frame rejected: hdr_valid=%d "
+                                  "total_cw=%d type=%s",
+                                  log_prefix_.c_str(), hdr.valid ? 1 : 0, hdr.total_cw,
+                                  v2::frameTypeToString(hdr.type));
+                    }
                     if (hdr.valid && hdr.total_cw == 1 && v2::isControlFrame(hdr.type)) {
                         // BUG-CLASSIC-CFO-CERT (2026-08-04): the control-first path
                         // returns before the common post-demod CFO feedback below.
@@ -3428,6 +3451,21 @@ void StreamingDecoder::decodeCurrentFrame() {
                                 static_cast<size_t>(waveform_->getMinSamplesForCWCount(actual_cw)));
         }
     }
+    // A FAILED MC-DPSK decode proves nothing about the audio after its chirp: resume the search
+    // just past the training start the chirp proved, not at the end of the longest frame the
+    // decode hypothesized (a 16-FSK look-ahead is 506880 samples, 10.5 s). A connected listener locks
+    // every OFDM frame's dual chirp (the same chirp) and fails it; skipping each failed span hid the
+    // frames after it - an MC-DPSK DISCONNECT 5 s behind an OFDM control frame was never searched
+    // (BUG-MCDPSK-FAILED-SPAN-SKIP, StreamingMCDPSK runControlFrameAtListener). Starting past the
+    // training start cannot re-lock the same chirp (it precedes the training).
+    if (!is_ofdm && !result.success && !result.is_ping && mode_ == protocol::WaveformMode::MC_DPSK) {
+        const size_t past_training = std::min<size_t>(consumed, CORRELATION_STEP);
+        if (past_training < consumed) {
+            LOG_MODEM(DEBUG, "[%s] Failed MC-DPSK decode: resuming the search %zu samples past "
+                      "its training (not %zu)", log_prefix_.c_str(), past_training, consumed);
+            consumed = past_training;
+        }
+    }
     size_t next_block_pos = sync_controller_.ring_.wrapRingIndexLocked(sync_position_ + consumed);
     size_t next_search_abs = frame_sync_abs + consumed;
 
@@ -4058,6 +4096,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
                                                    CodeRate rate, size_t bytes_per_cw,
                                                    float snr, float cfo) {
     DecodeResult result = decodeMCDPSKFrameImpl(soft_bits, rate, bytes_per_cw, snr, cfo);
+    result.decoded_mcdpsk = true;
     if (result.success && waveform_) {
         last_mc_dpsk_rx_modulation_.store(static_cast<int>(waveform_->getModulation()),
                                           std::memory_order_relaxed);
@@ -4201,6 +4240,9 @@ std::vector<int> StreamingDecoder::mcDpskCompactCodewordHypotheses() const {
 // section reads above this burst's own inter-chirp noise (a bare chirp or a sync on noise does not).
 bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame_buffer) const {
     const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get());
+    if (!mfsk_lookahead_allowed_.load(std::memory_order_relaxed)) {
+        return false;
+    }
     if (!mc || !connected_ || mode_ != protocol::WaveformMode::MC_DPSK ||
         protocol::connection_policy::mcDpskRungBelow(mc->getModulation()) != Modulation::MFSK16 ||
         mc->getModulation() == Modulation::MFSK16) {

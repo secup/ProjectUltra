@@ -498,7 +498,7 @@ void StreamingDecoder::searchForSync() {
          mode_ == protocol::WaveformMode::OFDM_CHIRP)
             ? waveform_->frameStructureSpanSamples()
             : 0;
-    const bool structure_anchor_search =
+    bool structure_anchor_search =
         structure_span > 0 && !handshake_confirmation_pending_.load(std::memory_order_acquire);
     bool used_structure_anchor = false;
     // (R4: the adaptive short-chirp re-anchor was removed — superseded by warm-handoff,
@@ -568,7 +568,58 @@ void StreamingDecoder::searchForSync() {
         }
     }
 
-    if (!replaying_deferred_future_sync) {
+    // DUAL-LISTEN CHIRP HINT (BUG-CONNECTED-OFDM-IGNORES-CHIRP). A connected OFDM receiver's
+    // group search runs the frame-structure detector only, so a frame that carries a full dual
+    // chirp - every DISCONNECT, TURN_REQUEST, TURNOVER, RTO resend - is found only when its
+    // structure statistic clears a false-lock budget of one per hour: on ITU Good 8-10 dB the
+    // first DISCONNECT went unanswered in 12 % of closes, and once all three (the peer's host never
+    // learned the session ended) while the MC-DPSK listener locked their chirps at 21 dB. The
+    // listener's lock is the hint: run this decoder's own chirp+LTS detector, once, on the window
+    // around it - the chirp-mode search, at a position a chirp detector has already proven. No
+    // search cursor moves; a hint into audio already decoded is dropped.
+    bool replaying_external_anchor = false;
+    if (!replaying_deferred_future_sync && connected_data_preamble &&
+        mode_ == protocol::WaveformMode::OFDM_CHIRP) {
+        // The MC-DPSK detector's training start is the dual chirp's end: up-chirp, gap, down-chirp
+        // (2 x 28800 samples at 48 kHz) before it. A lead of one search backtrack (the TX lead-in,
+        // CFO peak shift and the two slots' feed skew) and a tail through the OFDM LTS.
+        constexpr size_t kHintChirpSpan = 57600;
+        constexpr size_t kHintLead = kHintChirpSpan + 9600;
+        constexpr size_t kHintTail = 24000;
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        if (external_anchor_valid_) {
+            const size_t total = sync_controller_.ring_.total_fed_;
+            const size_t cap = sync_controller_.ring_.buffer_capacity_samples_;
+            const size_t oldest_abs = total > cap ? total - cap : 0;
+            const size_t start_abs =
+                external_anchor_abs_ > kHintLead ? external_anchor_abs_ - kHintLead : 0;
+            const size_t end_abs = external_anchor_abs_ + kHintTail;
+            const bool consumed = sync_controller_.ring_.search_floor_abs_valid_ &&
+                                  sync_controller_.ring_.search_floor_abs_ > external_anchor_abs_;
+            if (consumed || start_abs < oldest_abs) {
+                external_anchor_valid_ = false;  // decoded already, or no longer in the ring
+            } else if (total >= end_abs) {
+                external_anchor_valid_ = false;
+                search_buffer.resize(end_abs - start_abs);
+                const size_t ring_start = sync_controller_.ring_.absoluteToRingLocked(start_abs);
+                for (size_t i = 0; i < search_buffer.size(); ++i) {
+                    search_buffer[i] = sync_controller_.ring_.buffer_[
+                        sync_controller_.ring_.wrapRingIndexLocked(ring_start + i)];
+                }
+                search_start_abs = start_abs;
+                search_start = ring_start;
+                min_search = search_buffer.size();
+                replaying_external_anchor = true;
+                use_full_ofdm_anchor_search = true;
+                use_light_search = false;
+                structure_anchor_search = false;
+                LOG_MODEM(INFO, "[%s] Dual-listen chirp hint: chirp+LTS search at abs=%zu",
+                          log_prefix_.c_str(), external_anchor_abs_);
+            }
+        }
+    }
+
+    if (!replaying_deferred_future_sync && !replaying_external_anchor) {
         auto win = sync_controller_.acquireSearchWindow(
             use_light_search, connected_data_preamble, disconnected_mc_dpsk,
             min_search, data_symbol_samples,
@@ -1028,6 +1079,11 @@ void StreamingDecoder::searchForSync() {
         if (waveform_) {
             waveform_->setAbsoluteTrainingPosition(abs_training_pos);
         }
+        // Dual-listen chirp hint, listener side: a connected MC-DPSK chirp lock.
+        if (connected_ && mode_ == protocol::WaveformMode::MC_DPSK && chirp_lock_callback_) {
+            const size_t total = sync_controller_.ring_.total_fed_;
+            chirp_lock_callback_(total > abs_training_pos ? total - abs_training_pos : 0);
+        }
 
         // BUG-HALFOPEN-CONNECT: during the responder's half-open interval the
         // expected first OFDM full anchor may instead be the initiator repeating
@@ -1157,7 +1213,11 @@ void StreamingDecoder::searchForSync() {
         stampRxSignal();  // F129: sync itself is RX evidence
 
         last_snr_.store(sync_snr_);
-        cfo_tracker_.store(sync_cfo_);
+        if (!cfo_tracker_.established() && sync_result.correlation < CORR_DETECT_THRESHOLD) {
+            cfo_tracker_.storeProvisional(sync_cfo_);  // BUG-WEAK-CHIRP-ESTABLISHES-CFO
+        } else {
+            cfo_tracker_.store(sync_cfo_);
+        }
 
         LOG_MODEM(INFO, "[%s] SYNC at pos=%zu, CFO=%.1f Hz, SNR=%.1f dB (%s)",
                   log_prefix_.c_str(), sync_position_, sync_cfo_, sync_snr_,
@@ -1296,6 +1356,13 @@ void StreamingDecoder::checkIfReadyToDecode() {
         ofdm_control_samples,
         full_frame_samples,
         control_frame_samples);
+    // A 16-FSK lookahead outranks a pending codeword count: a frame that failed at the DPSK rungs
+    // may first have been taken for a fixed CONNECT (pending_total_cw_ = 2), and that 2-CW span
+    // would cut the 16-FSK frame the lookahead waits for short again, on every resend
+    // (BUG-MFSK-LOOKAHEAD-CUT-BY-CONNECT-WAIT, TNC marathon ITU Good 10 dB: 9 resends lost).
+    if (mc_mfsk_lookahead_pending_ && !is_ofdm_here && control_frame_samples > requirement.samples) {
+        requirement.samples = control_frame_samples;
+    }
     // Structure acquisition: a structure lock lands ~0.45 s into a frame (its window is the
     // template span + backtrack + probe), long before a 2.5 s chirp-window lock would. When it
     // is NOT a group head (no marker) while a descriptor-declared group is in flight, it is a

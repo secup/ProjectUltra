@@ -331,6 +331,38 @@ void test_protocol_gate_rejects_stronger_forgery_then_finds_valid_ack() {
     }
 }
 
+// BUG-TONE-ACK-BEFORE-ARM: an ACK answers the burst that armed the window. A CRC-valid burst that
+// was already in the buffer before arm() (pre-arm audio the scan window reaches back into) must not
+// be accepted; the same burst after the arm must be.
+void test_armed_monitor_ignores_bursts_before_the_arm() {
+    std::printf("[test] armed_monitor_ignores_bursts_before_the_arm\n");
+    ToneBurstEncoder enc;
+    const auto burst = enc.encode(payloadV(2), kBaselineSymbolMs);
+    const std::vector<float> gap((kSampleRate * 50u) / 1000u, 0.0f);
+    const std::vector<float> tail(kSampleRate, 0.0f);
+    for (const bool before_arm : {true, false}) {
+        ToneBurstAckMonitor::Config cfg;
+        cfg.armed_only = true;
+        cfg.symbol_durations_ms = {kBaselineSymbolMs};
+        ToneBurstAckMonitor mon(cfg);
+        std::vector<ToneBurstAckDetection> events;
+        mon.setCallback([&](const ToneBurstAckDetection& d) { events.push_back(d); });
+        mon.feedAudio(gap.data(), gap.size());
+        if (before_arm) {
+            mon.feedAudio(burst.data(), burst.size());
+            mon.feedAudio(gap.data(), gap.size());
+            mon.arm(kSampleRate * 2);
+        } else {
+            mon.arm(kSampleRate * 4);
+            mon.feedAudio(burst.data(), burst.size());
+        }
+        for (size_t off = 0; off < tail.size(); off += 1024) {
+            mon.feedAudio(tail.data() + off, std::min<size_t>(1024, tail.size() - off));
+        }
+        EXPECT_EQ(events.size(), static_cast<size_t>(before_arm ? 0 : 1));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -343,6 +375,7 @@ int main() {
     test_monitor_handles_chunk_boundary_inside_burst();
     test_rearm_replaces_longer_prior_deadline();
     test_protocol_gate_rejects_stronger_forgery_then_finds_valid_ack();
+    test_armed_monitor_ignores_bursts_before_the_arm();
 
     if (g_failures > 0) {
         std::fprintf(stderr, "\n%d test assertion(s) failed\n", g_failures);

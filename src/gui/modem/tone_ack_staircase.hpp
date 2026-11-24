@@ -9,7 +9,11 @@
 //   lower: fast to lengthen, slow to shorten (BUG-ACK-STAIRCASE-SLOW-ON-DROP: after a 20 -> 5 dB drop
 //   the median held the pre-drop SNR for three frames and 12 ms ACKs were lost at 0.3-6 dB; a lost
 //   ACK costs the sender's whole round, 8-17 s, a needlessly long one at most ~3 s of air).
-// - The column: fading when the frames measured fading (>= kFadingAwgnMax, ULTRA_ACK_FADE_EDGE).
+// - The column: fading when the frames measured fading (>= kFadingAwgnMax, ULTRA_ACK_FADE_EDGE), on
+//   the median of the last kRing frames' fading indices like the SNR: one frame's index is noisy at
+//   low SNR (AWGN 3 dB: 0.00, then 0.35 on the next frame), and that single reading moved an AWGN
+//   link's ACK from 0.85 s to the 6.8 s fading floor, past the sender's retransmit timeout - every
+//   ACK of the message then met the resend (BUG-ACK-STAIRCASE-FADING-SPIKE).
 // - The source: an OFDM or idle in-band reading sets the duration; an MC-DPSK reading may only
 //   LENGTHEN it past the baseline (BUG-MCDPSK-ACK-STAIRCASE-BYPASSED: an MC-DPSK session never left
 //   25 ms). The MC-DPSK reading is the data-aided estimate, a lower bound that already carries the
@@ -19,6 +23,7 @@
 //   Any other source: the baseline.
 // Lock-free: noteFrame runs on the modem RX path, choose on the protocol's ACK callback (which holds
 // the protocol mutex, so neither may call into the protocol).
+#include <cmath>
 #include "protocol/connection_policy.hpp"  // kMcDpskReadingBelowChannelDb
 #include "protocol/waveform_selection.hpp"  // kFadingAwgnMax
 #include "ultra/types.hpp"                  // SNRSource
@@ -47,12 +52,22 @@ public:
     };
 
     // A decoded frame's in-band SNR, the estimator it came from and the frame's fading index.
+    // Only an in-band SNR reading counts: a chirp-correlation score (SYNC_QUALITY, a control frame
+    // decoded off its chirp) is not an SNR - it read 14.8 "dB" on an AWGN 3 dB link - and it used to
+    // replace the last OFDM reading, so every ACK after a control frame fell back to the 25 ms
+    // baseline, which a 3 dB link does not hear (BUG-ACK-STAIRCASE-NON-SNR-SOURCE).
+    static bool isSnrReading(SNRSource source) {
+        return source == SNRSource::IDLE_IN_BAND || source == SNRSource::OFDM_BROADBAND ||
+               source == SNRSource::MCDPSK_IN_BAND;
+    }
     void noteFrame(float snr_db, SNRSource source, float fading_index) {
+        if (!isSnrReading(source) || !std::isfinite(snr_db)) return;
         current_.store(snr_db, std::memory_order_relaxed);
         source_.store(source, std::memory_order_relaxed);
         fading_.store(fading_index, std::memory_order_relaxed);
-        ring_[idx_.fetch_add(1, std::memory_order_relaxed) % kRing].store(snr_db,
-                                                                           std::memory_order_relaxed);
+        const uint32_t slot = idx_.fetch_add(1, std::memory_order_relaxed) % kRing;
+        ring_[slot].store(snr_db, std::memory_order_relaxed);
+        fading_ring_[slot].store(fading_index, std::memory_order_relaxed);
     }
 
     // The duration for an ACK sent now.
@@ -67,6 +82,15 @@ public:
             for (size_t i = 0; i < kRing; ++i) v[i] = ring_[i].load(std::memory_order_relaxed);
             std::sort(v.begin(), v.end());
             c.snr_used = std::min(v[kRing / 2], c.snr_current);
+            // Over the frames seen so far (a new session's first frames are not diluted by
+            // placeholder zeros): the median of n, the mean of two, the frame itself alone.
+            const size_t n = std::min<size_t>(idx_.load(std::memory_order_relaxed), kRing);
+            if (n >= 1) {
+                std::array<float, kRing> f;
+                for (size_t i = 0; i < n; ++i) f[i] = fading_ring_[i].load(std::memory_order_relaxed);
+                std::sort(f.begin(), f.begin() + n);
+                c.fading_index = (n == 2) ? 0.5f * (f[0] + f[1]) : f[n / 2];
+            }
         }
         const bool ofdm_or_idle =
             c.source == SNRSource::IDLE_IN_BAND || c.source == SNRSource::OFDM_BROADBAND;
@@ -114,6 +138,7 @@ private:
     std::atomic<SNRSource> source_{SNRSource::NONE};
     std::atomic<float> fading_{0.0f};
     std::array<std::atomic<float>, kRing> ring_{{12.0f, 12.0f, 12.0f, 12.0f, 12.0f}};
+    std::array<std::atomic<float>, kRing> fading_ring_{{0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
     std::atomic<uint32_t> idx_{0};
 };
 

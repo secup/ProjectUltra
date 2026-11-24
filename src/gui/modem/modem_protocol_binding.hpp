@@ -213,10 +213,16 @@ inline void wireModemToProtocol(ModemEngine& modem,
             modem.crossConnectedWaveform(mode, mod, rate, cw_count, mc_dpsk_num_carriers,
                                          mc_dpsk_samples_per_symbol);
         });
+    // The last DISCONNECT retry of an OFDM session rides MC-DPSK (BUG-DISCONNECT-LOST-IN-FADE).
+    protocol.setRobustControlOnceCallback(
+        [&modem](Modulation mod) { modem.transmitNextOnRobustWaveform(mod); });
     // Dual-listen: a frame arrived on the other wideband waveform - the connection follows the peer
     // to it before the frame is processed (the engine calls this first, then delivers).
     modem.setRxWaveformObservedCallback(
         [&protocol](protocol::WaveformMode mode) { protocol.noteRxWaveform(mode); });
+    // A control reply goes out on the waveform its request arrived on (BUG-REPLY-ON-WRONG-WAVEFORM).
+    modem.setRxFrameWaveformCallback(
+        [&protocol](bool mcdpsk) { protocol.noteRxFrameMcDpsk(mcdpsk); });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);

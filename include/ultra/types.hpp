@@ -84,6 +84,13 @@ inline bool isMfskModulation(Modulation mod) {
     return mod == Modulation::MFSK16 || mod == Modulation::MFSK16_FAST;
 }
 
+// The constellations an MC-DPSK waveform carries (MCDPSKWaveform::configure); every other value is
+// an OFDM constellation.
+inline bool isMcDpskModulation(Modulation mod) {
+    return mod == Modulation::DBPSK || mod == Modulation::DQPSK || mod == Modulation::D8PSK ||
+           isMfskModulation(mod);
+}
+
 // Get bits per symbol for a modulation scheme
 inline uint32_t getBitsPerSymbol(Modulation mod) {
     switch (mod) {

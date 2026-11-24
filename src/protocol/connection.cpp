@@ -478,10 +478,11 @@ Connection::Connection(const ConnectionConfig& config)
         if (frame->payload[0] != static_cast<uint8_t>(PayloadType::FILE_DATA)) {
             return;  // FILE_START/TEXT: metadata or seq-deduped — never salvage
         }
-        const uint32_t offset = (static_cast<uint32_t>(frame->payload[1]) << 24) |
-                                (static_cast<uint32_t>(frame->payload[2]) << 16) |
-                                (static_cast<uint32_t>(frame->payload[3]) << 8) |
-                                static_cast<uint32_t>(frame->payload[4]);
+        const uint32_t offset = fileTransferValueOf(
+            (static_cast<uint32_t>(frame->payload[1]) << 24) |
+            (static_cast<uint32_t>(frame->payload[2]) << 16) |
+            (static_cast<uint32_t>(frame->payload[3]) << 8) |
+            static_cast<uint32_t>(frame->payload[4]));
         const uint32_t len = static_cast<uint32_t>(
             frame->payload.size() - FileTransferController::FILE_DATA_OVERHEAD);
         file_transfer_.noteRangeDelivered(offset, len);
@@ -643,6 +644,7 @@ Connection::Connection(const ConnectionConfig& config)
                               "Connection: PARTIAL-SACK exact-group provenance "
                               "stamped in hold-compatible advisory=3");
                 }
+                publishToneAckAirtimeCap();
                 on_transmit_tone_burst_ack_(
                     tba, tone_ack_group_complete_context_);
             });
@@ -778,7 +780,8 @@ bool Connection::connect(const std::string& remote_call) {
     // Start with PROBING state - send PING for fast presence check
     state_ = ConnectionState::PROBING;
     ping_retry_count_ = 0;
-    timeout_remaining_ms_ = pingTimeoutMsForCurrentProfile();
+    probe_defer_ms_ = 0;
+    timeout_remaining_ms_ = pingTimeoutMsForCurrentProfile() + pingRetryJitterMs();  // first retry jittered too
     stats_.connects_initiated++;
 
     // Send PING (modem will generate preamble + "ULTR")
@@ -1122,6 +1125,27 @@ void Connection::disconnect() {
 
     if (state_ == ConnectionState::CONNECTED) {
         LOG_MODEM(INFO, "Connection: Disconnecting from %s", remote_call_.c_str());
+        // BUG-CLOSE-DURING-UNCONFIRMED-UPCROSS: a close that starts while this end's up-crossing
+        // is unconfirmed (the peer, which commanded it, has not yet heard OFDM from us) goes back
+        // to MC-DPSK at the rung the session left. The peer's PRIMARY decoder is still MC-DPSK
+        // there: OFDM copies reached only its listener, and their shared chirp sent its MC-DPSK
+        // decoder into long failed decodes that swallowed the robust copy - the peer's host never
+        // learned the session ended (TNC, AWGN 3 dB and ITU Good 8 dB, seed 301: the host closes as
+        // soon as its data is acknowledged, and that ACK carried the up-crossing command). Every
+        // copy, its retry timing and the ACK then follow the waveform both stations decode.
+        if (crossing_probe_active_ && !crossing_probe_rx_side_ &&
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+            const int rung = connection_policy::mcDpskRungIndexFor(crossing_return_mod_);
+            if (rung >= 0 &&
+                applyWaveformCrossing(connection_policy::encodeMcDpskRungCommand(rung),
+                                      "close before the peer heard the up-crossing")) {
+                // A down-crossing lands on ROBUST_MID; the peer's primary still runs the rung the
+                // session left, so the close goes out at that constellation.
+                const Modulation back_to = crossing_return_mod_;
+                endCrossingProbe(/*held=*/false);
+                applyMcDpskTxModulation(back_to, "close before the peer heard the up-crossing");
+            }
+        }
 
         auto disc = v2::ControlFrame::makeDisconnect(local_call_, remote_call_);
         disconnect_frame_ = disc.serialize();
@@ -1131,7 +1155,7 @@ void Connection::disconnect() {
         // old queue-first ordering would then see CONNECTED and misroute the sentinel
         // ACK through the DATA ARQ before DISCONNECTING was assigned.
         state_ = ConnectionState::DISCONNECTING;
-        timeout_remaining_ms_ = config_.disconnect_timeout_ms;
+        timeout_remaining_ms_ = disconnectHardTimeoutMs();
         disconnect_retry_count_ = 0;
         disconnect_retransmit_ms_ = disconnectRetryIntervalMs();
         setDisconnectTeardownActive(true);
@@ -1213,6 +1237,7 @@ void Connection::abortTxNow() {
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
     ping_retry_count_ = 0;
+    probe_defer_ms_ = 0;
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
 
@@ -1806,7 +1831,44 @@ void Connection::noteDataTurnPayloadStarted(size_t payload_bytes) {
     }
 }
 
-void Connection::sendTurnRequestIfNeeded() {
+// The peer runs an MC-DPSK listener beside its OFDM decoder (dual-listen follow on both ends: the same
+// setting on both stations), so a control frame on MC-DPSK reaches it 10+ dB below OFDM.
+// Not dualListenActive(): a close has already made the follow inactive here, the peer still listens.
+// The constellation the peer's MC-DPSK decoder demodulates at. A dual-listen listener runs the
+// robust profile (ROBUST_MID); but right after this end crossed up and before the peer showed it
+// followed (the crossing's probation), the peer's MC-DPSK decoder is still its PRIMARY, at the
+// rung the session left - and a primary sizes its window for that rung, so a 16-FSK control frame
+// was cut short and lost (TNC reconnect, AWGN 3 dB seed 301: the host's DISCONNECT came 3 ms after
+// a receiver-commanded up-crossing; the robust copy went out at 16-FSK to a DQPSK primary).
+Modulation Connection::robustControlModulation() const {
+    if (crossing_probe_active_ && !crossing_probe_rx_side_ &&
+        connection_policy::mcDpskRungIndexFor(crossing_return_mod_) >= 0) {
+        return crossing_return_mod_;
+    }
+    return connection_policy::ladderRungForId(LadderRungId::ROBUST_MID).modulation;
+}
+
+bool Connection::peerDecodesRobustControl() const {
+    const uint8_t mc_bit = connection_policy::modeToCapabilityBit(WaveformMode::MC_DPSK);
+    return waveform_follow_dual_listen_ && waveform_follow_enabled_ && waveform_follow_allowed_ &&
+           rxRateAuthorityEnabled() && (config_.mode_capabilities & mc_bit) != 0;
+}
+
+// BUG-REPLY-ON-WRONG-WAVEFORM: an OFDM session's control frame that arrived on MC-DPSK (the peer's
+// robust retry, or a peer already on MC-DPSK) is answered on MC-DPSK. A control frame from the other
+// waveform does not move the session (a late repeat must not), so the reply used to go out on OFDM -
+// which the peer, just shown unable to get OFDM through, then missed: a TURNOVER at AWGN 3 dB that
+// stalled the turn for minutes, a DISCONNECT ack at ITU Good 15 dB that left the closer retrying.
+void Connection::answerOnArrivalWaveform(bool arrived_mcdpsk, const char* what) {
+    if (!arrived_mcdpsk || negotiated_mode_ != WaveformMode::OFDM_CHIRP ||
+        !peerDecodesRobustControl() || !on_robust_control_once_) {
+        return;
+    }
+    LOG_MODEM(INFO, "Connection: %s on MC-DPSK, the waveform its request arrived on", what);
+    on_robust_control_once_(robustControlModulation());
+}
+
+void Connection::sendTurnRequestIfNeeded(bool retry) {
     if (state_ != ConnectionState::CONNECTED ||
         local_data_turn_ ||
         file_transfer_.isBusy() ||
@@ -1815,13 +1877,31 @@ void Connection::sendTurnRequestIfNeeded() {
         !hasLocalDataWaitingForTurn() ||
         local_turn_request_pending_ ||
         turn_request_holdoff_ms_ > 0 ||
-        (!is_initiator_ && !handshake_confirmed_)) {
+        // An unconfirmed responder keeps quiet while the initiator may still be retrying its
+        // CONNECT (its ACK lost): one retry interval without a duplicate proves it is not. A
+        // responder with data used to wait for the initiator's first frame forever - when that frame
+        // was the initiator's TURNOVER and it was lost, both sides waited until the 240 s half-open
+        // release (TNC simultaneous, ITU Good 15 dB seed 102).
+        (!is_initiator_ && !handshake_confirmed_ &&
+         responder_quiet_ms_ < connectRetryIntervalMs() + dataTurnControlGuardMs())) {
         return;
     }
 
     auto request = v2::ControlFrame::makeTurnRequest(local_call_, remote_call_);
     LOG_MODEM(INFO, "Connection: TX TURN_REQUEST (queued=%zu, backlog=%zu bytes)",
               queued_payloads_.size(), getTxBacklogBytes());
+    // A retry into a silent OFDM link rides MC-DPSK (BUG-TURN-CONTROL-LOST-AT-OFDM-FLOOR): at the
+    // OFDM entry floor (AWGN 3 dB) the single OFDM control codeword sits at its own edge and every
+    // request went unheard for minutes. Only when the peer has been silent for a whole retry
+    // interval: a peer holding the turn on a working link is sending, and we hear it - a robust
+    // frame then would pull its dual-listen receiver down to MC-DPSK in the middle of a good
+    // transfer. Silence is either a link OFDM no longer carries or an idle peer; both lose nothing.
+    if (retry && negotiated_mode_ == WaveformMode::OFDM_CHIRP && peerDecodesRobustControl() &&
+        ms_since_peer_heard_ >= turnRequestRetransmitMs() && on_robust_control_once_) {
+        LOG_MODEM(INFO, "Connection: TURN_REQUEST retry on the robust waveform (MC-DPSK): peer "
+                        "silent %u ms", ms_since_peer_heard_);
+        on_robust_control_once_(robustControlModulation());
+    }
     transmitFrame(request.serialize());
     local_turn_request_pending_ = true;
     turn_request_retransmit_ms_ = turnRequestRetransmitMs();
@@ -1862,6 +1942,7 @@ bool Connection::maybeYieldDataTurn() {
     }
 
     auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
+    answerOnArrivalWaveform(peer_turn_request_mcdpsk_, "TURNOVER");
     LOG_MODEM(INFO,
               "Connection: TX TURNOVER to %s (peer requested DATA turn, turn_bytes=%llu, contended_ms=%u, backlog=%zu)",
               remote_call_.c_str(),
@@ -2211,17 +2292,30 @@ bool Connection::isReadyToSend() const {
 }
 
 size_t Connection::getTxBacklogBytes() const {
-    size_t bytes = arq_.getTxInFlightBytes();
+    // Message traffic in wire bytes: unacknowledged ARQ slots, fragments not yet sent, payloads
+    // not yet started. Zero exactly when nothing is left to deliver.
+    size_t wire = arq_.getTxInFlightBytes();
 
     if (next_fragment_idx_ < pending_tx_fragments_.size()) {
         for (size_t i = next_fragment_idx_; i < pending_tx_fragments_.size(); ++i) {
-            bytes += pending_tx_fragments_[i].size();
+            wire += pending_tx_fragments_[i].size();
         }
     }
 
     for (const auto& payload : queued_payloads_) {
-        bytes += payload.data.size();
+        wire += payload.data.size();
     }
+
+    // The caller counts ITS bytes (BUG-TNC-BUFFER-WIRE-BYTES: a 1-byte TNC write reported BUFFER
+    // 2-3, the object prefix and markers included). Every message and block has a record holding
+    // the caller's bytes until it is delivered or failed: report no more than that. The wire count
+    // still falls as frames are acknowledged and reaches 0 with the last one; while it is non-zero
+    // and a record is open, the report is non-zero, so BUFFER 0 still means delivered.
+    size_t host = 0;
+    for (const auto& record : outbound_message_tx_records_) {
+        if (!record.terminal_reported) host += record.text.size();
+    }
+    size_t bytes = (host > 0) ? std::min(wire, host) : wire;
 
     if (queued_file_path_) {
         std::error_code ec;
@@ -2615,6 +2709,49 @@ bool Connection::isToneBurstAckCandidatePlausible(
     if (!kInteractiveToneAckEnabled()) return false;
     return arq_.isToneBurstAckPlausible(
         payload.group_seq, payload.frame_mask, payload.move_epoch);
+}
+
+// The receiver's side of the ACK/resend race (BUG-RTO-SHORTER-THAN-PEER-ACK). The frontend keys the
+// tone ACK at a length its own SNR picks (0.4-6.8 s); the sender resends the group when its
+// retransmission timeout expires, timed from the burst's key-up, and on a half-duplex radio it then
+// hears none of an ACK still on the air (AWGN 3 dB: 6.8 s ACKs against an 8.35 s deadline from a
+// 2.4 s frame - every ACK met the resend). Both ends build the same timeout table for the rung, so
+// this end knows the slot the sender left: the timeout for the group's frame count, minus the burst's
+// airtime and the decode/turnaround margin the timeout formula budgets. The ACK's 34 symbols must
+// fit in it; the frontend caps its staircase pick to the longest rung that does.
+void Connection::publishToneAckAirtimeCap() {
+    namespace tba = ultra::waveform::tone_burst_ack;
+    const size_t frames = last_rx_group_frames_ > 0 ? last_rx_group_frames_ : 1;
+    uint32_t burst_ms = 0;
+    uint32_t frame_ms = 0;
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        burst_ms = connection_policy::wideOFDMBurstAirtimeMs(data_modulation_, data_code_rate_,
+                                                              frames, data_frame_cw_count_);
+        frame_ms = burst_ms / static_cast<uint32_t>(frames);
+    } else if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        frame_ms = connection_policy::mcDpskFrameTiming(data_modulation_,
+                                                        config_.mc_dpsk_num_carriers,
+                                                        config_.mc_dpsk_samples_per_symbol,
+                                                        data_frame_cw_count_).data_ms;
+        burst_ms = frame_ms * static_cast<uint32_t>(frames);
+    } else if (negotiated_mode_ == WaveformMode::OFDM_NARROW) {
+        frame_ms = connection_policy::narrowOFDMFrameTiming(data_modulation_, data_code_rate_,
+                                                            data_frame_cw_count_).data_ms;
+        burst_ms = frame_ms * static_cast<uint32_t>(frames);
+    } else {
+        tone_ack_max_symbol_ms_.store(UINT32_MAX, std::memory_order_release);
+        return;
+    }
+    // The deadline the sender commits for such a round: the unified-burst physical timeout on wide
+    // OFDM (what finalizeUnifiedBurstWindow arms), the ARQ's per-count table elsewhere.
+    const uint64_t rto = (negotiated_mode_ == WaveformMode::OFDM_CHIRP && kUnifiedSeqEnabled())
+                             ? unifiedBurstAckTimeoutMs(frames)
+                             : arq_.ackTimeoutForFrameCount(frames);
+    const uint64_t margin = 700u + std::max<uint32_t>(700u, frame_ms / 2u);  // as the timeout budgets
+    const uint64_t used = static_cast<uint64_t>(burst_ms) + margin;
+    const uint64_t slot = rto > used ? rto - used : 0;
+    const uint32_t cap = static_cast<uint32_t>(slot / tba::kTotalSymbols);
+    tone_ack_max_symbol_ms_.store(cap, std::memory_order_release);
 }
 
 bool Connection::onToneBurstAck(
@@ -4592,6 +4729,14 @@ bool Connection::authorityClimbHasSufficientPayload(
 
 void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx,
                                            bool accepted_clean_round) {
+    // A rung the receiver commanded: a message re-gridded across it keeps its regrid allowance
+    // (BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP).
+    struct ReceiverCommandScope {
+        bool& flag;
+        bool saved;
+        explicit ReceiverCommandScope(bool& f) : flag(f), saved(f) { flag = true; }
+        ~ReceiverCommandScope() { flag = saved; }
+    } receiver_command_scope(receiver_commanded_geometry_change_);
     const bool startup_probe_command =
         (cmd_idx & kRungAuthorityStartupProbeFlag) != 0;
     cmd_idx &= kRungAuthorityIndexMask;
@@ -6014,6 +6159,7 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
                       "sender (event_seq=%u, descriptor_group_seq=%u)",
                       static_cast<unsigned>(voice.group_seq),
                       static_cast<unsigned>(group_seq));
+            publishToneAckAirtimeCap();
             on_transmit_tone_burst_ack_(voice, /*inbound_group_complete=*/true);
         }
         return;
@@ -6189,6 +6335,22 @@ void Connection::onFrameReceived(const Bytes& frame_data,
     // active, only a duplicate/crossed DISCONNECT and (for a local/crossed close)
     // its sentinel ACK are authoritative.  Stale DATA, MODE_CHANGE, turnover,
     // file control, and ordinary ACKs must not mutate ARQ state or trigger egress.
+    // A new call during the re-ACK grace after the peer closed: the caller has finished the old
+    // session (a station whose ACK faded retries DISCONNECT, it does not call), so the grace ends
+    // and the CONNECT is handled as a call to an idle station. Dropped here, a station that hung up
+    // and redialed waited out the whole ~24 s grace plus a CONNECT retry (TNC reconnect: 31 s
+    // second connects against 15 s, BUG-REDIAL-WAITS-OUT-GRACE).
+    if (header.type == v2::FrameType::CONNECT && peerClosedGraceActive()) {
+        LOG_MODEM(INFO, "Connection: CONNECT during the peer-close grace - ending the grace for "
+                        "the new call");
+        disconnect_pending_ = false;
+        disconnect_pending_ms_ = 0;
+        disconnect_ack_retransmit_ms_ = 0;
+        disconnect_ack_epoch_elapsed_ms_ = 0;
+        disconnect_ack_repeat_count_ = 0;
+        disconnect_ack_frame_.clear();
+        enterDisconnected("Remote disconnected");
+    }
     if (disconnect_teardown_active_ &&
         !isAllowedDisconnectTeardownRx(header)) {
         LOG_MODEM(DEBUG,
@@ -6295,6 +6457,7 @@ void Connection::onFrameReceived(const Bytes& frame_data,
                                 armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
                                 if ((ctrl->flags & v2::Flags::TURN_REQUEST) != 0) {
                                     peer_data_turn_requested_ = true;
+                                    peer_turn_request_mcdpsk_ = last_rx_frame_mcdpsk_;
                                     LOG_MODEM(INFO,
                                               "Connection: Peer requested DATA turn on ACK seq=%u",
                                               ctrl->seq);
@@ -6790,6 +6953,7 @@ bool Connection::tickDisconnectResponderGrace(uint32_t elapsed_ms) {
                       disconnect_ack_repeat_count_,
                       repeat_limit,
                       disconnect_pending_ms_);
+            answerOnArrivalWaveform(disconnect_ack_mcdpsk_, "DISCONNECT ack repeat");
             transmitFrame(disconnect_ack_frame_);
         } else {
             disconnect_ack_retransmit_ms_ -= elapsed_ms;
@@ -6813,7 +6977,23 @@ void Connection::tick(uint32_t elapsed_ms) {
     switch (state_) {
         case ConnectionState::PROBING:
             // Fast presence check via PING/PONG
+            if (elapsed_ms >= timeout_remaining_ms_ &&
+                probe_defer_ms_ < pingTimeoutMsForCurrentProfile() &&
+                ((tx_active_provider_ && tx_active_provider_()) ||
+                 (channel_busy_query_ && channel_busy_query_()))) {
+                // BUG-SIMULTANEOUS-PING-LOCKSTEP: listen before keying a PING retry. Two stations
+                // calling each other kept keying their PINGs over each other (both radios
+                // half-duplex: neither heard the other) until both gave up (TNC simultaneous, ITU
+                // Moderate 16 dB seed 313: offsets 0.02-1.1 s against a 1.4 s PING, 5 rounds). The
+                // station that defers hears the other's PING - the same chirp as a PONG - and goes
+                // straight on to CONNECT. Polls without spending retry budget, for at most one PING
+                // timeout per retry (a channel that never reads quiet - QRM - is keyed over).
+                probe_defer_ms_ += elapsed_ms;
+                timeout_remaining_ms_ = connection_policy::kCarrierSenseSackCoalesceMs;
+                break;
+            }
             if (elapsed_ms >= timeout_remaining_ms_) {
+                probe_defer_ms_ = 0;
                 ping_retry_count_++;
                 if (ping_retry_count_ >= MAX_PING_RETRIES) {
                     // No response after all PINGs - give up
@@ -6855,7 +7035,12 @@ void Connection::tick(uint32_t elapsed_ms) {
                                                                         static_cast<uint8_t>(outbound_forced_code_rate_),
                                                                         config_.forced_cw_count);
                     transmitFrame(connect_frame.serialize());
-                    timeout_remaining_ms_ = connectRetryIntervalMs();
+                    // Random back-off like the PING retry (BUG-SIMULTANEOUS-CONNECT-LOCKSTEP): two
+                    // stations whose CONNECTs crossed retried on the same fixed interval, each
+                    // keyed over the other's every time (TNC simultaneous, ITU Good 8 dB: 10
+                    // CONNECTs each, 0.6 s apart, never heard).
+                    timeout_remaining_ms_ =
+                        connectRetryIntervalMs() + retryJitterMs(connectRetryIntervalMs() / 2u);
                 }
             } else {
                 timeout_remaining_ms_ -= elapsed_ms;
@@ -6928,16 +7113,28 @@ void Connection::tick(uint32_t elapsed_ms) {
             ms_since_peer_heard_ = (ms_since_peer_heard_ > UINT32_MAX - elapsed_ms)
                                        ? UINT32_MAX
                                        : ms_since_peer_heard_ + elapsed_ms;
+            // The sender side too (BUG-ABORT-PEER-NOTICE-SLOW): a sender whose peer vanished
+            // (its host's ABORT, its radio off) retried every frame max_retries times - ~12 min on
+            // MC-DPSK - and then, with move-epoch, stayed CONNECTED and did it again for the next
+            // message. Either side owed an exchange and hearing nothing at all - no frame, no tone
+            // ACK, no sync - past peerSilentLinkLostMs() declares the link lost.
             {
                 const bool peer_owes_data =
                     !local_data_turn_ && !disconnect_teardown_active_ &&
                     (arq_.lastRxHadMoreData() || rx_reassembly_active_ ||
                      file_transfer_.getState() == FileTransferState::RECEIVING);
-                if (peer_owes_data && ms_since_peer_heard_ >= peerSilentLinkLostMs()) {
+                const bool we_await_ack =
+                    !disconnect_teardown_active_ &&
+                    (arq_.getTxInFlightBytes() > 0 ||
+                     file_transfer_.getState() == FileTransferState::SENDING);
+                if ((peer_owes_data || we_await_ack) &&
+                    ms_since_peer_heard_ >= peerSilentLinkLostMs()) {
                     LOG_MODEM(WARN,
-                              "Connection: link lost - nothing heard from %s for %u ms mid-transfer "
-                              "(past the sender's retry budget, %u ms)",
-                              remote_call_.c_str(), ms_since_peer_heard_, peerSilentLinkLostMs());
+                              "Connection: link lost - nothing heard from %s for %u ms while %s "
+                              "(bound %u ms)",
+                              remote_call_.c_str(), ms_since_peer_heard_,
+                              we_await_ack ? "awaiting its ACK" : "it owed data",
+                              peerSilentLinkLostMs());
                     enterDisconnected("Link lost (peer silent)");
                     return;
                 }
@@ -7016,7 +7213,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             if (!local_data_turn_ && hasLocalDataWaitingForTurn() && local_turn_request_pending_) {
                 if (elapsed_ms >= turn_request_retransmit_ms_) {
                     local_turn_request_pending_ = false;
-                    sendTurnRequestIfNeeded();
+                    sendTurnRequestIfNeeded(/*retry=*/true);
                 } else {
                     turn_request_retransmit_ms_ -= elapsed_ms;
                 }
@@ -7045,6 +7242,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             // confirm time observed (~38 s) and inside the initiator give-up bound.
             if (!is_initiator_ && !handshake_confirmed_) {
                 responder_half_open_ms_ += elapsed_ms;
+                responder_quiet_ms_ += elapsed_ms;
                 if (responder_half_open_ms_ >= 240000) {
                     LOG_MODEM(WARN,
                               "Connection: handshake never confirmed %u ms after "
@@ -7280,8 +7478,43 @@ void Connection::tick(uint32_t elapsed_ms) {
                         disconnect_retry_count_++;
                         LOG_MODEM(INFO, "Connection: Retransmitting DISCONNECT (%d/%d)",
                                   disconnect_retry_count_, DISCONNECT_MAX_RETRIES);
+                        // BUG-MCDPSK-CLOSE-STUCK-ON-UNPROVEN-RUNG: an unanswered MC-DPSK close
+                        // steps one rung down per retry, the rule an unanswered data burst already
+                        // follows (maybeFallBackMcDpskRungOnTimeout). A station's own MC-DPSK TX rung
+                        // can be one the link never carried for it (it had been receiving): TNC AWGN
+                        // 3 dB seed 306 sent all four copies at DQPSK, the peer read -5 dB and
+                        // decoded none while 16-FSK-F carried its data.
+                        if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+                            const Modulation below =
+                                connection_policy::mcDpskRungBelow(data_modulation_);
+                            if (below != data_modulation_ &&
+                                connection_policy::mcDpskRungIndexFor(below) >= 0) {
+                                LOG_MODEM(INFO, "Connection: MC-DPSK close retry steps down %s -> %s",
+                                          modulationToString(data_modulation_),
+                                          modulationToString(below));
+                                data_modulation_ = below;
+                                notifyDataModeChanged(measured_snr_db_, wireFadingIndex(),
+                                                      /*snr_is_wire=*/false);
+                            }
+                        }
+                        // The last useful retry of an OFDM session goes out on MC-DPSK, which the
+                        // peer's dual-listen listener decodes 10+ dB below OFDM: on ITU Good 8 dB
+                        // every OFDM copy of a close can fall in one fade (two copies at 0.0 and
+                        // 0.4 dB LTS SNR, the peer's host never told the session ended -
+                        // BUG-DISCONNECT-LOST-IN-FADE). The peer follows it onto MC-DPSK and
+                        // processes the DISCONNECT.
+                        // (Not dualListenActive(): the close itself has made the follow inactive;
+                        // the peer, still connected, still runs its listener.)
+                        if (negotiated_mode_ == WaveformMode::OFDM_CHIRP && peerDecodesRobustControl() &&
+                            disconnect_retry_count_ >= disconnectUsefulRetryCount() &&
+                            on_robust_control_once_) {
+                            LOG_MODEM(INFO, "Connection: last DISCONNECT retry on the robust "
+                                            "waveform (MC-DPSK)");
+                            on_robust_control_once_(robustControlModulation());
+                        }
                         transmitFrame(disconnect_frame_);
-                        disconnect_retransmit_ms_ = response_window_ms;
+                        // For the rung this copy actually rides (a step down lengthens the frame).
+                        disconnect_retransmit_ms_ = disconnectRetryIntervalMs();
                     }
                 } else {
                     disconnect_retransmit_ms_ -= elapsed_ms;
@@ -7487,16 +7720,26 @@ uint32_t Connection::turnRequestHoldoffAfterDataMs() const {
         std::max<uint64_t>(TURN_REQUEST_HOLDOFF_FLOOR_MS, guard_ms));
 }
 
-// How long a receiver owed data waits, hearing nothing, before it declares the link lost: the
-// sender's whole retry budget for the frame it is stuck on - every one of its max_retries resends
-// one retransmission timeout apart, plus the first send - at the session's longest (full-window)
-// timeout. The sender cannot still be trying past that.
+// How long a station owed an exchange waits, hearing NOTHING from its peer, before it declares the
+// link lost. Never past the sender's whole retry budget (every max_retries resend one full-window
+// retransmission timeout apart, plus the first send): the sender cannot still be trying then. And
+// no sooner than the longer of
+//  - four retransmission rounds: by then a sender has taken its timeout fallbacks (an MC-DPSK
+//    sender drops to the bottom rung on its second silent round) and resent there twice, and a
+//    live receiver answers every burst it hears with a tone ACK; and
+//  - kLinkLossSilenceFloorMs (180 s): longer than any total outage a session is known to ride out
+//    (GUI gate 2026-11-12: 1-2.5 min 0 dB dips survived); an HF path silent both ways for 3 min
+//    is gone for any operator.
+// MC-DPSK 16-FSK-F (45 s RTO): 3 min, was 12. OFDM: 3 min, was 16 x its RTO.
 uint32_t Connection::peerSilentLinkLostMs() const {
     const uint64_t rto = std::max<uint64_t>(
         arq_.ackTimeoutForFrameCount(std::max<size_t>(1, arq_.getWindowSize())),
         arq_.ackTimeoutForFrameCount(1));
     const uint64_t budget = static_cast<uint64_t>(arq_.getMaxRetries() + 1) * rto;
-    return static_cast<uint32_t>(std::min<uint64_t>(budget, UINT32_MAX));
+    constexpr uint64_t kLinkLossRounds = 4;
+    constexpr uint64_t kLinkLossSilenceFloorMs = 180000;
+    const uint64_t bound = std::min(budget, std::max(kLinkLossRounds * rto, kLinkLossSilenceFloorMs));
+    return static_cast<uint32_t>(std::min<uint64_t>(bound, UINT32_MAX));
 }
 
 uint32_t Connection::turnRequestRetransmitMs() const {
@@ -7646,8 +7889,20 @@ uint32_t Connection::disconnectRetryIntervalMs() const {
     // path, and decode/audio margin; adding disconnectControlKeydownMs() again
     // would double-count our request airtime.  Do not inherit the MODE_CHANGE env
     // pin: that knob is an A/B override for a different transaction.
+    // Every waveform: a retry is not due before the request's answer could have arrived - our
+    // DISCONNECT on the air, the peer finding and decoding it, its ACK on the air, us finding that
+    // (turnRequestRetransmitMs: two full-anchor control frames and two search windows, the same
+    // exchange). Non-OFDM sessions used a fixed 5 s: an MC-DPSK control frame is 2.3-4.9 s on the
+    // air, so every retry keyed over the peer's ACK - 18 of 18 MC-DPSK closes needed a retry and
+    // most timed out unacknowledged (BUG-DISCONNECT-TIMING-NON-OFDM).
+    const uint64_t control_round_trip_ms =
+        2ULL * static_cast<uint64_t>(disconnectControlKeydownMs()) +
+        static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
     if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
-        return DISCONNECT_RETRANSMIT_FLOOR_MS;
+        const uint64_t exchange_ms =
+            std::max<uint64_t>(control_round_trip_ms, turnRequestRetransmitMs());
+        return static_cast<uint32_t>(std::min<uint64_t>(
+            std::max<uint64_t>(exchange_ms, DISCONNECT_RETRANSMIT_FLOOR_MS), 0xFFFFFFFFull));
     }
 
     const Modulation control_mod =
@@ -7657,9 +7912,6 @@ uint32_t Connection::disconnectRetryIntervalMs() const {
             control_mod, CodeRate::R1_4, /*window_size=*/1,
             connection_policy::kCarrierSenseSackCoalesceMs,
             /*ack_repeat_count=*/1, /*cw_count=*/1);
-    const uint64_t control_round_trip_ms =
-        2ULL * static_cast<uint64_t>(disconnectControlKeydownMs()) +
-        static_cast<uint64_t>(connection_policy::kCarrierSenseSackCoalesceMs);
     const float retry_doppler_hz = connection_policy::retxTroughDopplerHz(
         coherence_doppler_hz_, fading_index_, coherence_score_, coherence_valid_);
     const uint64_t decorrelation_floor_ms = std::min<uint32_t>(
@@ -7674,10 +7926,8 @@ uint32_t Connection::disconnectRetryIntervalMs() const {
 }
 
 uint32_t Connection::disconnectResponderGraceMs() const {
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
-        return DISCONNECT_GRACE_LEGACY_MS;
-    }
-
+    // Every waveform (a fixed 5 s outside OFDM ended the grace before the initiator's first MC-DPSK
+    // retry could arrive).
     // Stay receptive through every retry that can still retain a complete response
     // window under the initiator's hard timeout.  A due retry may be held by CCA/TX
     // activity beyond its nominal +8/+16 s slot without spending retry budget.  The
@@ -7686,10 +7936,9 @@ uint32_t Connection::disconnectResponderGraceMs() const {
     const uint64_t retry_ms = disconnectRetryIntervalMs();
     const uint64_t nominal_last_retry_ms =
         static_cast<uint64_t>(disconnectUsefulRetryCount()) * retry_ms;
+    const uint64_t hard_timeout_ms = disconnectHardTimeoutMs();
     const uint64_t latest_deferred_retry_ms =
-        config_.disconnect_timeout_ms > retry_ms
-            ? static_cast<uint64_t>(config_.disconnect_timeout_ms) - retry_ms
-            : 0ULL;
+        hard_timeout_ms > retry_ms ? hard_timeout_ms - retry_ms : 0ULL;
     const uint64_t grace_ms =
         std::max(nominal_last_retry_ms, latest_deferred_retry_ms) +
         static_cast<uint64_t>(disconnectControlKeydownMs()) +
@@ -7700,10 +7949,7 @@ uint32_t Connection::disconnectResponderGraceMs() const {
 }
 
 uint32_t Connection::disconnectAckRetransmitMs() const {
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) {
-        return DISCONNECT_ACK_RETRANSMIT_FLOOR_MS;
-    }
-
+    // Every waveform (a fixed 2 s outside OFDM queued the next copy behind a 2.3-4.9 s MC-DPSK ACK).
     // Never queue a proactive copy before the preceding full ACK can clear the
     // audio play-head. Only two proactive copies are sent; after that the
     // responder stays silently receptive for a duplicate DISCONNECT, avoiding an
@@ -7716,9 +7962,22 @@ uint32_t Connection::disconnectAckRetransmitMs() const {
         0xFFFFFFFFull));
 }
 
+// The close's hard timeout: the configured one, stretched so the maximum number of retries each
+// keeps a complete response window (on MC-DPSK a round trip is 12-15 s; 30 s left one retry).
+uint32_t Connection::disconnectHardTimeoutMs() const {
+    if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
+        return config_.disconnect_timeout_ms;  // the measured wide-OFDM policy (two 8 s retries)
+    }
+    const uint64_t retry_ms = disconnectRetryIntervalMs();
+    const uint64_t needed = static_cast<uint64_t>(DISCONNECT_MAX_RETRIES + 1) * retry_ms +
+                            static_cast<uint64_t>(disconnectControlKeydownMs());
+    return static_cast<uint32_t>(std::min<uint64_t>(
+        std::max<uint64_t>(config_.disconnect_timeout_ms, needed), 0xFFFFFFFFull));
+}
+
 int Connection::disconnectUsefulRetryCount() const {
     const uint64_t retry_ms = disconnectRetryIntervalMs();
-    uint64_t remaining_ms = config_.disconnect_timeout_ms;
+    uint64_t remaining_ms = disconnectHardTimeoutMs();
     int useful = 0;
     for (int i = 0; i < DISCONNECT_MAX_RETRIES; ++i) {
         if (remaining_ms <= retry_ms) {
@@ -8189,6 +8448,12 @@ void Connection::configureSoftCombineHARQBounds() {
 // retry timeout (10 s on the 20 s profile) gives p ~ 0.3, four straight collisions ~1 %, for an
 // average extra wait of J/2 per retry. Seeded per station (callsign hash and clock).
 uint32_t Connection::pingRetryJitterMs() {
+    return retryJitterMs(pingTimeoutMsForCurrentProfile() / 2u);
+}
+
+// Uniform 0..span_ms from this station's own generator (seeded from its clock and callsign): two
+// stations retrying the same exchange drift apart instead of colliding in lockstep.
+uint32_t Connection::retryJitterMs(uint32_t span_ms) {
     if (ping_jitter_rng_state_ == 0) {
         const uint64_t clock = static_cast<uint64_t>(
             std::chrono::steady_clock::now().time_since_epoch().count());
@@ -8200,8 +8465,7 @@ uint32_t Connection::pingRetryJitterMs() {
     ping_jitter_rng_state_ ^= ping_jitter_rng_state_ << 25;
     ping_jitter_rng_state_ ^= ping_jitter_rng_state_ >> 27;
     const uint64_t r = ping_jitter_rng_state_ * 2685821657736338717ULL;
-    const uint32_t span_ms = pingTimeoutMsForCurrentProfile() / 2u;
-    return static_cast<uint32_t>((r >> 32) % (span_ms + 1u));
+    return static_cast<uint32_t>((r >> 32) % (static_cast<uint64_t>(span_ms) + 1u));
 }
 
 uint32_t Connection::pingTimeoutMsForCurrentProfile() const {
@@ -8891,13 +9155,13 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
                 const bool can_regrid =
                     regrid_contract_available &&
                     it->object_id != 0 &&
-                    it->geometry_regrid_attempts <
-                        kMaxMessageGeometryRegridAttempts &&
+                    (receiver_commanded_geometry_change_ ||
+                     it->geometry_regrid_attempts < kMaxMessageGeometryRegridAttempts) &&
                     queued_payloads_.size() +
                             geometry_regridded_message_records.size() <
                         kMaxQueuedPayloads;
                 if (can_regrid) {
-                    ++it->geometry_regrid_attempts;
+                    if (!receiver_commanded_geometry_change_) ++it->geometry_regrid_attempts;
                     // Drop only the WIRE identity of the old attempt. token,
                     // object_id, text, submitted_at and submitted_reported survive,
                     // so the operator still sees exactly one SUBMITTED and, later,
@@ -9408,6 +9672,8 @@ Connection::SessionPick Connection::sessionLadderPick() const {
                                       ? peak_control::mcDpskDbpskDataOverControlReadingDb()
                                       : 0.0f;
     const float papr_offset_db = txPaprOffsetDb() - mfsk_to_data_db;
+    pick.rate_fading = rate_fading;
+    pick.papr_offset_db = papr_offset_db;
     pick.rung = connection_policy::selectLadderRungPaprCorrected(pick.selection_snr_db,
                                                                  rate_fading, papr_offset_db);
     pick.mod = pick.rung.modulation;
@@ -9705,10 +9971,11 @@ uint8_t Connection::upCrossingWordForAck(bool clean) {
             : kRungIdxNone;
     const uint8_t command = up_crossing_gate_.observe(clean, ofdm_rung);
     LOG_MODEM(INFO,
-              "Connection: WAVEFORM FOLLOW rx: burst %s, pick %s %s %s (sel %.1f dB; reading "
-              "%.1f%s, physical %.1f dB x%u) -> %s (run %d)",
+              "Connection: WAVEFORM FOLLOW rx: burst %s, pick %s %s %s (sel %.1f dB, fading %.2f, "
+              "papr %.1f dB; reading %.1f%s, physical %.1f dB x%u) -> %s (run %d)",
               clean ? "clean" : "loss", pick.rung.name, modulationToString(pick.mod),
-              codeRateToString(pick.rate), pick.selection_snr_db, pick.reading_db,
+              codeRateToString(pick.rate), pick.selection_snr_db, pick.rate_fading,
+              pick.papr_offset_db, pick.reading_db,
               !pick.burst_reading ? " - none from this burst, no evidence"
                                   : (pick.physical_n == 0 ? " - not physically bounded" : ""),
               pick.physical_n > 0 ? pick.physical_db : 0.0f, pick.physical_n,
@@ -9741,7 +10008,13 @@ bool Connection::maybeObeyCrossingCommand(uint8_t command_word, const char* reas
     }
     const WaveformMode from = negotiated_mode_;
     const Modulation from_mod = data_modulation_;
-    if (!applyWaveformCrossing(command_word, reason)) {
+    // A crossing the receiver commanded rests on its evidence that the new waveform carries: it is
+    // the protocol's decision, not a failed delivery, so re-gridding a message across it does not
+    // spend the message's regrid allowance (BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP).
+    receiver_commanded_geometry_change_ = true;
+    const bool crossed = applyWaveformCrossing(command_word, reason);
+    receiver_commanded_geometry_change_ = false;
+    if (!crossed) {
         return false;
     }
     if (from == WaveformMode::MC_DPSK) {
@@ -10408,6 +10681,12 @@ void Connection::resetAdaptiveDecisionState() {
 void Connection::enterConnected(bool automatic_rate_allowed) {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    notePeerHeard();  // the handshake frame that got us here; never a previous session's silence
+    // Per session: a previous session released half-open left these at >= 240 s, and the next
+    // session this station answered was released on its first tick.
+    responder_half_open_ms_ = 0;
+    responder_quiet_ms_ = 0;
+    file_transfer_.beginSession();  // the peer's transfer identities start over
     // The modem needs the session's two addresses to decode compact MC-DPSK DATA frames (their
     // CRC is seeded from them, mcdpsk_frame.hpp) and to rebuild the v2 frame it hands back.
     if (on_session_addresses_) {

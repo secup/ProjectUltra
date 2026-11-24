@@ -132,6 +132,17 @@ struct ConnectionAdaptiveTestAccess {
     }
 
     // ── Waveform follow ──
+    static void makeLocalIrsWaitingForTurn(Connection& c) {
+        c.local_data_turn_ = false;
+        c.yielded_data_turn_waiting_for_peer_data_ = false;
+        c.local_turn_request_pending_ = false;
+        c.turn_request_holdoff_ms_ = 0;
+        c.handshake_confirmed_ = true;
+    }
+    static uint32_t turnRequestRetransmitMs(const Connection& c) {
+        return c.turnRequestRetransmitMs();
+    }
+    static void notePeerHeard(Connection& c) { c.notePeerHeard(); }
     static void allowWaveformFollow(Connection& c) {
         c.waveform_follow_allowed_ = true;
         c.up_crossing_gate_.reset();
@@ -217,6 +228,12 @@ struct ConnectionAdaptiveTestAccess {
     static void failUpCrossing(Connection& c) { c.up_crossing_gate_.crossingFailed(); }
     static void noteRxWaveform(Connection& c, WaveformMode mode) { c.noteRxWaveform(mode); }
     static bool dualListen(const Connection& c) { return c.dualListenActive(); }
+    static uint32_t disconnectRetryIntervalMs(const Connection& c) {
+        return c.disconnectRetryIntervalMs();
+    }
+    static int disconnectUsefulRetryCount(const Connection& c) {
+        return c.disconnectUsefulRetryCount();
+    }
     // A repeat of the last MC-DPSK ACK (no new frame since the command).
     static uint8_t mcDpskRepeatAckWord(Connection& c) {
         c.tone_ack_group_complete_context_ = false;
@@ -1580,6 +1597,201 @@ void test_binary_fragments_fit_the_v2_frame() {
     }
 }
 
+// BUG-DISCONNECT-LOST-IN-FADE: the last useful DISCONNECT retry of a dual-listen OFDM session goes
+// out on the robust waveform (MC-DPSK), the earlier copies on the session's OFDM.
+// BUG-TURN-CONTROL-LOST-AT-OFDM-FLOOR: a TURN_REQUEST retry into an OFDM link silent for a whole
+// retry interval rides MC-DPSK; never while the peer is being heard (a healthy peer holding the turn
+// is sending, and a robust frame would pull its dual-listen receiver down mid-transfer).
+void test_turn_request_retry_rides_robust_waveform_only_into_silence() {
+    for (const bool peer_heard : {false, true}) {
+        setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+        Connection c;
+        unsetenv("ULTRA_WAVEFORM_FOLLOW");
+        int robust = 0;
+        std::vector<int> robust_at_request;
+        c.setTransmitCallback([&](const Bytes& f) {
+            const auto h = v2::parseHeader(f);
+            if (h.valid && h.type == v2::FrameType::TURN_REQUEST) robust_at_request.push_back(robust);
+        });
+        c.setRobustControlOnceCallback([&](Modulation) { ++robust; });
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 3.0f, 0.0f,
+                                                        Modulation::QPSK);
+        ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+        ConnectionAdaptiveTestAccess::makeLocalIrsWaitingForTurn(c);
+        CHECK(c.sendMessage("after bulk"), "a message queues while the peer holds the turn");
+        const uint32_t retry_ms = ConnectionAdaptiveTestAccess::turnRequestRetransmitMs(c);
+        for (int i = 0; i < 40 && robust_at_request.size() < 3; ++i) {
+            if (peer_heard) ConnectionAdaptiveTestAccess::notePeerHeard(c);
+            c.tick(retry_ms / 4 + 1);
+        }
+        CHECK(robust_at_request.size() >= 3, "the request is retried");
+        if (robust_at_request.size() < 3) continue;
+        CHECK(robust_at_request[0] == 0, "the first request goes on the session waveform");
+        if (peer_heard) {
+            CHECK(robust == 0, "no robust retry while the peer is heard");
+        } else {
+            CHECK(robust_at_request[1] == 1, "the first retry into silence rides MC-DPSK");
+        }
+    }
+}
+
+// BUG-REPLY-ON-WRONG-WAVEFORM: in an OFDM session a control frame that arrived on MC-DPSK is
+// answered on MC-DPSK (DISCONNECT ack, TURNOVER); one that arrived on OFDM is answered on OFDM.
+void test_control_reply_rides_the_arrival_waveform() {
+    for (const bool arrived_mcdpsk : {true, false}) {
+        for (const v2::FrameType req : {v2::FrameType::DISCONNECT, v2::FrameType::TURN_REQUEST}) {
+            setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+            Connection c;
+            unsetenv("ULTRA_WAVEFORM_FOLLOW");
+            int robust = 0;
+            int robust_at_reply = -1;
+            const v2::FrameType want = req == v2::FrameType::DISCONNECT ? v2::FrameType::ACK
+                                                                        : v2::FrameType::TURNOVER;
+            c.setTransmitCallback([&](const Bytes& f) {
+                const auto h = v2::parseHeader(f);
+                if (h.valid && h.type == want && robust_at_reply < 0) robust_at_reply = robust;
+            });
+            c.setRobustControlOnceCallback([&](Modulation) { ++robust; });
+            ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 3.0f, 0.0f,
+                                                            Modulation::QPSK);
+            ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+            ConnectionAdaptiveTestAccess::makeLocalIss(c);  // holds the turn, nothing to send
+            const Bytes frame = req == v2::FrameType::DISCONNECT
+                                    ? v2::ControlFrame::makeDisconnect("K2DEF", "W1ABC").serialize()
+                                    : v2::ControlFrame::makeTurnRequest("K2DEF", "W1ABC").serialize();
+            c.noteRxFrameMcDpsk(arrived_mcdpsk);
+            c.onFrameReceived(frame, false);
+            for (int i = 0; i < 20 && robust_at_reply < 0; ++i) c.tick(500);
+            const char* name = req == v2::FrameType::DISCONNECT ? "DISCONNECT ack" : "TURNOVER";
+            CHECK(robust_at_reply >= 0, std::string(name) + " is sent");
+            if (arrived_mcdpsk) {
+                CHECK(robust_at_reply == 1,
+                      std::string(name) + " to an MC-DPSK request rides MC-DPSK");
+            } else {
+                CHECK(robust_at_reply == 0, std::string(name) + " to an OFDM request stays on OFDM");
+            }
+        }
+    }
+}
+
+// BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP: a message in flight is re-gridded across every crossing the
+// receiver commands; only failure-driven geometry changes spend its regrid allowance (TNC pingpong,
+// ITU Good 8 dB: the third crossing abandoned a 180-byte message on a delivering link).
+void test_message_survives_receiver_commanded_crossings() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    int failed = 0;
+    c.setMessageTxStatusCallback([&](const Connection::MessageTxStatusEvent& e) {
+        if (e.status == Connection::MessageTxStatus::FAILED) ++failed;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 8.0f, 0.4f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    CHECK(c.sendMessage(std::string(180, 'm')), "the message is accepted");
+    for (int i = 0; i < 4; ++i) c.tick(250);
+    int crossings = 0;
+    for (int round = 0; round < 3; ++round) {
+        crossings += ConnectionAdaptiveTestAccess::obeyCrossing(
+                         c, connection_policy::encodeMcDpskRungCommand(0)) ? 1 : 0;
+        for (int i = 0; i < 4; ++i) c.tick(250);
+        crossings += ConnectionAdaptiveTestAccess::obeyCrossing(c, kRungIdxQpskR12) ? 1 : 0;
+        for (int i = 0; i < 4; ++i) c.tick(250);
+    }
+    CHECK(crossings == 6, "six receiver-commanded crossings");
+    CHECK(failed == 0, "no crossing the receiver commanded abandons the message");
+}
+
+// The robust copy goes out at the constellation the peer's MC-DPSK decoder runs: its listener's
+// ROBUST_MID normally, the rung the session left while this end's up-crossing is unconfirmed (the
+// peer's MC-DPSK decoder is still its primary there). TNC reconnect, AWGN 3 dB seed 301.
+void test_robust_control_targets_the_peer_mcdpsk_decoder() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    std::vector<Modulation> sent;
+    c.setRobustControlOnceCallback([&](Modulation m) { sent.push_back(m); });
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::setDataMode(c, Modulation::DQPSK, CodeRate::R1_4);
+    CHECK(ConnectionAdaptiveTestAccess::obeyCrossing(c, kRungIdxQpskR14), "the sender crosses up");
+    CHECK(c.robustControlModulationForTest() == Modulation::DQPSK,
+          "an unconfirmed up-crossing: robust control at the DQPSK rung the peer still runs");
+    // BUG-CLOSE-DURING-UNCONFIRMED-UPCROSS: a close in that state returns to the peer's waveform.
+    c.disconnect();
+    CHECK(ConnectionAdaptiveTestAccess::negotiatedMode(c) == WaveformMode::MC_DPSK &&
+              ConnectionAdaptiveTestAccess::dataModulation(c) == Modulation::DQPSK,
+          "the close goes back to MC-DPSK DQPSK, the waveform the peer's primary runs");
+    const uint32_t retry_ms = ConnectionAdaptiveTestAccess::disconnectRetryIntervalMs(c);
+    for (int i = 0; i < 4; ++i) c.tick(retry_ms);
+    CHECK(sent.empty(), "every copy is MC-DPSK already: no robust-once switch is needed");
+
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection d;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    std::vector<Modulation> sent_d;
+    d.setRobustControlOnceCallback([&](Modulation m) { sent_d.push_back(m); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(d, CodeRate::R1_2, 15.0f, 0.10f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(d);
+    d.disconnect();
+    for (int i = 0; i < 4; ++i) d.tick(ConnectionAdaptiveTestAccess::disconnectRetryIntervalMs(d));
+    CHECK(sent_d.size() == 1 &&
+              sent_d[0] == connection_policy::ladderRungForId(LadderRungId::ROBUST_MID).modulation,
+          "a settled OFDM session: the robust copy at the listener's ROBUST_MID");
+}
+
+// BUG-MCDPSK-CLOSE-STUCK-ON-UNPROVEN-RUNG: an unanswered MC-DPSK close steps one rung down per retry.
+void test_mcdpsk_close_retries_step_down() {
+    Connection c;
+    ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+    ConnectionAdaptiveTestAccess::setDataMode(c, Modulation::DQPSK, CodeRate::R1_4);
+    std::vector<Modulation> at_copy;
+    c.setTransmitCallback([&](const Bytes& f) {
+        const auto h = v2::parseHeader(f);
+        if (h.valid && h.type == v2::FrameType::DISCONNECT) {
+            at_copy.push_back(ConnectionAdaptiveTestAccess::dataModulation(c));
+        }
+    });
+    c.disconnect();
+    for (int i = 0; i < 400 && at_copy.size() < 3; ++i) c.tick(500);
+    CHECK(at_copy.size() >= 3, "the close is retried");
+    if (at_copy.size() >= 3) {
+        CHECK(at_copy[0] == Modulation::DQPSK, "the first copy at the session rung");
+        CHECK(at_copy[1] == Modulation::MFSK16_FAST, "the first retry one rung down (16-FSK-F)");
+        CHECK(at_copy[2] == Modulation::MFSK16, "the next at the bottom rung (16-FSK)");
+    }
+}
+
+void test_last_disconnect_retry_rides_robust_waveform() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);  // the follow knob latches per Connection
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    int robust = 0;
+    std::vector<int> robust_at_copy;
+    int copies = 0;
+    c.setTransmitCallback([&](const Bytes& f) {
+        const auto h = v2::parseHeader(f);
+        if (h.valid && h.type == v2::FrameType::DISCONNECT) {
+            ++copies;
+            robust_at_copy.push_back(robust);
+        }
+    });
+    c.setRobustControlOnceCallback([&](Modulation) { ++robust; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 15.0f, 0.10f,
+                                                    Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);  // an automatic-rate session
+    CHECK(ConnectionAdaptiveTestAccess::dualListen(c), "the fixture runs dual-listen");
+    c.disconnect();
+    const uint32_t retry_ms = ConnectionAdaptiveTestAccess::disconnectRetryIntervalMs(c);
+    for (int i = 0; i < 4; ++i) c.tick(retry_ms);
+    const int useful = ConnectionAdaptiveTestAccess::disconnectUsefulRetryCount(c);
+    CHECK(copies == 1 + useful, "the initial DISCONNECT plus every useful retry is sent");
+    CHECK(robust == 1, "exactly one copy rides the robust waveform");
+    CHECK(!robust_at_copy.empty() && robust_at_copy.back() == 1 &&
+              (robust_at_copy.size() < 2 || robust_at_copy[robust_at_copy.size() - 2] == 0),
+          "it is the last useful retry");
+}
+
 int main() {
     // Production defaults on purpose (see the header); only the follow knob is set per test.
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
@@ -1592,6 +1804,12 @@ int main() {
         return 1;
     }
     test_waveform_follow_sender_crossings_switch_modem_first();
+    test_last_disconnect_retry_rides_robust_waveform();
+    test_turn_request_retry_rides_robust_waveform_only_into_silence();
+    test_control_reply_rides_the_arrival_waveform();
+    test_message_survives_receiver_commanded_crossings();
+    test_robust_control_targets_the_peer_mcdpsk_decoder();
+    test_mcdpsk_close_retries_step_down();
     test_waveform_follow_knob_off_ignores_crossing_words();
     test_waveform_follow_receiver_commands_up_and_reverts();
     test_waveform_follow_first_ofdm_group_settles_probation();

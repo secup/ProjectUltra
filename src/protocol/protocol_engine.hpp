@@ -58,6 +58,7 @@ public:
     using ConnectionChangedCallback = std::function<void(ConnectionState state, const std::string& remote)>;
     using DisconnectTeardownCallback = Connection::DisconnectTeardownCallback;
     using IncomingCallCallback = std::function<void(const std::string& from)>;
+    using PeerClosedCallback = Connection::PeerClosedCallback;
     using DataReceivedCallback = Connection::DataReceivedCallback;
 
     using FileProgressCallback = Connection::FileProgressCallback;
@@ -89,6 +90,10 @@ public:
     // and their own egress queues to DISCONNECT / sentinel-ACK traffic only.
     void setDisconnectTeardownCallback(DisconnectTeardownCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
+    // Fired (under the engine lock) when the peer's DISCONNECT starts this station's re-ACK grace.
+    void setPeerClosedCallback(PeerClosedCallback cb);
+    // Whether the session is in that grace (the peer has closed; only re-ACKs remain).
+    bool peerClosedGraceActive() const;
     void setDataReceivedCallback(DataReceivedCallback cb);
 
     // --- Connection Control ---
@@ -187,6 +192,8 @@ public:
     int connectedAsInitiator() const {
         return connected_as_initiator_.load(std::memory_order_acquire);
     }
+    // Lock-free (the frontend's tone-ACK callback runs under the engine lock).
+    uint32_t toneAckMaxSymbolMs() const { return connection_.toneAckMaxSymbolMs(); }
 
     ConnectionStats getStats() const;
     void resetStats();
@@ -252,6 +259,7 @@ public:
     void noteRxMcDpskFrameLost(int modulation);
     void noteRxMcDpskTurnLoss(bool turn_over);
     void noteRxWaveform(WaveformMode mode);
+    void noteRxFrameMcDpsk(bool mcdpsk);
     void noteRxMcDpskMargin(bool upper_rung_margin);
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;
@@ -299,6 +307,7 @@ public:
     void setDataModeChangedCallback(DataModeChangedCallback cb);
     void setSessionAddressesCallback(Connection::SessionAddressesCallback cb);
     void setWaveformCrossingCallback(Connection::WaveformCrossingCallback cb);
+    void setRobustControlOnceCallback(std::function<void(Modulation)> cb);
 
     // --- Ping/Pong (fast presence check) ---
 
@@ -387,6 +396,7 @@ private:
     ConnectionChangedCallback on_connection_changed_;
     DisconnectTeardownCallback on_disconnect_teardown_;
     IncomingCallCallback on_incoming_call_;
+    PeerClosedCallback on_peer_closed_;
     DataReceivedCallback on_data_received_;
 
     mutable ProtocolEngineMutex mutex_;
