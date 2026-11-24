@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-24 (night) — refactor: session close state (state machine slice 5)
+
+**What changed.** The ten loose close fields of `Connection` (disconnect_frame_, disconnect_retry_count_,
+disconnect_retransmit_ms_, disconnect_pending_, disconnect_pending_ms_, disconnect_ack_retransmit_ms_,
+disconnect_ack_epoch_elapsed_ms_, disconnect_ack_repeat_count_, disconnect_ack_frame_,
+disconnect_ack_mcdpsk_) are one aggregate, `CloseState` (`src/protocol/close_state.hpp`): the CLOSER side
+and the ANSWERING side, each with its own reset. Five hand-written reset blocks are now
+`close_.resetAnswering()` (2) and `close_.reset()` (3). Behaviour-identical. Since 8902cead: Connection
+fields 261 -> 247, booleans 82 -> 69, lines 15319 -> 15258.
+
+**Verification.** CTest 133/133. TNC smoke sweep 12 (seeds 407-408, 70 runs): 67/70; none from the
+slice: AWGN 3 dB bulk (BUG-OFDM-FLOOR-STAYS-MCDPSK), ITU Good 8 dB short (slow MC-DPSK on fading) and
+AWGN 3 dB short, a close whose MC-DPSK ACK rode a rung the closer could not decode
+(BUG-MCDPSK-CONTROL-REPLY-RUNG, new, pre-existing).
+
 ## 2026-11-24 (night) — refactor: half-duplex data-turn state (state machine slice 4)
 
 **What changed.** The six loose turn booleans of `Connection` (local_data_turn_,

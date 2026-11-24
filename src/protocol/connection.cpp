@@ -1150,7 +1150,7 @@ void Connection::disconnect() {
         }
 
         auto disc = v2::ControlFrame::makeDisconnect(local_call_, remote_call_);
-        disconnect_frame_ = disc.serialize();
+        close_.disconnect_frame = disc.serialize();
 
         // Publish/quarantine the close phase before handing bytes to a host callback.
         // Host transports are allowed to loop a decoded ACK back synchronously; the
@@ -1158,19 +1158,19 @@ void Connection::disconnect() {
         // ACK through the DATA ARQ before DISCONNECTING was assigned.
         state_ = ConnectionState::DISCONNECTING;
         timeout_remaining_ms_ = disconnectHardTimeoutMs();
-        disconnect_retry_count_ = 0;
-        disconnect_retransmit_ms_ = disconnectRetryIntervalMs();
+        close_.retry_count = 0;
+        close_.retransmit_ms = disconnectRetryIntervalMs();
         setDisconnectTeardownActive(true);
         stats_.disconnects++;
-        LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", disconnect_frame_.size());
-        transmitFrame(disconnect_frame_);
+        LOG_MODEM(INFO, "Connection: Sending DISCONNECT (%zu bytes)", close_.disconnect_frame.size());
+        transmitFrame(close_.disconnect_frame);
         if (state_ != ConnectionState::DISCONNECTING) {
             return;  // A synchronous host loopback already completed the close.
         }
         LOG_MODEM(INFO,
                   "Connection: DISCONNECT retry armed at %ums from queue "
                   "(control_keydown=%ums, timeout=%ums)",
-                  disconnect_retransmit_ms_, disconnectControlKeydownMs(),
+                  close_.retransmit_ms, disconnectControlKeydownMs(),
                   timeout_remaining_ms_);
     }
 }
@@ -1227,15 +1227,7 @@ void Connection::abortTxNow() {
     mode_change_timeout_ms_ = 0;
     mode_change_retry_count_ = 0;
     desc_switch_full_anchor_pending_ = false;
-    disconnect_pending_ = false;
-    disconnect_pending_ms_ = 0;
-    disconnect_ack_retransmit_ms_ = 0;
-    disconnect_ack_epoch_elapsed_ms_ = 0;
-    disconnect_ack_repeat_count_ = 0;
-    disconnect_ack_frame_.clear();
-    disconnect_frame_.clear();
-    disconnect_retry_count_ = 0;
-    disconnect_retransmit_ms_ = 0;
+    close_.reset();
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
     ping_retry_count_ = 0;
@@ -6382,12 +6374,7 @@ void Connection::onFrameReceived(const Bytes& frame_data,
     if (header.type == v2::FrameType::CONNECT && peerClosedGraceActive()) {
         LOG_MODEM(INFO, "Connection: CONNECT during the peer-close grace - ending the grace for "
                         "the new call");
-        disconnect_pending_ = false;
-        disconnect_pending_ms_ = 0;
-        disconnect_ack_retransmit_ms_ = 0;
-        disconnect_ack_epoch_elapsed_ms_ = 0;
-        disconnect_ack_repeat_count_ = 0;
-        disconnect_ack_frame_.clear();
+        close_.resetAnswering();
         enterDisconnected("Remote disconnected");
     }
     if (disconnect_teardown_active_ &&
@@ -6925,27 +6912,22 @@ void Connection::runDeferredArqRefill() {
 // =============================================================================
 
 bool Connection::tickDisconnectResponderGrace(uint32_t elapsed_ms) {
-    if (!disconnect_pending_) {
+    if (!close_.grace) {
         return false;
     }
 
-    if (elapsed_ms >= disconnect_pending_ms_) {
+    if (elapsed_ms >= close_.grace_ms) {
         const bool crossed_close = state_ == ConnectionState::DISCONNECTING;
-        disconnect_pending_ = false;
-        disconnect_pending_ms_ = 0;
-        disconnect_ack_retransmit_ms_ = 0;
-        disconnect_ack_epoch_elapsed_ms_ = 0;
-        disconnect_ack_repeat_count_ = 0;
-        disconnect_ack_frame_.clear();
+        close_.resetAnswering();
         enterDisconnected(crossed_close ? "Mutual disconnect complete"
                                         : "Remote disconnected");
         return true;
     }
-    disconnect_pending_ms_ -= elapsed_ms;
-    disconnect_ack_epoch_elapsed_ms_ =
-        (disconnect_ack_epoch_elapsed_ms_ > 0xFFFFFFFFu - elapsed_ms)
+    close_.grace_ms -= elapsed_ms;
+    close_.ack_epoch_elapsed_ms =
+        (close_.ack_epoch_elapsed_ms > 0xFFFFFFFFu - elapsed_ms)
             ? 0xFFFFFFFFu
-            : disconnect_ack_epoch_elapsed_ms_ + elapsed_ms;
+            : close_.ack_epoch_elapsed_ms + elapsed_ms;
 
     // Proactively re-send ACK periodically because the first copy may fade.
     // A crossed close is already conclusive on both sides; timed symmetric ACK
@@ -6953,49 +6935,49 @@ bool Connection::tickDisconnectResponderGrace(uint32_t elapsed_ms) {
     const int repeat_limit = state_ == ConnectionState::DISCONNECTING
         ? 0
         : disconnectAckMaxProactiveRepeats();
-    if (!disconnect_ack_frame_.empty() &&
-        disconnect_ack_repeat_count_ < repeat_limit) {
-        if (elapsed_ms >= disconnect_ack_retransmit_ms_) {
+    if (!close_.ack_frame.empty() &&
+        close_.ack_repeat_count < repeat_limit) {
+        if (elapsed_ms >= close_.ack_retransmit_ms) {
             if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
                 const uint64_t safe_finish_ms =
-                    static_cast<uint64_t>(disconnect_ack_epoch_elapsed_ms_) +
+                    static_cast<uint64_t>(close_.ack_epoch_elapsed_ms) +
                     2ULL * static_cast<uint64_t>(disconnectControlKeydownMs()) +
                     static_cast<uint64_t>(
                         connection_policy::kCarrierSenseSackCoalesceMs);
                 if (safe_finish_ms >= disconnectRetryIntervalMs()) {
-                    disconnect_ack_repeat_count_ = repeat_limit;
-                    disconnect_ack_retransmit_ms_ = 0;
+                    close_.ack_repeat_count = repeat_limit;
+                    close_.ack_retransmit_ms = 0;
                     LOG_MODEM(DEBUG,
                               "Connection: Skipping late disconnect ACK copy "
                               "at %ums; preserving quiet retry window",
-                              disconnect_ack_epoch_elapsed_ms_);
+                              close_.ack_epoch_elapsed_ms);
                     return false;
                 }
             }
 
             if ((tx_active_provider_ && tx_active_provider_()) ||
                 (channel_busy_query_ && channel_busy_query_())) {
-                disconnect_ack_retransmit_ms_ =
+                close_.ack_retransmit_ms =
                     connection_policy::kCarrierSenseSackCoalesceMs;
                 LOG_MODEM(DEBUG,
                           "Connection: Disconnect ACK repeat due but channel/TX "
                           "busy; polling in %ums without spending repeat budget",
-                          disconnect_ack_retransmit_ms_);
+                          close_.ack_retransmit_ms);
                 return false;
             }
 
-            disconnect_ack_repeat_count_++;
-            disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
+            close_.ack_repeat_count++;
+            close_.ack_retransmit_ms = disconnectAckRetransmitMs();
             LOG_MODEM(INFO,
                       "Connection: Re-sending disconnect ACK (proactive %d/%d, "
                       "%dms grace remaining)",
-                      disconnect_ack_repeat_count_,
+                      close_.ack_repeat_count,
                       repeat_limit,
-                      disconnect_pending_ms_);
-            answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack repeat");
-            transmitFrame(disconnect_ack_frame_);
+                      close_.grace_ms);
+            answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack repeat");
+            transmitFrame(close_.ack_frame);
         } else {
-            disconnect_ack_retransmit_ms_ -= elapsed_ms;
+            close_.ack_retransmit_ms -= elapsed_ms;
         }
     }
     return false;
@@ -7092,7 +7074,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             // Teardown is egress-exclusive. Once peer close intent is accepted,
             // only its ACK/grace machinery may run while the responder remains
             // logically CONNECTED for duplicate recovery.
-            if (disconnect_pending_) {
+            if (close_.grace) {
                 (void)tickDisconnectResponderGrace(elapsed_ms);
                 break;
             }
@@ -7474,7 +7456,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             // Mutual close: once the peer's own DISCONNECT is decoded, its close
             // intent is conclusive. Keep its ACK alive for one responder grace
             // window and suppress our phase-locked local DISCONNECT retries.
-            if (disconnect_pending_) {
+            if (close_.grace) {
                 (void)tickDisconnectResponderGrace(elapsed_ms);
                 break;
             }
@@ -7485,12 +7467,12 @@ void Connection::tick(uint32_t elapsed_ms) {
                 timeout_remaining_ms_ -= elapsed_ms;
 
                 // Retransmit DISCONNECT periodically (fading can lose the frame)
-                if (elapsed_ms >= disconnect_retransmit_ms_) {
+                if (elapsed_ms >= close_.retransmit_ms) {
                     const uint32_t response_window_ms =
                         disconnectRetryIntervalMs();
-                    if (disconnect_retry_count_ >= DISCONNECT_MAX_RETRIES ||
-                        disconnect_frame_.empty()) {
-                        disconnect_retransmit_ms_ = timeout_remaining_ms_;
+                    if (close_.retry_count >= DISCONNECT_MAX_RETRIES ||
+                        close_.disconnect_frame.empty()) {
+                        close_.retransmit_ms = timeout_remaining_ms_;
                     } else if (timeout_remaining_ms_ <= response_window_ms) {
                         // The hard timeout wins ties. Never launch a request that
                         // cannot retain one complete physical response window.
@@ -7498,30 +7480,30 @@ void Connection::tick(uint32_t elapsed_ms) {
                                   "Connection: Suppressing late DISCONNECT retry "
                                   "(%ums remain, %ums response window required)",
                                   timeout_remaining_ms_, response_window_ms);
-                        disconnect_retry_count_ = DISCONNECT_MAX_RETRIES;
-                        disconnect_retransmit_ms_ = timeout_remaining_ms_;
+                        close_.retry_count = DISCONNECT_MAX_RETRIES;
+                        close_.retransmit_ms = timeout_remaining_ms_;
                     } else if ((tx_active_provider_ && tx_active_provider_()) ||
                                (channel_busy_query_ && channel_busy_query_())) {
                         // A due retry is a new half-duplex key-down. Poll without
                         // consuming retry budget rather than transmitting over an
                         // ACK or an already-running local waveform.
-                        disconnect_retransmit_ms_ =
+                        close_.retransmit_ms =
                             connection_policy::kCarrierSenseSackCoalesceMs;
                         LOG_MODEM(DEBUG,
                                   "Connection: DISCONNECT retry due but channel/TX "
                                   "busy; polling in %ums without spending budget",
-                                  disconnect_retransmit_ms_);
+                                  close_.retransmit_ms);
                     } else {
-                        disconnect_retry_count_++;
+                        close_.retry_count++;
                         LOG_MODEM(INFO, "Connection: Retransmitting DISCONNECT (%d/%d)",
-                                  disconnect_retry_count_, DISCONNECT_MAX_RETRIES);
+                                  close_.retry_count, DISCONNECT_MAX_RETRIES);
                         // The link-control plan (link_control_plan.hpp): R5 an unanswered MC-DPSK close
                         // steps one rung down (BUG-MCDPSK-CLOSE-STUCK-ON-UNPROVEN-RUNG); R4 the last
                         // useful retry of an OFDM session rides MC-DPSK, which the peer's dual-listen
                         // listener decodes 10+ dB below OFDM (BUG-DISCONNECT-LOST-IN-FADE).
                         ControlEvent retry_event;
                         retry_event.kind = ControlKind::DisconnectRetry;
-                        retry_event.retry_count = disconnect_retry_count_;
+                        retry_event.retry_count = close_.retry_count;
                         retry_event.useful_retry_count = disconnectUsefulRetryCount();
                         const ControlTxPlan retry_plan = planControlTx(linkFacts(), retry_event);
                         if (retry_plan.step_down_to != Modulation::AUTO) {
@@ -7537,12 +7519,12 @@ void Connection::tick(uint32_t elapsed_ms) {
                                             "waveform (MC-DPSK)");
                             on_robust_control_once_(retry_plan.robust_mod);
                         }
-                        transmitFrame(disconnect_frame_);
+                        transmitFrame(close_.disconnect_frame);
                         // For the rung this copy actually rides (a step down lengthens the frame).
-                        disconnect_retransmit_ms_ = disconnectRetryIntervalMs();
+                        close_.retransmit_ms = disconnectRetryIntervalMs();
                     }
                 } else {
-                    disconnect_retransmit_ms_ -= elapsed_ms;
+                    close_.retransmit_ms -= elapsed_ms;
                 }
             }
             break;
@@ -10843,16 +10825,9 @@ void Connection::enterDisconnected(const std::string& reason) {
     qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     mode_change_ack_repeat_jobs_.clear();
-    disconnect_frame_.clear();
-    disconnect_retry_count_ = 0;
-    disconnect_retransmit_ms_ = 0;
+    close_.resetCloser();
     timeout_remaining_ms_ = 0;
-    disconnect_pending_ = false;
-    disconnect_pending_ms_ = 0;
-    disconnect_ack_retransmit_ms_ = 0;
-    disconnect_ack_epoch_elapsed_ms_ = 0;
-    disconnect_ack_repeat_count_ = 0;
-    disconnect_ack_frame_.clear();
+    close_.resetAnswering();
     burst_mode_active_ = false;
     burst_tx_buffer_.clear();
     rx_level_low_streak_ = 0;   // software-ALC: per-connection
@@ -11539,15 +11514,7 @@ void Connection::reset() {
     connect_waveform_ = WaveformMode::MC_DPSK;  // Reset to DPSK for next connect attempt
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
-    disconnect_frame_.clear();
-    disconnect_retry_count_ = 0;
-    disconnect_retransmit_ms_ = 0;
-    disconnect_pending_ = false;
-    disconnect_pending_ms_ = 0;
-    disconnect_ack_retransmit_ms_ = 0;
-    disconnect_ack_epoch_elapsed_ms_ = 0;
-    disconnect_ack_repeat_count_ = 0;
-    disconnect_ack_frame_.clear();
+    close_.reset();
     turn_.reset(/*local_holds=*/false);
     resetDataTurnFairness();
     data_turn_tx_guard_ms_ = 0;

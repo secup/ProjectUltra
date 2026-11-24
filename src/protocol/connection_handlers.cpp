@@ -783,22 +783,22 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
     LOG_MODEM(INFO, "Connection: Disconnect from %s", remote_call_.c_str());
 
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
-    disconnect_ack_frame_ = ack.serialize();
+    close_.ack_frame = ack.serialize();
 
-    if (disconnect_pending_) {
+    if (close_.grace) {
         // Already in grace period from a previous DISCONNECT — reset first so
         // synchronous host callbacks always observe the renewed close lifetime.
         LOG_MODEM(INFO, "Connection: Re-sent disconnect ACK (retransmit detected)");
-        disconnect_pending_ms_ = disconnectResponderGraceMs();
-        disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
-        disconnect_ack_epoch_elapsed_ms_ = 0;
-        disconnect_ack_repeat_count_ = crossed_close
+        close_.grace_ms = disconnectResponderGraceMs();
+        close_.ack_retransmit_ms = disconnectAckRetransmitMs();
+        close_.ack_epoch_elapsed_ms = 0;
+        close_.ack_repeat_count = crossed_close
             ? disconnectAckMaxProactiveRepeats()
             : 0;
         setDisconnectTeardownActive(true);
-        disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-        answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
-        transmitFrame(disconnect_ack_frame_);
+        close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
+        answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+        transmitFrame(close_.ack_frame);
         return;
     }
 
@@ -809,17 +809,17 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
     if (!crossed_close) {
         stats_.disconnects++;
     }
-    disconnect_pending_ = true;
-    disconnect_pending_ms_ = disconnectResponderGraceMs();
-    disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
-    disconnect_ack_epoch_elapsed_ms_ = 0;
-    disconnect_ack_repeat_count_ = crossed_close
+    close_.grace = true;
+    close_.grace_ms = disconnectResponderGraceMs();
+    close_.ack_retransmit_ms = disconnectAckRetransmitMs();
+    close_.ack_epoch_elapsed_ms = 0;
+    close_.ack_repeat_count = crossed_close
         ? disconnectAckMaxProactiveRepeats()
         : 0;
     setDisconnectTeardownActive(true);
-    disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-    answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
-    transmitFrame(disconnect_ack_frame_);
+    close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
+    answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+    transmitFrame(close_.ack_frame);
     if (!crossed_close && on_peer_closed_) {
         on_peer_closed_();  // BUG-TNC-PEER-DISCONNECTED-LATE: the host learns now, not after the grace
     }
@@ -831,10 +831,10 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
     LOG_MODEM(INFO,
               "Connection: Disconnect ACK sent, grace period %ums "
               "(up to %d proactive repeats every %ums; duplicate re-ACK reactive)",
-              disconnect_pending_ms_, crossed_close
+              close_.grace_ms, crossed_close
                   ? 0
                   : disconnectAckMaxProactiveRepeats(),
-              disconnect_ack_retransmit_ms_);
+              close_.ack_retransmit_ms);
 }
 
 void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std::string& src_call) {
@@ -848,21 +848,21 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
 
     // Send ACK for the disconnect
     auto ack = v2::ControlFrame::makeAck(local_call_, remote_call_, frame.seq);
-    disconnect_ack_frame_ = ack.serialize();
+    close_.ack_frame = ack.serialize();
 
-    if (disconnect_pending_) {
+    if (close_.grace) {
         // Already in grace period — reset before re-sending (see control form above).
         LOG_MODEM(INFO, "Connection: Re-sent disconnect ACK (retransmit detected)");
-        disconnect_pending_ms_ = disconnectResponderGraceMs();
-        disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
-        disconnect_ack_epoch_elapsed_ms_ = 0;
-        disconnect_ack_repeat_count_ = crossed_close
+        close_.grace_ms = disconnectResponderGraceMs();
+        close_.ack_retransmit_ms = disconnectAckRetransmitMs();
+        close_.ack_epoch_elapsed_ms = 0;
+        close_.ack_repeat_count = crossed_close
             ? disconnectAckMaxProactiveRepeats()
             : 0;
         setDisconnectTeardownActive(true);
-        disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-        answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
-        transmitFrame(disconnect_ack_frame_);
+        close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
+        answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+        transmitFrame(close_.ack_frame);
         return;
     }
 
@@ -870,17 +870,17 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
     if (!crossed_close) {
         stats_.disconnects++;
     }
-    disconnect_pending_ = true;
-    disconnect_pending_ms_ = disconnectResponderGraceMs();
-    disconnect_ack_retransmit_ms_ = disconnectAckRetransmitMs();
-    disconnect_ack_epoch_elapsed_ms_ = 0;
-    disconnect_ack_repeat_count_ = crossed_close
+    close_.grace = true;
+    close_.grace_ms = disconnectResponderGraceMs();
+    close_.ack_retransmit_ms = disconnectAckRetransmitMs();
+    close_.ack_epoch_elapsed_ms = 0;
+    close_.ack_repeat_count = crossed_close
         ? disconnectAckMaxProactiveRepeats()
         : 0;
     setDisconnectTeardownActive(true);
-    disconnect_ack_mcdpsk_ = last_rx_frame_mcdpsk_;
-    answerOnArrivalWaveform(ControlKind::DisconnectAck, disconnect_ack_mcdpsk_, "DISCONNECT ack");
-    transmitFrame(disconnect_ack_frame_);
+    close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
+    answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+    transmitFrame(close_.ack_frame);
     if (!crossed_close && on_peer_closed_) {
         on_peer_closed_();  // BUG-TNC-PEER-DISCONNECTED-LATE: the host learns now, not after the grace
     }
@@ -892,10 +892,10 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
     LOG_MODEM(INFO,
               "Connection: Disconnect ACK sent, grace period %ums "
               "(up to %d proactive repeats every %ums; duplicate re-ACK reactive)",
-              disconnect_pending_ms_, crossed_close
+              close_.grace_ms, crossed_close
                   ? 0
                   : disconnectAckMaxProactiveRepeats(),
-              disconnect_ack_retransmit_ms_);
+              close_.ack_retransmit_ms);
 }
 
 // =============================================================================

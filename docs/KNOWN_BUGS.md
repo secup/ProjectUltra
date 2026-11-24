@@ -39,6 +39,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   ALPHA's PING fell in BRAVO's own transmit blanking. Needs: a CCA threshold derived from the noise
   statistics for a chirp's in-band power on fading, and either a longer randomized retry span or an
   explicit tie-break (e.g. callsign-ordered slots) once two PINGs collide.
+- **BUG-MCDPSK-CONTROL-REPLY-RUNG** (P2, open): in an MC-DPSK session a control reply rides the
+  replying station's own TX rung, and an LDPC R1/4 control codeword sits ~1 dB above the turbo data
+  frame of the same rung. TNC short, AWGN 3 dB seed 407 (sweep 12): ALPHA's DISCONNECT arrived on
+  16-FSK-F; BRAVO answered at its data rung DQPSK (where its turbo data decoded cleanly) and ALPHA's
+  decoder - connected, constellation retry included - decoded none of three copies (training SNR -4.3
+  dB); the close timed out. Also: the proactive ACK repeats every 2.5 s (the OFDM interval) are longer
+  than an MC-DPSK ACK on the air (~4.8 s at 16-FSK-F), so they key back to back. Fix: a reply rides the
+  more robust of its own rung and the request's (needs the decoded MC-DPSK rung on DecodeResult), and
+  the repeat interval follows the waveform the ACK rides.
 - **BUG-OFDM-FLOOR-STAYS-MCDPSK** (P3, open): at a true AWGN 3 dB on a peak-limited TX, OFDM QPSK R1/4 lost
   whole rounds (two ARQ aborts), the sender crossed down, and the DQPSK selection (reading -0.8 dB, PAPR
   correction -2.9 dB) stayed under the 2.5 dB floor for the rest of a 6 KB transfer (~25 bps, TNC seed

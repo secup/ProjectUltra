@@ -291,15 +291,15 @@ struct ConnectionAdaptiveTestAccess {
     }
 
     static bool disconnectPending(const Connection& c) {
-        return c.disconnect_pending_;
+        return c.close_.grace;
     }
 
     static uint32_t disconnectPendingMs(const Connection& c) {
-        return c.disconnect_pending_ms_;
+        return c.close_.grace_ms;
     }
 
     static int disconnectAckRepeatCount(const Connection& c) {
-        return c.disconnect_ack_repeat_count_;
+        return c.close_.ack_repeat_count;
     }
 
     static int disconnectAckMaxProactiveRepeats(const Connection& c) {
@@ -307,7 +307,7 @@ struct ConnectionAdaptiveTestAccess {
     }
 
     static int disconnectRetryCount(const Connection& c) {
-        return c.disconnect_retry_count_;
+        return c.close_.retry_count;
     }
 
     static uint32_t disconnectTimeoutRemainingMs(const Connection& c) {

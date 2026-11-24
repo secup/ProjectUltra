@@ -7,6 +7,7 @@
 #include "link_control_plan.hpp"
 #include "waveform_agreement.hpp"
 #include "data_turn.hpp"
+#include "close_state.hpp"
 #include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
@@ -364,7 +365,7 @@ public:
     }
     // In the responder's re-ACK grace after the peer's DISCONNECT (still CONNECTED on the wire).
     bool peerClosedGraceActive() const {
-        return disconnect_pending_ && state_ == ConnectionState::CONNECTED;
+        return close_.grace && state_ == ConnectionState::CONNECTED;
     }
     void setDataReceivedCallback(DataReceivedCallback cb);
 
@@ -1179,9 +1180,6 @@ private:
     uint32_t connected_time_ms_ = 0;
 
     // Disconnect retransmission (initiator side)
-    Bytes disconnect_frame_;                // Cached DISCONNECT frame for retransmission
-    int disconnect_retry_count_ = 0;
-    uint32_t disconnect_retransmit_ms_ = 0; // Time until next retransmit
     static constexpr uint32_t DISCONNECT_RETRANSMIT_FLOOR_MS = 5000;
     static constexpr int DISCONNECT_MAX_RETRIES = 3;
 
@@ -1189,12 +1187,6 @@ private:
     // After receiving DISCONNECT, stay connected briefly and re-send ACK
     // periodically to ensure the initiator gets it (fading can lose frames)
     bool disconnect_teardown_active_ = false;
-    bool disconnect_pending_ = false;
-    uint32_t disconnect_pending_ms_ = 0;
-    uint32_t disconnect_ack_retransmit_ms_ = 0; // Time until next ACK re-send
-    uint32_t disconnect_ack_epoch_elapsed_ms_ = 0;
-    int disconnect_ack_repeat_count_ = 0;
-    Bytes disconnect_ack_frame_;            // Cached ACK for re-sending
     static constexpr uint32_t DISCONNECT_GRACE_LEGACY_MS = 5000;
     static constexpr uint32_t DISCONNECT_ACK_RETRANSMIT_FLOOR_MS = 2000;
     static constexpr int DISCONNECT_ACK_MAX_PROACTIVE_REPEATS_CAP = 2;
@@ -2028,6 +2020,7 @@ private:
     std::function<void(Modulation)> on_robust_control_once_;
     Modulation robustControlModulation() const;
     // Waveform agreement (waveform_agreement.hpp, state machine slice 3).
+    CloseState close_;  // both sides of a session close (close_state.hpp, slice 5)
     DataTurn turn_;  // half-duplex data turn (data_turn.hpp, slice 4)
     CrossingProbation probation_;
     RxCrossingCommand rx_command_;
@@ -2119,7 +2112,6 @@ private:
     bool last_rx_frame_mcdpsk_ = false;
     uint32_t probe_defer_ms_ = 0;  // PING retry held by carrier sense (bounded)
     bool peer_turn_request_mcdpsk_ = false;  // the pending TURN_REQUEST arrived on MC-DPSK
-    bool disconnect_ack_mcdpsk_ = false;     // the DISCONNECT being acknowledged did
     void answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what);
     LinkFacts linkFacts() const;
     bool maybeYieldDataTurn();
