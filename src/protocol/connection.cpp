@@ -1660,8 +1660,8 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
     }
     LOG_MODEM(DEBUG, "Connection: B2F-DBG sendPayload %zuB queue=%d (local_turn=%d is_init=%d hs_conf=%d yield_pend=%d peer_req=%d guard=%u)",
               data.size(), shouldQueuePayloadForLinkTurn() ? 1 : 0,
-              local_data_turn_ ? 1 : 0, is_initiator_ ? 1 : 0, handshake_confirmed_ ? 1 : 0,
-              data_turn_yield_pending_ ? 1 : 0, peer_data_turn_requested_ ? 1 : 0, data_turn_tx_guard_ms_);
+              turn_.localHolds() ? 1 : 0, is_initiator_ ? 1 : 0, handshake_confirmed_ ? 1 : 0,
+              turn_.yieldPending() ? 1 : 0, turn_.peerRequested() ? 1 : 0, data_turn_tx_guard_ms_);
     if (shouldQueuePayloadForLinkTurn()) {
         if (queued_payloads_.size() >= kMaxQueuedPayloads) {
             dropOutboundMessageRecord(message_token);
@@ -1675,8 +1675,8 @@ bool Connection::sendPayload(const Bytes& data, bool binary_payload) {
         LOG_MODEM(INFO,
                   "Connection: Queued %zu byte %s until local ISS DATA turn (depth=%zu, local_turn=%d, peer_request=%d)",
                   data.size(), binary_payload ? "binary payload" : "message",
-                  queued_payloads_.size(), local_data_turn_ ? 1 : 0,
-                  peer_data_turn_requested_ ? 1 : 0);
+                  queued_payloads_.size(), turn_.localHolds() ? 1 : 0,
+                  turn_.peerRequested() ? 1 : 0);
         sendTurnRequestIfNeeded();
         return true;
     }
@@ -1749,8 +1749,8 @@ bool Connection::dataTurnFairBudgetMet() const {
 
 bool Connection::shouldPauseLocalDataForPeerRequest() const {
     if (state_ != ConnectionState::CONNECTED ||
-        !local_data_turn_ ||
-        !peer_data_turn_requested_ ||
+        !turn_.localHolds() ||
+        !turn_.peerRequested() ||
         file_cancel_confirm_pending_ ||
         file_transfer_.getState() == FileTransferState::SENDING ||
         !dataTurnFairBudgetMet()) {
@@ -1775,9 +1775,9 @@ bool Connection::shouldQueuePayloadForLinkTurn() const {
         !is_initiator_ && !handshake_confirmed_;
 
     return responder_handshake_turn ||
-           data_turn_yield_pending_ ||
-           !local_data_turn_ ||
-           peer_data_turn_requested_ ||
+           turn_.yieldPending() ||
+           !turn_.localHolds() ||
+           turn_.peerRequested() ||
            file_cancel_confirm_pending_ ||
            data_turn_tx_guard_ms_ > 0 ||
            queued_file_path_.has_value() ||
@@ -1787,7 +1787,7 @@ bool Connection::shouldQueuePayloadForLinkTurn() const {
 
 bool Connection::shouldRequestDataTurnOnAck() const {
     return state_ == ConnectionState::CONNECTED &&
-           !local_data_turn_ &&
+           !turn_.localHolds() &&
            !file_transfer_.isBusy() &&
            !file_cancel_confirm_pending_ &&
            hasLocalDataWaitingForTurn() &&
@@ -1804,7 +1804,7 @@ bool Connection::noteTurnRequestOnAckIfNeeded() {
     // receive that ACK, finish any ACK-diversity guard, and send TURNOVER back
     // across the half-duplex channel. Otherwise both sides can transmit control
     // bursts into each other at the ownership change.
-    local_turn_request_pending_ = true;
+    turn_.setRequestPending(true);
     turn_request_retransmit_ms_ = std::max(
         turn_request_retransmit_ms_,
         turnRequestAckEmbeddedRetransmitMs());
@@ -1817,7 +1817,7 @@ void Connection::resetDataTurnFairness() {
 }
 
 void Connection::noteDataTurnPayloadStarted(size_t payload_bytes) {
-    if (local_data_turn_) {
+    if (turn_.localHolds()) {
         data_turn_payload_bytes_sent_ += payload_bytes;
     }
 
@@ -1891,12 +1891,12 @@ LinkFacts Connection::linkFacts() const {
 
 void Connection::sendTurnRequestIfNeeded(bool retry) {
     if (state_ != ConnectionState::CONNECTED ||
-        local_data_turn_ ||
+        turn_.localHolds() ||
         file_transfer_.isBusy() ||
         file_cancel_confirm_pending_ ||
-        yielded_data_turn_waiting_for_peer_data_ ||
+        turn_.yieldedWaitingForPeerData() ||
         !hasLocalDataWaitingForTurn() ||
-        local_turn_request_pending_ ||
+        turn_.requestPending() ||
         turn_request_holdoff_ms_ > 0 ||
         // An unconfirmed responder keeps quiet while the initiator may still be retrying its
         // CONNECT (its ACK lost): one retry interval without a duplicate proves it is not. A
@@ -1928,7 +1928,7 @@ void Connection::sendTurnRequestIfNeeded(bool retry) {
         on_robust_control_once_(plan.robust_mod);
     }
     transmitFrame(request.serialize());
-    local_turn_request_pending_ = true;
+    turn_.setRequestPending(true);
     turn_request_retransmit_ms_ = turnRequestRetransmitMs();
 }
 
@@ -1938,8 +1938,8 @@ void Connection::armDataTurnTxGuard(uint32_t guard_ms) {
 
 bool Connection::maybeYieldDataTurn() {
     if (state_ != ConnectionState::CONNECTED ||
-        !local_data_turn_ ||
-        !peer_data_turn_requested_ ||
+        !turn_.localHolds() ||
+        !turn_.peerRequested() ||
         file_transfer_.getState() == FileTransferState::SENDING ||
         hasLocalInFlightDataTurn()) {
         return false;
@@ -1953,7 +1953,7 @@ bool Connection::maybeYieldDataTurn() {
         arq_.getTxInFlightBytes() == 0 &&
         !mode_change_pending_;
 
-    if (!data_turn_yield_pending_ &&
+    if (!turn_.yieldPending() &&
         data_turn_payload_bytes_sent_ > 0 &&
         hasLocalDataWaitingForTurn() &&
         !only_unstarted_file_waiting &&
@@ -1962,7 +1962,7 @@ bool Connection::maybeYieldDataTurn() {
     }
 
     if (data_turn_tx_guard_ms_ > 0) {
-        data_turn_yield_pending_ = true;
+        turn_.setYieldPending(true);
         return false;
     }
 
@@ -1974,14 +1974,9 @@ bool Connection::maybeYieldDataTurn() {
               static_cast<unsigned long long>(data_turn_payload_bytes_sent_),
               data_turn_contended_ms_, getTxBacklogBytes());
     transmitFrame(turnover.serialize());
-    local_data_turn_ = false;
-    peer_data_turn_requested_ = false;
-    local_turn_request_pending_ = false;
-    yielded_data_turn_waiting_for_peer_data_ = true;
-    data_turn_yield_pending_ = false;
+    turn_.yieldToPeer();
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
-    received_peer_data_since_connect_ = false;
     resetDataTurnFairness();
     armDataTurnTxGuard(dataTurnControlGuardMs());
     return true;
@@ -2113,14 +2108,14 @@ bool Connection::tryStartQueuedFileIfReady() {
         queued_payloads_.front().enqueue_order < queued_file_order_) {
         return false;
     }
-    if (!local_data_turn_) {
+    if (!turn_.localHolds()) {
         sendTurnRequestIfNeeded();
         return false;
     }
     if (file_cancel_confirm_pending_) {
         return false;
     }
-    if (peer_data_turn_requested_ || data_turn_yield_pending_) {
+    if (turn_.peerRequested() || turn_.yieldPending()) {
         maybeYieldDataTurn();
         return false;
     }
@@ -2170,7 +2165,7 @@ void Connection::sendNextQueuedPayloadIfReady() {
     if (!is_initiator_ && !handshake_confirmed_) {
         return;
     }
-    if (!local_data_turn_) {
+    if (!turn_.localHolds()) {
         sendTurnRequestIfNeeded();
         return;
     }
@@ -2180,7 +2175,7 @@ void Connection::sendNextQueuedPayloadIfReady() {
     if (data_turn_tx_guard_ms_ > 0) {
         return;
     }
-    if (data_turn_yield_pending_) {
+    if (turn_.yieldPending()) {
         maybeYieldDataTurn();
         return;
     }
@@ -2310,7 +2305,7 @@ bool Connection::sendMessages(const std::vector<std::string>& texts) {
 bool Connection::isReadyToSend() const {
     return state_ == ConnectionState::CONNECTED && !disconnect_teardown_active_ &&
            arq_.isReadyToSend() &&
-           local_data_turn_ && !peer_data_turn_requested_ &&
+           turn_.localHolds() && !turn_.peerRequested() &&
            !file_cancel_confirm_pending_ &&
            data_turn_tx_guard_ms_ == 0 && !file_transfer_.isBusy() &&
            !queued_file_path_.has_value() && queued_payloads_.empty();
@@ -2400,16 +2395,16 @@ bool Connection::sendFile(const std::string& filepath) {
         !queued_payloads_.empty() || !outbound_message_tx_records_.empty() ||
         !arq_.isReadyToSend();
     const bool owns_clear_data_turn =
-        local_data_turn_ && !peer_data_turn_requested_ &&
+        turn_.localHolds() && !turn_.peerRequested() &&
         !file_cancel_confirm_pending_ && data_turn_tx_guard_ms_ == 0 &&
-        !data_turn_yield_pending_;
+        !turn_.yieldPending();
     if (noninteractive_burst_bypass && owns_clear_data_turn &&
         !logical_operation_active) {
         return startFileTransferNow(filepath);
     }
 
-    if (!local_data_turn_ ||
-        peer_data_turn_requested_ ||
+    if (!turn_.localHolds() ||
+        turn_.peerRequested() ||
         file_cancel_confirm_pending_ ||
         data_turn_tx_guard_ms_ > 0 ||
         hasLocalOutboundDataTurn() ||
@@ -2420,8 +2415,8 @@ bool Connection::sendFile(const std::string& filepath) {
         queued_file_order_ = allocateQueuedOperationOrder();
         LOG_MODEM(INFO,
                   "Connection: Queued file transfer until local ISS DATA turn is clear (path=%s, local_turn=%d, peer_request=%d, guard_ms=%u)",
-                  filepath.c_str(), local_data_turn_ ? 1 : 0,
-                  peer_data_turn_requested_ ? 1 : 0, data_turn_tx_guard_ms_);
+                  filepath.c_str(), turn_.localHolds() ? 1 : 0,
+                  turn_.peerRequested() ? 1 : 0, data_turn_tx_guard_ms_);
         sendTurnRequestIfNeeded();
         maybeYieldDataTurn();
         return true;
@@ -2530,7 +2525,7 @@ void Connection::clearFileTransferArqState() {
 
 void Connection::cancelFileTransfer() {
     const bool had_active_transfer = file_transfer_.isBusy();
-    const bool was_local_iss = local_data_turn_;
+    const bool was_local_iss = turn_.localHolds();
     if (state_ == ConnectionState::CONNECTED && had_active_transfer) {
         transmitFileCancelControl(" (local cancel)");
         armFileCancelReassertion();
@@ -2547,10 +2542,10 @@ void Connection::cancelFileTransfer() {
     }
 
     if (state_ == ConnectionState::CONNECTED) {
-        data_turn_yield_pending_ = false;
+        turn_.setYieldPending(false);
         resetDataTurnFairness();
         if (!was_local_iss) {
-            local_turn_request_pending_ = false;
+            turn_.setRequestPending(false);
             turn_request_retransmit_ms_ = 0;
             sendTurnRequestIfNeeded();
         }
@@ -6497,10 +6492,10 @@ void Connection::onFrameReceived(const Bytes& frame_data,
                             commitPendingModeChange("ACKed");
                         } else {
                             // Regular data ACK
-                            if (local_data_turn_) {
+                            if (turn_.localHolds()) {
                                 armDataTurnTxGuard(dataTurnAckDiversityGuardMs(*ctrl));
                                 if ((ctrl->flags & v2::Flags::TURN_REQUEST) != 0) {
-                                    peer_data_turn_requested_ = true;
+                                    turn_.setPeerRequested(true);
                                     peer_turn_request_mcdpsk_ = last_rx_frame_mcdpsk_;
                                     LOG_MODEM(INFO,
                                               "Connection: Peer requested DATA turn on ACK seq=%u",
@@ -6593,7 +6588,7 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     // the sender then cannot hear the ACK it is waiting for (GUI narrowband behind a 500 Hz IF
     // filter: 20 false locks at the sending station, 15 such ACKs, every round expired, the 4 KB
     // transfer FAILED while the receiver had decoded every group; BUG-SENDER-BACKSTOP-STEALS-ACK).
-    if (local_data_turn_) {
+    if (turn_.localHolds()) {
         LOG_MODEM(INFO,
                   "Connection: ANCHORED-BURST BACKSTOP ignored - this end holds the DATA turn, "
                   "the peer originates no group to re-confirm (payload_seen=%d)",
@@ -6888,7 +6883,7 @@ void Connection::runDeferredArqRefill() {
     // like the existing guards — the deferred-refill flags RE-LATCH below, so the refill
     // fires automatically (same [holes]+[new] coalescing, untouched) when the hold expires
     // in the CONNECTED tick. Default-off knob ⇒ the hold is never armed ⇒ byte-identical.
-    if (!local_data_turn_ || file_cancel_confirm_pending_ || data_turn_tx_guard_ms_ > 0 ||
+    if (!turn_.localHolds() || file_cancel_confirm_pending_ || data_turn_tx_guard_ms_ > 0 ||
         retx_pace_hold_ms_ > 0) {
         deferred_file_refill_ = refill_file || deferred_file_refill_;
         deferred_fragment_refill_ = refill_fragments || deferred_fragment_refill_;
@@ -7131,7 +7126,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                         ? 0
                         : file_cancel_reassert_cooldown_ms_ - elapsed_ms;
             }
-            if (local_data_turn_ && peer_data_turn_requested_) {
+            if (turn_.localHolds() && turn_.peerRequested()) {
                 data_turn_contended_ms_ += elapsed_ms;
             }
             // While we've yielded and are waiting for the peer's first DATA burst, keep
@@ -7140,7 +7135,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             // actual turn state, not the stronger half-duplex-interactive B2F policy.
             // The one-shot armed on the yield-TURNOVER gets consumed in the gap (stray
             // detect / warm-sync DEGRADED), so re-arm periodically until the peer's data
-            // actually arrives (yielded_data_turn_waiting_for_peer_data_ clears). The peer
+            // actually arrives (turn_.yieldedWaitingForPeerData() clears). The peer
             // force-fulls its first frame on turn-acquire, so this meets it (BUG-TNC-B2F-001).
             // A yield waits for the peer's DATA (the B2F responder speaks first), but a peer with
             // nothing to say never sends any and never hands the turn back: this station's own
@@ -7164,7 +7159,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             // ACK, no sync - past peerSilentLinkLostMs() declares the link lost.
             {
                 const bool peer_owes_data =
-                    !local_data_turn_ && !disconnect_teardown_active_ &&
+                    !turn_.localHolds() && !disconnect_teardown_active_ &&
                     (arq_.lastRxHadMoreData() || rx_reassembly_active_ ||
                      file_transfer_.getState() == FileTransferState::RECEIVING);
                 const bool we_await_ack =
@@ -7183,7 +7178,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     return;
                 }
             }
-            if (yielded_data_turn_waiting_for_peer_data_ && !local_data_turn_) {
+            if (turn_.yieldedWaitingForPeerData() && !turn_.localHolds()) {
                 yielded_turn_wait_ms_ += elapsed_ms;
                 if (hasLocalDataWaitingForTurn() &&
                     yielded_turn_wait_ms_ >= turnRequestRetransmitMs()) {
@@ -7191,17 +7186,17 @@ void Connection::tick(uint32_t elapsed_ms) {
                               "Connection: peer sent no DATA %u ms after our TURNOVER; "
                               "requesting the turn for %zu queued payload(s)",
                               yielded_turn_wait_ms_, queued_payloads_.size());
-                    yielded_data_turn_waiting_for_peer_data_ = false;
+                    turn_.setYieldedWaiting(false);
                     yielded_turn_wait_ms_ = 0;
-                    local_turn_request_pending_ = false;
+                    turn_.setRequestPending(false);
                     turn_request_holdoff_ms_ = 0;
                     sendTurnRequestIfNeeded();
                 }
             } else {
                 yielded_turn_wait_ms_ = 0;
             }
-            if (yielded_data_turn_waiting_for_peer_data_ &&
-                !local_data_turn_ && on_full_ofdm_anchor_expected_) {
+            if (turn_.yieldedWaitingForPeerData() &&
+                !turn_.localHolds() && on_full_ofdm_anchor_expected_) {
                 if (elapsed_ms >= interactive_anchor_rearm_ms_) {
                     interactive_anchor_rearm_ms_ = 400;
                     on_full_ofdm_anchor_expected_();
@@ -7212,7 +7207,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             // VARA-HF turnaround: the interactive ISS with an empty TX buffer yields to the
             // IRS so the B2F responder can send its SID. Fire once, ~1.5 s after connect.
             if (half_duplex_interactive_ && is_initiator_ && !interactive_initiator_yield_done_) {
-                const bool ready = local_data_turn_ && connected_time_ms_ >= 1500 &&
+                const bool ready = turn_.localHolds() && connected_time_ms_ >= 1500 &&
                                    data_turn_tx_guard_ms_ == 0 &&
                                    !hasLocalDataWaitingForTurn() && !file_transfer_.isBusy() &&
                                    arq_.isReadyToSend();
@@ -7225,9 +7220,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     }
                     auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
                     transmitFrame(turnover.serialize());
-                    local_data_turn_ = false;
-                    yielded_data_turn_waiting_for_peer_data_ = true;
-                    received_peer_data_since_connect_ = false;
+                    turn_.initiatorHandOver();
                     resetDataTurnFairness();
                     armDataTurnTxGuard(dataTurnControlGuardMs());
                     interactive_initiator_yield_done_ = true;
@@ -7238,7 +7231,7 @@ void Connection::tick(uint32_t elapsed_ms) {
                     if (interactive_yield_log_throttle_ms_ >= 2000) {
                         interactive_yield_log_throttle_ms_ = 0;
                         LOG_MODEM(DEBUG, "Connection: interactive yield WAIT: turn=%d conn_ms=%u guard=%u data_waiting=%d file_busy=%d arq_ready=%d",
-                                  local_data_turn_ ? 1 : 0, connected_time_ms_, data_turn_tx_guard_ms_,
+                                  turn_.localHolds() ? 1 : 0, connected_time_ms_, data_turn_tx_guard_ms_,
                                   hasLocalDataWaitingForTurn() ? 1 : 0, file_transfer_.isBusy() ? 1 : 0,
                                   arq_.isReadyToSend() ? 1 : 0);
                     }
@@ -7251,12 +7244,12 @@ void Connection::tick(uint32_t elapsed_ms) {
                 file_cancel_confirm_pending_ = false;
                 armDataTurnTxGuard(fileCancelConfirmDataGuardMs());
             }
-            if (!local_data_turn_ && hasLocalDataWaitingForTurn() && !local_turn_request_pending_) {
+            if (!turn_.localHolds() && hasLocalDataWaitingForTurn() && !turn_.requestPending()) {
                 sendTurnRequestIfNeeded();
             }
-            if (!local_data_turn_ && hasLocalDataWaitingForTurn() && local_turn_request_pending_) {
+            if (!turn_.localHolds() && hasLocalDataWaitingForTurn() && turn_.requestPending()) {
                 if (elapsed_ms >= turn_request_retransmit_ms_) {
-                    local_turn_request_pending_ = false;
+                    turn_.setRequestPending(false);
                     sendTurnRequestIfNeeded(/*retry=*/true);
                 } else {
                     turn_request_retransmit_ms_ -= elapsed_ms;
@@ -10731,12 +10724,7 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     // responder enters as a normal IRS and the turn falls to it naturally.
     interactive_initiator_yield_done_ = false;
     interactive_yield_log_throttle_ms_ = 0;
-    local_data_turn_ = is_initiator_;
-    peer_data_turn_requested_ = false;
-    local_turn_request_pending_ = false;
-    received_peer_data_since_connect_ = false;
-    yielded_data_turn_waiting_for_peer_data_ = false;
-    data_turn_yield_pending_ = false;
+    turn_.reset(/*local_holds=*/is_initiator_);
     resetDataTurnFairness();
     resetOfdmLadderState();  // per-connection rung, pacing and receiver-authority state
     // Waveform follow is per QSO, and only for a QSO the ladder picked (an operator pin holds the
@@ -10773,7 +10761,7 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
     file_cancel_rx_drain_ms_ = 0;
     clearFileCancelReassertion();
     file_cancel_confirm_pending_ = false;
-    if (local_data_turn_) {
+    if (turn_.localHolds()) {
         armDataTurnTxGuard(dataTurnConnectGuardMs());
     }
 
@@ -10792,9 +10780,9 @@ void Connection::enterConnected(bool automatic_rate_allowed) {
 
     LOG_MODEM(INFO, "Connection: Now CONNECTED to %s (mode=%s, data_turn=%s)",
               remote_call_.c_str(), waveformModeToString(negotiated_mode_),
-              local_data_turn_ ? "ISS" : "IRS");
+              turn_.localHolds() ? "ISS" : "IRS");
     LOG_MODEM(DEBUG, "Connection: B2F-DBG connect state: is_initiator=%d local_data_turn=%d handshake_confirmed=%d interactive=%d",
-              is_initiator_ ? 1 : 0, local_data_turn_ ? 1 : 0,
+              is_initiator_ ? 1 : 0, turn_.localHolds() ? 1 : 0,
               handshake_confirmed_ ? 1 : 0, half_duplex_interactive_ ? 1 : 0);
 
     if (on_mode_negotiated_) {
@@ -10874,12 +10862,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     tone_ack_group_has_decoded_data_context_ = false;
     responder_handshake_wait_ms_ = 0;
     connect_ack_frame_.clear();
-    local_data_turn_ = false;
-    peer_data_turn_requested_ = false;
-    local_turn_request_pending_ = false;
-    received_peer_data_since_connect_ = false;
-    yielded_data_turn_waiting_for_peer_data_ = false;
-    data_turn_yield_pending_ = false;
+    turn_.reset(/*local_holds=*/false);
     resetDataTurnFairness();
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;
@@ -11565,12 +11548,7 @@ void Connection::reset() {
     disconnect_ack_epoch_elapsed_ms_ = 0;
     disconnect_ack_repeat_count_ = 0;
     disconnect_ack_frame_.clear();
-    local_data_turn_ = false;
-    peer_data_turn_requested_ = false;
-    local_turn_request_pending_ = false;
-    received_peer_data_since_connect_ = false;
-    yielded_data_turn_waiting_for_peer_data_ = false;
-    data_turn_yield_pending_ = false;
+    turn_.reset(/*local_holds=*/false);
     resetDataTurnFairness();
     data_turn_tx_guard_ms_ = 0;
     turn_request_retransmit_ms_ = 0;

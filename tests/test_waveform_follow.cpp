@@ -51,11 +51,11 @@ struct ConnectionAdaptiveTestAccess {
         return c.physicalDataFrameCodewords();
     }
     static void makeLocalIss(Connection& c) {
-        c.local_data_turn_ = true;
-        c.peer_data_turn_requested_ = false;
-        c.local_turn_request_pending_ = false;
-        c.received_peer_data_since_connect_ = false;
-        c.data_turn_yield_pending_ = false;
+        c.turn_.setLocalHolds(true);
+        c.turn_.setPeerRequested(false);
+        c.turn_.setRequestPending(false);
+        c.turn_.setPeerDataSinceConnect(false);
+        c.turn_.setYieldPending(false);
         c.data_turn_payload_bytes_sent_ = 0;
         c.data_turn_contended_ms_ = 0;
         c.data_turn_tx_guard_ms_ = 0;
@@ -133,9 +133,9 @@ struct ConnectionAdaptiveTestAccess {
 
     // ── Waveform follow ──
     static void makeLocalIrsWaitingForTurn(Connection& c) {
-        c.local_data_turn_ = false;
-        c.yielded_data_turn_waiting_for_peer_data_ = false;
-        c.local_turn_request_pending_ = false;
+        c.turn_.setLocalHolds(false);
+        c.turn_.setYieldedWaiting(false);
+        c.turn_.setRequestPending(false);
         c.turn_request_holdoff_ms_ = 0;
         c.handshake_confirmed_ = true;
     }

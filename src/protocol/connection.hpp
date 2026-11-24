@@ -6,6 +6,7 @@
 #include "connection_policy.hpp"
 #include "link_control_plan.hpp"
 #include "waveform_agreement.hpp"
+#include "data_turn.hpp"
 #include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
@@ -1234,7 +1235,7 @@ private:
     // bidirectional B2F exchange where BOTH stations alternately transmit — they
     // key up uncoordinated and collide on the half-duplex channel. When this flag
     // is set, sendFile() keeps the turn gate: a station only starts its burst when
-    // it holds local_data_turn_, otherwise it queues + TURN_REQUESTs, and the peer
+    // it holds the data turn (turn_.localHolds()), otherwise it queues + TURN_REQUESTs, and the peer
     // yields (TURNOVER) so the two directions serialize. Set true by ultra_tnc;
     // false for the GUI one-way file transfer.
     bool half_duplex_interactive_ = false;
@@ -1859,11 +1860,6 @@ private:
     // In-QSO HF ARQ DATA turn ownership. Exactly one peer is ISS (allowed to
     // originate DATA) at a time; the other queues operator payloads and requests
     // a deterministic changeover via ACK flag or TURN_REQUEST control.
-    bool local_data_turn_ = false;
-    bool peer_data_turn_requested_ = false;
-    bool local_turn_request_pending_ = false;
-    bool received_peer_data_since_connect_ = false;
-    bool yielded_data_turn_waiting_for_peer_data_ = false;
     // Time since this station yielded its DATA turn with the peer silent (the wait above).
     uint32_t yielded_turn_wait_ms_ = 0;
     // PING retry jitter (BUG-SIMULTANEOUS-CALL-LOCKSTEP): xorshift state, seeded on first use.
@@ -1876,7 +1872,6 @@ private:
 
     void notePeerHeard() { ms_since_peer_heard_ = 0; }
     uint32_t peerSilentLinkLostMs() const;
-    bool data_turn_yield_pending_ = false;
     uint64_t data_turn_payload_bytes_sent_ = 0;
     uint32_t data_turn_contended_ms_ = 0;
     uint32_t data_turn_tx_guard_ms_ = 0;
@@ -2033,6 +2028,7 @@ private:
     std::function<void(Modulation)> on_robust_control_once_;
     Modulation robustControlModulation() const;
     // Waveform agreement (waveform_agreement.hpp, state machine slice 3).
+    DataTurn turn_;  // half-duplex data turn (data_turn.hpp, slice 4)
     CrossingProbation probation_;
     RxCrossingCommand rx_command_;
     DataModeChangedCallback on_data_mode_changed_;

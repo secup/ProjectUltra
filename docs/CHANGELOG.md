@@ -10,6 +10,18 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-24 (night) — refactor: half-duplex data-turn state (state machine slice 4)
+
+**What changed.** The six loose turn booleans of `Connection` (local_data_turn_,
+peer_data_turn_requested_, local_turn_request_pending_, yielded_data_turn_waiting_for_peer_data_,
+data_turn_yield_pending_, received_peer_data_since_connect_) are one class, `DataTurn`
+(`src/protocol/data_turn.hpp`). The grouped writes are named transitions - `acquire()` (TURNOVER
+received), `yieldToPeer()` (TURNOVER sent), `initiatorHandOver()`, `reset(local_holds)` (three
+identical session-reset blocks) - and the single updates setters. Behaviour-identical; the turn
+timers stay in Connection. Since 8902cead: Connection fields 261 -> 252, booleans 82 -> 71.
+
+**Verification.** CTest 133/133 (new DataTurn 5/5). TNC smoke sweep 11 (seeds 405-406, 70 runs): 70/70.
+
 ## 2026-11-24 (night) — refactor: waveform agreement state (state machine slice 3)
 
 **What changed.** The nine loose crossing fields of `Connection` (crossing_probe_active_,

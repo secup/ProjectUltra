@@ -1161,3 +1161,9 @@ add_executable(test_waveform_agreement test_waveform_agreement.cpp)
 target_include_directories(test_waveform_agreement PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_waveform_agreement PRIVATE ultra_core)
 add_test(NAME WaveformAgreement COMMAND test_waveform_agreement)
+
+# Half-duplex data-turn state (state machine slice 4).
+add_executable(test_data_turn test_data_turn.cpp)
+target_include_directories(test_data_turn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_data_turn PRIVATE ultra_core)
+add_test(NAME DataTurn COMMAND test_data_turn)

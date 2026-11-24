@@ -81,11 +81,11 @@ namespace protocol {
 
 struct ConnectionAdaptiveTestAccess {
     static void makeLocalIss(Connection& c) {
-        c.local_data_turn_ = true;
-        c.peer_data_turn_requested_ = false;
-        c.local_turn_request_pending_ = false;
-        c.received_peer_data_since_connect_ = false;
-        c.data_turn_yield_pending_ = false;
+        c.turn_.setLocalHolds(true);
+        c.turn_.setPeerRequested(false);
+        c.turn_.setRequestPending(false);
+        c.turn_.setPeerDataSinceConnect(false);
+        c.turn_.setYieldPending(false);
         c.data_turn_payload_bytes_sent_ = 0;
         c.data_turn_contended_ms_ = 0;
         c.data_turn_tx_guard_ms_ = 0;
@@ -95,11 +95,11 @@ struct ConnectionAdaptiveTestAccess {
 
     // The peer holds the DATA turn: this end only receives - a data receiver's real state (the
     // anchored-burst backstop applies only there; BUG-SENDER-BACKSTOP-STEALS-ACK).
-    static void makePeerIss(Connection& c) { c.local_data_turn_ = false; }
+    static void makePeerIss(Connection& c) { c.turn_.setLocalHolds(false); }
     static void makeUnconfirmedResponder(Connection& c) {
         c.is_initiator_ = false;
         c.handshake_confirmed_ = false;
-        c.local_data_turn_ = false;
+        c.turn_.setLocalHolds(false);
         c.responder_half_open_ms_ = 0;
         c.responder_quiet_ms_ = 0;
         c.connect_ack_frame_ = Bytes(35, 0x01);
@@ -217,9 +217,9 @@ struct ConnectionAdaptiveTestAccess {
         c.data_code_rate_ = CodeRate::R2_3;
         c.measured_snr_db_ = 20.0f;
         c.fading_index_ = 0.30f;
-        c.local_data_turn_ = initiator;
-        c.peer_data_turn_requested_ = false;
-        c.local_turn_request_pending_ = false;
+        c.turn_.setLocalHolds(initiator);
+        c.turn_.setPeerRequested(false);
+        c.turn_.setRequestPending(false);
         c.arq_.setCallsigns(c.local_call_, c.remote_call_);
         c.configureArqForCurrentDataMode();
     }
@@ -485,10 +485,10 @@ struct ConnectionAdaptiveTestAccess {
     }
 
     static void makeRemoteDataTurn(Connection& c) {
-        c.local_data_turn_ = false;
-        c.peer_data_turn_requested_ = false;
-        c.local_turn_request_pending_ = false;
-        c.data_turn_yield_pending_ = false;
+        c.turn_.setLocalHolds(false);
+        c.turn_.setPeerRequested(false);
+        c.turn_.setRequestPending(false);
+        c.turn_.setYieldPending(false);
         c.data_turn_tx_guard_ms_ = 0;
         c.turn_request_retransmit_ms_ = 0;
         c.turn_request_holdoff_ms_ = 0;

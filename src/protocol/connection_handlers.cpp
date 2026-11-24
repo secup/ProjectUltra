@@ -1017,11 +1017,7 @@ void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string
         return;
     }
 
-    local_data_turn_ = true;
-    peer_data_turn_requested_ = false;
-    local_turn_request_pending_ = false;
-    yielded_data_turn_waiting_for_peer_data_ = false;
-    data_turn_yield_pending_ = false;
+    turn_.acquire();
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;
     resetDataTurnFairness();
@@ -1050,15 +1046,15 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
         return;
     }
 
-    if (!local_data_turn_) {
-        if (yielded_data_turn_waiting_for_peer_data_) {
+    if (!turn_.localHolds()) {
+        if (turn_.yieldedWaitingForPeerData()) {
             auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
             LOG_MODEM(INFO,
                       "Connection: RX TURN_REQUEST from %s while waiting for peer DATA; reasserting TURNOVER",
                       src_call.empty() ? remote_call_.c_str() : src_call.c_str());
             answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (reasserted)");
             transmitFrame(turnover.serialize());
-            local_turn_request_pending_ = false;
+            turn_.setRequestPending(false);
             turn_request_retransmit_ms_ = 0;
             turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
             armDataTurnTxGuard(dataTurnControlGuardMs());
@@ -1084,16 +1080,16 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
                   src_call.empty() ? remote_call_.c_str() : src_call.c_str());
         answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (orphaned turn)");
         transmitFrame(turnover.serialize());
-        yielded_data_turn_waiting_for_peer_data_ = true;
+        turn_.setYieldedWaiting(true);
         yielded_turn_wait_ms_ = 0;
-        local_turn_request_pending_ = false;
+        turn_.setRequestPending(false);
         turn_request_retransmit_ms_ = 0;
         turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
         armDataTurnTxGuard(dataTurnControlGuardMs());
         return;
     }
 
-    peer_data_turn_requested_ = true;
+    turn_.setPeerRequested(true);
     peer_turn_request_mcdpsk_ = last_rx_frame_mcdpsk_;
     LOG_MODEM(INFO, "Connection: RX TURN_REQUEST from %s",
               src_call.empty() ? remote_call_.c_str() : src_call.c_str());
@@ -1123,7 +1119,7 @@ void Connection::handleFileCancel(const v2::ControlFrame& frame, const std::stri
         return;
     }
 
-    const bool was_local_iss = local_data_turn_;
+    const bool was_local_iss = turn_.localHolds();
     queued_file_path_.reset();
     if (file_transfer_.isBusy()) {
         file_transfer_.cancel("Transfer cancelled");
@@ -1132,19 +1128,19 @@ void Connection::handleFileCancel(const v2::ControlFrame& frame, const std::stri
     file_cancel_rx_drain_ms_ = FILE_CANCEL_RX_DRAIN_MS;
     armDataTurnTxGuard(fileCancelTxGuardMs());
     file_cancel_confirm_pending_ = had_active_transfer;
-    data_turn_yield_pending_ = false;
+    turn_.setYieldPending(false);
     resetDataTurnFairness();
 
     if (was_local_iss) {
         // A FILE_CANCEL aborts the file transfer, not the DATA turn. If the peer
         // cancelled while receiving our file, we keep ISS ownership so locally
         // queued operator payloads can go out immediately after the abort.
-        peer_data_turn_requested_ = false;
-        local_turn_request_pending_ = false;
+        turn_.setPeerRequested(false);
+        turn_.setRequestPending(false);
         turn_request_retransmit_ms_ = 0;
         turn_request_holdoff_ms_ = 0;
     } else {
-        local_turn_request_pending_ = false;
+        turn_.setRequestPending(false);
         turn_request_retransmit_ms_ = 0;
         sendTurnRequestIfNeeded();
     }
@@ -1254,8 +1250,8 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
         rx_reassembly_active_ = false;
         rx_reassembly_binary_ = false;
     }
-    received_peer_data_since_connect_ = true;
-    yielded_data_turn_waiting_for_peer_data_ = false;
+    turn_.setPeerDataSinceConnect(true);
+    turn_.setYieldedWaiting(false);
     turn_request_holdoff_ms_ = turnRequestHoldoffAfterDataMs();
 
     const bool binary_payload =
