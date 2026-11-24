@@ -10,6 +10,20 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-24 (night) — refactor: waveform agreement state (state machine slice 3)
+
+**What changed.** The nine loose crossing fields of `Connection` (crossing_probe_active_,
+crossing_probe_rx_side_, crossing_return_mod_, crossing_probe_revert_ms_, crossing_launch_ack_valid_/
+seq_/mask_, rx_crossing_apply_pending_, rx_crossing_word_, rx_dual_up_commanded_) are two classes in
+`src/protocol/waveform_agreement.hpp`: `CrossingProbation` (None / Sender / Receiver, the rung left,
+the receiver's revert countdown, the launching ACK) and `RxCrossingCommand` (the receiver's stamped
+command, pending or dual-listen up). About 30 write sites became named transitions; a sender and a
+receiver probation can no longer coexist. Behaviour-identical (each transition writes what its site
+wrote). `Connection` member declarations 261 -> 257 since 8902cead.
+
+**Verification.** CTest 132/132 (new WaveformAgreement 15/15; WaveformFollow 248/248, ConnectionAdaptive
+953/953 unchanged). TNC smoke sweep 10 (seeds 403-404, 70 runs): 70/70.
+
 ## 2026-11-24 (night) — refactor: link-control TX plan (state machine slices 1-2)
 
 **What changed.** `src/protocol/link_control_plan.hpp` holds the five link-control rules as one pure

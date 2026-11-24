@@ -5,6 +5,7 @@
 #include "selective_repeat_arq.hpp"
 #include "connection_policy.hpp"
 #include "link_control_plan.hpp"
+#include "waveform_agreement.hpp"
 #include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
@@ -1457,21 +1458,12 @@ private:
     // (the sender likely missed the command) and commands MC-DPSK if the first burst delivers
     // nothing; the sender returns on its first timeout. A failed probation backs the gate off.
     connection_policy::UpCrossingGate up_crossing_gate_;
-    uint8_t rx_crossing_word_ = 0;
-    bool rx_crossing_apply_pending_ = false;
-    bool crossing_probe_active_ = false;
-    bool crossing_probe_rx_side_ = false;     // this station commanded it (the receiver)
     // The tone ACK that launched this end's up-crossing (its repeats are consumed while the first
     // OFDM group is on air).
     // Retransmission-timeout rounds since the peer was last heard (any ACK round resets it): the
     // escapes need the latest round to have drawn an ACK (escapeHasPeerEvidence).
     int rto_rounds_since_peer_ack_ = 0;
     bool escape_silence_hold_logged_ = false;
-    bool crossing_launch_ack_valid_ = false;
-    uint8_t crossing_launch_ack_seq_ = 0;
-    uint16_t crossing_launch_ack_mask_ = 0;
-    uint32_t crossing_probe_revert_ms_ = 0;   // receiver: countdown while no OFDM burst arrived
-    Modulation crossing_return_mod_ = Modulation::DBPSK;
     bool waveform_follow_enabled_ = connection_policy::waveformFollowEnabled();  // the knob
     bool waveform_follow_dual_listen_ = connection_policy::waveformFollowDualListen();  // "=2"
     bool waveform_follow_allowed_ = false;    // this QSO lets the ladder cross (no operator pin)
@@ -1663,7 +1655,6 @@ private:
     // OFDM receiver: a group (or anchored burst) and what it delivered - the floor-crater rule.
     void noteRxOfdmGroupForFollow(bool delivered_any);
     bool dualListenActive() const;
-    bool rx_dual_up_commanded_ = false;  // dual-listen receiver: its last ACK commanded OFDM
     // Down-crossing economics: feed and read the OFDM spell meter, and the silent time after which a
     // down-crossing pays (ski rental, capped where the ARQ would abandon a frame; the receiver's is
     // half a round earlier so it listens when the sender's first MC-DPSK burst comes).
@@ -2041,6 +2032,9 @@ private:
     WaveformCrossingCallback on_waveform_crossing_;
     std::function<void(Modulation)> on_robust_control_once_;
     Modulation robustControlModulation() const;
+    // Waveform agreement (waveform_agreement.hpp, state machine slice 3).
+    CrossingProbation probation_;
+    RxCrossingCommand rx_command_;
     DataModeChangedCallback on_data_mode_changed_;
     SessionAddressesCallback on_session_addresses_;
     ConnectWaveformChangedCallback on_connect_waveform_changed_;

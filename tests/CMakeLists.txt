@@ -1155,3 +1155,9 @@ add_executable(test_link_control_plan test_link_control_plan.cpp)
 target_include_directories(test_link_control_plan PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_link_libraries(test_link_control_plan PRIVATE ultra_core)
 add_test(NAME LinkControlPlan COMMAND test_link_control_plan)
+
+# Waveform agreement state (state machine slice 3): crossing probation and the receiver's command.
+add_executable(test_waveform_agreement test_waveform_agreement.cpp)
+target_include_directories(test_waveform_agreement PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_link_libraries(test_waveform_agreement PRIVATE ultra_core)
+add_test(NAME WaveformAgreement COMMAND test_waveform_agreement)

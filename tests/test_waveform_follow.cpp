@@ -212,7 +212,7 @@ struct ConnectionAdaptiveTestAccess {
         c.noteRxOfdmGroupForFollow(delivered_any);
     }
     static uint8_t pendingCrossingWord(const Connection& c) {
-        return c.rx_crossing_apply_pending_ ? c.rx_crossing_word_ : 0;
+        return c.rx_command_.pending() ? c.rx_command_.word() : 0;
     }
     static void tickFollow(Connection& c, uint32_t ms) { c.tickWaveformFollow(ms); }
     static void setRxReassembly(Connection& c, size_t bytes) {
@@ -222,8 +222,8 @@ struct ConnectionAdaptiveTestAccess {
         c.data_modulation_ = mod;
         c.data_code_rate_ = rate;
     }
-    static bool crossingProbeActive(const Connection& c) { return c.crossing_probe_active_; }
-    static uint32_t crossingRevertMs(const Connection& c) { return c.crossing_probe_revert_ms_; }
+    static bool crossingProbeActive(const Connection& c) { return c.probation_.active(); }
+    static uint32_t crossingRevertMs(const Connection& c) { return c.probation_.revertMs(); }
     static int upCrossingRun(const Connection& c) { return c.up_crossing_gate_.run(); }
     static void failUpCrossing(Connection& c) { c.up_crossing_gate_.crossingFailed(); }
     static void noteRxWaveform(Connection& c, WaveformMode mode) { c.noteRxWaveform(mode); }
@@ -313,7 +313,7 @@ struct ConnectionAdaptiveTestAccess {
         c.rx_mcdpsk_last_modulation_ = c.data_modulation_;
         c.rx_mcdpsk_frames_since_command_ += n;
     }
-    static bool dualUpCommanded(const Connection& c) { return c.rx_dual_up_commanded_; }
+    static bool dualUpCommanded(const Connection& c) { return c.rx_command_.upCommanded(); }
     // One retransmission timeout inside the ARQ (no ACK heard).
     static void arqTimeoutRound(Connection& c) { c.arq_.tick(c.arq_.getAckTimeout() + 1); }
     // One heard ACK round in which seq `missing` (the base) did not arrive: an empty ACK.
@@ -341,11 +341,8 @@ struct ConnectionAdaptiveTestAccess {
     // The sender right after obeying an up-crossing launched by the ACK (seq, mask), its first
     // OFDM group on air for another on_air_ms (negative: already off the air).
     static void armCrossingLaunch(Connection& c, uint8_t seq, uint16_t mask, int on_air_ms) {
-        c.crossing_probe_active_ = true;
-        c.crossing_probe_rx_side_ = false;
-        c.crossing_launch_ack_valid_ = true;
-        c.crossing_launch_ack_seq_ = seq;
-        c.crossing_launch_ack_mask_ = mask;
+        c.probation_.beginSender(c.probation_.returnMod());
+        c.probation_.markLaunchAck(seq, mask);
         c.last_data_burst_end_valid_ = true;
         c.last_data_burst_end_ =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(on_air_ms);
