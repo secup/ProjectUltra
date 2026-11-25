@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — cleanup: receiver rate authority is permanent; the sender-side rate walk is deleted (R10)
+
+**What was there.** The receiver has commanded the rung on every group ACK since 2026-07-05
+(`ULTRA_RX_RATE_AUTHORITY`, default on). The sender-side walk it superseded stayed behind its `=0` opt-out:
+`applyAdaptiveRateFeedback` (388 lines: EMA walk, QAM16 climb hop, crest walks, cooldowns),
+`maybeApplyRxRateCommand` + `updateRxRateCommandFromGroup` (the relative DOWN-hard command - its two ACK
+bits were overwritten by the absolute rung word on every ACK), `maybeTroughAmnesty`, and
+`maybeCollapseEscape` (returned on its first line under the authority since 2026-11-12). The main
+connection test binary pinned the authority OFF, so ConnectionAdaptive's 900+ checks ran the legacy walk,
+not the shipped path.
+
+**What changed.** The knob and those paths are deleted (~900 lines of production code), plus the
+write-only QAM16 climb state (`noteQam16Demoted`, six streak/cooldown members) and nine env knobs read
+only there (map 9f). The codec's CRC span is the production span unconditionally. ConnectionAdaptive now
+runs the authority: the three descriptor/hold tests trigger their rate move through
+`maybeObeyAuthorityCommand`; the hold-geometry test became `test_commanded_rate_move_keeps_the_message`
+(a receiver-commanded move regrids the message and must not fail it, BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP);
+the three relative-command tests, the collapse-escape checks and CTest Psk8Climb went with their code.
+`tools/qso_sweep.sh` no longer sets the knob (`ULTRA_LOCK_RATE=1` still pins its rate).
+
+**Behaviour.** None intended: every deleted path was unreachable with the authority on.
+
+**Verification.** CTest 131/131 (ConnectionAdaptive 922/922 under the authority, WaveformFollow
+245/245). TNC sweep 18 (seeds 419-420, 7 scenarios x 5 channels): 70/70 PASS.
+
 ## 2026-11-25 — fix: handshake carrier sense hears the peer; ACK length cap counts the frames answered
 
 **What broke.** (1) Two stations calling each other overlapped their CONNECT retries on every round

@@ -871,7 +871,6 @@ static bool test_identical_ack_authority_revisions_are_downward_only() {
 
 int main() {
     // MUST precede any Connection construction (env-latched statics).
-    setenv("ULTRA_RX_RATE_AUTHORITY", "1", 1);
     // ULTRA_LATENT_RATE went DEFAULT-ON 2026-08-01 and returns EARLY from
     // updateRxAuthorityCommand, bypassing every legacy clamp. This whole suite exercises
     // that legacy ladder — the two-crater rule, climb dwell, EMA hold, rung penalties — so

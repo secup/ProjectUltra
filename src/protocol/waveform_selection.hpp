@@ -908,23 +908,10 @@ inline float goodputBreakEvenDeliveredFraction(uint8_t cur) {
     return rungSpectralEfficiency(below) / eta_cur;
 }
 
-// ULTRA_RX_RATE_AUTHORITY (2026-07-05, default ON): receiver-commanded absolute
-// rung selection — the receiver maps ITS fresh per-group channel measurements
-// through selectCoherentOFDM and commands the sender's next rung on every group
-// ACK; the sender OBEYS (descriptor commit) and its own mid-transfer rate drivers
-// (EMA walk, climb streaks, crest walks, cooldowns, amnesty) go inert. The sender's collapse
-// escape is inert too (2026-11-12): silence is no evidence against the rung (a blackout kills every
-// rung, and its MODE_CHANGE cannot land there), and the receiver commands again after it.
-// BOTH ends must set it: it reinterprets the ACK's [rate_hint|rung_cmd] bits and
-// requires the widened CRC span (a knob-OFF peer CRC-rejects the ACKs — fails safe
-// as ack loss). Supersedes ULTRA_RX_RATE_CMD's demote-only command when on.
-inline bool rxRateAuthorityEnabled() {
-    static const bool on = [] {
-        const char* e = std::getenv("ULTRA_RX_RATE_AUTHORITY");
-        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05 (both ends lockstep: widened tone-ACK CRC span)
-    }();
-    return on;
-}
+// RX-AUTHORITY (2026-07-05; permanent 2026-11-25, its ULTRA_RX_RATE_AUTHORITY opt-out and the
+// sender-side rate walk it superseded deleted): the receiver maps its fresh per-group channel
+// measurements through the rate selector and commands the sender's next rung on every group ACK
+// ([rate_hint|rung_cmd] = one absolute 5-bit rung word); the sender obeys (descriptor commit).
 
 // Highest GUI-validated code rate for a given coherent modulation — a per-modulation
 // ceiling for the adaptive RateController, which is otherwise modulation-BLIND (it walks

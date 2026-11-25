@@ -544,9 +544,6 @@ StreamingDecoder::resolveCommandedGeometry(bool is_ofdm, bool burst_latched) {
     // A descriptor for THIS group WAS consumed -> nothing to reconstruct.
     if (pending_total_cw_ > 0) return cg;
     if (sync_controller_.have_burst_descriptor_) return cg;
-    // Without RX rate authority the ack's five bits are a quantized quality +
-    // RELATIVE demote, not an absolute rung index — reconstructing one is garbage.
-    if (!protocol::rxRateAuthorityEnabled()) return cg;
 
     const uint8_t idx = commanded_rung_idx_.load(std::memory_order_relaxed);
     if (idx == protocol::kRungIdxNone || idx >= protocol::kRungIdxCount) return cg;
@@ -686,7 +683,6 @@ StreamingDecoder::resolveClassicLongGeometry(bool is_ofdm,
     if (pending_total_cw_ > 0 || sync_controller_.have_burst_descriptor_) {
         return cg;
     }
-    if (!protocol::rxRateAuthorityEnabled()) return cg;
 
     // Tie the candidate to the accepted anchor's PHYSICAL sample interval. The
     // backstop timestamp is a decoder-feed watermark (total_fed_ at detection),

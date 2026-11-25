@@ -2,8 +2,7 @@
 // moves (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md, INV-FOLLOW-001).
 //
 // Its own binary because follow rides the receiver-authority ACK word: the commands are the
-// authority's rung bits, and only an authority sender reads them. ConnectionAdaptive pins
-// ULTRA_RX_RATE_AUTHORITY=0 for its legacy-driver tests; this binary runs the production defaults
+// authority's rung bits. This binary runs the production defaults
 // (authority on, ULTRA_FAST on), the configuration follow ships in.
 
 #include "protocol/connection.hpp"
@@ -312,7 +311,6 @@ struct ConnectionAdaptiveTestAccess {
         c.noteArqRoundOutcome(progress, origin);
     }
     static void setZeroProgressRounds(Connection& c, int n) { c.zero_progress_rounds_ = n; }
-    static void pollCollapseEscape(Connection& c) { c.maybeCollapseEscape(); }
     static void pollStuckEscape(Connection& c) { c.maybeEscapeStuckFrame(); }
     static void turnLoss(Connection& c, bool turn_over) { c.noteRxMcDpskTurnLoss(turn_over); }
     // Frames of the current burst decoded since this end's last command (no ACK formed yet).
@@ -1346,31 +1344,6 @@ void test_escape_needs_the_peer_heard() {
     ConnectionAdaptiveTestAccess::noteRound(c, 0, "rto");
     CHECK(!ConnectionAdaptiveTestAccess::escapeEvidence(c), "two silent rounds since the last ACK");
 
-    // The collapse escape itself, under the receiver authority (this binary's default): two
-    // zero-progress rounds in silence do not move the rung, and neither do they once an empty ACK
-    // has followed them (GUI QSB seed 44: that ACK lent the trough's rounds "peer heard" and the
-    // escape demoted the returned link). The receiver's crater verdict commands the rung. With the
-    // authority off the sender is the only driver and the escape acts (ConnectionAdaptive).
-    CHECK(rxRateAuthorityEnabled(), "this binary runs the receiver authority (production)");
-    ConnectionAdaptiveTestAccess::allowRateAdaptation(c);
-    bool queued = true;
-    for (int f = 0; f < 8; ++f) {  // a collapsed window: half a burst or more pending
-        queued = ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes(40, 0x33),
-                                                             v2::Flags::MORE_FRAG) && queued;
-    }
-    CHECK(queued, "a window of frames is in flight (the escape's scope)");
-    ConnectionAdaptiveTestAccess::setZeroProgressRounds(c, 2);
-    ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c) &&
-              c.getDataCodeRate() == CodeRate::R2_3 && c.getDataModulation() == Modulation::QAM8,
-          "in silence the collapse escape holds the rung");
-    ConnectionAdaptiveTestAccess::noteRound(c, 0, "toneburst-ack");
-    ConnectionAdaptiveTestAccess::setZeroProgressRounds(c, 2);
-    CHECK(ConnectionAdaptiveTestAccess::escapeEvidence(c), "an empty ACK: the peer is heard again");
-    ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c) &&
-              c.getDataCodeRate() == CodeRate::R2_3 && c.getDataModulation() == Modulation::QAM8,
-          "silent rounds then an empty ACK: under the authority the collapse escape holds the rung");
 }
 
 // The stuck-frame escape counts the ACK rounds a frame was missing from, never retransmissions
@@ -1824,10 +1797,6 @@ int main() {
     unsetenv("ULTRA_WAVEFORM_FOLLOW");
     if (!connection_policy::waveformFollowEnabled() || !connection_policy::waveformFollowDualListen()) {
         std::cout << "WaveformFollow: the default must be dual-listen follow\n";
-        return 1;
-    }
-    if (!rxRateAuthorityEnabled()) {
-        std::cout << "WaveformFollow: needs ULTRA_RX_RATE_AUTHORITY on (the production default)\n";
         return 1;
     }
     test_waveform_follow_sender_crossings_switch_modem_first();

@@ -1251,7 +1251,6 @@ private:
     // §14.36 Phase 5c BER-driven per-block rate adaptation. The SENDER runs the controller
     // on the receiver's per-group decode headroom (carried on the GROUP_ACK; a GROUP_NACK
     // feeds quality 0 -> step down).
-    void applyAdaptiveRateFeedback(float quality);
     // Mid-transfer rate/mod MOVES are live. DEFAULT-ON for connected wideband OFDM
     // (2026-07-02 fade-riding ladder); opt out with ULTRA_RATE_ADAPT=0 or pin with
     // ULTRA_LOCK_RATE=1. adaptive_rate_enabled_/ULTRA_ADAPTIVE_RATE only enables the
@@ -1270,17 +1269,11 @@ private:
     // ULTRA_COLLAPSE_ESCAPE_ROUNDS) ⇒ byte-identical unset: no hold is ever armed, no ARQ
     // timer touched, no escape fired; only the inert round counter ticks.
     //
-    // Shared escape ACTION (§2.2 — refactored out of maybeEscapeStuckFrame, reuse not fork):
-    // QAM16 (either rate) drops STRAIGHT to QPSK R3/4 + noteQam16Demoted(2); otherwise one
+    // The stuck-frame escape's ACTION:
+    // QAM16 (either rate) drops STRAIGHT to QPSK R3/4 (or the 16QAM R1/2 midrung); otherwise one
     // code-rate rung + noteRungFailed. Guards (mode_change_pending_, floor, in-flight) are
-    // the CALLER's responsibility — both callers keep first refusal.
+    // the caller's responsibility.
     void executeEscapeDrop(const char* trigger);
-    // Polled from tick() beside maybeEscapeStuckFrame (never fired from inside an ARQ
-    // callback): ≥ N consecutive zero-progress rounds with ≥⌈burst_cap/2⌉ frames in flight
-    // ⇒ the WINDOW is collapsing (the g43/rig frozen-base signature) ⇒ escape the rung.
-    // g42-protective by construction: any delivered/SACKed frame resets the round counter,
-    // so a lone straggler retrying amid deliveries can never trip it (§2.3).
-    void maybeCollapseEscape();
     // §1.3 scope gate: CONNECTED wideband OFDM (OFDM_CHIRP only — MC-DPSK/OFDM_NARROW are
     // explicitly out of scope, §6.2) on the unified tone-burst path, file SENDING with
     // in-flight bytes.
@@ -1290,11 +1283,6 @@ private:
     // ⇒ count it and, knob-gated, arm the §1.2 deferral on BOTH triggers; <0 ⇒ no fresh ack
     // (dup/stale) ⇒ not a round).
     void noteArqRoundOutcome(int progress_frames, const char* origin);
-    // TROUGH AMNESTY (ULTRA_TROUGH_AMNESTY): on the first progress-bearing ack after a
-    // zero-progress episode, restore the pre-episode rung (trough demotes are not rate
-    // evidence — see the member comment at trough_episode_active_). Called from the
-    // toneburst-ack path inside the defer-refill bracket, after noteArqRoundOutcome.
-    void maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd);
     struct PhysicalDataRoundTiming {
         uint64_t waveform_samples = 0;
         uint64_t keyed_samples = 0;
@@ -1329,17 +1317,6 @@ private:
     // MODE_CHANGE because silence does not prove descriptor receipt. Reset on any
     // ACK progress (noteArqRoundOutcome) and at QSO boundaries.
     int consecutive_escape_drops_ = 0;
-    // TROUGH AMNESTY (ULTRA_TROUGH_AMNESTY, 2026-07-05): snapshot of the rung ACTIVE
-    // when a zero-progress episode began. A fade null is time-bounded — a rung proven
-    // clean seconds before the null is not invalidated by it, yet the escape + EMA
-    // demotes (down) and ssthresh + climb streaks (up) treat trough evidence as rate
-    // evidence (F89/F91: a ~20 s null sentenced transfers to minutes of R1/4 while
-    // delivering 8/8 q=0.9+). When the episode ends (first progress-bearing ack),
-    // restore this rung directly; if the channel genuinely worsened, one cheap crater
-    // (~3.5 s rung-command demote) re-drops it — bounded loss, minutes gained.
-    bool trough_episode_active_ = false;
-    Modulation pre_episode_mod_ = Modulation::QPSK;
-    CodeRate pre_episode_rate_ = CodeRate::R1_4;
     // Active trough-pacing hold (sender-local, ticks down in the CONNECTED tick BEFORE
     // runDeferredArqRefill; gates the turn refill — trigger #1. The slot-RTO trigger #2 is
     // gated by SelectiveRepeatARQ::deferPendingRetransmits armed alongside this).
@@ -1364,27 +1341,6 @@ private:
     bool rx_level_clipped_ = false;
     uint32_t rx_level_verdict_seq_seen_ = 0;
     bool rx_level_verdict_pending_for_group_ = false;
-    // ── RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD) state ────────────────────────────
-    // RECEIVER side: standing rung command stamped on every outgoing tone-burst ACK
-    // (bits 42-43). Recomputed per burst-group event in updateRxRateCommandFromGroup:
-    //   - set to kRungCmdDownHard on a TOTAL crater (frame_mask == 0: zero frames
-    //     delivered — the same zero-progress evidence class the collapse escape
-    //     counts) at QAM16 (the modulation whose demote-on-one-bad-group policy is
-    //     already codified sender-side, kQam16DemoteBadStreak = 1);
-    //   - cleared the moment any group delivers frames (the crater state ended —
-    //     a stale demote command must not ride a healthy channel's ACKs), and in
-    //     applyDataMode when mod/rate actually change (the sender's adoption
-    //     observed — the once-per-committed-move idempotency latch).
-    // Repeated ACK emits between crater and adoption re-carry the SAME command
-    // (diversity against ACK loss); the SENDER dedups by group_seq (below), which
-    // is frozen during a crater (zero progress ⇒ base cannot advance), so the
-    // command acts at most once per move. Only ever non-zero when the knob is ON.
-    uint8_t rx_rate_cmd_pending_ = 0;
-    // SENDER side: last group_seq whose non-zero rung command was consumed
-    // (-1 = none this connection) — the drive_advisory dedup pattern. NOT reset on
-    // mode change (a straggler duplicate ACK of the consumed command must stay
-    // deduped after the demote commits); reset in enterConnected/enterDisconnected.
-    int rx_rate_cmd_seq_seen_ = -1;
     // WAITING-REBASE voice identity/dedup (BUG-UNANCHORED-SILENCE-ESCAPE,
     // design §5.3). The unified BURST_HEADER transport seq is intentionally not
     // an ARQ sequence and currently stays zero, so it cannot identify successive
@@ -1395,10 +1351,6 @@ private:
     // on EVERY voice copy (cheap, idempotent, and the point).
     uint8_t rebase_voice_event_seq_ = 0;
     int rx_rebase_voice_seq_seen_ = -1;
-    // PARTIAL-CRATER latency fix (2026-07-04, F27): consecutive all_ok=false groups
-    // at QAM16 (receiver side). 2+ -> DownOne command (a total crater still commands
-    // immediately). Reset on any clean group, non-QAM16, and session boundaries.
-    int qam16_rx_bad_streak_ = 0;
     // HALF-OPEN timeout accumulator (2026-07-04, F29): ms in CONNECTED with the
     // responder handshake never confirmed; 240 s -> release the session.
     uint32_t responder_half_open_ms_ = 0;
@@ -1406,22 +1358,14 @@ private:
     // one CONNECT retry interval with no duplicate, the initiator has the ACK (it would have retried)
     // and a TURN_REQUEST is safe (BUG-RESPONDER-NEVER-ASKS-TURN).
     uint32_t responder_quiet_ms_ = 0;
-    // Receiver emit-side decision (called from onBurstGroupReceived before the
-    // group's tone-burst ACK is emitted) and sender consume-side action (called
-    // from onToneBurstAck; mod/rate_at_ack = the mode snapshot taken BEFORE
-    // applyAdaptiveRateFeedback ran, so one ACK's evidence moves the rung at most
-    // once). Both are hard no-ops while the knob is OFF.
     // BUG-RESPONDER-HANDSHAKE-NEVER-CONFIRMS (2026-07-04): single confirm site,
     // called from BOTH the classic frame path and the burst-group path (see .cpp).
     // The predicate prevents a mere PHY sync, an empty/failed group, or a frame from
     // another station from confirming a half-open responder session.
     bool isAuthoritativeResponderHandshakeFrame(const v2::HeaderInfo& header) const;
     void maybeConfirmResponderHandshake(const char* evidence);
-    void updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask);
-    void maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
-                                 Modulation mod_at_ack, CodeRate rate_at_ack);
 
-    // ── RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY, 2026-07-05) ──────────────────────
+    // ── RX-AUTHORITY (2026-07-05; permanent 2026-11-25) ─────────────────────────
     // The receiver measures, the receiver DECIDES: per burst group it maps its
     // fresh channel observation (broadband SNR EMA + coherence-adjusted fading,
     // fed by setBurstChannelObservation from the decoder's lock-free atomics)
@@ -1735,30 +1679,6 @@ private:
                                             int post_ack_clean_streak) const;
     void handleLatentStartupProbeTimeoutRollback();
     std::string last_adaptive_action_;      // GUI: short human-readable action
-    // QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON since 2026-07-02). See
-    // applyAdaptiveRateFeedback. clean_streak = consecutive clean groups while pinned at QPSK
-    // R3/4 (the climb gate AND a low-variance Good/Moderate proxy — a Moderate channel's fades
-    // keep resetting it); bad_streak = consecutive bad groups on QAM16 (the prompt-demote
-    // trigger).
-    int qam16_clean_streak_ = 0;
-    int qam16_bad_streak_ = 0;
-    // 16QAM R3/4 crest rung (ULTRA_QAM16_R34, default-OFF A/B knob). Consecutive clean groups
-    // at QAM16 R2/3 toward the within-QAM16 R2/3 -> R3/4 walk — a PARALLEL counter to
-    // qam16_clean_streak_ (which tracks the QPSK-pinned streak toward the modulation hop).
-    // Reset on any bad group, on every QAM16 demote (noteQam16Demoted), and in enterConnected.
-    int qam16_r34_clean_streak_ = 0;
-    // Re-climb COOLDOWN (2026-07-02, replaces the 06-17 sticky no-reclimb). Under fade-riding
-    // the QPSK<->QAM16 oscillation IS the mechanism — the rung SHOULD oscillate with the
-    // ~10-20 s Good fade cycle (crest -> 16QAM R2/3, trough -> QPSK R3/4); the 06-17 sticky
-    // design assumed oscillation was pathology and permanently forfeited every later crest.
-    // Instead, after a demote the climb streak may not begin again until this many CLEAN
-    // groups pass (base 3, ULTRA_QAM16_RECLIMB_COOLDOWN), DOUBLING per demote this connection
-    // (cap x4 — ssthresh-family multiplicative backoff): a channel that keeps cratering QAM16
-    // re-probes ever more rarely, bounding worst-case MODE_CHANGE move overhead <10% of
-    // airtime (per-move cost arithmetic: CHANGELOG 2026-07-02). Reset in enterConnected.
-    int qam16_reclimb_cooldown_ = 0;
-    int qam16_demote_count_ = 0;
-    void noteQam16Demoted(int weight);
     // [LADDER] per-transfer telemetry (sender-side, pure observability): time-in-rung
     // percentages + mid-stream move count, logged ONCE at transfer completion, e.g.
     //   [LADDER] qpsk_r23=54% qam16_r23=38% moves=9 (52s, ok)

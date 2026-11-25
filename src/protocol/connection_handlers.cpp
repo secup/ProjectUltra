@@ -499,7 +499,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // Keep the automatic connect verdict as the latent controller's prior;
         // the conservative first-group rung below is only what goes on air.
         const uint8_t automatic_latent_seed_rung =
-            (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+            isOFDMMode(negotiated_mode_)
                 ? coherentRungIndexFor(rec_mod, rec_rate)
                 : kRungIdxNone;
 
@@ -508,7 +508,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
         // while QPSK R1/2 subsequently ran 24/24 groups clean.  The connect sample
         // is MC-DPSK-domain evidence, not a coherent-OFDM payload measurement.
         const auto authority_entry = capRxAuthorityInitialRung(
-            rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply() && entryProbeCapEnabled(),
+            rec_mod, rec_rate, entryRateCapsApply() && entryProbeCapEnabled(),
             environment_forced_rung);
         if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
             LOG_MODEM(INFO,
@@ -536,7 +536,7 @@ void Connection::handleConnect(const v2::ConnectFrame& frame, const std::string&
             environment_forced_rung ||
             forced_mod != Modulation::AUTO || forced_rate != CodeRate::AUTO;
         latent_bootstrap_rung_ =
-            (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+            isOFDMMode(negotiated_mode_)
                 ? (forced_rung
                        ? coherentRungIndexFor(rec_mod, rec_rate)
                        : automatic_latent_seed_rung)

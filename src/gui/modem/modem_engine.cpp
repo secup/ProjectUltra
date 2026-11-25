@@ -846,7 +846,7 @@ std::vector<float> ModemEngine::transmitToneBurstAck(
     // quantized quality + a RELATIVE demote — reconstructing an index is garbage),
     // kRungCmdReserved (the WAITING-REBASE voice, which would decode as index 24),
     // kRungIdxNone (no command), and out-of-range.
-    if (streaming_decoder_ && protocol::rxRateAuthorityEnabled() &&
+    if (streaming_decoder_ &&
         payload.rung_cmd != ultra::waveform::tone_burst_ack::kRungCmdReserved) {
         const uint8_t authority_word = static_cast<uint8_t>(
             (payload.rate_hint & 0x7) | ((payload.rung_cmd & 0x3) << 3));

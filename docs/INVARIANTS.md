@@ -992,9 +992,8 @@ probation until the first OFDM burst (docs/WAVEFORM_FOLLOW_DESIGN_2026_11_11.md)
 switch to MC-DPSK takes effect at once: a data-mode call made while the modem was still OFDM would put
 the decoder back into OFDM after the switch. And a crossing applied inside the ARQ's ACK callback
 would reconfigure the ARQ in the middle of its own operation.
-**Corollaries:** follow needs the receiver authority (`ULTRA_RX_RATE_AUTHORITY`, default on): the
-commands are its rung bits, and only an authority sender reads them and ends its probation, so
-`waveformFollowActive()` requires it. A down-crossing restarts the channel evidence (SNR pool, the
+**Corollaries:** follow rides the receiver authority (permanent since 2026-11-25): the
+commands are its rung bits, read by the sender, which ends its probation on them. A down-crossing restarts the channel evidence (SNR pool, the
 connection's physical measurement and the decoder's physical ring): the way back up is decided on
 what the MC-DPSK spell measures, never on the channel that collapsed (BUG-FOLLOW-STALE-EVIDENCE).
 The way back up reads only the burst being acknowledged: pool readings younger than this end's

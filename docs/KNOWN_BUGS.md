@@ -9,6 +9,20 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### TNC host-facing gaps found 2026-11-23 (`tools/tnc_scenario.py`, open) — P2/P3
+- **BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING** (P1, open 2026-11-25): an up-crossing's first OFDM burst gets
+  no ACK and the sender crosses back (TNC sweep 16, ITU Good 8 dB seed 415 bulk_then_short: four up/down
+  cycles). BRAVO's OFDM listener decoded the descriptor (R1/4 -> R1/2, `current_anchor=LIGHT`), reset to
+  COLD expecting a full chirp anchor, missed member 1, joined at frame 2 (LATE-JOIN) and decoded 0/40
+  codewords. Sender and receiver disagree on a rate-switch group's anchor: under structure acquisition
+  (ULTRA_FAST, default since 2026-11-09) the sender never sends the full anchor on a descriptor-committed
+  switch (`desc_switch_anchor ... && !structure_acq`, connection.cpp) and the descriptor says so
+  (`current_group_full_anchor` = the encoder's `force_full_group_start`), but
+  `decode_policy::keepDescriptorWarmHandoff` still demotes warm handoff on every mode hop (the F164 rule,
+  from when every commit carried a full anchor). Sweeps 14-17: all 86 hop groups took the cold path
+  (0.73 mean delivered, 15 % zero) vs 449 warm same-mode groups (0.88, 6 % zero) - confounded by the
+  channel change that caused the hop. Fix (pending A/B): follow the descriptor's flag. The geometry is
+  safe - the decoder returns after the descriptor and applies the pending configure() before the next
+  member is searched.
 - **BUG-FIRST-OFDM-FRAME-LTS-CFO** (P1, intermittent, pre-existing): on the first OFDM frame after the
   MC-DPSK handshake the LTS residual "corrects" the handshake's accurate dual-chirp CFO by ~1.2-1.3 Hz
   (AWGN 10 dB, true 7.3 Hz: 7.30 -> 8.64 in one run, 7.30 -> 6.11 in another, both logged
@@ -30,7 +44,7 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   resends are the frames it rescues. Still true: most hints fire on genuine MC-DPSK frames, and hinted
   decodes of OFDM frames often read the LTS at the noise floor. Next: hint only after the MC-DPSK
   decode failed, and a CTest that exercises the replay (the floor-consumed check dropped it in a test).
-- **BUG-SIMULTANEOUS-CALL-FADING** (P2, open): the PING listen-before-talk fix (BUG-SIMULTANEOUS-PING-
+- **BUG-SIMULTANEOUS-CALL-FADING** (P2, FIXED 2026-11-25, 95af57fa): the PING listen-before-talk fix (BUG-SIMULTANEOUS-PING-
   LOCKSTEP) does not cover every collision. TNC simultaneous, ITU Good 8 dB seed 402 (sweep 9): after
   aligning the two log clocks the rounds started 0.01, 0.73, 2.14, 0.2 and 0.07 s apart - two inside
   any carrier-sense latency, and the 0.73 / 0.2 s ones not held because BRAVO's CCA read rms 0.12

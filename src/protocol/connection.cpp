@@ -523,62 +523,43 @@ Connection::Connection(const ConnectionConfig& config)
                 // MOVE-EPOCH echo (ULTRA_ARQ_MOVE_EPOCH, BUG-ARQ-SEQ-COLLISION):
                 // payload bits 40-41; always 0 while the knob is OFF (byte-identical).
                 tba.move_epoch = move_epoch;
-                // RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD): payload bits 42-43 — the
-                // standing receiver rung command computed per group event in
-                // updateRxRateCommandFromGroup (crater-only DOWN-hard). Only ever
-                // non-zero when the knob is ON (byte-identical OFF); re-emitted ACK
-                // copies re-carry the same command, the sender dedups by group_seq.
-                tba.rung_cmd = rx_rate_cmd_pending_;
-                // §14.43: carry the receiver's last measured group decode headroom [0,1] back to
-                // the sender, quantized into the 3-bit rate_hint (0..7). The sender de-quantizes it
-                // in onToneBurstAck and feeds its RateController. -1 (no sample yet) -> 0.
-                tba.rate_hint = (last_group_quality_ >= 0.0f)
-                    ? static_cast<uint8_t>(std::lround(
-                          std::clamp(last_group_quality_, 0.0f, 1.0f) * 7.0f))
-                    : 0;
-                // RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): reinterpret the SAME five
-                // bits [rate_hint(3)|rung_cmd(2)] as the receiver's ABSOLUTE canonical
-                // rung command (waveform_selection.hpp kRungIdx*; 0 = no command).
-                // Overrides the hint/relative-cmd stamps above — under authority the
-                // sender's EMA has no consumer for the hint, and the demote-only
-                // relative command is superseded by the absolute one. The WAITING-
-                // REBASE voice is untouched (type=NACK path, emitted elsewhere).
-                if (rxRateAuthorityEnabled()) {
-                    // A logical FINAL retires the peer's transfer.  Advertising a NEW
-                    // rung in this ACK cannot accelerate any remaining payload, but it
-                    // can make the sender pay a standalone MODE_CHANGE after its file
-                    // has already drained.  Preserve the proven current rung; a future
-                    // transfer will produce fresh evidence before changing it.
-                    if (has_final) {
-                        const uint8_t current = coherentRungIndexFor(
-                            data_modulation_, data_code_rate_);
-                        if (current != kRungIdxNone && rx_authority_cmd_ != current) {
-                            LOG_MODEM(INFO,
-                                      "Connection: RX-AUTHORITY FINAL hold idx %u "
-                                      "(discarding tail-only idx %u command)",
-                                      current, rx_authority_cmd_);
-                            rx_authority_cmd_ = current;
-                        }
-                        if (latent_startup_probe_waiting_) {
-                            latent_startup_probe_waiting_ = false;
-                            latent_startup_probe_spent_ = true;
-                            latent_startup_probe_clean_groups_ = 0;
-                            latent_startup_probe_pending_base_groups_ = 0;
-                            latent_startup_probe_rollback_pending_ = false;
-                            LOG_MODEM(INFO,
-                                      "Connection: LATENT startup probe suppressed at "
-                                      "logical FINAL (no next physical group)");
-                        }
+                // RX-AUTHORITY: the five bits [rate_hint(3)|rung_cmd(2)] are the receiver's
+                // ABSOLUTE canonical rung command (waveform_selection.hpp kRungIdx*; 0 = no
+                // command). The WAITING-REBASE voice is a NACK, emitted elsewhere.
+                // A logical FINAL retires the peer's transfer.  Advertising a NEW
+                // rung in this ACK cannot accelerate any remaining payload, but it
+                // can make the sender pay a standalone MODE_CHANGE after its file
+                // has already drained.  Preserve the proven current rung; a future
+                // transfer will produce fresh evidence before changing it.
+                if (has_final) {
+                    const uint8_t current = coherentRungIndexFor(
+                        data_modulation_, data_code_rate_);
+                    if (current != kRungIdxNone && rx_authority_cmd_ != current) {
+                        LOG_MODEM(INFO,
+                                  "Connection: RX-AUTHORITY FINAL hold idx %u "
+                                  "(discarding tail-only idx %u command)",
+                                  current, rx_authority_cmd_);
+                        rx_authority_cmd_ = current;
                     }
-                    uint8_t wire_authority_cmd = rx_authority_cmd_;
-                    if (!has_final && tone_ack_group_complete_context_ &&
-                        latent_startup_probe_waiting_ &&
-                        rx_authority_cmd_ == kRungIdxQpskR23) {
-                        wire_authority_cmd |= kRungAuthorityStartupProbeFlag;
+                    if (latent_startup_probe_waiting_) {
+                        latent_startup_probe_waiting_ = false;
+                        latent_startup_probe_spent_ = true;
+                        latent_startup_probe_clean_groups_ = 0;
+                        latent_startup_probe_pending_base_groups_ = 0;
+                        latent_startup_probe_rollback_pending_ = false;
+                        LOG_MODEM(INFO,
+                                  "Connection: LATENT startup probe suppressed at "
+                                  "logical FINAL (no next physical group)");
                     }
-                    tba.rate_hint = static_cast<uint8_t>(wire_authority_cmd & 0x7);
-                    tba.rung_cmd = static_cast<uint8_t>((wire_authority_cmd >> 3) & 0x3);
                 }
+                uint8_t wire_authority_cmd = rx_authority_cmd_;
+                if (!has_final && tone_ack_group_complete_context_ &&
+                    latent_startup_probe_waiting_ &&
+                    rx_authority_cmd_ == kRungIdxQpskR23) {
+                    wire_authority_cmd |= kRungAuthorityStartupProbeFlag;
+                }
+                tba.rate_hint = static_cast<uint8_t>(wire_authority_cmd & 0x7);
+                tba.rung_cmd = static_cast<uint8_t>((wire_authority_cmd >> 3) & 0x3);
                 // MC-DPSK rate change: in an MC-DPSK session the same five bits carry this
                 // receiver's constellation command (connection_policy::McDpskRateController).
                 if (negotiated_mode_ == WaveformMode::MC_DPSK &&
@@ -916,7 +897,7 @@ void Connection::acceptCall() {
     // Preserve the automatic selector's belief separately from the conservative
     // physical first-group cap.  A forced operator rung below replaces this seed.
     const uint8_t automatic_latent_seed_rung =
-        (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+        isOFDMMode(negotiated_mode_)
             ? coherentRungIndexFor(rec_mod, rec_rate)
             : kRungIdxNone;
 
@@ -924,7 +905,7 @@ void Connection::acceptCall() {
     // intentionally before the forced-mode overrides below: an operator probing
     // an exact rung still gets the requested modulation/rate unchanged.
     const auto authority_entry = capRxAuthorityInitialRung(
-        rec_mod, rec_rate, rxRateAuthorityEnabled() && entryRateCapsApply() && entryProbeCapEnabled(),
+        rec_mod, rec_rate, entryRateCapsApply() && entryProbeCapEnabled(),
         environment_forced_rung);
     if (authority_entry.mod != rec_mod || authority_entry.rate != rec_rate) {
         LOG_MODEM(INFO,
@@ -954,7 +935,7 @@ void Connection::acceptCall() {
         pending_forced_modulation_ != Modulation::AUTO ||
         pending_forced_code_rate_ != CodeRate::AUTO;
     latent_bootstrap_rung_ =
-        (isOFDMMode(negotiated_mode_) && rxRateAuthorityEnabled())
+        isOFDMMode(negotiated_mode_)
             ? (forced_rung
                    ? coherentRungIndexFor(rec_mod, rec_rate)
                    : automatic_latent_seed_rung)
@@ -1853,7 +1834,7 @@ float Connection::evmPredictedGoodput(const LatentRateController::RungGeometryTa
 bool Connection::peerDecodesRobustControl() const {
     const uint8_t mc_bit = connection_policy::modeToCapabilityBit(WaveformMode::MC_DPSK);
     return waveform_follow_dual_listen_ && waveform_follow_enabled_ && waveform_follow_allowed_ &&
-           rxRateAuthorityEnabled() && (config_.mode_capabilities & mc_bit) != 0;
+           (config_.mode_capabilities & mc_bit) != 0;
 }
 
 // BUG-REPLY-ON-WRONG-WAVEFORM: an OFDM session's control frame that arrived on MC-DPSK (the peer's
@@ -2905,28 +2886,18 @@ bool Connection::onToneBurstAck(
             if (outermost) arq_callback_defer_refill_ = false;
             return false;
         }
-        // §14.43: feed the RateController the RECEIVER's GRADED decode headroom carried in
-        // rate_hint (0..7 -> [0,1]), not a binary ack/nack — restoring the closed loop the
-        // unification cut. A NACK (group lost) still feeds 0. (Replaces the legacy GROUP_ACK
-        // quality byte; same controller, now on the unified tone-burst path.)
-        // RX-RATE-CMD Phase 2: snapshot the mode BEFORE the controller runs — one ACK is
-        // ONE piece of channel evidence, so if the EMA/QAM16 machinery already moved the
-        // rung on this ACK, the piggybacked command (same evidence, measured receiver-side)
-        // must not fire a second move (maybeApplyRxRateCommand compares against these).
+        // The data geometry this ACK answers, before the receiver's command moves it.
         const Modulation mod_at_ack = data_modulation_;
         const CodeRate rate_at_ack = data_code_rate_;
         const WaveformMode mode_at_ack = negotiated_mode_;
         const int logical_cw_at_ack = data_frame_cw_count_;
         const int physical_cw_at_ack = physicalDataFrameCodewords();
         const int lifting_z_at_ack = selectBurstLiftingZ();
-        // RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): the receiver commands the rung
-        // outright — the ACK's [rate_hint|rung_cmd] bits are its ABSOLUTE canonical
-        // rung index, and the sender's own mid-transfer drivers (the EMA walk, the
-        // dense demote/crest walks, the climb hop, trough amnesty, the relative
-        // rung command) are INERT: one decision-maker, sitting where the channel is
-        // actually measured. Ack-SILENCE safety rails (collapse escape, stuck-frame
-        // escape, RTO machinery) stay live — no command crosses a blackout.
-        const bool rx_authority = rxRateAuthorityEnabled();
+        // RX-AUTHORITY: the receiver commands the rung outright — the ACK's
+        // [rate_hint|rung_cmd] bits are its ABSOLUTE canonical rung index; the sender has
+        // no rate driver of its own (one decision-maker, where the channel is measured).
+        // Ack-SILENCE safety rails (stuck-frame escape, waveform-follow cross-down, RTO
+        // machinery) stay live — no command crosses a blackout.
         if (negotiated_mode_ == WaveformMode::MC_DPSK &&
             connection_policy::mcDpskRateAdaptEnabled()) {
             // MC-DPSK rate change: the five bits are the receiver's constellation command.
@@ -2940,7 +2911,7 @@ bool Connection::onToneBurstAck(
                 probation_.markLaunchAck(detection.payload.group_seq,
                                          detection.payload.frame_mask);
             }
-        } else if (rx_authority) {
+        } else {
             const uint8_t cmd_word = static_cast<uint8_t>(
                 (detection.payload.rate_hint & 0x7) |
                 ((detection.payload.rung_cmd & 0x3) << 3));
@@ -2964,13 +2935,6 @@ bool Connection::onToneBurstAck(
                     arq_.getTxInFlightBytes() == 0;
                 maybeObeyAuthorityCommand(cmd_word, accepted_clean_round);
             }
-        } else {
-            const float fed_quality =
-                detection.payload.type ==
-                        ultra::waveform::tone_burst_ack::AckType::Nack
-                    ? 0.0f
-                    : static_cast<float>(detection.payload.rate_hint) / 7.0f;
-            applyAdaptiveRateFeedback(fed_quality);
         }
         // Software-ALC sender side (BUG-QAM16-RIG-LEVEL-BUDGET): the receiver's
         // drive advisory rides bits [30..31] of this ACK. Hand a non-hold advisory
@@ -2986,18 +2950,6 @@ bool Connection::onToneBurstAck(
                 on_drive_advisory_(advisory, detection.payload.group_seq);
             }
         }
-        // RX-RATE-CMD Phase 2 (ULTRA_RX_RATE_CMD): consume the receiver's rung command
-        // (bits 42-43) — ADVISORY input through the sender's own guards, never a blind
-        // obey. Runs INSIDE the defer-refill bracket so a committed demote's refill
-        // coalesces into the single outermost runDeferredArqRefill below (which then
-        // sends the [holes]+[new] burst at the NEW rung). Hard no-op while OFF.
-        // RX-AUTHORITY supersedes it: bits 42-43 are then command bits already
-        // consumed above, not a relative demote.
-        if (!rx_authority) {
-            maybeApplyRxRateCommand(detection.payload.rung_cmd,
-                                    detection.payload.group_seq,
-                                    mod_at_ack, rate_at_ack);
-        }
         if (outermost) {
             arq_callback_defer_refill_ = false;
             // §RETX-PACING §1.1 round boundary: every tone-burst ack ends a resend round.
@@ -3009,14 +2961,6 @@ bool Connection::onToneBurstAck(
             const int round_progress = arq_.lastAckProgressFrames();
             arq_.consumeAckProgress();
             noteArqRoundOutcome(round_progress, "toneburst-ack");
-            // TROUGH AMNESTY: progress after a zero-progress episode = the null ended;
-            // restore the pre-episode rung (see maybeTroughAmnesty). Inside the same
-            // defer-refill bracket, so the restored rung rides the very next refill.
-            // RX-AUTHORITY: inert — the receiver re-commands the right rung on the
-            // first post-trough ACK; a second restorer would double-drive.
-            if (!rx_authority) {
-                maybeTroughAmnesty(round_progress, detection.payload.rung_cmd);
-            }
             // Default-OFF descriptor-only repair: arm exactly one synchronous refill
             // only when this ACK proves partial forward progress for the immediately
             // preceding descriptor-bearing physical group.  Reserved advisory=3 is
@@ -3165,37 +3109,7 @@ static float troughDeferTcFrac() {
     return v;
 }
 
-// ULTRA_COLLAPSE_ESCAPE_ROUNDS 0 (OFF, default ⇒ byte-identical) or [2..8]: N consecutive
-// zero-progress rounds at the current rung (with ≥ half the burst budget in flight) ⇒
-// escape-drop the rung (§2). Zero-DELIVERED evidence, not retry depth — the rejected
-// ULTRA_STUCK_ESCAPE_RETX=3 hair-trigger fled rungs that were delivering (g42 −28%); the
-// round condition cannot trip on a lone straggler amid deliveries (§2.3). The existing
-// 5-retx per-frame backstop (stuckRetransmitEscape above) stays untouched. Read ONCE (static).
-static int collapseEscapeRounds() {
-    static const int v = [] {
-        if (const char* e = std::getenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS")) {
-            const int n = std::atoi(e);
-            if (n == 0 && e[0] == '0') return 0;  // opts out (it read as the default before)
-            if (n >= 2 && n <= 8) return n;
-        }
-        return 2;  // DEFAULT 2026-07-05 (campaign standing value; 0 opts out)
-    }();
-    return v;
-}
-
-// QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB). Climb to QAM16 only after this many
-// CONSECUTIVE clean groups (quality >= climb_above) while pinned at the QPSK R3/4 top rung — a
-// modulation hop costs a full MODE_CHANGE (T/R + re-anchor) and QAM16 is fragile. Default 2
-// (history 8 -> 4 on 2026-06-17, 4 -> 2 on 2026-07-02 fade-riding ladder: the crests of a
-// Good ~10-20 s fade cycle only last a few ~8 s groups, so a 4-group streak forfeited most of
-// each crest; 2 clean groups is the fastest gate that still requires a SUSTAINED reading, and
-// the immediate demote + re-climb cooldown are the safety net). Env-tunable for rig sweeps via
-// ULTRA_QAM16_CLIMB_STREAK [1..64]; lower = faster switch but a weaker Good-vs-Moderate proxy.
-// Demote off QAM16 IMMEDIATELY on a bad group (kQam16DemoteBadStreak=1, was 2 — fade-riding
-// needs the trough exit to be as prompt as the cliff NACK exit) or on a NACK.
-// The ULTRA_QAM16_R34 crest-rung walk (QAM16 R2/3 -> R3/4, default-OFF) reuses this same
-// streak length as its climb gate — one clean-evidence constant for both upward moves.
-// MID-RUNG demote landing (ULTRA_QAM16_DEMOTE_MIDRUNG, default OFF; F102 finding):
+// MID-RUNG demote landing (ULTRA_QAM16_DEMOTE_MIDRUNG, default ON since 2026-07-05; F102 finding):
 // with the 16QAM R1/2 rung ladder-enabled, a crater/escape at 16QAM R2/3+ lands at
 // 16QAM R1/2 (raw ~2.45k, ~2x the FEC margin) instead of skipping to QPSK R3/4
 // (~2.05k raw). The channel that craters R2/3 often still carries R1/2 — that is
@@ -3211,43 +3125,7 @@ static bool qam16DemoteMidrungEnabled() {
     return v;
 }
 
-static int qam16ClimbStreak() {
-    static const int v = [] {
-        if (const char* e = std::getenv("ULTRA_QAM16_CLIMB_STREAK")) {
-            const int n = std::atoi(e);
-            if (n >= 1 && n <= 64) return n;
-        }
-        return 1;  // DEFAULT 2026-07-05 (campaign standing value, was 2)
-    }();
-    return v;
-}
-static constexpr int kQam16DemoteBadStreak = 1;
 
-// Re-climb cooldown BASE after a QAM16 demote, in CLEAN groups (quality >= climb_above).
-// ULTRA_QAM16_RECLIMB_COOLDOWN [0..64]; 0 = no cooldown. Doubles per demote this connection
-// (cap x4) via noteQam16Demoted — see the member comment in connection.hpp and the move-
-// overhead arithmetic in CHANGELOG 2026-07-02.
-static int qam16ReclimbCooldownBase() {
-    static const int v = [] {
-        if (const char* e = std::getenv("ULTRA_QAM16_RECLIMB_COOLDOWN")) {
-            const int n = std::atoi(e);
-            if (n >= 0 && n <= 64) return n;
-        }
-        return 1;  // DEFAULT 2026-07-05 (campaign standing value, was 3)
-    }();
-    return v;
-}
-
-// Register a QAM16 demote and arm the re-climb cooldown. weight=1 for the ack-driven soft
-// demote; weight=2 for the escape-drop (a frame nearly DIED at QAM16 — stronger evidence, so
-// the backoff advances two steps). Cooldown = base << min(demotes-1, 2): 3, 6, 12, 12...
-void Connection::noteQam16Demoted(int weight) {
-    qam16_demote_count_ = std::min(qam16_demote_count_ + weight, 8);
-    const int scale = 1 << std::min(qam16_demote_count_ - 1, 2);
-    qam16_reclimb_cooldown_ = qam16ReclimbCooldownBase() * scale;
-    qam16_clean_streak_ = 0;
-    qam16_r34_clean_streak_ = 0;  // leaving QAM16 — any pending crest-rung walk dies with it
-}
 
 bool Connection::entryRateCapsApply() const {
     if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) return true;
@@ -3346,7 +3224,6 @@ void Connection::executeEscapeDrop(const char* trigger) {
                       modulationToString(esc_mod), codeRateToString(esc_rate), trigger);
             return;
         }
-        if (!midrung_exit && esc_is_qam16) noteQam16Demoted(2);
         // Silence is negative evidence: unlike a receiver-carried rung command,
         // it does not prove the peer can hear a descriptor.  A unilateral regrid
         // here left the receiver slicing R1/2 as stale R2/3 for 96 s in the live
@@ -3385,97 +3262,6 @@ void Connection::executeEscapeDrop(const char* trigger) {
                       v2::ModeChangeReason::CHANNEL_DEGRADED);
 }
 
-// ═══════ RX-RATE-CMD Phase 2 — receiver rung command in the tone-burst ACK ═══════
-// docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.2 as amended (knob
-// ULTRA_RX_RATE_CMD, default OFF = byte-identical; SEMANTICS-BREAKING lockstep when
-// ON: live payload bits 42-43 + the widened tone-ACK CRC span). Motivation (the
-// Phase-1 D3 rig finding): with climbs ~free under the descriptor commit, the ESCAPE
-// side became the measured bottleneck — the RECEIVER sees a 16QAM crater IMMEDIATELY
-// (failed group decode) while the sender only learns after ~2 zero-progress rounds
-// (~2×RTO); 4 climb/escape cycles in 90 s on a Moderate epoch. The command closes
-// that gap: the verdict rides the cratered group's own tone-burst ACK — the 4-FSK
-// control plane whose detection floor out-survives every OFDM waveform by ~15-20 dB
-// on fading (§1.2), exactly the channel a trough verdict must cross.
-//
-// DELIBERATE deviations from the design doc's §5.2 sketch (stated in-doc too):
-//   - NO UP command (the sketch's value 1 = STEP-UP): climbs stay sender-side where
-//     the quality EMA + ssthresh + climb streaks live — a second upward driver would
-//     double-drive the control loop (two integrators, one plant) and re-open the
-//     2026-06-09 churn arm. Demote-only keeps the command channel single-purpose:
-//     trough-escape latency. Wire encoding: 0 none / 1 DOWN-one / 2 DOWN-hard /
-//     3 reserved-hold (tone_burst_constants.hpp kRungCmd*).
-//   - Emit policy is CRATER-ONLY DOWN-hard: the receiver has NO quality EMA/streak
-//     machinery (the RateController runs sender-side only) and building a parallel
-//     estimator is an explicit anti-goal. DOWN-one is defined on the wire and
-//     consumed (forward-compatible), but nothing emits it yet.
-
-// RECEIVER side (called from onBurstGroupReceived, before the group's ACK emits).
-// Crater predicate — both arms derived from EXISTING policy quantizations, no new
-// numeric constants:
-//   frame_mask == 0  ⇔ ZERO frames delivered — the decoder's whole-fail/fast-NACK
-//                      signature and the same zero-progress evidence class the
-//                      sender's collapse escape counts. No finer grade exists on
-//                      this axis: the decoder assigns quality EXACTLY 0.0 to any
-//                      !all_ok group (streaming_burst_interleave.cpp), so the
-//                      3-bit rate_hint quantization already saturates at 0 for
-//                      every partial-fail — mask==0 is the only receiver-side
-//                      distinction between "cliff" and "ordinary fade losses".
-//   QAM16 only       — the modulation whose demote-on-a-single-bad-group policy is
-//                      already codified sender-side (kQam16DemoteBadStreak = 1: the
-//                      decodability-cliff asymmetry). At QPSK rungs a zero group is
-//                      indistinguishable from an irreducible deep null (fading loss
-//                      is irreducible at ANY rate); commanding DOWN there would
-//                      bypass the deliberately EMA-smoothed policy and re-introduce
-//                      the 2026-06-09 single-NACK ratchet-to-R1/4.
-void Connection::updateRxRateCommandFromGroup(bool all_ok, uint16_t frame_mask) {
-    using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
-    using ultra::waveform::tone_burst_ack::kRungCmdDownOne;
-    using ultra::waveform::tone_burst_ack::kRungCmdNone;
-    if (all_ok) {
-        // Clean group — the bad stretch (if any) ended; nothing may keep riding.
-        qam16_rx_bad_streak_ = 0;
-        rx_rate_cmd_pending_ = kRungCmdNone;
-        return;
-    }
-    if (data_modulation_ != Modulation::QAM16) {
-        qam16_rx_bad_streak_ = 0;
-        return;  // deep null at a robust rung: irreducible fading, not a rate signal
-    }
-    ++qam16_rx_bad_streak_;
-    if (frame_mask != 0) {
-        // PARTIAL failure (frames delivered, group not clean). A single partial is a
-        // fade brush — clear any standing command (the base advances, fresh seqs, the
-        // dedup would no longer swallow it). But TWO consecutive failed groups at
-        // 16QAM = the rung is under water even without a total crater — and the
-        // sender's own detection of that state costs ~40 s of zero-progress rounds
-        // (F27 paid it twice; partials never froze the base so no crater command
-        // fired). Command DOWN-ONE once per bad pair; the next group event either
-        // clears it (delivered) or re-arms it (still failing — a new seq, and the
-        // sender's per-ACK mode-snapshot guard keeps it to one rung per ACK).
-        rx_rate_cmd_pending_ =
-            (qam16_rx_bad_streak_ >= 2) ? kRungCmdDownOne : kRungCmdNone;
-        return;
-    }
-    // Total crater at the high-order mode → command a demote. Idempotent across
-    // consecutive craters: the SAME command keeps riding every re-emitted ACK until
-    // the sender's move is observed (applyDataMode clears the latch on a real
-    // mod/rate change — the once-per-committed-move rule). That re-carry is
-    // ACK-loss diversity for free and storm-safe: a crater freezes the ARQ base,
-    // so every copy carries ONE group_seq and the sender acts once.
-    //
-    // CREST-RUNG graded landing (2026-07-04, F10 finding): a crater AT 16QAM R3/4
-    // commands DOWN-ONE (→ 16QAM R2/3, the sender's DownOne mapping) — R2/3's
-    // requirement sits ~1.5 dB below R3/4's, so a trough that kills the crest rung
-    // by inches usually leaves R2/3 alive (F10: the pre-hop R2/3 groups ran 0.85-0.98
-    // in the same epoch). One rung per evidence quantum; if R2/3 craters too, the
-    // NEXT command is DOWN-hard to the QPSK home gear. R2/3 craters keep the
-    // straight-to-QPSK exit (the decodability-cliff asymmetry).
-    rx_rate_cmd_pending_ =
-        (data_code_rate_ == CodeRate::R3_4)
-            ? ultra::waveform::tone_burst_ack::kRungCmdDownOne
-            : kRungCmdDownHard;
-}
-
 void Connection::failClosedLatentStartupProbeUnknown(const char* origin) {
     if (!latent_startup_probe_waiting_) return;
 
@@ -3497,7 +3283,7 @@ void Connection::failClosedLatentStartupProbeUnknown(const char* origin) {
               origin ? origin : "unknown physical outcome", rx_authority_cmd_);
 }
 
-// ═══════════ RX-AUTHORITY receiver verdict (ULTRA_RX_RATE_AUTHORITY) ═══════════
+// ═══════════ RX-AUTHORITY receiver verdict ═══════════
 // Called per delivered/failed burst group, BEFORE the group's ACK emits. Maps the
 // receiver's FRESH channel observation (broadband SNR EMA + coherence-adjusted
 // fading, fed via setBurstChannelObservation from the decoder's per-frame atomics)
@@ -4741,102 +4527,6 @@ void Connection::maybeObeyAuthorityCommand(uint8_t cmd_idx,
               desc_committed ? "DESC-SWITCH" : "MODE_CHANGE");
 }
 
-// SENDER side (called from onToneBurstAck, inside the defer-refill bracket, AFTER
-// applyAdaptiveRateFeedback). The command is ADVISORY: it routes through the sender's
-// own guards, ladder tables, caps and cooldowns — the receiver is authoritative about
-// what it could not decode; the sender stays authoritative about what it transmits
-// (design §4.1 arbitration).
-void Connection::maybeApplyRxRateCommand(uint8_t cmd, uint8_t group_seq,
-                                         Modulation mod_at_ack, CodeRate rate_at_ack) {
-    using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
-    using ultra::waveform::tone_burst_ack::kRungCmdDownOne;
-    if (!rx_rate_cmd_enabled_) return;  // knob OFF: byte-identical (bits ignored)
-    if (cmd != kRungCmdDownOne && cmd != kRungCmdDownHard) {
-        return;  // 0 = no command; 3 = reserved, treat as hold (forward compat)
-    }
-    if (state_ != ConnectionState::CONNECTED) return;
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;  // wideband ladder only
-    // One action attempt per command episode: a crater freezes the ARQ base, so every
-    // re-emitted copy of the command carries the same group_seq (the drive_advisory
-    // dedup pattern, connection.cpp:1718-1731 class). Recorded BEFORE the policy
-    // guards below — a transiently-blocked command is dropped, not retried later
-    // under the same seq (fail-soft to the sender's own escape backstops, which
-    // remain armed and unchanged).
-    if (static_cast<int>(group_seq) == rx_rate_cmd_seq_seen_) return;
-    rx_rate_cmd_seq_seen_ = group_seq;
-    if (!rateAdaptationActive()) return;  // ULTRA_LOCK_RATE / rate-adapt-off wins
-    if (mode_change_pending_) return;     // a legacy exchange is already re-anchoring
-    if (mod_at_ack != data_modulation_ || rate_at_ack != data_code_rate_) {
-        // The EMA/QAM16 machinery already moved the rung on THIS ack (the command and
-        // the quality byte are the same channel evidence measured two ways) — one ACK
-        // may move the ladder at most once.
-        return;
-    }
-
-    // Target selection — the sender's OWN ladder tables, never a receiver-named rung:
-    // DOWN-hard mirrors executeEscapeDrop exactly (crater semantics: QAM16 → straight
-    // to the robust QPSK R3/4 home gear + double-weight re-climb cooldown; below QAM16
-    // → one rung more robust + noteRungFailed so ssthresh remembers the cratered
-    // rung). DOWN-one mirrors the soft ack-driven demote ladder (single-weight).
-    Modulation target_mod = data_modulation_;
-    CodeRate target_rate = data_code_rate_;
-    if (data_modulation_ == Modulation::QAM16) {
-        if (cmd == kRungCmdDownOne && qam16R34Enabled() &&
-            data_code_rate_ == CodeRate::R3_4) {
-            target_rate = CodeRate::R2_3;  // crest-rung step-down: stays on QAM16
-        } else if (qam16DemoteMidrungEnabled() &&
-                   data_code_rate_ != CodeRate::R1_2) {
-            // MID-RUNG landing: stay on 16QAM at R1/2 (2x margin) instead of the
-            // QPSK R3/4 exit. Stays-on-QAM16 ⇒ no noteQam16Demoted (mirrors the
-            // crest step-down above); a further crater lands QPSK via the else.
-            target_rate = CodeRate::R1_2;
-        } else {
-            target_mod = Modulation::QPSK;
-            target_rate = CodeRate::R3_4;
-            noteQam16Demoted(cmd == kRungCmdDownHard ? 2 : 1);
-        }
-    } else {
-        const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
-        if (robust == data_code_rate_) {
-            return;  // already the most robust rung — irreducible (floor guard)
-        }
-        if (cmd == kRungCmdDownHard) {
-            rate_controller_.noteRungFailed(data_code_rate_);
-        }
-        target_rate = robust;
-    }
-
-    // COMMIT. Mid-window is the whole point of the command (the crater keeps the
-    // window busy, so the clean boundary the Phase-1 sites wait for never comes):
-    // a descriptor commit there regrids live seqs → only era-safe under the
-    // move-epoch machinery, so gate on ULTRA_ARQ_MOVE_EPOCH and fall back to the
-    // legacy synchronized exchange without it (exactly executeEscapeDrop's commit).
-    // At a clean boundary no epoch is needed (Phase-1 invariant: empty window ⇒
-    // nothing to abort). tryDescriptorModeSwitch re-checks the Phase-1 knob and
-    // scope (incl. the descriptor-bearing >1-frame-remaining guard) and returns
-    // false out of scope — the guards compose, never duplicate.
-    const bool busy = hasGeometryBoundDataOperation();
-    bool desc_committed = false;
-    if (!busy || arq_.moveEpochEnabled()) {
-        desc_committed = tryDescriptorModeSwitch(
-            target_mod, target_rate, wireSnrDb(),
-            v2::ModeChangeReason::CHANNEL_DEGRADED);
-    }
-    if (!desc_committed) {
-        requestModeChange(target_mod, target_rate, wireSnrDb(),
-                          v2::ModeChangeReason::CHANNEL_DEGRADED);
-    }
-    char buf[112];
-    std::snprintf(buf, sizeof(buf), "RX-RATE-CMD %s: %s %s -> %s %s via %s (seq=%u)",
-                  cmd == kRungCmdDownHard ? "down-hard" : "down-one",
-                  modulationToString(mod_at_ack), codeRateToString(rate_at_ack),
-                  modulationToString(target_mod), codeRateToString(target_rate),
-                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE",
-                  static_cast<unsigned>(group_seq));
-    LOG_MODEM(WARN, "Connection: %s", buf);
-    last_adaptive_action_ = buf;
-}
-
 // An escape-drop needs evidence that the peer hears this end: the latest round drew an ACK. Rounds
 // that drew nothing (retransmission timeouts in a row) are no evidence against the rung - a dead
 // channel or a dead return path kills every rung, and the drop's MODE_CHANGE cannot land there. It
@@ -4877,83 +4567,11 @@ void Connection::maybeEscapeStuckFrame() {
 
     // The pathological-single-frame 5-retx backstop (ULTRA_STUCK_ESCAPE_RETX), kept verbatim
     // (§RETX_PACING_DESIGN_2026_07_03 §2.3). During genuine collapses the round-conditioned
-    // maybeCollapseEscape typically preempts this (2 rounds ≈ retry 2-3 < 5); on healthy
-    // windows only this backstop can fire — exactly the pre-pacing behavior.
+    // the waveform follow's cross-down typically preempts this; on healthy
+    // windows only this backstop can fire.
     char trigger[64];
     std::snprintf(trigger, sizeof(trigger), "frame stuck, missing from %d ACKs (%d retx)",
                   arq_.maxInFlightHeardMissCount(), arq_.maxInFlightRetryCount());
-    executeEscapeDrop(trigger);
-}
-
-// Collapse-conditioned escape (§RETX_PACING_DESIGN_2026_07_03 §2, behind
-// ULTRA_COLLAPSE_ESCAPE_ROUNDS, default 2 since 2026-07-05; 0 opts out). Polled from the CONNECTED tick beside
-// maybeEscapeStuckFrame — NEVER fired from inside an ARQ callback (an RTO-batch round
-// increments the counter while its physical batch is staged; the escape lands after
-// arq_.tick unwinds and before that batch is committed). Zero-DELIVERED evidence: only a whole-window zero
-// streak (the g43/rig frozen-base signature) trips it; any progress reset the counter
-// (noteArqRoundOutcome), so a lone straggler amid deliveries cannot (g42-protective).
-void Connection::maybeCollapseEscape() {
-    const int rounds_needed = collapseEscapeRounds();
-    if (rounds_needed <= 0) return;               // ULTRA_COLLAPSE_ESCAPE_ROUNDS=0 (default 2)
-    // Under the receiver authority this escape counts only retransmission timeouts (F128), and
-    // silence is no evidence against the rung (escapeHasPeerEvidence): its only remaining trigger
-    // was two silent rounds followed by an empty ACK, which lent the trough's rounds the ACK's
-    // "peer heard". GUI, ITU Good QSB, seed 44 (twice): at a trough's end an empty ACK fired it,
-    // 8PSK R2/3 -> QPSK R3/4, and its MODE_CHANGE took two 10 s retries on a returned channel. The
-    // receiver's crater verdict commands a rung that really is too high; the sender has nothing
-    // to add.
-    if (rxRateAuthorityEnabled()) return;
-    if (zero_progress_rounds_ < rounds_needed) return;
-    if (!rateAdaptationActive()) return;
-    if (!escapeHasPeerEvidence("collapse")) return;
-    if (state_ != ConnectionState::CONNECTED) return;
-    if (mode_change_pending_) return;             // a rate change is already in flight
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;  // scope gate (§1.3/§6.2)
-    if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be collapsing
-    if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
-
-    // ESCAPE EPISODE CAP (ULTRA_ESCAPE_EPISODE_CAP, default 0 = OFF = unlimited/legacy).
-    // A fade null is TIME-bounded (~Tc-scale), not rate-bounded: during the null NO rung
-    // delivers (SNR is -inf in the null regardless of code rate), so zero-progress
-    // evidence measures time-stuck, not rate error. ONE drop hedges the post-null
-    // decode; further drops buy zero delivery during the null and cost minutes of
-    // under-rated cruise after (F89: one trough cascaded R3/4->R2/3->R1/2->R1/4 while
-    // the deliveries BETWEEN stalls ran q=0.94-0.99). Saturate at the cap per silent
-    // episode (consecutive_escape_drops_ resets on ANY ack progress — the episode
-    // boundary); the trough-pacing hold owns the time axis, and a genuinely over-
-    // climbed rung post-null still demotes via the ack-driven RateController (partial
-    // deliveries feed it) and the stuck-frame escape (frame-death evidence, uncapped).
-    static const int kEscapeEpisodeCap = [] {
-        if (const char* e = std::getenv("ULTRA_ESCAPE_EPISODE_CAP")) {
-            const int n = std::atoi(e);
-            if (n >= 1 && n <= 8) return n;
-        }
-        return 1;  // DEFAULT 2026-07-05 (campaign standing value; 0 = unlimited cascade)
-    }();
-    if (kEscapeEpisodeCap > 0 && consecutive_escape_drops_ >= kEscapeEpisodeCap) {
-        LOG_MODEM(INFO,
-                  "Connection: COLLAPSE-escape SATURATED (episode cap %d, drops %d) — "
-                  "holding rung through the null",
-                  kEscapeEpisodeCap, consecutive_escape_drops_);
-        zero_progress_rounds_ = 0;  // consume the evidence; re-accumulates before the next poll
-        return;
-    }
-
-    // §2.1 window-collapse evidence: ≥⌈burst_cap/2⌉ frames pending at the current rung.
-    // in_flight ≥ ceil(cap/2) ⇔ 2·in_flight ≥ cap (integer).
-    const size_t burst_cap = burstAirtimeBudgetFrames(arq_.getWindowSize());
-    const size_t in_flight_frames = arq_.getWindowSize() - arq_.getAvailableSlots();
-    if (2 * in_flight_frames < burst_cap) return;
-
-    LOG_MODEM(WARN, "Connection: COLLAPSE-escape (%d zero rounds)", zero_progress_rounds_);
-    char trigger[64];
-    std::snprintf(trigger, sizeof(trigger), "collapse, %d zero-progress rounds",
-                  zero_progress_rounds_);
-    // Reset the era before the drop — requestModeChange sets mode_change_pending_ and the
-    // commit path (applyDataMode) starts a new era anyway; this keeps the counter from
-    // double-firing if the MODE_CHANGE round-trip is slow.
-    zero_progress_rounds_ = 0;
-    retx_pace_hold_ms_ = 0;
     executeEscapeDrop(trigger);
 }
 
@@ -5150,65 +4768,6 @@ uint32_t Connection::elapsedSinceLastDataBurstEndMs() const {
 //                          ack-signature dedup): NOT a round, touch nothing.
 // Partial-SACK rounds land here with progress > 0 and therefore resend immediately
 // (status quo) — only zero-progress rounds ever defer (§3).
-// TROUGH AMNESTY (ULTRA_TROUGH_AMNESTY, default OFF = byte-identical). A fade null is
-// TIME-bounded: a rung proven clean seconds before it is not invalidated by it. Yet the
-// down-side (collapse escape + quality-EMA demote) and the up-side (ssthresh pins +
-// per-rung climb streaks) both treat trough evidence as RATE evidence — F89/F91 measured
-// a ~20 s bidirectional/forward null demoting three rungs and then sitting at R1/4 for
-// minutes while delivering 8/8 q=0.9+. When the episode ends (the first progress-bearing
-// ack), restore the pre-episode rung directly: if the channel genuinely worsened, one
-// crater at the restored rung re-demotes in ~3.5 s (receiver rung command) — bounded
-// downside, minutes of upside. Ordering with the receiver's rung command: the command
-// applies BEFORE the round outcome in onToneBurstAck, so (a) an episode that starts on a
-// crater ack snapshots the POST-crater rung (crater evidence kept), and (b) amnesty
-// SKIPS when this ack carries a fresh DOWN command (receiver evidence wins).
-static int coherentRungOrdinal(Modulation m, CodeRate r) {
-    const int mod_rank = (m == Modulation::QAM16) ? 1 : 0;
-    return mod_rank * 16 + static_cast<int>(ofdmCodeRateValue(r) * 12.0f + 0.5f);
-}
-void Connection::maybeTroughAmnesty(int progress_frames, uint8_t rung_cmd) {
-    if (!trough_episode_active_ || progress_frames <= 0) return;
-    trough_episode_active_ = false;  // the episode is over either way
-    static const bool kAmnestyOn = [] {
-        const char* e = std::getenv("ULTRA_TROUGH_AMNESTY");
-        return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05 (inert under authority)
-    }();
-    if (!kAmnestyOn) return;
-    if (rung_cmd != ultra::waveform::tone_burst_ack::kRungCmdNone) return;
-    if (state_ != ConnectionState::CONNECTED) return;
-    if (negotiated_mode_ != WaveformMode::OFDM_CHIRP) return;
-    if (!rateAdaptationActive() || mode_change_pending_) return;
-    if (file_transfer_.getState() != FileTransferState::SENDING &&
-        hasGeometryBoundDataOperation()) {
-        // Amnesty is an opportunistic up-move. A message/binary object owns one
-        // geometry for its complete lifetime; never fail it merely to restore a
-        // pre-trough rung. The next transfer can re-evaluate normally.
-        return;
-    }
-    if (coherentRungOrdinal(data_modulation_, data_code_rate_) >=
-        coherentRungOrdinal(pre_episode_mod_, pre_episode_rate_)) {
-        return;  // nothing was lost to the trough
-    }
-    LOG_MODEM(WARN,
-              "Connection: TROUGH-AMNESTY restore %s %s -> %s %s (null ended; "
-              "trough demotes are not rate evidence)",
-              modulationToString(data_modulation_), codeRateToString(data_code_rate_),
-              modulationToString(pre_episode_mod_), codeRateToString(pre_episode_rate_));
-    // Same commit envelope as maybeApplyRxRateCommand (we are inside the ack's
-    // defer-refill bracket): descriptor commit when era-safe, legacy exchange fallback.
-    bool desc_committed = false;
-    const bool busy = hasGeometryBoundDataOperation();
-    if (!busy || arq_.moveEpochEnabled()) {
-        desc_committed = tryDescriptorModeSwitch(
-            pre_episode_mod_, pre_episode_rate_, wireSnrDb(),
-            v2::ModeChangeReason::CHANNEL_IMPROVED);
-    }
-    if (!desc_committed) {
-        requestModeChange(pre_episode_mod_, pre_episode_rate_, wireSnrDb(),
-                          v2::ModeChangeReason::CHANNEL_IMPROVED);
-    }
-}
-
 void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     if (progress_frames >= 0) {
         // The peer is heard on any ACK round, progress or not; a timeout round heard nothing.
@@ -5273,27 +4832,14 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     // rounds' that were both decoded dup-acks — while the receiver's verdict was
     // simultaneously commanding UP; the two drivers fought and the ladder sawed).
     // The escape's charter is ack-SILENCE self-rescue: only RTO rounds (no ack
-    // decoded at all) count while authority is on. Without authority the old
-    // accounting stands (the sender is the only driver there).
-    if (rxRateAuthorityEnabled() && std::strcmp(origin, "rto") != 0) {
+    // decoded at all) count - the receiver commands the rung on every ACK it sends.
+    if (std::strcmp(origin, "rto") != 0) {
         return;
     }
 
     ++zero_progress_rounds_;
-    // TROUGH AMNESTY: snapshot the rung active as the episode BEGINS. Runs after
-    // maybeApplyRxRateCommand in the ack path, so a crater rung-command landing on
-    // this same ack has already applied — the snapshot is the post-crater rung
-    // (legitimate receiver evidence is kept; only trough-driven drops are amnestied).
-    if (zero_progress_rounds_ == 1) {
-        trough_episode_active_ = true;
-        pre_episode_mod_ = data_modulation_;
-        pre_episode_rate_ = data_code_rate_;
-    }
     LOG_MODEM(INFO, "Connection: zero-progress ARQ round %d (%s)",
               zero_progress_rounds_, origin);
-    // The §2 collapse escape is POLLED from the CONNECTED tick (maybeCollapseEscape), not
-    // fired here — this function runs inside ack processing AND inside the ARQ transmit
-    // callback (RTO batch), and requestModeChange must not re-enter the ARQ from the latter.
     if (!retxTroughPacingEnabled()) {
         return;  // §5.1 master knob OFF (default) — counting above is inert bookkeeping
     }
@@ -5322,395 +4868,6 @@ void Connection::noteArqRoundOutcome(int progress_frames, const char* origin) {
     char buf[96];
     std::snprintf(buf, sizeof(buf), "pace-hold %ums (zero-progress round %d)",
                   hold_ms, zero_progress_rounds_);
-    last_adaptive_action_ = buf;
-}
-
-void Connection::applyAdaptiveRateFeedback(float quality) {
-    // §14.36 Phase 5c: the SENDER runs the rate controller on the receiver's
-    // decode-headroom feedback (carried on the GROUP_ACK; a GROUP_NACK feeds 0).
-    // It owns the rate, so data_code_rate_ is the rate the just-acked group used.
-    if (!adaptive_rate_enabled_ || !use_burst_transport_) {
-        return;
-    }
-    if (quality < 0.0f) {
-        return;  // no feedback byte (old peer / adaptation off on the far end)
-    }
-    // GUI "Adapt:" headroom bar reads lastGroupQuality(). Record EVERY valid sample here —
-    // before the lock-rate / rate-change branches below each return — or the bar stays at the
-    // init -1.0 forever ("waiting for first group..."). The unification dropped this assignment
-    // (only last_adaptive_action_ text was kept), so the bar never populated mid-transfer.
-    // NOTE: on the unified tone-burst path `quality` is currently the binary ack(1.0)/nack(0.0)
-    // signal; a graded decode-headroom would need the tone-burst rate_hint field wired through
-    // (TODO) — but binary already drives the green/red bar instead of "waiting" all run.
-    last_group_quality_ = quality;
-    // Rate ADAPTATION is DEFAULT-ON for connected wideband OFDM (2026-07-02, fade-riding
-    // ladder; was default-OFF 2026-06-07..07-01). The §14.43 closed-loop quality feedback is
-    // wired end-to-end (receiver LDPC headroom -> rate_hint -> here). Opt out with
-    // ULTRA_RATE_ADAPT=0 or pin with ULTRA_LOCK_RATE=1 — then the graded quality still drives
-    // the GUI "Adapt:" bar (last_group_quality_, set above) + the action text, so we can SEE
-    // what the controller WOULD do without it moving the rate.
-    if (!rateAdaptationActive()) {
-        const bool rate_locked = [] {
-            const char* l = std::getenv("ULTRA_LOCK_RATE");
-            return l != nullptr && std::atoi(l) != 0;
-        }();
-        char buf[96];
-        std::snprintf(buf, sizeof(buf), "%s %s (q=%.2f)",
-                      rate_locked ? "lock" : "off", codeRateToString(data_code_rate_), quality);
-        last_adaptive_action_ = buf;
-        return;
-    }
-
-    // ───────── QAM16 R2/3 cross-modulation climb (ULTRA_QAM16_CLIMB, default-ON) ─────────
-    // Default-ON since 2026-07-02 (fade-riding ladder): above QPSK R3/4 the next throughput
-    // step is the QAM16 R2/3 modulation hop, and riding the Good fade crests requires taking
-    // it. "0" opts out.
-    const bool qam16_climb_enabled = [] {
-        const char* e = std::getenv("ULTRA_QAM16_CLIMB");
-        if (e == nullptr || e[0] == '\0') return true;
-        return std::atoi(e) != 0;
-    }();
-    if (data_modulation_ == Modulation::QAM16 ||
-        data_modulation_ == Modulation::QAM8) {
-        // While on a DENSE-constellation gear we do NOT walk the QPSK code-rate ladder
-        // (the RateController is QPSK-blind — its R2/3 index is a QPSK rung). QAM16 is
-        // fragile on frequency-selective fading (the decodability cliff: 55-70% loss /
-        // link-death — fable_07); QAM8's 45° boundaries fail the same way, just later
-        // (+3.6 dB margin). 8PSK revival probe (2026-07-05): letting the EMA walk QAM8
-        // down its own rate ladder slid R2/3 -> R1/2 -> R1/4 (a strictly-dominated
-        // rung: tight boundaries AND low rate) and finished at 990 vs the pinned-rate
-        // 2040 — dense mods need the EXIT semantics, not the walk. So: HOLD or a
-        // prompt asymmetric demote to the robust QPSK R3/4 home gear (QAM16's
-        // re-climb cooldown machinery applies to QAM16 only; QAM8 has no mid-stream
-        // climb-in yet — it is entry-selected — so no cooldown to meter).
-        // ULTRA_QAM16_R34 crest semantics generalize: a bad group at the mod's R3/4
-        // rung steps down ONE rung to its validated R2/3 and STAYS on the modulation;
-        // a further bad group takes the QPSK exit.
-        // RAW quality (not the EMA): a cliff demands a prompt reaction.
-        const bool is_qam16 = data_modulation_ == Modulation::QAM16;
-        const float drop_below = rate_controller_.config().drop_below;
-        const bool nack = quality <= 0.0f;  // group fully lost — the cliff signature
-        if (quality < drop_below) ++qam16_bad_streak_; else qam16_bad_streak_ = 0;
-        char buf[96];
-        if (nack || qam16_bad_streak_ >= kQam16DemoteBadStreak) {
-            qam16_bad_streak_ = 0;
-            qam16_r34_clean_streak_ = 0;  // a bad group also aborts any pending R3/4 walk
-            // Crest-rung exit is one step at a time: R3/4 demotes to the validated R2/3, and
-            // STAYS on the dense mod — noteQam16Demoted meters the QPSK->QAM16 re-entry
-            // cooldown, which this is not. A further bad group at R2/3 exits to QPSK below.
-            // (QAM8 R3/4 is a ladder rung when the psk8 ladder is on — same one-step-down.)
-            const bool r34_step_down =
-                (is_qam16 ? qam16R34Enabled() : true) &&
-                data_code_rate_ == CodeRate::R3_4;
-            const bool busy = hasGeometryBoundDataOperation();
-            if (busy) {
-                std::snprintf(buf, sizeof(buf),
-                              "hold %s %s (demote->%s at clean boundary, q=%.2f)",
-                              modulationToString(data_modulation_),
-                              codeRateToString(data_code_rate_),
-                              r34_step_down ? "R2/3 (same mod)" : "QPSK R3/4", quality);
-            } else if (r34_step_down) {
-                const Modulation step_mod = data_modulation_;  // stays on the dense mod
-                const bool desc_committed = tryDescriptorModeSwitch(
-                    step_mod, CodeRate::R2_3, wireSnrDb(),
-                    v2::ModeChangeReason::CHANNEL_DEGRADED);
-                if (!desc_committed) {
-                    requestModeChange(step_mod, CodeRate::R2_3, wireSnrDb(),
-                                      v2::ModeChangeReason::CHANNEL_DEGRADED);
-                }
-                std::snprintf(buf, sizeof(buf),
-                              "%s R3/4 -> R2/3 demote via %s (q=%.2f)",
-                              modulationToString(step_mod),
-                              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
-                LOG_MODEM(INFO, "Connection: adaptive %s", buf);
-            } else {
-                // Count the demote + arm the re-climb cooldown only when the MODE_CHANGE actually
-                // fires (a busy-held decision re-asserts on the next bad group; counting the hold
-                // would double-charge the backoff for one logical demote). QAM16 only: QAM8 has
-                // no mid-stream climb-in, so there is no re-entry cooldown to meter.
-                if (is_qam16) noteQam16Demoted(1);
-                // Old-mode strings captured BEFORE the commit: a descriptor commit applies
-                // the new mode immediately (data_code_rate_ mutates), unlike the pending
-                // MODE_CHANGE path which holds it until the ACK.
-                const char* old_mod_str = modulationToString(data_modulation_);
-                const char* old_rate_str = codeRateToString(data_code_rate_);
-                const bool desc_committed = tryDescriptorModeSwitch(
-                    Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
-                    v2::ModeChangeReason::CHANNEL_DEGRADED);
-                if (!desc_committed) {
-                    requestModeChange(Modulation::QPSK, CodeRate::R3_4, wireSnrDb(),
-                                      v2::ModeChangeReason::CHANNEL_DEGRADED);
-                }
-                std::snprintf(buf, sizeof(buf),
-                              "%s %s -> QPSK R3/4 demote via %s (q=%.2f)",
-                              old_mod_str, old_rate_str,
-                              desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
-                LOG_MODEM(INFO, "Connection: adaptive %s", buf);
-            }
-        } else if (is_qam16 && qam16R34Enabled() && data_code_rate_ == CodeRate::R2_3) {
-            // Crest-rung walk: QAM16 R2/3 -> R3/4 after qam16ClimbStreak() CONSECUTIVE clean
-            // groups (quality >= climb_above; a sub-threshold group resets the streak — same
-            // gate as the QPSK->QAM16 hop). Fires only at a clean send boundary; when the
-            // window is busy the streak is KEPT so the walk re-asserts on a later
-            // clean-boundary ack, mirroring the modulation hop's deferred re-assert.
-            const float climb_above = rate_controller_.config().climb_above;
-            if (quality >= climb_above) ++qam16_r34_clean_streak_;
-            else qam16_r34_clean_streak_ = 0;
-            // FAST-CREST (2026-07-04, F9 finding, knob ULTRA_R34_FAST_CREST default-OFF):
-            // the 2-group streak TRAILS the crest — F9's hop confirmed at fading 0.17
-            // but fired at 0.51 (the window had closed; the excursion caught the tail,
-            // 4/9 + 0/9, ~40 s lost). With descriptor commits + the ~4 s receiver-command
-            // demote, a wrong hop is now cheap — so when the receiver's quality hint
-            // SATURATES (>= 0.99 = the 3-bit quantizer's top bin: decode headroom far
-            // beyond the R2/3 requirement), ONE such group arms the walk. Exit speed
-            // funds entry speed.
-            static const bool kFastCrest = [] {
-                const char* e = std::getenv("ULTRA_R34_FAST_CREST");
-                return !(e && e[0] == '0');  // DEFAULT-ON 2026-07-05
-            }();
-            const int walk_streak_needed =
-                (kFastCrest && quality >= 0.99f) ? 1 : qam16ClimbStreak();
-            // CALM-GATE (2026-07-04, F3-replication + crest A/B, knob
-            // ULTRA_R34_CALM_FADING default-OFF byte-identical): the R3/4 walk fired
-            // on `quality` alone — a BACKWARD-looking signal (the group that just
-            // decoded had headroom). But R3/4 must survive the NEXT ~9 s, which is a
-            // channel-COHERENCE property, not a decode-headroom one. In a chop
-            // realization a clean group is routinely followed by a crater, so blind
-            // probing pays 1 cratered group + a re-climb per probe (afternoon A/B:
-            // crest median 1.25 vs crest-OFF 1.43/1.62 in the SAME chop; F3's 2.50
-            // was a zero-crater 16QAM cruise that NEVER probed). Gate the walk on the
-            // coherence-adjusted fading index: probe only in AWGN/low-Doppler calm —
-            // exactly F3's cruise condition — otherwise stay at 16QAM R2/3 and cruise.
-            // Set the knob to a threshold (e.g. 0.30) to enable; absent = legacy.
-            static const float kR34CalmFading = [] {
-                const char* e = std::getenv("ULTRA_R34_CALM_FADING");
-                return (e && e[0]) ? std::strtof(e, nullptr) : 0.30f;  // DEFAULT 0.30 2026-07-05; <0 = off
-            }();
-            const bool calm_gate_ok =
-                kR34CalmFading < 0.0f ||
-                connection_policy::coherenceAdjustedFadingIndex(
-                    fading_index_, coherence_score_, coherence_valid_) <= kR34CalmFading;
-            if (calm_gate_ok && qam16_r34_clean_streak_ >= walk_streak_needed) {
-                const bool busy = hasGeometryBoundDataOperation();
-                if (busy) {
-                    std::snprintf(buf, sizeof(buf),
-                                  "hold QAM16 R2/3 for clean boundary (want QAM16 R3/4, q=%.2f)",
-                                  quality);
-                } else {
-                    qam16_r34_clean_streak_ = 0;  // walk FIRED at a clean boundary -> reset
-                    const bool desc_committed = tryDescriptorModeSwitch(
-                        Modulation::QAM16, CodeRate::R3_4, wireSnrDb(),
-                        v2::ModeChangeReason::CHANNEL_IMPROVED);
-                    if (!desc_committed) {
-                        requestModeChange(Modulation::QAM16, CodeRate::R3_4, wireSnrDb(),
-                                          v2::ModeChangeReason::CHANNEL_IMPROVED);
-                    }
-                    std::snprintf(buf, sizeof(buf),
-                                  "QAM16 R2/3 -> QAM16 R3/4 climb via %s (q=%.2f)",
-                                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
-                    LOG_MODEM(INFO, "Connection: adaptive %s", buf);
-                }
-            } else {
-                std::snprintf(buf, sizeof(buf), "hold QAM16 R2/3 (q=%.2f)", quality);
-            }
-        } else if (!is_qam16 && psk8LadderEnabled() &&
-                   data_code_rate_ == CodeRate::R2_3) {
-            // QAM8 R2/3 -> QAM16 R2/3 modulation crest-step (2026-07-05, F121 finding:
-            // QAM8 was entry-only — no upward walk existed). Same gates as the QAM16
-            // R3/4 crest walk above: qam16ClimbStreak() CONSECUTIVE clean groups
-            // (>= climb_above; one sub-threshold group resets), fire only at a clean
-            // send boundary, streak KEPT on a busy hold so the step re-asserts.
-            // Reuses qam16_r34_clean_streak_ (identical lifecycle, mutually exclusive
-            // with the QAM16 walk via the is_qam16 arm; rename tracked in the cleanup
-            // register). +1 bit/symbol at -3.6 dB margin — strictly a crest move, the
-            // streak is the calm gate.
-            const float climb_above = rate_controller_.config().climb_above;
-            if (quality >= climb_above) ++qam16_r34_clean_streak_;
-            else qam16_r34_clean_streak_ = 0;
-            if (qam16_r34_clean_streak_ >= qam16ClimbStreak() &&
-                qam16_reclimb_cooldown_ == 0) {
-                const bool busy = hasGeometryBoundDataOperation();
-                if (busy) {
-                    std::snprintf(buf, sizeof(buf),
-                                  "hold QAM8 R2/3 for clean boundary (want QAM16 R2/3, q=%.2f)",
-                                  quality);
-                } else {
-                    qam16_r34_clean_streak_ = 0;  // step FIRED at a clean boundary -> reset
-                    const bool desc_committed = tryDescriptorModeSwitch(
-                        Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
-                        v2::ModeChangeReason::CHANNEL_IMPROVED);
-                    if (!desc_committed) {
-                        requestModeChange(Modulation::QAM16, CodeRate::R2_3, wireSnrDb(),
-                                          v2::ModeChangeReason::CHANNEL_IMPROVED);
-                    }
-                    std::snprintf(buf, sizeof(buf),
-                                  "QAM8 R2/3 -> QAM16 R2/3 climb via %s (q=%.2f)",
-                                  desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
-                    LOG_MODEM(INFO, "Connection: adaptive %s", buf);
-                }
-            } else {
-                std::snprintf(buf, sizeof(buf), "hold QAM8 R2/3 (q=%.2f)", quality);
-            }
-        } else {
-            std::snprintf(buf, sizeof(buf), "hold %s %s (q=%.2f)",
-                          modulationToString(data_modulation_),
-                          codeRateToString(data_code_rate_), quality);
-        }
-        last_adaptive_action_ = buf;
-        return;
-    }
-
-    const CodeRate prev = data_code_rate_;
-    CodeRate next = rate_controller_.update(prev, quality);
-    // 2026-05-28 experiment: ULTRA_MAX_OFDM_RATE caps climbs at a chosen rung.
-    if (const char* env = std::getenv("ULTRA_MAX_OFDM_RATE")) {
-        const std::string s(env);
-        const CodeRate cap = (s == "R1_2" || s == "r1_2") ? CodeRate::R1_2
-                           : (s == "R2_3" || s == "r2_3") ? CodeRate::R2_3
-                           : (s == "R3_4" || s == "r3_4") ? CodeRate::R3_4
-                           : CodeRate::AUTO;  // anything else = no cap (AUTO sentinel)
-        if (cap != CodeRate::AUTO && next > cap) {
-            next = cap;
-        }
-    }
-    // Per-modulation validated-rate cap (2026-06-12, Phase 1). The RateController is
-    // modulation-blind: it would climb the connect-time 16QAM R1/2 up into the measured
-    // damage-bound 16QAM R2/3/R3/4 (Phase 0a) before the REACTIVE ssthresh can cap it —
-    // taking a frame into a fade at the over-climbed rung (the seed-7 R3/4 FAIL mode).
-    // Cap the CLIMB at the highest GUI-validated rate for the active modulation. Drops
-    // (escape-drop / ssthresh) go DOWN and are unaffected. No-op for QPSK (cap = R3/4, ladder top).
-    const CodeRate mod_cap = maxValidatedCoherentRate(data_modulation_);
-    if (next > mod_cap) {
-        next = mod_cap;
-    }
-
-    // QPSK R3/4 -> QAM16 R2/3 cross-modulation CLIMB. Above the QPSK top rung (R3/4) the next
-    // throughput step is a MODULATION step, not a thinner code (R5/6 retired — a measured loser).
-    // Climb ONLY after qam16ClimbStreak() CONSECUTIVE clean groups (quality >= climb_above) while
-    // pinned at QPSK R3/4: a single sub-threshold group breaks the streak, so the streak doubles
-    // as a low-variance Good-vs-Moderate gate (a Moderate channel's fades keep resetting it) — the
-    // sender-side proxy for "confirmed-Good" that needs no wire change. The LTS coherence disc (the
-    // sharper gate) lives on the RECEIVER, which is deaf to its own channel while sending, and its
-    // HW threshold is not yet validated, so disc-gating is a deliberate later add. After a demote,
-    // the re-climb COOLDOWN (noteQam16Demoted) must first be spent in CLEAN groups before the
-    // streak may accrue again — the fade-riding replacement for the 06-17 sticky no-reclimb.
-    Modulation target_mod = data_modulation_;
-    CodeRate target_rate = next;
-    bool qam16_hop = false;
-    // LADDER-AWARE dense climb (2026-07-05, F121 finding): with the 8PSK ladder on,
-    // the first dense rung above QPSK R3/4 is QAM8 R2/3 (constant-envelope, ~3.6 dB
-    // more constellation margin than 16QAM). Without this the hop was hardcoded
-    // QPSK->QAM16, making QAM8 ENTRY-ONLY: any exit mid-transfer stranded the run on
-    // the QPSK<->QAM16 loop (F121 never revisited 8PSK after an 18 dB connect
-    // snapshot). The streak / cooldown / calm-gate machinery below is unchanged —
-    // only the hop TARGET generalizes. The QAM8 R2/3 -> QAM16 R2/3 upward step lives
-    // in the dense-constellation branch above (this code is unreachable while on a
-    // dense mod — that branch returns). (The qam16_* names now cover the generic
-    // dense-climb machinery; rename tracked in the cleanup register.)
-    const Modulation climb_to_mod =
-        psk8LadderEnabled() ? Modulation::QAM8 : Modulation::QAM16;
-    if (qam16_climb_enabled &&
-        data_modulation_ == Modulation::QPSK && prev == CodeRate::R3_4 &&
-        next == CodeRate::R3_4) {
-        const float climb_above = rate_controller_.config().climb_above;
-        if (quality >= climb_above) {
-            if (qam16_reclimb_cooldown_ > 0) {
-                --qam16_reclimb_cooldown_;  // a clean group spends cooldown; streak stays 0
-                qam16_clean_streak_ = 0;
-            } else {
-                ++qam16_clean_streak_;
-            }
-        } else {
-            qam16_clean_streak_ = 0;
-        }
-        // 16QAM CALM-GATE (2026-07-04, crater-frequency lever, knob
-        // ULTRA_QAM16_CALM_FADING default-OFF byte-identical): the climb fires on
-        // backward-looking `quality`; 16QAM R2/3 sits at ZERO fade-headroom, so in a
-        // choppy realization it climbs into a trough and craters (afternoon 8/29 vs
-        // F3's calm 1/18). Now that crater RECOVERY is fast (self-echo fix, ~3.5 s),
-        // the residual tax is crater FREQUENCY. Gate the hop on the coherence-adjusted
-        // fading index — climb to 16QAM only when the channel is calm (fade-riding:
-        // 16QAM on crests), else hold the robust QPSK R3/4 and cruise. The streak is
-        // preserved when the gate blocks (same deferral semantics as a busy window),
-        // so the hop re-asserts the moment calm returns. Mirror of the R3/4 calm-gate.
-        static const float kQam16CalmFading = [] {
-            const char* e = std::getenv("ULTRA_QAM16_CALM_FADING");
-            return (e && e[0]) ? std::strtof(e, nullptr) : -1.0f;  // <0 = gate off
-        }();
-        const bool qam16_calm_ok =
-            kQam16CalmFading < 0.0f ||
-            connection_policy::coherenceAdjustedFadingIndex(
-                fading_index_, coherence_score_, coherence_valid_) <= kQam16CalmFading;
-        if (qam16_clean_streak_ >= qam16ClimbStreak() && qam16_calm_ok) {
-            target_mod = climb_to_mod;
-            target_rate = CodeRate::R2_3;
-            qam16_hop = true;
-            // NOTE: do NOT reset the streak here. If the change is DEFERRED below (busy send
-            // window — the common case mid-transfer), keeping the streak >= qam16ClimbStreak() lets
-            // the hop RE-ASSERT on the next clean-boundary ack (mirroring how the QPSK rate change
-            // re-asserts via rate_controller_.update). The streak resets only when the hop actually
-            // FIRES, or when a sub-climb_above group breaks it (the channel degraded — abort).
-        }
-    } else {
-        qam16_clean_streak_ = 0;  // not pinned at the QPSK top rung / disabled -> reset the streak
-    }
-
-    char buf[96];
-    const bool changed = (target_mod != data_modulation_) || (target_rate != prev);
-    if (changed) {
-        // OPTION A (2026-06-10): a mid-FILE rate/mod change must land at a CLEAN send boundary —
-        // one with no in-flight/pending file chunks. applyDataMode() re-encodes pending chunks
-        // via requeuePendingChunks(), which REWINDS the file send cursor by the whole in-flight
-        // window and re-sends already-delivered data. On a clean channel that's just wasted
-        // airtime (survivable), but coincident with a fade the redundant re-sends starve the
-        // real remaining chunks and the transfer strands (~75%, Good@20 seeds 2/99, 2026-06-09).
-        // requestModeChange() holds the rate until BRAVO ACKs and runDeferredArqRefill() is gated
-        // on mode_change_pending_, so NO new chunks submit between issue and apply — a change
-        // ISSUED at a clean boundary is also APPLIED at one (the window stays drained until the
-        // ACK -> requeuePendingChunks() is a no-op -> nothing re-sent). When the window is busy,
-        // HOLD: applyAdaptiveRateFeedback runs on every group ack, and the EMA controller
-        // re-asserts the decision on a later ack that lands at a clean boundary (a full-ack tick).
-        // This also correctly THROTTLES rate churn during a fade (partial acks keep us busy).
-        const bool geometry_owner_busy = hasGeometryBoundDataOperation();
-        if (geometry_owner_busy) {
-            std::snprintf(buf, sizeof(buf), "hold %s %s for clean boundary (want %s %s, q=%.2f)",
-                          modulationToString(data_modulation_), codeRateToString(prev),
-                          modulationToString(target_mod), codeRateToString(target_rate), quality);
-        } else {
-            // Route the adaptive rate/mod change through the SYNCHRONIZED MODE_CHANGE handshake:
-            // requestModeChange() holds the local rate until BRAVO ACKs, so both stations switch
-            // TOGETHER and re-anchor cleanly. The former unilateral `data_code_rate_ = next` flip
-            // (in-band BURST_HEADER descriptor) desynced the pilot/carrier geometry between sender
-            // and receiver — stale warm-sync -> |H| garbage -> 0/8 CWs forever -> churn to R1/4
-            // (2026-06-09). The EMA RateController owns WHEN to change; the MODE_CHANGE owns HOW.
-            const uint8_t reason =
-                isFasterMode(target_mod, target_rate, data_modulation_, prev)
-                    ? v2::ModeChangeReason::CHANNEL_IMPROVED
-                    : v2::ModeChangeReason::CHANNEL_DEGRADED;
-            // Old-mod string captured BEFORE the commit: a descriptor commit applies the
-            // new mode immediately (data_modulation_ mutates), unlike the pending
-            // MODE_CHANGE path which holds it until the ACK.
-            const char* old_mod_str = modulationToString(data_modulation_);
-            // DESC-SWITCH Phase 1 (knob-ON): skip the MODE_CHANGE round-trip — commit
-            // locally and let the next burst's BURST_HEADER descriptor announce the move
-            // (§5.1; the pilot/carrier-geometry desync arm of the 2026-06-09 failure is
-            // closed by the mandatory full-anchor one-shot + RX warm-handoff demotion).
-            // Falls back to the synchronized exchange when out of scope.
-            const bool desc_committed =
-                tryDescriptorModeSwitch(target_mod, target_rate, wireSnrDb(), reason);
-            if (!desc_committed) {
-                requestModeChange(target_mod, target_rate, wireSnrDb(), reason);
-            }
-            if (qam16_hop) qam16_clean_streak_ = 0;  // hop FIRED at a clean boundary -> reset
-            std::snprintf(buf, sizeof(buf), "%s %s -> %s %s via %s (q=%.2f)",
-                          old_mod_str, codeRateToString(prev),
-                          modulationToString(target_mod), codeRateToString(target_rate),
-                          desc_committed ? "DESC-SWITCH" : "MODE_CHANGE", quality);
-            LOG_MODEM(INFO, "Connection: adaptive %s", buf);
-        }
-    } else {
-        std::snprintf(buf, sizeof(buf), "hold %s (q=%.2f)", codeRateToString(prev), quality);
-    }
     last_adaptive_action_ = buf;
 }
 
@@ -5849,28 +5006,22 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // below) so the verdict rides THIS ACK — the crater is visible to the sender one
         // whole escape-detection cycle (~2×RTO) earlier than its own zero-progress
         // evidence. Hard no-op while the knob is OFF.
-        if (rx_rate_cmd_enabled_) {
-            updateRxRateCommandFromGroup(all_ok, frame_mask);
-        }
-        // RX-AUTHORITY (ULTRA_RX_RATE_AUTHORITY): compute the receiver's ABSOLUTE
-        // rung verdict for this group BEFORE its ACK emits — the command rides THIS
-        // ACK. Hard no-op while the knob is OFF.
-        if (rxRateAuthorityEnabled()) {
-            // Delivered fraction for the goodput-graded crater predicate: frame_mask
-            // bits are the DELIVERED frames of this group (the full-crater arm below
-            // reads mask==0 as zero delivered), so popcount/group_size is the measured
-            // per-group delivery. Only meaningful with a known group size — pass -1
-            // otherwise so the predicate keeps its legacy binary form.
-            const uint8_t delivered_frames = static_cast<uint8_t>(
-                std::min<unsigned>(std::popcount(frame_mask), group_size));
-            const float delivered_fraction =
-                (group_size > 0)
-                    ? static_cast<float>(delivered_frames) / static_cast<float>(group_size)
-                    : -1.0f;
-            updateRxAuthorityCommand(all_ok, quality, /*full_crater=*/!all_ok && frame_mask == 0,
-                                     delivered_fraction, delivered_frames, group_size,
-                                     geometry_proven);
-        }
+        // RX-AUTHORITY: compute the receiver's ABSOLUTE rung verdict for this group BEFORE
+        // its ACK emits — the command rides THIS ACK.
+        // Delivered fraction for the goodput-graded crater predicate: frame_mask
+        // bits are the DELIVERED frames of this group (the full-crater arm below
+        // reads mask==0 as zero delivered), so popcount/group_size is the measured
+        // per-group delivery. Only meaningful with a known group size — pass -1
+        // otherwise so the predicate keeps its legacy binary form.
+        const uint8_t delivered_frames = static_cast<uint8_t>(
+            std::min<unsigned>(std::popcount(frame_mask), group_size));
+        const float delivered_fraction =
+            (group_size > 0)
+                ? static_cast<float>(delivered_frames) / static_cast<float>(group_size)
+                : -1.0f;
+        updateRxAuthorityCommand(all_ok, quality, /*full_crater=*/!all_ok && frame_mask == 0,
+                                 delivered_fraction, delivered_frames, group_size,
+                                 geometry_proven);
         // ALC RUNAWAY GUARD (2026-07-04, F18): a fully-failed group invalidates any
         // accumulated LOW-level streak — those readings were fade-trough artifacts,
         // not drive-starvation evidence (see the SACK-emit advisory gate).
@@ -6399,8 +5550,7 @@ void Connection::noteAnchoredBurstNoGroup(bool payload_seen) {
     // onBurstGroupReceived). A decoded fallback payload makes k=0 false, while
     // the lost descriptor leaves M unknowable; skip the selector observation
     // rather than inventing the latent controller's fallback 0/5 sample.
-    if (rxRateAuthorityEnabled() &&
-        connection_policy::shouldGradeAnchoredBackstopAsCrater(payload_seen)) {
+    if (connection_policy::shouldGradeAnchoredBackstopAsCrater(payload_seen)) {
         updateRxAuthorityCommand(/*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/true);
     } else if (payload_seen) {
         LOG_MODEM(INFO,
@@ -7256,10 +6406,6 @@ void Connection::tick(uint32_t elapsed_ms) {
             // progress cross to it instead of escaping to another OFDM rung.
             maybeCrossDownOnCollapse();
             maybeEscapeStuckFrame();
-            // §RETX-PACING §2: the collapse-conditioned escape is POLLED here (proven-safe
-            // context, same as maybeEscapeStuckFrame) — rounds counted inside the ARQ
-            // transmit callback (RTO batch) and act after ARQ unwinds, never re-entrantly.
-            maybeCollapseEscape();
             // The timeout batch was serialized by ARQ before these escape decisions, but
             // has not gone on air. Commit it only if the rung/geometry is still current;
             // otherwise the mode-change refill owns the next physical turn.
@@ -9090,7 +8236,6 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // §RETX-PACING: a mode/rate change starts a NEW era — the zero-round evidence and any
     // armed hold belong to the rung we just left (§7 checklist: reset on applyDataMode).
     zero_progress_rounds_ = 0;
-    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     // GROUP-SIZE: the clean streak is CHANNEL evidence (fade cadence), not rung
     // evidence — an UP-move was itself earned by clean rounds, so it carries the
@@ -9111,7 +8256,6 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
     // so the next ACK stops carrying the consumed command. An idempotent re-apply
     // (nothing changed) is NOT an adoption and keeps the latch.
     if (rate_changed || mod_changed) {
-        rx_rate_cmd_pending_ = 0;
         // RX-AUTHORITY: any real mode move (an obey, an ack-silence escape, a
         // legacy exchange) starts a new era for the obey-dedup — without this, a
         // safety escape that moved us OFF a previously-obeyed target would block
@@ -9437,11 +8581,8 @@ bool Connection::waveformFollowActive() const {
     const uint8_t mc = connection_policy::modeToCapabilityBit(WaveformMode::MC_DPSK);
     const uint8_t ofdm = connection_policy::modeToCapabilityBit(WaveformMode::OFDM_CHIRP);
     const char* lock = std::getenv("ULTRA_LOCK_RATE");
-    // The crossing commands are the receiver authority's rung word: without the authority the
-    // sender neither reads them nor ends its probation (an ACK with progress, read in the
-    // authority branch), so follow would cross one way and never settle.
+    // The crossing commands are the receiver authority's rung word.
     return waveform_follow_enabled_ && waveform_follow_allowed_ &&
-           rxRateAuthorityEnabled() &&
            state_ == ConnectionState::CONNECTED && !disconnect_teardown_active_ &&
            (negotiated_mode_ == WaveformMode::MC_DPSK ||
             negotiated_mode_ == WaveformMode::OFDM_CHIRP) &&
@@ -10435,23 +9576,14 @@ void Connection::resetOfdmLadderState() {
     // The OFDM ladder's per-session state: what a fresh connection starts from, and what an
     // MC-DPSK -> OFDM crossing starts from (waveform follow) - none of it is evidence about a
     // channel the ladder has not yet carried data on.
-    // QAM16 climb state (the re-climb cooldown/backoff resets here).
-    qam16_clean_streak_ = 0;
-    qam16_bad_streak_ = 0;
-    qam16_r34_clean_streak_ = 0;
-    qam16_reclimb_cooldown_ = 0;
-    qam16_demote_count_ = 0;
-    // §RETX-PACING: trough-pacing / collapse-escape round state.
+    // §RETX-PACING: trough-pacing round state.
     zero_progress_rounds_ = 0;
-    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     last_data_burst_end_valid_ = false;
     partial_sack_last_round_ = {};
     partial_sack_descriptor_repair_scope_ = false;
     // RX-RATE-CMD Phase 2 state (the seq dedup space restarts with the ARQ; a stale standing
     // command must never leak across sessions or eras).
-    rx_rate_cmd_pending_ = 0;
-    rx_rate_cmd_seq_seen_ = -1;
     rebase_voice_event_seq_ = 0;
     rx_rebase_voice_seq_seen_ = -1;
     rx_authority_cmd_ = 0;
@@ -10472,7 +9604,6 @@ void Connection::resetOfdmLadderState() {
     burst_obs_fading_ = -1.0f;
     burst_obs_evm_snr_db_ = -1.0f;
     burst_obs_coh_valid_ = false;
-    qam16_rx_bad_streak_ = 0;
 }
 
 void Connection::resetAdaptiveDecisionState() {
@@ -10635,8 +9766,6 @@ void Connection::enterDisconnected(const std::string& reason) {
     desc_switch_full_anchor_pending_ = false;
     partial_sack_last_round_ = {};
     partial_sack_descriptor_repair_scope_ = false;
-    rx_rate_cmd_pending_ = 0;       // RX-RATE-CMD: session-scoped
-    rx_rate_cmd_seq_seen_ = -1;
     rebase_voice_event_seq_ = 0;
     rx_rebase_voice_seq_seen_ = -1;
     rx_authority_cmd_ = 0;
@@ -10657,7 +9786,6 @@ void Connection::enterDisconnected(const std::string& reason) {
     burst_obs_fading_ = -1.0f;
     burst_obs_evm_snr_db_ = -1.0f;
     burst_obs_coh_valid_ = false;
-    qam16_rx_bad_streak_ = 0;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     mode_change_ack_repeat_jobs_.clear();
     close_.resetCloser();
@@ -10966,7 +10094,7 @@ void Connection::handleArqTimeoutBatch(const std::vector<Bytes>& frame_data_list
     }
 
     // One ARQ tick produces at most one timeout batch. Account the missing ACK now so
-    // maybeCollapseEscape() can consume this very round, but delay every irreversible
+    // the tick's escapes can consume this very round, but delay every irreversible
     // physical side effect (play-head, timeout commit, monitor arm, encoder queue).
     noteArqRoundOutcome(0, "rto");
     staged_timeout_batch_ = frame_data_list;
@@ -11396,7 +10524,6 @@ void Connection::reset() {
     coherence_valid_ = false;
     // §RETX-PACING: trough-pacing / collapse-escape round state is per-connection.
     zero_progress_rounds_ = 0;
-    trough_episode_active_ = false;  // trough-amnesty episode dies with the era
     retx_pace_hold_ms_ = 0;
     last_data_burst_end_valid_ = false;
     rebase_voice_event_seq_ = 0;

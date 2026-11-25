@@ -113,10 +113,9 @@ struct ToneBurstAckPayload {
 // kPayload*Bits) — this comment is descriptive; the code reads the constants.
 //
 // STATELESSNESS: the CRC span is a PARAMETER of every pack/verify/codec entry
-// point (`cover_rung_cmd`). The parameter-less overloads bind it once from the
-// ULTRA_RX_RATE_CMD / ULTRA_RX_RATE_AUTHORITY env (read a single time,
-// process-wide — the production encoder/detector path); tests pass it
-// explicitly, so no env ordering can change a test's meaning.
+// point (`cover_rung_cmd`). The parameter-less overloads use the production
+// span (the five rung-command bits covered, rungCmdCrcSpanEnabled); tests pass
+// it explicitly.
 //
 // We use a 12-bit CRC (rather than 16) to keep the packet small: 12 bits at
 // ~1 bit/symbol after 4-FSK + (15,11) Hamming means ~3-4 fewer symbols on

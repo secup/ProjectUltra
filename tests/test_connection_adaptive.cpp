@@ -666,13 +666,11 @@ struct ConnectionAdaptiveTestAccess {
         return c.retx_pace_hold_ms_;
     }
 
-    static void pollCollapseEscape(Connection& c) {
-        c.maybeCollapseEscape();
-    }
 
     // DESC-SWITCH (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md Phase 1) hooks.
-    static void applyFeedback(Connection& c, float quality) {
-        c.applyAdaptiveRateFeedback(quality);
+    // The receiver's rate command (RX-AUTHORITY), as an ACK delivers it to the sender.
+    static void obeyRateCommand(Connection& c, Modulation mod, CodeRate rate) {
+        c.maybeObeyAuthorityCommand(coherentRungIndexFor(mod, rate));
     }
 
     static bool descSwitchFullAnchorArmed(const Connection& c) {
@@ -746,10 +744,6 @@ struct ConnectionAdaptiveTestAccess {
         return c.tryStartQueuedFileIfReady();
     }
 
-    // RX-RATE-CMD (Phase 2, ULTRA_RX_RATE_CMD) hooks.
-    static uint8_t rxRateCmdPending(const Connection& c) {
-        return c.rx_rate_cmd_pending_;
-    }
 
     // LATENT-RATE/QSO-scope regression hooks. Keep the production entry point in the
     // loop so these tests pin the exact k/M plumbing rather than re-testing only the
@@ -2008,7 +2002,7 @@ void test_responder_handshake_timer_does_not_false_confirm() {
 // timer touched, no escape fired (the knob-off byte-identical contract) — and the
 // g42-PROTECTIVE property holds: ANY progress resets the zero-round streak, and a
 // duplicate/stale ack (progress −1) is never a round.
-void test_zero_progress_round_counter_knob_off_and_g42_protective() {
+void test_zero_progress_round_counter_g42_protective() {
     Connection c;
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(
         c, CodeRate::R2_3, 20.0f, 0.40f, Modulation::QPSK);
@@ -2022,32 +2016,31 @@ void test_zero_progress_round_counter_knob_off_and_g42_protective() {
 
     // Two consecutive zero-progress rounds accumulate (scope: CONNECTED wideband OFDM,
     // file SENDING, in-flight bytes — all true here).
-    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
-    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "toneburst-ack");
+    CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 0,
+          "an empty ACK is the peer answering: not a silent round");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "rto");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "rto");
     CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 2,
-          "two zero-progress rounds should accumulate");
+          "two silent (timeout) rounds should accumulate");
     CHECK(ConnectionAdaptiveTestAccess::paceHoldMs(c) == 0,
           "ULTRA_RETX_TROUGH_PACING=0: no pacing hold may be armed (byte-identical)");
     CHECK(ConnectionAdaptiveTestAccess::arqAckTimeout(c) == rto_before,
           "knob-off: the ARQ ack timeout base must be untouched");
 
-    // ULTRA_COLLAPSE_ESCAPE_ROUNDS=0: polling the escape must never fire a MODE_CHANGE.
-    ConnectionAdaptiveTestAccess::pollCollapseEscape(c);
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
-          "ULTRA_COLLAPSE_ESCAPE_ROUNDS=0: no collapse escape may fire (byte-identical)");
     CHECK(c.getDataCodeRate() == CodeRate::R2_3,
           "knob-off: the data rate must not move");
 
     // g42-protective (§2.3): a round in which ANY frame progressed resets the streak —
     // a lone straggler retrying amid deliveries can never accumulate rounds.
-    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
-    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 1, "test");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "rto");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 1, "toneburst-ack");
     CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 0,
           "any delivered/SACKed frame must reset the zero-round streak");
 
     // §1.1 dedup: progress −1 (duplicate/stale ack — no fresh ack processed) is NOT a round.
-    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "test");
-    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, -1, "test");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, 0, "rto");
+    ConnectionAdaptiveTestAccess::noteRoundOutcome(c, -1, "toneburst-ack");
     CHECK(ConnectionAdaptiveTestAccess::zeroProgressRounds(c) == 1,
           "a duplicate/stale ack (progress -1) must not create or reset a round");
 }
@@ -2079,7 +2072,7 @@ void test_descriptor_switch_knob_off_is_byte_identical() {
     ConnectionAdaptiveTestAccess::startFile(c, payload.path);
 
     // QAM16 NACK (quality 0) at a clean send boundary -> prompt demote decision.
-    ConnectionAdaptiveTestAccess::applyFeedback(c, 0.0f);
+    ConnectionAdaptiveTestAccess::obeyRateCommand(c, Modulation::QPSK, CodeRate::R3_4);
 
     CHECK(ConnectionAdaptiveTestAccess::modeChangePending(c),
           "knob-off: the demote must arm the MODE_CHANGE stop-and-wait");
@@ -2138,7 +2131,7 @@ void test_descriptor_switch_commits_locally_at_clean_boundary() {
     const uint8_t epoch_before = ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
 
     // QAM16 NACK at a clean boundary -> demote decision -> descriptor commit.
-    ConnectionAdaptiveTestAccess::applyFeedback(c, 0.0f);
+    ConnectionAdaptiveTestAccess::obeyRateCommand(c, Modulation::QPSK, CodeRate::R3_4);
 
     CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
           "commit must not arm the MODE_CHANGE stop-and-wait (no TX freeze)");
@@ -2281,17 +2274,6 @@ using ultra::waveform::tone_burst_ack::ToneBurstAckPayload;
 using ultra::waveform::tone_burst_ack::kDriveAdvisoryReserved;
 using ultra::waveform::tone_burst_ack::kRungCmdDownHard;
 using ultra::waveform::tone_burst_ack::kRungCmdNone;
-
-ToneBurstAckDetection makeRungCmdDetection(uint8_t group_seq, uint8_t rung_cmd) {
-    ToneBurstAckDetection d;
-    d.payload.group_seq = group_seq;
-    d.payload.frame_mask = 0;               // total crater: nothing delivered
-    d.payload.rate_hint = 0;                // quality 0 (the crater's quantized grade)
-    d.payload.type = AckType::Ack;
-    d.payload.move_epoch = 0;               // matches the sender's initial TX epoch
-    d.payload.rung_cmd = rung_cmd;
-    return d;
-}
 
 void test_stale_epoch_tone_ack_has_no_connection_side_effects() {
     setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
@@ -3729,7 +3711,11 @@ void test_receiver_suppresses_duplicate_message_object() {
           "suppression history must hold one entry per delivered object");
 }
 
-void test_ordinary_adaptation_holds_geometry_for_complete_message() {
+// A receiver-commanded rate move (RX-AUTHORITY) during a multi-frame message regrids the rest of the
+// message at the new rung (BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP: its regrid allowance is kept); it
+// must never fail the accepted message. (Until 2026-11-25 this tested the sender's own quality walk,
+// deleted with R10, which held the geometry instead.)
+void test_commanded_rate_move_keeps_the_message() {
     Connection c;
     std::vector<Bytes> transmitted;
     std::vector<Connection::MessageTxStatusEvent> statuses;
@@ -3747,17 +3733,14 @@ void test_ordinary_adaptation_holds_geometry_for_complete_message() {
         ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
     CHECK(c.sendMessage(std::string(capacity + 11, 'A')) &&
               ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
-          "adaptive hold fixture must start one multi-frame message");
-    const size_t wire_before_feedback = transmitted.size();
-    ConnectionAdaptiveTestAccess::applyFeedback(c, 0.0f);
-    CHECK(c.getDataModulation() == Modulation::QAM16 &&
-              c.getDataCodeRate() == CodeRate::R2_3 &&
-              transmitted.size() == wire_before_feedback &&
-              ConnectionAdaptiveTestAccess::fragmentedMessagePending(c),
-          "ordinary quality adaptation must hold one geometry until the complete message retires");
-    CHECK(statuses.size() == 1 &&
-              statuses.front().status == Connection::MessageTxStatus::SUBMITTED,
-          "an avoidable adaptive decision must not fail an accepted message");
+          "the fixture must start one multi-frame message");
+    ConnectionAdaptiveTestAccess::obeyRateCommand(c, Modulation::QPSK, CodeRate::R3_4);
+    for (int i = 0; i < 4; ++i) c.tick(50);
+    bool failed = false;
+    for (const auto& e : statuses) failed = failed || e.status == Connection::MessageTxStatus::FAILED;
+    CHECK(!failed, "a receiver-commanded rate move must not fail an accepted message");
+    CHECK(!statuses.empty() && statuses.front().status == Connection::MessageTxStatus::SUBMITTED,
+          "the message stays submitted");
     c.abortTxNow();
 }
 
@@ -5974,120 +5957,6 @@ void test_terminal_file_failure_disconnects_to_reset_peer_assembler() {
           "terminal file failure should send DISCONNECT to reset peer assembler state");
 }
 
-// Knob-OFF identity pin (ULTRA_RX_RATE_CMD=0, the baseline pinned in main): the
-// receiver's emitted tone-ACK carries rung_cmd 0 even for a QAM16 crater, and the
-// sender ignores an incoming DOWN-hard command outright — no mode move, no
-// MODE_CHANGE frame, no descriptor commit.
-void test_rx_rate_cmd_knob_off_is_byte_identical() {
-    // Receiver emit side: a total QAM16 crater must NOT set the command.
-    Connection r;
-    std::vector<ToneBurstAckPayload> acks;
-    r.setTransmitToneBurstAckCallback(
-        [&](const ToneBurstAckPayload& p) { acks.push_back(p); });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        r, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
-    r.onBurstGroupReceived(3, {}, /*all_ok=*/false, /*quality=*/0.0f,
-                           /*frame_mask=*/0, /*interleaved=*/true, /*group_size=*/8);
-    CHECK(!acks.empty(), "crater group must still emit its tone-burst ACK");
-    CHECK(acks.back().rung_cmd == kRungCmdNone,
-          "knob-off: the emitted rung_cmd bits must stay 0 (byte-identical wire)");
-    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r) == 0,
-          "knob-off: no standing command may be latched");
-
-    // Sender consume side: an incoming DOWN-hard command must be ignored.
-    Connection c;
-    std::vector<Bytes> tx_frames;
-    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
-    TempPayloadFile payload("rx_rate_cmd_off", 60 * 1024);
-    CHECK(payload.dir.valid() && !payload.path.empty(),
-          "temp payload file should be created");
-    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
-    ConnectionAdaptiveTestAccess::fillArqWindow(c, 4);
-
-    c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
-
-    CHECK(c.getDataModulation() == Modulation::QAM16 &&
-              c.getDataCodeRate() == CodeRate::R2_3,
-          "knob-off: an incoming rung command must not move the mode");
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
-          "knob-off: an incoming rung command must not arm a MODE_CHANGE");
-    CHECK(countModeChangeFrames(tx_frames) == 0,
-          "knob-off: no MODE_CHANGE frame may go on the wire");
-    CHECK(c.getStats().descriptor_mode_switches == 0,
-          "knob-off: no descriptor commit may be counted");
-}
-
-// Knob-ON receiver emit: a TOTAL crater (frame_mask == 0) at QAM16 sets DOWN-hard on
-// the group's ACK; the SAME command re-rides subsequent ACKs of the unchanged state
-// (ACK-loss diversity, sender dedups by group_seq); the observed adoption (a real
-// mod/rate change through applyDataMode) clears it; a group that delivers frames
-// clears it; a crater at a non-QAM16 mode commands nothing (deep null at a robust
-// rung is irreducible fading, not a rate signal — the 2026-06-09 ratchet guard).
-void test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move() {
-    setenv("ULTRA_RX_RATE_CMD", "1", 1);
-    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);  // adoption path for the clear
-    Connection r;  // ctor latches both knobs ON for this instance
-    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);  // restore the pinned baseline
-    setenv("ULTRA_RX_RATE_CMD", "0", 1);
-    // New controller regressions below exercise these default-on mechanisms directly.
-    // Pin them before any function-local static reads so an operator test shell cannot
-    // silently select a different controller or suppress the observable ALC side effect.
-    setenv("ULTRA_LATENT_RATE", "1", 1);
-    setenv("ULTRA_LATENT_RELAX_DB", "0.35", 1);
-    setenv("ULTRA_LATENT_TIE_PROBE", "0", 1);
-    setenv("ULTRA_SOFTWARE_ALC", "1", 1);
-
-    std::vector<ToneBurstAckPayload> acks;
-    r.setTransmitToneBurstAckCallback(
-        [&](const ToneBurstAckPayload& p) { acks.push_back(p); });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        r, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
-
-    // Total crater at QAM16 -> DOWN-hard rides this group's ACK.
-    r.onBurstGroupReceived(5, {}, false, 0.0f, 0, true, 8);
-    CHECK(!acks.empty() && acks.back().rung_cmd == kRungCmdDownHard,
-          "QAM16 total crater must command DOWN-hard on the group's own ACK");
-
-    // Unchanged state -> the SAME standing command re-rides (idempotent diversity;
-    // the ARQ base is frozen during a crater so the sender dedups all copies).
-    r.onBurstGroupReceived(5, {}, false, 0.0f, 0, true, 8);
-    CHECK(acks.back().rung_cmd == kRungCmdDownHard,
-          "repeated crater ACKs re-carry the same standing command");
-
-    // Sender's adoption observed (descriptor announces QPSK R3/4) -> latch clears.
-    r.onDescriptorModeChange(Modulation::QPSK, CodeRate::R3_4, 8);
-    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r) == 0,
-          "an applied mod/rate change is the adoption — the command latch must clear");
-    r.onBurstGroupReceived(6, {}, false, 0.0f, 0, true, 8);
-    CHECK(acks.back().rung_cmd == kRungCmdNone,
-          "post-adoption crater at QPSK must NOT command (non-QAM16 = fade physics)");
-
-    // A delivering group ends any crater state (fresh QAM16 instance).
-    setenv("ULTRA_RX_RATE_CMD", "1", 1);
-    Connection r2;
-    setenv("ULTRA_RX_RATE_CMD", "0", 1);
-    std::vector<ToneBurstAckPayload> acks2;
-    r2.setTransmitToneBurstAckCallback(
-        [&](const ToneBurstAckPayload& p) { acks2.push_back(p); });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        r2, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
-    r2.onBurstGroupReceived(9, {}, false, 0.0f, 0, true, 8);
-    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == kRungCmdDownHard,
-          "crater must latch the command");
-    // PARTIAL-CRATER policy (2026-07-04, F27): a failed-but-partial group after a
-    // crater is the SECOND consecutive bad group — the rung is under water; the
-    // command steps to DOWN-ONE (one rung per evidence quantum) instead of clearing.
-    // Only a CLEAN group ends the bad stretch.
-    r2.onBurstGroupReceived(10, {}, false, 0.0f, /*frame_mask=*/0x3, true, 8);
-    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == ultra::waveform::tone_burst_ack::kRungCmdDownOne,
-          "second consecutive failed group (partial) must command DOWN-ONE");
-    r2.onBurstGroupReceived(11, {}, true, 0.95f, /*frame_mask=*/0xFF, true, 8);
-    CHECK(ConnectionAdaptiveTestAccess::rxRateCmdPending(r2) == 0,
-          "a CLEAN group ends the bad stretch — no stale command may ride");
-}
-
 void test_waiting_rebase_voice_has_per_outcome_event_identity() {
     setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
     setenv("ULTRA_RX_RATE_CMD", "1", 1);
@@ -6175,85 +6044,6 @@ void test_waiting_rebase_voice_has_per_outcome_event_identity() {
     sender.tick(1);
     CHECK(sender_tx.size() == 3,
           "next voice event identity must retrigger a prompt era-base resend");
-}
-
-// Knob-ON sender consume, MID-WINDOW (the Phase-2 case): a DOWN-hard command with
-// frames in flight routes the escape target (QAM16 -> QPSK R3/4) through the
-// DESCRIPTOR commit — no MODE_CHANGE frame, mode applied immediately, and the ARQ
-// abort bumps the move-epoch (era safety; requires ULTRA_ARQ_MOVE_EPOCH ON). A
-// duplicate of the same command (same group_seq) before adoption is a no-op.
-void test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch() {
-    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
-    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "1", 1);
-    setenv("ULTRA_RX_RATE_CMD", "1", 1);
-    Connection c;  // ctor latches all three knobs ON for this instance
-    setenv("ULTRA_RX_RATE_CMD", "0", 1);  // restore the pinned baselines
-    setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
-    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
-
-    std::vector<Bytes> tx_frames;
-    c.setTransmitCallback([&](const Bytes& d) { tx_frames.push_back(d); });
-    std::vector<bool> burst_full_anchor;
-    std::vector<size_t> burst_sizes;
-    c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t /*seq*/,
-                                   bool force_full_preamble) {
-        burst_sizes.push_back(frames.size());
-        burst_full_anchor.push_back(force_full_preamble);
-    });
-    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
-        c, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QAM16);
-    TempPayloadFile payload("rx_rate_cmd_mid", 60 * 1024);
-    CHECK(payload.dir.valid() && !payload.path.empty(),
-          "temp payload file should be created");
-    ConnectionAdaptiveTestAccess::startFile(c, payload.path);
-    ConnectionAdaptiveTestAccess::fillArqWindow(c, 4);  // MID-window: frames in flight
-    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 0,
-          "fresh connection starts at TX move-epoch 0");
-
-    // The crater group's ACK arrives carrying DOWN-hard (epoch echo 0 = current era).
-    c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
-
-    // ULTRA_QAM16_DEMOTE_MIDRUNG DEFAULT-ON (2026-07-05): the first DOWN-hard from
-    // 16QAM R2/3 lands at the 16QAM R1/2 midrung (2x margin, stays on the mod); a
-    // second escape takes the QPSK R3/4 exit.
-    CHECK(c.getDataModulation() == Modulation::QAM16 &&
-              c.getDataCodeRate() == CodeRate::R1_2,
-          "DOWN-hard at QAM16 must commit the midrung landing (16QAM R1/2) immediately");
-    CHECK(ConnectionAdaptiveTestAccess::arqCodeRate(c) == CodeRate::R1_2,
-          "the ARQ must be reconfigured to the committed rate");
-    CHECK(!ConnectionAdaptiveTestAccess::modeChangePending(c),
-          "the descriptor commit must not arm the MODE_CHANGE stop-and-wait");
-    CHECK(countModeChangeFrames(tx_frames) == 0,
-          "NO MODE_CHANGE control frame may go on the wire (that was the dead-air)");
-    CHECK(c.getStats().descriptor_mode_switches == 1,
-          "the commit must count as a descriptor switch");
-    CHECK(ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c) == 1,
-          "the MID-WINDOW regrid must bump the TX move-epoch (era safety)");
-    bool full_anchor_armed_or_consumed =
-        ConnectionAdaptiveTestAccess::descSwitchFullAnchorArmed(c);
-    for (size_t i = 0; i < burst_full_anchor.size(); ++i) {
-        if (burst_sizes[i] >= 2 && burst_full_anchor[i]) {
-            full_anchor_armed_or_consumed = true;
-        }
-    }
-    // F163 REVERSAL (2026-07-06): every commit arms the full anchor — the
-    // midrung landing included (see the first-switch comment above).
-    CHECK(full_anchor_armed_or_consumed,
-          "every DESC-SWITCH commit must arm the full anchor (F163)");
-
-    // Rate-limit: the SAME command (same group_seq — the base was frozen by the
-    // crater) re-arriving before the receiver's adoption is deduped: no second
-    // demote (QPSK R3/4 would otherwise step to R2/3), no new commit.
-    c.onToneBurstAck(makeRungCmdDetection(/*group_seq=*/1, kRungCmdDownHard));
-    // Midrung default (2026-07-05): the first DOWN-hard landed at 16QAM R1/2; the
-    // DUPLICATE (same group_seq) must not move it again.
-    CHECK(c.getDataModulation() == Modulation::QAM16 &&
-              c.getDataCodeRate() == CodeRate::R1_2,
-          "a duplicate command (same group_seq) before adoption must be a no-op");
-    CHECK(c.getStats().descriptor_mode_switches == 1,
-          "a duplicate command must not commit again");
-    CHECK(countModeChangeFrames(tx_frames) == 0,
-          "a duplicate command must not fall back to MODE_CHANGE either");
 }
 
 void test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor() {
@@ -7598,11 +7388,6 @@ int main() {
     // tests the byte-identical baseline (no hold armed, no collapse escape fired), per the
     // setenv-in-main pattern used by test_connection_policy.
     setenv("ULTRA_RETX_TROUGH_PACING", "0", 1);
-    setenv("ULTRA_COLLAPSE_ESCAPE_ROUNDS", "0", 1);
-    // RX-AUTHORITY is DEFAULT-ON since 2026-07-05 and supersedes the machinery this
-    // binary tests (EMA feedback and RX-RATE-CMD descriptor demotes on the
-    // legacy drivers) — pin it OFF so the legacy/fallback paths stay testable.
-    setenv("ULTRA_RX_RATE_AUTHORITY", "0", 1);
     // The receiver-side ALC provenance regression below exercises the production
     // default deterministically even when the invoking shell carries an opt-out.
     setenv("ULTRA_SOFTWARE_ALC", "1", 1);
@@ -7656,7 +7441,7 @@ int main() {
     test_disconnect_responder_grace_covers_long_cca_deferred_retry();
     test_disconnect_supports_synchronous_host_loopback();
     test_responder_handshake_timer_does_not_false_confirm();
-    test_zero_progress_round_counter_knob_off_and_g42_protective();
+    test_zero_progress_round_counter_g42_protective();
     test_descriptor_switch_knob_off_is_byte_identical();
     test_descriptor_switch_commits_locally_at_clean_boundary();
     test_silent_escape_never_unilaterally_descriptor_switches();
@@ -7680,7 +7465,7 @@ int main() {
     test_message_geometry_regrid_recuts_fragments_at_new_capacity();
     test_message_geometry_regrid_is_bounded_then_fails_closed();
     test_receiver_suppresses_duplicate_message_object();
-    test_ordinary_adaptation_holds_geometry_for_complete_message();
+    test_commanded_rate_move_keeps_the_message();
     test_runtime_forced_cw_override_cannot_regrid_active_message();
     test_submitted_status_reset_runs_after_physical_handoff();
     test_failure_batch_precedes_reentrant_replacement_submission();
@@ -7726,10 +7511,7 @@ int main() {
     test_delivered_status_callback_can_send_without_corrupting_tracking();
     test_terminal_failure_disconnects_when_move_epoch_is_disabled();
     test_terminal_file_failure_disconnects_to_reset_peer_assembler();
-    test_rx_rate_cmd_knob_off_is_byte_identical();
-    test_rx_rate_cmd_receiver_emits_crater_down_hard_once_per_move();
     test_waiting_rebase_voice_has_per_outcome_event_identity();
-    test_rx_rate_cmd_down_hard_mid_window_commits_via_descriptor_with_epoch();
     test_ofdm_connected_entry_does_not_emit_unsolicited_timing_anchor();
     test_interactive_bootstrap_yield_stops_after_initiator_starts_data();
     test_normal_ofdm_ack_arms_full_anchor_expectation();

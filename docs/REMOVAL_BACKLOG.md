@@ -500,7 +500,17 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   `selectCoherentOFDM` is), and it is the last live picker of `CodeRate::R5_6` after R5/6 was
   retired from the real ladder (2026-06-17). KEEP-check: confirm no GUI control still calls it
   before deleting; the `R5_6` enum value itself stays (valid LDPC rate + forcible probe).
-- **R10. Sender-side mid-transfer rate drivers (superseded by RX-AUTHORITY)** — logged
+- **R10 — DONE 2026-11-25.** The authority is permanent (`ULTRA_RX_RATE_AUTHORITY` removed); deleted:
+  `applyAdaptiveRateFeedback` (the EMA/climb/crest walk), `maybeApplyRxRateCommand` and its receiver
+  emitter `updateRxRateCommandFromGroup` (the relative command; its bits were always overwritten by the
+  absolute word), `maybeTroughAmnesty` + `trough_episode_*`, `maybeCollapseEscape` (inert under the
+  authority since 2026-11-12 - the KEEP note below predates that), `noteQam16Demoted` + the QAM16 climb
+  streak/cooldown state, nine env knobs (map 9f), CTest Psk8Climb; ConnectionAdaptive now runs the
+  production authority (it pinned the authority OFF, so its 900+ checks exercised the legacy walk).
+  KEPT: `executeEscapeDrop`/`maybeEscapeStuckFrame`, retx pacing, entry-time selection, all MC-DPSK and
+  narrowband rate code, `ULTRA_RX_RATE_CMD` (still gates the WAITING-REBASE voice - untangle separately),
+  `RateController` (the stuck-frame escape's one-rung step only). Original entry:
+- **R10 (original). Sender-side mid-transfer rate drivers (superseded by RX-AUTHORITY)** — logged
   2026-07-05, deletion HARD-GATED on `ULTRA_RX_RATE_AUTHORITY` graduating default-ON
   (multi-seed faithful gate + rig campaign). Once the receiver commands the rung per group
   ACK, these `connection.cpp` senders-side drivers are dead weight (already inert under the
