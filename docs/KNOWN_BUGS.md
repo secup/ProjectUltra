@@ -20,9 +20,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   `decode_policy::keepDescriptorWarmHandoff` still demotes warm handoff on every mode hop (the F164 rule,
   from when every commit carried a full anchor). Sweeps 14-17: all 86 hop groups took the cold path
   (0.73 mean delivered, 15 % zero) vs 449 warm same-mode groups (0.88, 6 % zero) - confounded by the
-  channel change that caused the hop. Fix (pending A/B): follow the descriptor's flag. The geometry is
-  safe - the decoder returns after the descriptor and applies the pending configure() before the next
-  member is searched.
+  channel change that caused the hop.
+  **A/B REJECTED the obvious fix (2026-11-25):** keeping warm timing on a LIGHT rate-switch group
+  (follow the descriptor's flag, drop the hop rule) lost ~9 % on the GUI gate - ITU Good 15 dB 21 KB
+  1808 -> 1648 bps mean, a 2 -> 15 dB crossing profile 970 -> 883 bps, 7 of 8 seed pairs slower, all 16
+  PASS. The groups after a switch decoded worse warm (3/4, 2/4, 1/4) than through the cold re-acquisition
+  (mostly 4/4): the warm state is stale across a rate switch, as the F164 rule says. Reverted. What
+  remains is the crossing case where the cold search MISSES member 1 entirely (seed 415: no member-1
+  acquisition after the descriptor, a LATE-JOIN at frame 2, 0/40): the next step is why the cold
+  search missed a light member whose position the descriptor fixes.
 - **BUG-FIRST-OFDM-FRAME-LTS-CFO** (P1, intermittent, pre-existing): on the first OFDM frame after the
   MC-DPSK handshake the LTS residual "corrects" the handshake's accurate dual-chirp CFO by ~1.2-1.3 Hz
   (AWGN 10 dB, true 7.3 Hz: 7.30 -> 8.64 in one run, 7.30 -> 6.11 in another, both logged
