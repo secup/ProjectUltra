@@ -105,9 +105,11 @@ struct ConnectionAdaptiveTestAccess {
         c.connect_ack_frame_ = Bytes(35, 0x01);
     }
     static uint32_t connectRetryIntervalMs(const Connection& c) { return c.connectRetryIntervalMs(); }
+    static void makeRetryDueNow(Connection& c) { c.timeout_remaining_ms_ = 1; }
     static uint32_t publishToneAckCap(Connection& c, size_t frames) {
         c.last_rx_group_frames_ = frames;
         c.tone_ack_burst_frames_ = frames;
+        c.tone_ack_group_sized_ = true;
         c.publishToneAckAirtimeCap();
         return c.toneAckMaxSymbolMs();
     }
@@ -4824,6 +4826,63 @@ void test_unconfirmed_responder_asks_for_turn() {
 // after a 2.4 s frame, the 3.4 s rung does.
 // BUG-SIMULTANEOUS-PING-LOCKSTEP: a PING retry waits while the channel is busy (the peer calling us
 // at the same moment), without spending a retry, and keys anyway after one PING timeout of busy.
+// BUG-SIMULTANEOUS-CALL-FADING: a CONNECT retry waits while the channel is busy (the peer's own
+// CONNECT on the air), without spending a retry, and keys anyway after one retry interval of busy.
+void test_connect_retry_listens_before_talking() {
+    Connection c;
+    c.setLocalCallsign("W1ABC");
+    int connects = 0;
+    c.setTransmitCallback([&](const Bytes& f) {
+        if (!f.empty()) ++connects;
+    });
+    bool busy = false;
+    c.setChannelBusyQuery([&] { return busy; });
+    c.connect("K2DEF");
+    c.onPongReceived();  // the probe answered: CONNECTING, first CONNECT sent
+    CHECK(c.getState() == ConnectionState::CONNECTING, "a PONG moves the call to CONNECTING");
+    const int first = connects;
+    const uint32_t interval = ConnectionAdaptiveTestAccess::connectRetryIntervalMs(c);
+    ConnectionAdaptiveTestAccess::makeRetryDueNow(c);
+    busy = true;
+    for (uint32_t t = 0; t < interval / 2; t += 250) c.tick(250);
+    const int during_busy = connects - first;
+    CHECK(during_busy == 0, "a due CONNECT retry is held while the channel is busy");
+    busy = false;
+    for (int i = 0; i < 8 && connects - first == during_busy; ++i) c.tick(250);
+    CHECK(connects - first > during_busy, "the retry goes out once the channel clears");
+}
+
+// The handshake's carrier sense must hear the peer through the DECODER (a chirp lock), not only
+// energy: the energy query is OFDM-only and reads idle for every handshake frame.
+void test_connect_retry_hears_the_peer_through_the_decoder() {
+    Connection c;
+    c.setLocalCallsign("W1ABC");
+    int connects = 0;
+    c.setTransmitCallback([&](const Bytes& f) {
+        if (!f.empty()) ++connects;
+    });
+    c.setChannelBusyQuery([] { return false; });  // energy: idle, as in MC-DPSK
+    bool chirp_recent = false;
+    uint32_t asked_window = 0;
+    c.setRxActivityQuery([&](uint32_t within_ms) {
+        asked_window = within_ms;
+        return chirp_recent;
+    });
+    c.connect("K2DEF");
+    c.onPongReceived();
+    const int first = connects;
+    const uint32_t interval = ConnectionAdaptiveTestAccess::connectRetryIntervalMs(c);
+    ConnectionAdaptiveTestAccess::makeRetryDueNow(c);
+    chirp_recent = true;
+    for (uint32_t t = 0; t < interval / 2; t += 250) c.tick(250);
+    CHECK(connects == first, "a chirp the decoder just locked holds the CONNECT retry");
+    CHECK(asked_window > 0 && asked_window < interval,
+          "the evidence window is one CONNECT airtime (" << asked_window << " ms)");
+    chirp_recent = false;
+    for (int i = 0; i < 8 && connects == first; ++i) c.tick(250);
+    CHECK(connects > first, "the retry goes out once the peer's frame is over");
+}
+
 void test_ping_retry_listens_before_talking() {
     Connection c;
     c.setLocalCallsign("W1ABC");
@@ -7651,6 +7710,8 @@ int main() {
     test_tx_backlog_counts_caller_bytes();
     test_tone_ack_capped_to_sender_deadline();
     test_ping_retry_listens_before_talking();
+    test_connect_retry_listens_before_talking();
+    test_connect_retry_hears_the_peer_through_the_decoder();
     test_unconfirmed_responder_asks_for_turn();
     test_ack_revealed_hole_refill_uses_resend_anchor();
     test_proven_partial_sack_uses_descriptor_only_anchor_and_light_timing();

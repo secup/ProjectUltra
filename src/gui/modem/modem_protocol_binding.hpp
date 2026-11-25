@@ -220,6 +220,9 @@ inline void wireModemToProtocol(ModemEngine& modem,
     // to it before the frame is processed (the engine calls this first, then delivers).
     modem.setRxWaveformObservedCallback(
         [&protocol](protocol::WaveformMode mode) { protocol.noteRxWaveform(mode); });
+    // Handshake carrier sense: the decoder's chirp-lock evidence (lock-free atomic read).
+    protocol.setRxActivityQuery(
+        [&modem](uint32_t within_ms) { return modem.rxSignalActive(static_cast<int64_t>(within_ms)); });
     // A control reply goes out on the waveform its request arrived on (BUG-REPLY-ON-WRONG-WAVEFORM).
     modem.setRxFrameWaveformCallback(
         [&protocol](bool mcdpsk, Modulation mod) { protocol.noteRxFrameMcDpsk(mcdpsk, mod); });

@@ -1230,6 +1230,7 @@ void Connection::abortTxNow() {
     close_.reset();
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
+    connect_defer_ms_ = 0;
     ping_retry_count_ = 0;
     probe_defer_ms_ = 0;
     responder_handshake_wait_ms_ = 0;
@@ -2736,9 +2737,15 @@ bool Connection::isToneBurstAckCandidatePlausible(
 // fit in it; the frontend caps its staircase pick to the longest rung that does.
 void Connection::publishToneAckAirtimeCap() {
     namespace tba = ultra::waveform::tone_burst_ack;
-    const size_t frames = tone_ack_burst_frames_ > 0   ? tone_ack_burst_frames_
-                          : last_rx_group_frames_ > 0 ? last_rx_group_frames_
-                                                      : 1;
+    // The burst this ACK answers: its group size when one arrived since the previous ACK, else the
+    // DATA frames delivered since then (a resend that came frame by frame, never through a group -
+    // TNC pingpong, ITU Good 8 dB seed 416: the cap stayed at an 8-frame burst and 6.8 s ACKs met the
+    // 8.3 s one-frame resend), else one frame (the shortest deadline the sender can be on).
+    const size_t frames = tone_ack_group_sized_ && tone_ack_burst_frames_ > 0
+                              ? tone_ack_burst_frames_
+                              : std::max<size_t>(1, tone_ack_frames_since_ack_);
+    tone_ack_group_sized_ = false;
+    tone_ack_frames_since_ack_ = 0;
     uint32_t burst_ms = 0;
     uint32_t frame_ms = 0;
     if (negotiated_mode_ == WaveformMode::OFDM_CHIRP) {
@@ -5829,6 +5836,7 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // final ACK ran past the sender's 8.2 s resend (TNC bulk_then_short, AWGN 3 dB seed 409).
         if (group_size > 0) {
             tone_ack_burst_frames_ = group_size;
+            tone_ack_group_sized_ = true;
         }
         // Waveform follow: the first OFDM group after an up-crossing settles it, before this
         // group's ACK is stamped (a group that delivered nothing calls the crossing off in it).
@@ -6459,6 +6467,11 @@ void Connection::noteBurstOutcomeUnknown() {
 }
 
 void Connection::processArqFrame(const Bytes& frame_data) {
+    // The frames the next tone ACK answers, when no group size arrives for them (a resend
+    // delivered frame by frame): its length cap (publishToneAckAirtimeCap).
+    if (const auto h = v2::parseHeader(frame_data); h.valid && !h.is_control) {
+        ++tone_ack_frames_since_ack_;
+    }
     // TEST HOOK (env ULTRA_DROP_RX_SEQ=N): drop the FIRST receipt of the DATA frame with
     // seq=N to prove SELECTIVE repeat — the ack bitmap must then show only that hole and
     // the sender must resend ONLY that frame. One-shot: the resend is accepted.
@@ -6792,9 +6805,7 @@ void Connection::tick(uint32_t elapsed_ms) {
         case ConnectionState::PROBING:
             // Fast presence check via PING/PONG
             if (elapsed_ms >= timeout_remaining_ms_ &&
-                probe_defer_ms_ < pingTimeoutMsForCurrentProfile() &&
-                ((tx_active_provider_ && tx_active_provider_()) ||
-                 (channel_busy_query_ && channel_busy_query_()))) {
+                probe_defer_ms_ < pingTimeoutMsForCurrentProfile() && handshakeChannelBusy()) {
                 // BUG-SIMULTANEOUS-PING-LOCKSTEP: listen before keying a PING retry. Two stations
                 // calling each other kept keying their PINGs over each other (both radios
                 // half-duplex: neither heard the other) until both gave up (TNC simultaneous, ITU
@@ -6829,7 +6840,20 @@ void Connection::tick(uint32_t elapsed_ms) {
             break;
 
         case ConnectionState::CONNECTING:
+            if (elapsed_ms >= timeout_remaining_ms_ &&
+                connect_defer_ms_ < connectRetryIntervalMs() && handshakeChannelBusy()) {
+                // BUG-SIMULTANEOUS-CALL-FADING: listen before keying a CONNECT retry, as the PING
+                // retry does. Two stations calling each other overlapped their 3.5-5 s MC-DPSK
+                // CONNECTs on all ten retries (starts 1-4 s apart; TNC simultaneous, ITU Moderate
+                // 16 dB seed 414) and neither ever decoded the other's. The station that defers
+                // hears the other's CONNECT and handleConnect's callsign tie-break settles who
+                // answers. No retry budget spent; bounded by one retry interval per retry.
+                connect_defer_ms_ += elapsed_ms;
+                timeout_remaining_ms_ = connection_policy::kCarrierSenseSackCoalesceMs;
+                break;
+            }
             if (elapsed_ms >= timeout_remaining_ms_) {
+                connect_defer_ms_ = 0;
                 connect_retry_count_++;
                 if (connect_retry_count_ >= config_.connect_retries) {
                     LOG_MODEM(ERROR, "Connection: Connect failed after %d attempts",
@@ -7445,6 +7469,17 @@ uint32_t Connection::connectControlFrameAirtimeMs() const {
         static_cast<uint64_t>(connection_policy::mcDpskBurstAirtimeMs(timing, 1)) +
         2ULL * static_cast<uint64_t>(connection_policy::kMCDPSKInterFrameGuardMs);
     return static_cast<uint32_t>(std::min<uint64_t>(airtime_ms, 0xFFFFFFFFull));
+}
+
+// Carrier sense for the handshake's retries (PING, CONNECT): keyed ourselves, the energy query, or a
+// chirp the decoder locked within one CONNECT airtime - the peer's PING or CONNECT, whose body may
+// still be on the air. The energy query alone is OFDM-only and reads idle for every handshake frame
+// (the peer sits at the noise floor there), so until 2026-11-25 the retries' listen-before-talk
+// never heard the peer (BUG-SIMULTANEOUS-CALL-FADING).
+bool Connection::handshakeChannelBusy() const {
+    if (tx_active_provider_ && tx_active_provider_()) return true;
+    if (channel_busy_query_ && channel_busy_query_()) return true;
+    return rx_activity_query_ && rx_activity_query_(connectControlFrameAirtimeMs());
 }
 
 uint32_t Connection::connectRetryIntervalMs() const {
@@ -11292,6 +11327,7 @@ void Connection::reset() {
     pending_remote_call_.clear();
     timeout_remaining_ms_ = 0;
     connect_retry_count_ = 0;
+    connect_defer_ms_ = 0;
     connected_time_ms_ = 0;
     narrowband_override_ = WaveformMode::AUTO;  // Clear session-scoped narrowband override
     negotiated_mode_ = WaveformMode::OFDM_CHIRP;
@@ -11306,6 +11342,8 @@ void Connection::reset() {
     partial_sack_descriptor_repair_scope_ = false;
     last_rx_group_frames_ = 0;
     tone_ack_burst_frames_ = 0;
+    tone_ack_group_sized_ = false;
+    tone_ack_frames_since_ack_ = 0;
     follow_spell_fading_ = NAN;
     follow_spell_fading_clusters_ = 0;
     mode_change_ack_repeat_jobs_.clear();

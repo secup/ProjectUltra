@@ -10,6 +10,23 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — fix: handshake carrier sense hears the peer; ACK length cap counts the frames answered
+
+**What broke.** (1) Two stations calling each other overlapped their CONNECT retries on every round
+(BUG-SIMULTANEOUS-CALL-FADING): the retries' listen-before-talk asked the energy CCA, which is OFDM-only
+and reads idle for every handshake frame, so it never heard the peer. (2) A tone ACK answering a resend
+delivered frame by frame was capped for the previous 8-frame burst and ran past the one-frame resend.
+
+**What changed.** CONNECT retries listen before talking like PING retries (`connect_defer_ms_`, bounded by
+one retry interval); both use `Connection::handshakeChannelBusy` = keyed, energy CCA, or a chirp the decoder
+locked within one CONNECT airtime (`setRxActivityQuery` -> `ModemEngine::rxSignalActive`). The ACK cap's
+frame count is the group size when one arrived since the previous ACK, else the DATA frames delivered
+since then, else one.
+
+**Verification.** CTest 132/132 (ConnectionAdaptive 959/959: `test_connect_retry_listens_before_talking`,
+`test_connect_retry_hears_the_peer_through_the_decoder`, both fail with their hold disabled). TNC
+simultaneous 20/20 across four channels x five seeds (two of them failed before). TNC sweep 17 (seeds 417-418, 7 scenarios x 5 channels): 70/70 PASS.
+
 ## 2026-11-25 — fix: MC-DPSK control replies ride the request's more robust rung
 
 **What broke.** An MC-DPSK DISCONNECT ack went out at the answering station's data rung (DQPSK) while

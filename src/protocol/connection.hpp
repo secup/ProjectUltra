@@ -301,6 +301,12 @@ public:
     void setChannelBusyQuery(std::function<bool()> query) {
         channel_busy_query_ = std::move(query);
     }
+    // Decoder evidence of an incoming transmission within the last `within_ms` (a chirp lock): the
+    // carrier sense for the handshake, where the peer sits at or below the noise floor and the
+    // energy query reports idle (it is OFDM-only). Protocol mutex held: must be lock-free.
+    void setRxActivityQuery(std::function<bool(uint32_t within_ms)> query) {
+        rx_activity_query_ = std::move(query);
+    }
 
     void setTransmitToneBurstAckCallback(TransmitToneBurstAckCallback cb) {
         on_transmit_tone_burst_ack_ = std::move(cb);
@@ -1817,6 +1823,8 @@ private:
     // anchored-burst backstop's estimate of a group whose descriptor was lost.
     size_t last_rx_group_frames_ = 0;
     size_t tone_ack_burst_frames_ = 0;  // the burst the next tone ACK answers (its length cap)
+    bool tone_ack_group_sized_ = false;     // a group size arrived since the previous ACK
+    size_t tone_ack_frames_since_ack_ = 0;  // DATA frames delivered since the previous ACK
     // The fading the OFDM spell measured, pooled at the last down-crossing (NAN: none), and the
     // fade-independent clusters it rests on: the class a fallback spell's follow pick reads, since
     // MC-DPSK frames measure no fading (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME).
@@ -1989,6 +1997,8 @@ private:
     bool tone_ack_exact_group_geometry_context_ = false;
     std::function<bool()> tx_active_provider_;  // BUG-MC-RETRY-SPURIOUS: see setter
     std::function<bool()> channel_busy_query_;  // keepalive universal busy gate
+    std::function<bool(uint32_t)> rx_activity_query_;  // handshake carrier sense (decoder evidence)
+    bool handshakeChannelBusy() const;
     DriveAdvisoryCallback on_drive_advisory_;  // software-ALC sender-side hook
     ArmToneBurstAckMonitorCallback on_arm_tone_burst_ack_monitor_;
     std::atomic<size_t> tone_ack_armed_span_{SIZE_MAX};
@@ -2104,6 +2114,7 @@ private:
     bool last_rx_frame_mcdpsk_ = false;
     Modulation last_rx_frame_mcdpsk_mod_ = Modulation::AUTO;  // its MC-DPSK rung
     uint32_t probe_defer_ms_ = 0;  // PING retry held by carrier sense (bounded)
+    uint32_t connect_defer_ms_ = 0;  // CONNECT retry held by carrier sense (bounded)
     bool peer_turn_request_mcdpsk_ = false;
     Modulation peer_turn_request_mod_ = Modulation::AUTO;  // the pending TURN_REQUEST arrived on MC-DPSK
     void answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what,

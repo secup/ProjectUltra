@@ -354,6 +354,9 @@ public:
     void setChannelBusyQuery(std::function<bool()> query) {
         connection_.setChannelBusyQuery(std::move(query));
     }
+    void setRxActivityQuery(std::function<bool(uint32_t within_ms)> query) {
+        connection_.setRxActivityQuery(std::move(query));
+    }
 
     // Half-duplex INTERACTIVE (bidirectional) data path — the TNC / Winlink-B2F
     // case where both stations alternately transmit. Keeps the ISS/IRS turn gate

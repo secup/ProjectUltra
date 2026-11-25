@@ -41,8 +41,20 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   explicit tie-break (e.g. callsign-ordered slots) once two PINGs collide.
   Second shape (sweep 15, Moderate 16 dB seed 414): after the first retries both stations HEARD each
   other's PING (the same chirp as a PONG) within 4.5 s and both sent a full CONNECT, which collided.
-  A PING heard while probing needs a deterministic tie-break (e.g. the lower callsign hash answers as
-  responder instead of calling).
+  Correction after reading the logs: the tie-break exists (handleConnect: the lower callsign keeps its
+  attempt, the higher accepts), but neither CONNECT was ever decoded - the two 3.5-5 s MC-DPSK
+  CONNECTs started 1-4 s apart on all ten retries and overlapped every time (half-duplex). 2026-11-25:
+  CONNECT retries now listen before talking like PING retries (`connect_defer_ms_`, bounded by one
+  retry interval); the deferring station hears the other's CONNECT and the tie-break settles it.
+  CTest ConnectionAdaptive `test_connect_retry_listens_before_talking` (fails with the hold disabled).
+  And the deeper cause, found the same night: the retries' carrier sense never heard the peer at all.
+  `ModemEngine::channelBusyForTx` is energy CCA and OFDM-only (the peer sits at the noise floor on
+  MC-DPSK), so during PROBING/CONNECTING it always read idle - the PING listen-before-talk of
+  BUG-SIMULTANEOUS-PING-LOCKSTEP only ever waited for this station's own transmitter. The handshake
+  retries now also treat a chirp the decoder locked within one CONNECT airtime as busy
+  (`Connection::handshakeChannelBusy`, `setRxActivityQuery` -> `ModemEngine::rxSignalActive`, the F129
+  level-independent decoder evidence). CTest `test_connect_retry_hears_the_peer_through_the_decoder`.
+  TNC simultaneous: 20/20 across Moderate 16, Good 8, AWGN 3, Good 15 x seeds 402/414/416/503/504.
 - **BUG-OFDM-FLOOR-STAYS-MCDPSK** (P3, open): at a true AWGN 3 dB on a peak-limited TX, OFDM QPSK R1/4 lost
   whole rounds (two ARQ aborts), the sender crossed down, and the DQPSK selection (reading -0.8 dB, PAPR
   correction -2.9 dB) stayed under the 2.5 dB floor for the rest of a 6 KB transfer (~25 bps, TNC seed
@@ -3193,6 +3205,11 @@ Current blockers:
   budgets; `Connection::publishToneAckAirtimeCap`), and the GUI/TNC frontends cap the staircase pick to
   the longest rung that fits (`tone_burst_ack::capSymbolMsToRung`; never lengthened). CTest
   ConnectionAdaptive `test_tone_ack_capped_to_sender_deadline`.
+
+- Third half (2026-11-25): the frame count the cap uses is the frames THIS ACK answers - the group
+  size when one arrived since the previous ACK, else the DATA frames delivered since then (a resend
+  delivered frame by frame never reaches the group callback), else one frame. TNC pingpong, ITU Good
+  8 dB seed 416: the cap stayed at an 8-frame burst and 6.8 s ACKs met the 8.3 s one-frame resend.
 
 ### BUG-ACK-STAIRCASE-NON-SNR-SOURCE (FIXED 2026-11-24) — was P2
 - The staircase stored every decoded frame's reading with its source and fell back to the 25 ms

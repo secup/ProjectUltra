@@ -63,6 +63,7 @@ void Connection::sendFullConnect() {
     // Transition to CONNECTING and send full CONNECT frame
     state_ = ConnectionState::CONNECTING;
     connect_retry_count_ = 0;
+    connect_defer_ms_ = 0;
     timeout_remaining_ms_ = connectRetryIntervalMs();
 
     // Notify about state change (PROBING -> CONNECTING)
