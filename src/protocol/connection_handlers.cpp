@@ -1185,6 +1185,9 @@ void Connection::requestModeChange(Modulation new_mod, CodeRate new_rate,
     // wire for 300+ s); stale -> -1 -> wire "unknown" -> receiver's n/a render.
     pending_fading_index_ = wireFadingIndex();
     pending_reason_ = reason;
+    // A rung the receiver commanded keeps that provenance until the ACK applies it
+    // (BUG-MESSAGE-ABANDONED-ON-FOLLOW-FLAP: the commit runs outside the command's scope).
+    pending_mode_change_receiver_commanded_ = receiver_commanded_geometry_change_;
     mode_change_pending_ = true;
     mode_change_retry_count_ = 0;
     mode_change_timeout_ms_ = modeChangeRetryMs();

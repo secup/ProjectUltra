@@ -227,36 +227,9 @@ struct RTOUpdate {
     uint32_t ceiling_ms = 0;
 };
 
-// ULTRA_ADAPTIVE_RTO (default OFF) — let the RFC6298 estimator actually govern.
-//
-// MEASURED 2026-07-30, IONOS rig at MPG@20. The wideband OFDM configured timeout is
-// sized on a FULL 16-frame window: "timeout=44.68s (data=1272ms, burst=21552ms,
-// ack=144ms/control=216ms x1)". Because that value is used as BOTH the floor (below)
-// and, via max(12000, configured), the ceiling, the clamp collapses to a point:
-// clamp(anything, 44700, 44700) = 44700. The estimator computes an RTO on every round
-// trip and the clamp discards it — srtt/rttvar are pure bookkeeping today.
-//
-// The cost is not theoretical. Gaps exceeding the nominal 9-10 s group cadence, across
-// five rig transfers: 63 s / 36 s / 36 s / 12 s / 54 s of dead air = 32/16/14/4/27% of
-// wall clock, mean ~19%, clustered at the END of transfers. That is where one frame is
-// outstanding, its true round trip is ~10 s, and the sender still waits 44.7 s.
-//
-// The full-window value remains legitimate as an INITIAL value (used before any RTT
-// sample exists — SelectiveRepeatARQ seeds adaptive_ack_timeout_ms_ with it) and as a
-// CEILING. It is wrong as a floor: the measured srtt already contains whatever burst
-// airtime the link actually uses, so if bursts genuinely take 21.5 s the estimator
-// learns that and the RTO sits above it by construction. Flooring at the worst case
-// asserts the worst case is always happening.
-//
-// Kept default-OFF and knob-gated: a too-short RTO causes spurious retransmission,
-// which on a half-duplex link costs a whole turnaround. Rig A/B before any default flip.
-inline bool adaptiveRtoEnabled() {
-    static const bool on = [] {
-        const char* e = std::getenv("ULTRA_ADAPTIVE_RTO");
-        return e != nullptr && e[0] == '1' && e[1] == '\0';
-    }();
-    return on;
-}
+// The configured worst-case timeout floors the RFC6298 estimate (so the RTO sits at it on the
+// wideband window). An adaptive floor (ULTRA_ADAPTIVE_RTO) was tried and retracted: measured srtt
+// already sat at the configured value, so it moved the RTO 0-20 %, not 7.5x (REMOVAL_BACKLOG R12).
 
 // ULTRA_INFLIGHT_RTO (default OFF) — size the retransmission timeout on the frames
 // ACTUALLY OUTSTANDING, not on the window maximum.
@@ -313,8 +286,7 @@ inline RTOUpdate updateRTO(bool have_estimator,
                            float previous_srtt_ms,
                            float previous_rttvar_ms,
                            uint32_t sample_ms,
-                           uint32_t configured_ack_timeout_ms,
-                           bool adaptive_floor = false) {
+                           uint32_t configured_ack_timeout_ms) {
     RTOUpdate update;
     if (!have_estimator) {
         update.srtt_ms = static_cast<float>(sample_ms);
@@ -330,11 +302,8 @@ inline RTOUpdate updateRTO(bool have_estimator,
 
     const uint32_t srtt_floor = static_cast<uint32_t>(update.srtt_ms * 1.5f + 0.5f);
     update.floor_ms = std::clamp(srtt_floor, 600u, 2500u);
-    if (!adaptive_floor) {
-        // LEGACY: the configured worst case also floors the estimate, which pins the
-        // RTO to exactly that value (see the note above updateRTO). Default path.
-        update.floor_ms = std::max(update.floor_ms, configured_ack_timeout_ms);
-    }
+    // The configured worst case also floors the estimate.
+    update.floor_ms = std::max(update.floor_ms, configured_ack_timeout_ms);
     update.ceiling_ms = std::max<uint32_t>(12000u, configured_ack_timeout_ms);
     update.rto_ms = std::clamp(static_cast<uint32_t>(rto_f + 0.5f),
                                update.floor_ms, update.ceiling_ms);

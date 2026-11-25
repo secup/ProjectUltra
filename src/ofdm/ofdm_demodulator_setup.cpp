@@ -46,10 +46,6 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     freq_domain_scratch.resize(cfg.fft_size);
     equalized_scratch.resize(static_cast<size_t>(cfg.num_carriers));
     constellation_update_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
-    interp_h_full_scratch.resize(static_cast<size_t>(cfg.num_carriers));
-    interp_h_cir_scratch.resize(static_cast<size_t>(cfg.num_carriers));
-    interp_h_clean_scratch.resize(static_cast<size_t>(cfg.num_carriers));
-    interp_pilot_logical_pos_scratch.reserve(static_cast<size_t>(cfg.num_carriers));
     channel_estimate.resize(cfg.fft_size, Complex(1, 0));
     per_carrier_h_error_var_.assign(cfg.fft_size, 0.0f);  // Phase 2b eps_H term; 0 = no inflation
     per_carrier_raw_obs_power_.assign(cfg.fft_size, 0.0f);   // F166 Stage B
@@ -67,7 +63,6 @@ OFDMDemodulator::Impl::Impl(const ModemConfig& cfg)
     setupCarriers();
     generateSequences();
     buildInterpTable();
-    buildInterpolationPhasors();
 }
 
 void OFDMDemodulator::Impl::setupCarriers() {
@@ -190,27 +185,5 @@ void OFDMDemodulator::Impl::buildInterpTable() {
     }
 }
 
-void OFDMDemodulator::Impl::buildInterpolationPhasors() {
-    const size_t N = all_carrier_fft_indices.size();
-    interp_idft_phasors.resize(N * N);
-    interp_dft_phasors.resize(N * N);
-
-    if (N == 0) {
-        return;
-    }
-
-    const float inv_N = 1.0f / static_cast<float>(N);
-    for (size_t n = 0; n < N; ++n) {
-        for (size_t k = 0; k < N; ++k) {
-            const float idft_phase = 2.0f * M_PI * k * n * inv_N;
-            interp_idft_phasors[n * N + k] =
-                Complex(std::cos(idft_phase), std::sin(idft_phase));
-
-            const float dft_phase = -2.0f * M_PI * k * n * inv_N;
-            interp_dft_phasors[k * N + n] =
-                Complex(std::cos(dft_phase), std::sin(dft_phase));
-        }
-    }
-}
 
 } // namespace ultra

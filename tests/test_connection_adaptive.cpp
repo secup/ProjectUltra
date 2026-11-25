@@ -107,6 +107,7 @@ struct ConnectionAdaptiveTestAccess {
     static uint32_t connectRetryIntervalMs(const Connection& c) { return c.connectRetryIntervalMs(); }
     static uint32_t publishToneAckCap(Connection& c, size_t frames) {
         c.last_rx_group_frames_ = frames;
+        c.tone_ack_burst_frames_ = frames;
         c.publishToneAckAirtimeCap();
         return c.toneAckMaxSymbolMs();
     }
@@ -983,8 +984,6 @@ struct ConnectionAdaptiveTestAccess {
 
     static void seedQsoScopedAdaptiveState(Connection& c) {
         c.consecutive_escape_drops_ = 2;
-        c.rx_auth_last_change_ = std::chrono::steady_clock::now();
-        c.rx_auth_last_change_valid_ = true;
     }
 
     static int consecutiveEscapeDrops(const Connection& c) {
@@ -993,10 +992,6 @@ struct ConnectionAdaptiveTestAccess {
 
     static void executeEscapeDrop(Connection& c, const char* trigger) {
         c.executeEscapeDrop(trigger);
-    }
-
-    static bool rxAuthorityDwellClockValid(const Connection& c) {
-        return c.rx_auth_last_change_valid_;
     }
 
     static void enterDisconnected(Connection& c) {
@@ -2426,16 +2421,14 @@ void test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso() {
               !ConnectionAdaptiveTestAccess::latentVerdictClockValid(c) &&
               ConnectionAdaptiveTestAccess::burstCleanGroupStreak(c) == 0 &&
               ConnectionAdaptiveTestAccess::latentBootstrapRung(c) == kRungIdxNone &&
-              ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c) == 0 &&
-              !ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c),
-          "disconnect must clear posterior, cadence, burst-size, escape-episode, and "
-          "rung-dwell evidence (prior=" << ConnectionAdaptiveTestAccess::latentHasPrior(c)
+              ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c) == 0,
+          "disconnect must clear posterior, cadence, burst-size and escape-episode "
+          "evidence (prior=" << ConnectionAdaptiveTestAccess::latentHasPrior(c)
               << " obs=" << ConnectionAdaptiveTestAccess::latentObservations(c)
               << " decisions=" << ConnectionAdaptiveTestAccess::latentDecisions(c)
               << " clock=" << ConnectionAdaptiveTestAccess::latentVerdictClockValid(c)
               << " burst_streak=" << ConnectionAdaptiveTestAccess::burstCleanGroupStreak(c)
               << " escapes=" << ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c)
-              << " dwell=" << ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c)
               << " bootstrap=" << static_cast<int>(
                      ConnectionAdaptiveTestAccess::latentBootstrapRung(c)) << ")");
 
@@ -2458,7 +2451,6 @@ void test_latent_rate_consumes_exact_group_geometry_and_resets_per_qso() {
               !ConnectionAdaptiveTestAccess::latentVerdictClockValid(c) &&
               ConnectionAdaptiveTestAccess::burstCleanGroupStreak(c) == 0 &&
               ConnectionAdaptiveTestAccess::consecutiveEscapeDrops(c) == 0 &&
-              !ConnectionAdaptiveTestAccess::rxAuthorityDwellClockValid(c) &&
               ConnectionAdaptiveTestAccess::latentBootstrapRung(c) == automatic_rung,
           "connected entry must clear outcome state while preserving this QSO's pre-cap seed");
 }

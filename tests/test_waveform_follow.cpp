@@ -143,6 +143,13 @@ struct ConnectionAdaptiveTestAccess {
         return c.turnRequestRetransmitMs();
     }
     static void notePeerHeard(Connection& c) { c.notePeerHeard(); }
+    // A receiver-commanded rung requested by MODE_CHANGE, then applied when its ACK arrives.
+    static void commandedModeChangeAcked(Connection& c, Modulation mod, CodeRate rate) {
+        c.receiver_commanded_geometry_change_ = true;
+        c.requestModeChange(mod, rate, 10.0f, 0);
+        c.receiver_commanded_geometry_change_ = false;
+        c.commitPendingModeChange("ACKed");
+    }
     static void allowWaveformFollow(Connection& c) {
         c.waveform_follow_allowed_ = true;
         c.up_crossing_gate_.reset();
@@ -1759,6 +1766,29 @@ void test_mcdpsk_close_retries_step_down() {
     }
 }
 
+// The commanded rung applied at its MODE_CHANGE ACK keeps the receiver-command provenance (TNC short,
+// ITU Good 15 dB seed 412: the third such change abandoned a 900-byte message).
+void test_message_survives_commanded_mode_changes() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    int failed = 0;
+    c.setMessageTxStatusCallback([&](const Connection::MessageTxStatusEvent& e) {
+        if (e.status == Connection::MessageTxStatus::FAILED) ++failed;
+    });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R2_3, 15.0f, 0.4f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::makeLocalIss(c);
+    CHECK(c.sendMessage(std::string(900, 'm')), "the message is accepted");
+    for (int i = 0; i < 4; ++i) c.tick(250);
+    const CodeRate rates[] = {CodeRate::R1_2, CodeRate::R2_3, CodeRate::R1_2, CodeRate::R2_3};
+    for (const CodeRate r : rates) {
+        ConnectionAdaptiveTestAccess::commandedModeChangeAcked(c, Modulation::QPSK, r);
+        for (int i = 0; i < 4; ++i) c.tick(250);
+    }
+    CHECK(failed == 0, "receiver-commanded MODE_CHANGEs never abandon the message");
+}
+
 void test_last_disconnect_retry_rides_robust_waveform() {
     setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);  // the follow knob latches per Connection
     Connection c;
@@ -1805,6 +1835,7 @@ int main() {
     test_turn_request_retry_rides_robust_waveform_only_into_silence();
     test_control_reply_rides_the_arrival_waveform();
     test_message_survives_receiver_commanded_crossings();
+    test_message_survives_commanded_mode_changes();
     test_robust_control_targets_the_peer_mcdpsk_decoder();
     test_mcdpsk_close_retries_step_down();
     test_waveform_follow_knob_off_ignores_crossing_words();

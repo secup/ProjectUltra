@@ -191,40 +191,6 @@ void test_rtt_rto_policy() {
     auto ceiling = updateRTO(true, 1000.0f, 10000.0f, 1000, 8000);
     CHECK(ceiling.rto_ms == 12000, "large RTTVAR should clamp to RTO ceiling");
 
-    // ── ULTRA_ADAPTIVE_RTO (2026-07-30) ───────────────────────────────────────
-    // The legacy checks above are not "correct behaviour", they PIN a defect: with
-    // the configured worst case used as both floor and ceiling, clamp() collapses to
-    // a point and the RFC6298 estimator is discarded every round trip. On the rig the
-    // wideband OFDM configured timeout is 44.7 s (sized on a FULL 16-frame window)
-    // while a tail frame's true round trip is ~10 s; measured dead air was 12-63 s per
-    // transfer, mean ~19% of wall clock, clustered at the end. These cases pin the
-    // adaptive path, which keeps the configured value as CEILING and initial value but
-    // lets the measurement govern below it.
-    auto adaptive = updateRTO(false, 0.0f, 0.0f, 2000, 44700, /*adaptive_floor=*/true);
-    CHECK(adaptive.floor_ms == 2500,
-          "adaptive floor comes from srtt (clamped 600..2500), not the configured worst case");
-    CHECK(adaptive.ceiling_ms == 44700, "configured value still bounds the RTO from above");
-    // First sample: srtt = 2000, rttvar = srtt/2 = 1000, rto = srtt + 4*rttvar = 6000,
-    // clamped to [2500, 44700] -> 6000.
-    CHECK(adaptive.rto_ms == 6000, "adaptive RTO follows srtt + 4*rttvar");
-
-    // Same inputs, legacy path: the configured value dominates entirely. This is the
-    // A/B in one assertion — identical measurement, 11x the timeout.
-    auto legacy = updateRTO(false, 0.0f, 0.0f, 2000, 44700, /*adaptive_floor=*/false);
-    CHECK(legacy.rto_ms == 44700, "legacy path pins the RTO at the configured worst case");
-    CHECK(legacy.rto_ms > adaptive.rto_ms * 5,
-          "the defect costs an order of magnitude on the same measurement");
-
-    // A genuinely long link must still get a long RTO — the estimator LEARNS the
-    // burst airtime because srtt is measured from real round trips. This is why
-    // flooring at the worst case is unnecessary rather than merely conservative.
-    auto slow = updateRTO(true, 21000.0f, 3000.0f, 21000, 44700, /*adaptive_floor=*/true);
-    CHECK(slow.rto_ms >= 21000,
-          "a link that really takes 21 s per round trip still gets an RTO above it");
-
-    // Default argument must preserve legacy behaviour exactly (knob-off byte-identity).
-    auto defaulted = updateRTO(false, 0.0f, 0.0f, 2000, 44700);
-    CHECK(defaulted.rto_ms == legacy.rto_ms, "omitting the flag keeps the legacy path");
 }
 
 }  // namespace

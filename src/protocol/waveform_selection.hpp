@@ -844,6 +844,16 @@ inline uint8_t snapRungIndexDownToEnabled(uint8_t idx) {
     }
     return kRungIdxNone;
 }
+// First ENABLED rung strictly above idx, or kRungIdxNone: the climb's mirror of
+// snapRungIndexDownToEnabled (disabled anchor rows are HOLES; raw arithmetic on rung indices is a
+// known deadlock source, F145). Moved here from the deleted goodput_rate_controller.hpp.
+inline uint8_t snapRungIndexUpToEnabled(uint8_t idx) {
+    for (int r = static_cast<int>(idx) + 1; r < static_cast<int>(kRungIdxCount); ++r) {
+        const CoherentPick p = coherentRungFromIndex(static_cast<uint8_t>(r));
+        if (coherentRungLocallyEnabled(p.mod, p.rate)) return static_cast<uint8_t>(r);
+    }
+    return kRungIdxNone;
+}
 
 // Spectral efficiency of a rung, in information bits per data-carrier symbol:
 // modulation bits x code rate. Pure constellation/code geometry — no bench

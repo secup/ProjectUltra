@@ -2786,8 +2786,7 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
 
     // RFC6298-style estimator (Karn-safe: retransmitted slots are marked ineligible).
     const auto rto = arq_policy::updateRTO(
-        have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms,
-        arq_policy::adaptiveRtoEnabled());
+        have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms);
     srtt_ms_ = rto.srtt_ms;
     rttvar_ms_ = rto.rttvar_ms;
     adaptive_ack_timeout_ms_ = rto.rto_ms;
@@ -2795,22 +2794,6 @@ void SelectiveRepeatARQ::maybeSampleRTT(TXSlot& slot) {
 
     LOG_MODEM(DEBUG, "SR-ARQ: RTT sample=%ums srtt=%.1f rttvar=%.1f rto=%ums",
               sample_ms, srtt_ms_, rttvar_ms_, adaptive_ack_timeout_ms_);
-    // NULL CONTROL (2026-07-30). A knob that provably did not engage proves nothing, and
-    // this one is easy to leave inert: the burst/file path must actually reach
-    // maybeSampleRTT for the adaptive floor to matter at all. Log at INFO, once per
-    // change, so a rig run can be checked for engagement instead of assumed. Prints the
-    // legacy value alongside so the delta is visible without a second run.
-    if (arq_policy::adaptiveRtoEnabled() && adaptive_ack_timeout_ms_ != last_logged_rto_ms_) {
-        last_logged_rto_ms_ = adaptive_ack_timeout_ms_;
-        const auto legacy = arq_policy::updateRTO(
-            have_rtt_estimator_, srtt_ms_, rttvar_ms_, sample_ms, config_.ack_timeout_ms,
-            /*adaptive_floor=*/false);
-        LOG_MODEM(INFO,
-                  "SR-ARQ: ADAPTIVE-RTO ENGAGED rto=%ums (legacy would be %ums, "
-                  "configured=%ums) srtt=%.0f rttvar=%.0f sample=%ums",
-                  adaptive_ack_timeout_ms_, legacy.rto_ms, config_.ack_timeout_ms,
-                  srtt_ms_, rttvar_ms_, sample_ms);
-    }
 }
 
 void SelectiveRepeatARQ::sendFrameNack(uint16_t seq) {

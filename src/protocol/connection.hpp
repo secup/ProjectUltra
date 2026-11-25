@@ -11,7 +11,6 @@
 #include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
 #include "rate_controller.hpp"
-#include "goodput_rate_controller.hpp"
 #include "latent_rate_controller.hpp"
 #include "evm_rate_selector.hpp"
 #include "file_transfer.hpp"
@@ -1130,6 +1129,7 @@ private:
     // operator than one that fails once with an honest reason.
     static constexpr uint8_t kMaxMessageGeometryRegridAttempts = 2;  // failure-driven changes only
     bool receiver_commanded_geometry_change_ = false;
+    bool pending_mode_change_receiver_commanded_ = false;
     uint64_t arq_submit_message_token_ = 0;
     std::deque<MessageTxStatusEvent> pending_message_tx_status_events_;
     size_t message_tx_status_deferral_depth_ = 0;
@@ -1575,14 +1575,6 @@ private:
     // SENDER: last non-zero command index acted on (dedup — ACK repeats re-carry
     // the same command; obey once per distinct target).
     uint8_t tx_authority_last_obeyed_ = 0;
-    // MINIMUM RUNG DWELL (ULTRA_RUNG_DWELL_MS), scoped to one QSO. Measured:
-    // correlation(rung changes, goodput) = -0.58 over 15 rig runs; held (<=1 change)
-    // 1.93 kbps vs churned (>=3) 1.59.
-    // Consecutive TOTAL craters that bypass the dwell — a 0/N group is unambiguous, unlike a
-    // partial crater, and holding a rung that delivers nothing is a stall not adaptivity.
-    static constexpr int kCatastrophicDwellBypassCraters = 2;
-    std::chrono::steady_clock::time_point rx_auth_last_change_{};
-    bool rx_auth_last_change_valid_ = false;
     void updateRxAuthorityCommand(bool all_ok, float quality, bool full_crater = false,
                                   float delivered_fraction = -1.0f,
                                   uint8_t delivered_frames = 0,
@@ -1661,10 +1653,6 @@ private:
     // OFDM sender: rounds without progress at one rung -> MC-DPSK (polled before the escapes).
     void maybeCrossDownOnCollapse();
 
-    // GOODPUT-MAXIMIZING RATE CONTROL (ULTRA_GOODPUT_RATE, default OFF). Replaces the
-    // SNR-anchor pick + corrective stack in updateRxAuthorityCommand when enabled; inert
-    // and untouched when off. See goodput_rate_controller.hpp for why it reads no SNR.
-    GoodputRateController goodput_ctl_;
     // ULTRA_LATENT_RATE: outcome-fitted latent state; consumes no SNR, so no calibration
     // offset can reach the rate decision.
     LatentRateController latent_ctl_;
@@ -1825,6 +1813,7 @@ private:
     // Size of the last group this end framed with proven geometry (0 = none yet): the
     // anchored-burst backstop's estimate of a group whose descriptor was lost.
     size_t last_rx_group_frames_ = 0;
+    size_t tone_ack_burst_frames_ = 0;  // the burst the next tone ACK answers (its length cap)
     // The fading the OFDM spell measured, pooled at the last down-crossing (NAN: none), and the
     // fade-independent clusters it rests on: the class a fallback spell's follow pick reads, since
     // MC-DPSK frames measure no fading (BUG-FOLLOW-SPELL-CLASS-ONE-FRAME).

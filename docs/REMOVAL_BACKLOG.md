@@ -235,7 +235,7 @@ here causes a wrong deletion later. Move finished items to *Completed* with the 
 
 ---
 
-### R12. Retired rate-control experiments + the dead predictive-climb predictor — `QUEUED 2026-08-01`
+### R12. Retired rate-control experiments + the dead predictive-climb predictor — `DONE 2026-11-24` (`rungPredictedSustainable` and its two knobs went 2026-08-01; the goodput controller, `ULTRA_TRUST_LADDER_PICK`, `ULTRA_RUNG_DWELL_MS` + `rx_auth_last_change_*` + `kCatastrophicDwellBypassCraters`, and `ULTRA_ADAPTIVE_RTO` + `updateRTO(adaptive_floor)` on 2026-11-24; `snapRungIndexUpToEnabled`, the only live helper in goodput_rate_controller.hpp, moved to waveform_selection.hpp)
 
 Six knob-guarded experiments whose target code is gone or whose result is closed. All
 default-off; none is reachable on the v0.5.1 default path.
@@ -491,7 +491,7 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   no auto rung reaches them. Confirm no forced-mod test path first.
 - **R6. `carrier_ldpc_interleaver`** — default-off diversity layer, auto-on only on masked
   carriers; likely removable. Confirm the masked-carrier path is truly unused first.
-- **R20. `OFDMDemodulator::Impl::huntForCodeword`** (`ofdm_sync.cpp`, declared in
+- **R20 — DONE 2026-11-24.** `OFDMDemodulator::Impl::huntForCodeword` (`ofdm_sync.cpp`, declared in
   `demodulator_impl.hpp`) — no callers (2026-11-10). It recognizes a frame only by the RAW magic
   `55 4C`, so it would also miss whitened OFDM control frames (INV-FRAME-WHITEN-001) if revived.
   **KEEP** the LDPC hunt's sibling `robustDecodeSingleCW` (`streaming_ofdm_decode.cpp`, live).
@@ -516,7 +516,7 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   `selectCoherentOFDM`/`selectLadderRung`; the whole MC-DPSK/narrow rate machinery (RX-AUTHORITY
   is wideband-coherent-only); `RateController` itself if entry/fallback still consults it.
 
-- **R13. `Impl::interpolateChannel()` + its N×N phasor tables** (found 2026-07-28) — an earlier
+- **R13 — DONE 2026-11-24.** `Impl::interpolateChannel()` + its N×N phasor tables (found 2026-07-28; `buildInterpolationPhasors`, both tables and the four scratch buffers deleted; `interp_table` / `buildInterpTable` kept) — an earlier
   DFT-channel-interpolation attempt that is **declared and defined but called from nowhere**.
   **Scope:** `demodulator_impl.hpp:415` (decl), `channel_equalizer_pilot.cpp:1204` (defn),
   `buildInterpolationPhasors()` `demodulator_impl.hpp:371` / `ofdm_demodulator_setup.cpp:70,193`,
@@ -586,6 +586,7 @@ _(none currently — R7 done, see Completed removals)_
 ---
 
 ## Completed removals (record / momentum)
+
 
 | Done | What | Commit |
 |------|------|--------|

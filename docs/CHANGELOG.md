@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-24 (night) — cleanup: retired experiments and dead decoder code (state machine slice 6)
+
+**What was deleted** (decided-dead items from docs/REMOVAL_BACKLOG.md, plus one of today's own):
+- R12 retired rate experiments: the goodput rate controller (`goodput_rate_controller.hpp`, its CTest and
+  the `ULTRA_GOODPUT_RATE` path), `ULTRA_TRUST_LADDER_PICK`, `ULTRA_RUNG_DWELL_MS` with
+  `rx_auth_last_change_*` and `kCatastrophicDwellBypassCraters`, and `ULTRA_ADAPTIVE_RTO` with the
+  `adaptive_floor` parameter of `updateRTO`. All default-off and off every default path.
+  `snapRungIndexUpToEnabled`, the one live helper in the goodput header, moved to waveform_selection.hpp.
+- R20 `OFDMDemodulator::Impl::huntForCodeword` (no callers); R13 `interpolateChannel` with
+  `buildInterpolationPhasors`, its two N×N phasor tables (built at every setup for nothing) and four
+  scratch buffers. `interp_table` / `buildInterpTable` (the live linear interpolation) kept.
+- Tried and REVERTED: deleting the dual-listen chirp hint. Sweep 13 without it lost two transfers'
+  final ACKs to one-frame resends the OFDM decoder never found (KNOWN_BUGS BUG-CHIRP-HINT-UNVERIFIED).
+- Fixed alongside: a receiver-commanded rung applied at its MODE_CHANGE ACK keeps the receiver-command
+  provenance, so it no longer spends a message's regrid allowance (sweep 14, Good 15 dB seed 412).
+- Fixed alongside: the tone-ACK length cap now uses the burst being answered
+  (`tone_ack_burst_frames_`, any group size) - a one-frame resend with unproven geometry kept the cap at
+  the previous 8-frame burst and a 6.8 s final ACK ran past the sender's 8.2 s resend.
+
+**Size.** Since 78af254c: 19 files, +23 / -1446 lines. Connection since 8902cead: fields 261 -> 244,
+booleans 82 -> 68, lines 15319 -> 15022.
+
+**Verification.** CTest 132/132 (GoodputRateController removed with its controller). TNC smoke sweep 13
+(seeds 409-410) and a GUI check below.
+
 ## 2026-11-24 (night) — refactor: session close state (state machine slice 5)
 
 **What changed.** The ten loose close fields of `Connection` (disconnect_frame_, disconnect_retry_count_,

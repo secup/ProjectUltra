@@ -21,15 +21,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   an idle receiver on the narrowband chirp until its next reset (false locks are gated since
   BUG-FALSE-NARROWBAND-LOCK, real ones are not undone).
 - (BUG-RTO-SHORTER-THAN-PEER-ACK: FIXED 2026-11-24, see Fixed Bugs.)
-- **BUG-CHIRP-HINT-UNVERIFIED** (P2, open): the dual-listen chirp hint (BUG-CONNECTED-OFDM-IGNORES-CHIRP)
-  is not shown to work. Over the 2026-11-24 sweep 365 hints led to 6 delivered frames; most fire on
-  genuine MC-DPSK frames (both waveforms share the dual chirp) and the OFDM decoder then reports an
-  accepted OFDM sync to the protocol for a frame that is not OFDM; hinted OFDM decodes of real OFDM
-  frames read their LTS at the estimator's noise floor (internal 5.0 / in-band 0.0 dB) even at ITU Good
-  15 dB. A standalone CTest could not exercise it (the replayed window sat below the decoder's search
-  floor and was dropped as consumed). Chirp-anchored OFDM control decodes work (ULTRA_BURST_ACQ=chirp:
-  8/8 at 10 and 20 dB), so the defect is in the replay, not the chirp path. Fire the hint only after
-  the MC-DPSK decode of that lock failed, and prove a replay decode in a test before relying on it.
+- **BUG-CHIRP-HINT-UNVERIFIED** (P3, open; the hint STAYS): removing the dual-listen chirp hint was tried
+  2026-11-24 and REVERTED. In the first sweep without it (sweep 13, 70 runs) two transfers ended with
+  "never reported BUFFER 0": the receiver had the whole file, its final ACK was lost, and the sender's
+  one-frame resends (each behind a full chirp) were locked by the receiver's MC-DPSK decoder and never
+  found by its OFDM decoder, whose structure detector missed every one; none of ~700 earlier runs with
+  the hint showed it. The "6 delivered frames from 365 hints" count was too crude to see that these
+  resends are the frames it rescues. Still true: most hints fire on genuine MC-DPSK frames, and hinted
+  decodes of OFDM frames often read the LTS at the noise floor. Next: hint only after the MC-DPSK
+  decode failed, and a CTest that exercises the replay (the floor-consumed check dropped it in a test).
 - **BUG-SIMULTANEOUS-CALL-FADING** (P2, open): the PING listen-before-talk fix (BUG-SIMULTANEOUS-PING-
   LOCKSTEP) does not cover every collision. TNC simultaneous, ITU Good 8 dB seed 402 (sweep 9): after
   aligning the two log clocks the rounds started 0.01, 0.73, 2.14, 0.2 and 0.07 s apart - two inside
@@ -3168,6 +3168,13 @@ Current blockers:
   carries - the protocol's decision, not a failed delivery - so it no longer spends the allowance;
   failure-driven changes still do. CTest WaveformFollow
   `test_message_survives_receiver_commanded_crossings` (fails with the fix disabled).
+
+- Second half (2026-11-24 night): a rung the receiver commands through MODE_CHANGE is applied when
+  the MODE_CHANGE ACK arrives, outside the command's scope, so it still spent the allowance (TNC short,
+  ITU Good 15 dB seed 412, sweep 14: the third commanded change abandoned a 900-byte message and the
+  TNC closed the session on the send failure). `requestModeChange` now records the provenance
+  (`pending_mode_change_receiver_commanded_`) and `commitPendingModeChange` applies the change under it.
+  CTest WaveformFollow `test_message_survives_commanded_mode_changes` (fails with the fix disabled).
 
 ### BUG-RTO-SHORTER-THAN-PEER-ACK (FIXED 2026-11-24) — was P2 (lost ACKs on low-SNR rounds)
 - The receiver keys a tone ACK of 0.4-6.8 s by its own SNR; the sender resends when its round timeout

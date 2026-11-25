@@ -698,7 +698,6 @@ private:
     uint32_t adaptive_ack_timeout_ms_ = 0;
     uint32_t ack_timeout_table_[selective_repeat_arq_policy::kMaxWindow + 1] = {};
     size_t ack_timeout_table_n_ = 0;
-    uint32_t last_logged_rto_ms_ = 0;  // null-control dedup (see maybeSampleRTT)
     // Measured burst timeout (setMeasuredBurstTimeouts). The egress group is the DATA frames
     // that left in one ARQ tick (a physical burst: the Connection hands a burst over at once),
     // with the airtime they were sent at; a latency sample needs the acknowledged frame to be in

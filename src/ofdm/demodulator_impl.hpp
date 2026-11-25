@@ -48,12 +48,6 @@ struct OFDMDemodulator::Impl {
     std::vector<Complex> freq_domain_scratch;
     std::vector<Complex> equalized_scratch;
     std::vector<Complex> constellation_update_scratch;
-    std::vector<Complex> interp_h_full_scratch;
-    std::vector<Complex> interp_h_cir_scratch;
-    std::vector<Complex> interp_h_clean_scratch;
-    std::vector<int> interp_pilot_logical_pos_scratch;
-    std::vector<Complex> interp_idft_phasors;
-    std::vector<Complex> interp_dft_phasors;
 
     // LTS DFT-denoise gate + tap window. Initialized from env in the constructor
     // so DEFAULT behavior is unchanged, but settable from a test via
@@ -462,7 +456,6 @@ struct OFDMDemodulator::Impl {
     void activateCarrierPattern(size_t symbol_index);
     void generateSequences();
     void buildInterpTable();
-    void buildInterpolationPhasors();
 
     // ==========================================================================
     // SYNC DETECTION (ofdm_sync.cpp)
@@ -478,7 +471,6 @@ struct OFDMDemodulator::Impl {
     float estimateCFOFromTraining(const float* samples, size_t num_symbols, float coarse_cfo_hz = 0.0f);
     size_t refineLTSTiming(size_t coarse_sts_start);
     std::vector<float> trialDemodulate(size_t data_start_offset, size_t num_symbols);
-    std::pair<bool, int> huntForCodeword(size_t candidate_sync_pos);
 
     // ==========================================================================
     // CHANNEL ESTIMATION & EQUALIZATION (channel_equalizer.cpp)
@@ -512,7 +504,6 @@ struct OFDMDemodulator::Impl {
                                   float noise_norm,
                                   Complex fallback,
                                   float* out_error_var);
-    void interpolateChannel();
     Complex hardDecision(Complex sym, Modulation mod) const;
     void resetFailureAttributionDiagnostics();
     void recordFailureAttributionSymbol(const std::vector<Complex>& equalized, Modulation mod);

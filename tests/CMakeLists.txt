@@ -449,10 +449,6 @@ add_test(NAME WaveformPolicy COMMAND test_waveform_policy)
 add_test(NAME WaveformPolicyLdpc COMMAND test_waveform_policy)
 set_tests_properties(WaveformPolicyLdpc PROPERTIES ENVIRONMENT "ULTRA_DATA_FEC=ldpc")
 
-add_executable(test_goodput_rate_controller test_goodput_rate_controller.cpp)
-target_link_libraries(test_goodput_rate_controller PRIVATE ultra_core)
-add_test(NAME GoodputRateController COMMAND test_goodput_rate_controller)
-
 add_executable(test_latent_rate_controller test_latent_rate_controller.cpp)
 target_link_libraries(test_latent_rate_controller PRIVATE ultra_core)
 add_test(NAME LatentRateController COMMAND test_latent_rate_controller)
