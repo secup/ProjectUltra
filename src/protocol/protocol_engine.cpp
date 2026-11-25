@@ -944,9 +944,9 @@ void ProtocolEngine::noteRxMcDpskMargin(bool upper_rung_margin) {
     connection_.noteRxMcDpskMargin(upper_rung_margin);
 }
 
-void ProtocolEngine::noteRxFrameMcDpsk(bool mcdpsk) {
+void ProtocolEngine::noteRxFrameMcDpsk(bool mcdpsk, Modulation mcdpsk_mod) {
     std::lock_guard<ProtocolEngineMutex> lock(mutex_);
-    connection_.noteRxFrameMcDpsk(mcdpsk);
+    connection_.noteRxFrameMcDpsk(mcdpsk, mcdpsk_mod);
 }
 
 void ProtocolEngine::noteRxWaveform(WaveformMode mode) {

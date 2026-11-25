@@ -26,6 +26,7 @@ struct CloseState {
     int ack_repeat_count = 0;
     Bytes ack_frame;                 // cached DISCONNECT ACK
     bool ack_mcdpsk = false;         // the DISCONNECT being acknowledged arrived on MC-DPSK
+    Modulation ack_mod = Modulation::AUTO;  // ... at this MC-DPSK rung
 
     void resetCloser() {
         disconnect_frame.clear();

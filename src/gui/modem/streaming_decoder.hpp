@@ -110,6 +110,7 @@ struct DecodeResult {
     int codewords_failed = 0;       // Number of failed LDPC decodes
     bool is_ping = false;           // True if this is a PING (chirp-only) frame
     bool decoded_mcdpsk = false;    // Demodulated as MC-DPSK (by either dual-listen decoder)
+    Modulation decoded_mcdpsk_mod = Modulation::AUTO;  // the MC-DPSK rung it decoded at
     bool has_idle_in_band_snr_db = false;
     float idle_in_band_snr_db = 0.0f;       // Receiver passband/in-band idle SNR.
     bool has_ofdm_broadband_snr_db = false;

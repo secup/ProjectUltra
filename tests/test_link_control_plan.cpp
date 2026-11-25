@@ -97,6 +97,29 @@ void rule5_mcdpsk_close_steps_down() {
     CHECK(planControlTx(f, e).step_down_to == Modulation::AUTO, "R5: the bottom rung has nowhere to go");
 }
 
+void rule6_mcdpsk_reply_at_request_rung() {
+    LinkFacts f;
+    f.session = WaveformMode::MC_DPSK;
+    f.session_mod = Modulation::DQPSK;
+    for (const ControlKind k : {ControlKind::DisconnectAck, ControlKind::Turnover}) {
+        ControlEvent e;
+        e.kind = k;
+        e.answering_mcdpsk = true;
+        e.answering_mod = Modulation::MFSK16_FAST;
+        const auto p = planControlTx(f, e);
+        CHECK(p.robust_once && p.robust_mod == Modulation::MFSK16_FAST,
+              "R6: a DQPSK station answers a 16-FSK-F request at 16-FSK-F");
+        e.answering_mod = Modulation::DQPSK;
+        CHECK(!planControlTx(f, e).robust_once, "R6: a request at its own rung needs no change");
+        LinkFacts slow = f;
+        slow.session_mod = Modulation::MFSK16;
+        e.answering_mod = Modulation::DQPSK;
+        CHECK(!planControlTx(slow, e).robust_once, "R6: never speed a reply up past its own rung");
+        e.answering_mod = Modulation::AUTO;
+        CHECK(!planControlTx(f, e).robust_once, "R6: an unknown request rung changes nothing");
+    }
+}
+
 void robust_targets_the_peer_decoder() {
     LinkFacts f = ofdmSession();
     CHECK(peerMcDpskDecoderModulation(f) == kRobustMid, "a settled session: the listener's ROBUST_MID");
@@ -113,6 +136,7 @@ int main() {
     rule3_turn_request_into_silence();
     rule4_last_disconnect_retry();
     rule5_mcdpsk_close_steps_down();
+    rule6_mcdpsk_reply_at_request_rung();
     robust_targets_the_peer_decoder();
     if (failures) {
         std::cout << "LinkControlPlan: " << failures << "/" << checks << " failed\n";

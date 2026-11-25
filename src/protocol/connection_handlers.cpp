@@ -797,7 +797,8 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
             : 0;
         setDisconnectTeardownActive(true);
         close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
-        answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+        close_.ack_mod = last_rx_frame_mcdpsk_mod_;
+        answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack", close_.ack_mod);
         transmitFrame(close_.ack_frame);
         return;
     }
@@ -818,7 +819,8 @@ void Connection::handleDisconnect(const v2::ControlFrame& frame, const std::stri
         : 0;
     setDisconnectTeardownActive(true);
     close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
-    answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+        close_.ack_mod = last_rx_frame_mcdpsk_mod_;
+    answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack", close_.ack_mod);
     transmitFrame(close_.ack_frame);
     if (!crossed_close && on_peer_closed_) {
         on_peer_closed_();  // BUG-TNC-PEER-DISCONNECTED-LATE: the host learns now, not after the grace
@@ -861,7 +863,8 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
             : 0;
         setDisconnectTeardownActive(true);
         close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
-        answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+        close_.ack_mod = last_rx_frame_mcdpsk_mod_;
+        answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack", close_.ack_mod);
         transmitFrame(close_.ack_frame);
         return;
     }
@@ -879,7 +882,8 @@ void Connection::handleDisconnectFrame(const v2::ConnectFrame& frame, const std:
         : 0;
     setDisconnectTeardownActive(true);
     close_.ack_mcdpsk = last_rx_frame_mcdpsk_;
-    answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack");
+        close_.ack_mod = last_rx_frame_mcdpsk_mod_;
+    answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack", close_.ack_mod);
     transmitFrame(close_.ack_frame);
     if (!crossed_close && on_peer_closed_) {
         on_peer_closed_();  // BUG-TNC-PEER-DISCONNECTED-LATE: the host learns now, not after the grace
@@ -1052,7 +1056,7 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
             LOG_MODEM(INFO,
                       "Connection: RX TURN_REQUEST from %s while waiting for peer DATA; reasserting TURNOVER",
                       src_call.empty() ? remote_call_.c_str() : src_call.c_str());
-            answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (reasserted)");
+            answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (reasserted)", last_rx_frame_mcdpsk_mod_);
             transmitFrame(turnover.serialize());
             turn_.setRequestPending(false);
             turn_request_retransmit_ms_ = 0;
@@ -1078,7 +1082,7 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
         LOG_MODEM(INFO,
                   "Connection: RX TURN_REQUEST from %s with the turn orphaned; granting it (TURNOVER)",
                   src_call.empty() ? remote_call_.c_str() : src_call.c_str());
-        answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (orphaned turn)");
+        answerOnArrivalWaveform(ControlKind::Turnover, last_rx_frame_mcdpsk_, "TURNOVER (orphaned turn)", last_rx_frame_mcdpsk_mod_);
         transmitFrame(turnover.serialize());
         turn_.setYieldedWaiting(true);
         yielded_turn_wait_ms_ = 0;
@@ -1091,6 +1095,7 @@ void Connection::handleTurnRequest(const v2::ControlFrame& frame, const std::str
 
     turn_.setPeerRequested(true);
     peer_turn_request_mcdpsk_ = last_rx_frame_mcdpsk_;
+    peer_turn_request_mod_ = last_rx_frame_mcdpsk_mod_;
     LOG_MODEM(INFO, "Connection: RX TURN_REQUEST from %s",
               src_call.empty() ? remote_call_.c_str() : src_call.c_str());
     maybeYieldDataTurn();

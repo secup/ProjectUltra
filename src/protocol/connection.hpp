@@ -355,7 +355,10 @@ public:
     void setMessageTxStatusCallback(MessageTxStatusCallback cb);
     void setIncomingCallCallback(IncomingCallCallback cb);
     void setPeerClosedCallback(PeerClosedCallback cb) { on_peer_closed_ = std::move(cb); }
-    void noteRxFrameMcDpsk(bool mcdpsk) { last_rx_frame_mcdpsk_ = mcdpsk; }
+    void noteRxFrameMcDpsk(bool mcdpsk, Modulation mcdpsk_mod = Modulation::AUTO) {
+        last_rx_frame_mcdpsk_ = mcdpsk;
+        last_rx_frame_mcdpsk_mod_ = mcdpsk ? mcdpsk_mod : Modulation::AUTO;
+    }
     Modulation robustControlModulationForTest() const { return robustControlModulation(); }
     // The longest tone-ACK symbol duration whose ACK still ends before the sender resends the group
     // this ACK answers (published before every tone ACK; lock-free for the frontend's ACK callback).
@@ -2099,9 +2102,12 @@ private:
                               uint8_t rung) const;
     // The frame being processed was demodulated as MC-DPSK (set by the frontend before delivery).
     bool last_rx_frame_mcdpsk_ = false;
+    Modulation last_rx_frame_mcdpsk_mod_ = Modulation::AUTO;  // its MC-DPSK rung
     uint32_t probe_defer_ms_ = 0;  // PING retry held by carrier sense (bounded)
-    bool peer_turn_request_mcdpsk_ = false;  // the pending TURN_REQUEST arrived on MC-DPSK
-    void answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what);
+    bool peer_turn_request_mcdpsk_ = false;
+    Modulation peer_turn_request_mod_ = Modulation::AUTO;  // the pending TURN_REQUEST arrived on MC-DPSK
+    void answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what,
+                                 Modulation arrived_mod = Modulation::AUTO);
     LinkFacts linkFacts() const;
     bool maybeYieldDataTurn();
     void armDataTurnTxGuard(uint32_t guard_ms);

@@ -315,7 +315,7 @@ public:
 
     // Every delivered frame: whether it was demodulated as MC-DPSK, reported just before delivery so
     // the protocol answers a control frame on the waveform it arrived on.
-    using RxFrameWaveformCallback = std::function<void(bool mcdpsk)>;
+    using RxFrameWaveformCallback = std::function<void(bool mcdpsk, Modulation mcdpsk_mod)>;
     void setRxFrameWaveformCallback(RxFrameWaveformCallback callback) {
         rx_frame_waveform_cb_ = std::move(callback);
     }

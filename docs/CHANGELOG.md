@@ -10,6 +10,22 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — fix: MC-DPSK control replies ride the request's more robust rung
+
+**What broke.** An MC-DPSK DISCONNECT ack went out at the answering station's data rung (DQPSK) while
+the closer's request had arrived at 16-FSK-F; an LDPC control codeword at DQPSK is ~1 dB weaker than
+the turbo data frames that rung was chosen for, and the closer decoded none (BUG-MCDPSK-CONTROL-REPLY-RUNG).
+
+**What changed.** `DecodeResult::decoded_mcdpsk_mod` (set in `decodeMCDPSKFrame`) travels with the
+arrival waveform (`ModemEngine::setRxFrameWaveformCallback(bool, Modulation)` ->
+`ProtocolEngine::noteRxFrameMcDpsk`); the connection keeps it beside the stored arrival flags (last
+frame, pending turn request, DISCONNECT being acknowledged). Link-control rule R6: in an MC-DPSK session
+a DISCONNECT ack / TURNOVER rides the more robust of its own rung and the request's.
+
+**Verification.** CTest 132/132 (LinkControlPlan 28/28 with R6). TNC AWGN 3 dB short seed 407: FAIL ->
+PASS (R6 fired 3x). TNC sweep 15 (seeds 413-414, 70 runs): 69/70; the failure is a pre-session
+call collision (BUG-SIMULTANEOUS-CALL-FADING: both stations heard each other's PING and both sent CONNECT).
+
 ## 2026-11-24 (night) — cleanup: retired experiments and dead decoder code (state machine slice 6)
 
 **What was deleted** (decided-dead items from docs/REMOVAL_BACKLOG.md, plus one of today's own):

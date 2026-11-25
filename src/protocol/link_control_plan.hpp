@@ -41,6 +41,7 @@ enum class ControlKind : uint8_t {
 struct ControlEvent {
     ControlKind kind = ControlKind::TurnRequest;
     bool answering_mcdpsk = false;    // replies: the frame answered was demodulated as MC-DPSK
+    Modulation answering_mod = Modulation::AUTO;  // replies: the MC-DPSK rung it decoded at
     int retry_count = 0;              // DisconnectRetry: this retry's ordinal (1-based)
     int useful_retry_count = 0;       // DisconnectRetry: the last retry that can still be answered
     uint32_t peer_silent_ms = 0;      // TurnRequestRetry: time since anything was heard from the peer
@@ -104,6 +105,18 @@ inline ControlTxPlan planControlTx(const LinkFacts& f, const ControlEvent& e) {
             // R1 BUG-REPLY-ON-WRONG-WAVEFORM: a reply rides the waveform its request arrived on.
             if (ofdm && f.peer_decodes_robust && e.answering_mcdpsk) {
                 robust("R1 reply on the request's waveform");
+            } else if (f.session == WaveformMode::MC_DPSK && e.answering_mcdpsk) {
+                // R6 BUG-MCDPSK-CONTROL-REPLY-RUNG: in an MC-DPSK session a reply rides the more
+                // robust of this station's own rung and the rung its request decoded at - an
+                // LDPC control codeword sits ~1 dB above the turbo data frame of the same rung, so
+                // a reply at a data rung the link carries only for turbo frames is lost.
+                const int req = connection_policy::mcDpskRungIndexFor(e.answering_mod);
+                const int own = connection_policy::mcDpskRungIndexFor(f.session_mod);
+                if (req >= 0 && own >= 0 && req < own) {
+                    p.robust_once = true;
+                    p.robust_mod = e.answering_mod;
+                    p.rule = "R6 MC-DPSK reply at the request's more robust rung";
+                }
             }
             break;
         case ControlKind::TurnRequest:

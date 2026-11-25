@@ -1860,13 +1860,16 @@ bool Connection::peerDecodesRobustControl() const {
 // waveform does not move the session (a late repeat must not), so the reply used to go out on OFDM -
 // which the peer, just shown unable to get OFDM through, then missed: a TURNOVER at AWGN 3 dB that
 // stalled the turn for minutes, a DISCONNECT ack at ITU Good 15 dB that left the closer retrying.
-void Connection::answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what) {
+void Connection::answerOnArrivalWaveform(ControlKind kind, bool arrived_mcdpsk, const char* what,
+                                         Modulation arrived_mod) {
     ControlEvent e;
     e.kind = kind;
     e.answering_mcdpsk = arrived_mcdpsk;
+    e.answering_mod = arrived_mod;
     const ControlTxPlan plan = planControlTx(linkFacts(), e);
     if (!plan.robust_once || !on_robust_control_once_) return;
-    LOG_MODEM(INFO, "Connection: %s on MC-DPSK, the waveform its request arrived on", what);
+    LOG_MODEM(INFO, "Connection: %s on MC-DPSK %s (%s)", what, modulationToString(plan.robust_mod),
+              plan.rule);
     on_robust_control_once_(plan.robust_mod);
 }
 
@@ -1959,7 +1962,7 @@ bool Connection::maybeYieldDataTurn() {
     }
 
     auto turnover = v2::ControlFrame::makeTurnover(local_call_, remote_call_);
-    answerOnArrivalWaveform(ControlKind::Turnover, peer_turn_request_mcdpsk_, "TURNOVER");
+    answerOnArrivalWaveform(ControlKind::Turnover, peer_turn_request_mcdpsk_, "TURNOVER", peer_turn_request_mod_);
     LOG_MODEM(INFO,
               "Connection: TX TURNOVER to %s (peer requested DATA turn, turn_bytes=%llu, contended_ms=%u, backlog=%zu)",
               remote_call_.c_str(),
@@ -6273,6 +6276,7 @@ void Connection::onFrameReceived(const Bytes& frame_data,
                                 if ((ctrl->flags & v2::Flags::TURN_REQUEST) != 0) {
                                     turn_.setPeerRequested(true);
                                     peer_turn_request_mcdpsk_ = last_rx_frame_mcdpsk_;
+    peer_turn_request_mod_ = last_rx_frame_mcdpsk_mod_;
                                     LOG_MODEM(INFO,
                                               "Connection: Peer requested DATA turn on ACK seq=%u",
                                               ctrl->seq);
@@ -6763,7 +6767,7 @@ bool Connection::tickDisconnectResponderGrace(uint32_t elapsed_ms) {
                       close_.ack_repeat_count,
                       repeat_limit,
                       close_.grace_ms);
-            answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack repeat");
+            answerOnArrivalWaveform(ControlKind::DisconnectAck, close_.ack_mcdpsk, "DISCONNECT ack repeat", close_.ack_mod);
             transmitFrame(close_.ack_frame);
         } else {
             close_.ack_retransmit_ms -= elapsed_ms;

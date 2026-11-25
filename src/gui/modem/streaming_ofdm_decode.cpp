@@ -4098,6 +4098,7 @@ DecodeResult StreamingDecoder::decodeMCDPSKFrame(const std::vector<float>& soft_
     DecodeResult result = decodeMCDPSKFrameImpl(soft_bits, rate, bytes_per_cw, snr, cfo);
     result.decoded_mcdpsk = true;
     if (result.success && waveform_) {
+        result.decoded_mcdpsk_mod = waveform_->getModulation();
         last_mc_dpsk_rx_modulation_.store(static_cast<int>(waveform_->getModulation()),
                                           std::memory_order_relaxed);
     }

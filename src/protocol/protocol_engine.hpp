@@ -259,7 +259,7 @@ public:
     void noteRxMcDpskFrameLost(int modulation);
     void noteRxMcDpskTurnLoss(bool turn_over);
     void noteRxWaveform(WaveformMode mode);
-    void noteRxFrameMcDpsk(bool mcdpsk);
+    void noteRxFrameMcDpsk(bool mcdpsk, Modulation mcdpsk_mod = Modulation::AUTO);
     void noteRxMcDpskMargin(bool upper_rung_margin);
     float getMeasuredSNR() const;
     SNRSource getMeasuredSNRSource() const;

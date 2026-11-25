@@ -222,7 +222,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
         [&protocol](protocol::WaveformMode mode) { protocol.noteRxWaveform(mode); });
     // A control reply goes out on the waveform its request arrived on (BUG-REPLY-ON-WRONG-WAVEFORM).
     modem.setRxFrameWaveformCallback(
-        [&protocol](bool mcdpsk) { protocol.noteRxFrameMcDpsk(mcdpsk); });
+        [&protocol](bool mcdpsk, Modulation mod) { protocol.noteRxFrameMcDpsk(mcdpsk, mod); });
     modem.setDescriptorModeChangeCallback(
         [&protocol](Modulation mod, CodeRate rate, int cw_per_frame) {
             protocol.onDescriptorModeChange(mod, rate, cw_per_frame);
