@@ -123,6 +123,20 @@ the 5 Hz phantom bound, every later frame demodulated as noise (|LLR| ~0.1) and 
 recovered (BUG-CFO-REVOKE-TO-ZERO). **Test:** `StreamingSignalPolicy`
 (`test_burst_outcome_cfo_reconciliation`: all three revoke paths, certificate precedence,
 reset, non-finite reference).
+**Amended 2026-11-25 (BUG-SESSION-CFO-SINGLE-CHIRP, BUG-HANDSHAKE-CFO-SEED-STALE):** the session
+reference is the MEDIAN of the session's dual-chirp readings at the trust correlation (the handshake
+value plus every later chirp, the newest five; an even count drops the oldest), and while no
+certificate exists the connected chirp clamp compares against that median once three readings exist.
+One chirp reading outranks no other: on multipath any one may carry the phantom (ITU Good 1.3 Hz,
+Moderate 2.4 Hz in ~1 of 3 handshakes), and the LTS cannot see 1.3 Hz on a fading frame (σ_r ~1 Hz).
+Only a structure / warm-LTS sync does not vote (it reports the CFO it searched at). The engine saves
+a delivered frame's CFO BEFORE delivering it, so the CONNECT / CONNECT_ACK that enters the session
+seeds it with its own reading. Whether the peer's CFO is measured is a flag (`peer_cfo_known_`), never
+a magnitude test: a peer at 0 Hz is measured (BUG-PEER-CFO-ZERO-SENTINEL — both seeding sites skipped
+|CFO| <= 0.01 Hz, so a session between well-calibrated rigs had no reference at all).
+**Test:** `StreamingSignalPolicy` (phantom seed outvoted, single phantom chirp clamped, weak lock
+ignored, certificate wins), `DualListenEngine` (seed is the handshake frame's own CFO; a 0 Hz CONNECT
+is a measurement).
 
 ### INV-CHIRP-003: A chirp search must start kappa x CFO_max before the expected chirp
 

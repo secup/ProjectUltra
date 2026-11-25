@@ -290,7 +290,7 @@ void ModemEngine::setConnected(bool connected) {
 
             // Propagate known CFO from handshake to StreamingDecoder
             // This seeds the CFO feedback loop so the first OFDM frame uses correct CFO
-            if (std::abs(peer_cfo_hz_) > 0.01f) {
+            if (peer_cfo_known_) {
                 streaming_decoder_->setKnownCFO(peer_cfo_hz_);
                 LOG_MODEM(INFO, "setConnected: seeded CFO=%.2f Hz from handshake", peer_cfo_hz_);
             }
@@ -354,6 +354,7 @@ void ModemEngine::setConnected(bool connected) {
         data_modulation_ = Modulation::DQPSK;
         data_code_rate_ = CodeRate::R1_4;
         peer_cfo_hz_ = 0.0f;
+        peer_cfo_known_ = false;
 
         // Keep using connected waveform for the next TX (DISCONNECT ACK)
         // Save the current negotiated waveform BEFORE it might be reset

@@ -388,6 +388,22 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 8. **A revoke without a certificate restores the handshake CFO, not 0 Hz** (INV-CFO-006) — the
    LTS can only correct an uncertified prior within the 5 Hz phantom bound, so a 0 Hz default on a
    7 Hz link is unrecoverable until a chirp re-anchors.
+9. **Until a certificate, no chirp reading outranks another** (INV-CFO-006, amended 2026-11-25) —
+   the session reference and the connected clamp's comparison value are the MEDIAN of the session's
+   trusted dual-chirp readings (`CFOTracker::noteTrustedChirp`, newest five). Invariant 5's 1 Hz
+   clamp defends a CERTIFIED value; applied to a single handshake reading it defended a 1.3 Hz
+   phantom against every correct chirp (BUG-SESSION-CFO-SINGLE-CHIRP). The engine records a
+   delivered frame's CFO before delivering it, so the handshake seed is the CONNECT / CONNECT_ACK's
+   own reading (BUG-HANDSHAKE-CFO-SEED-STALE). "Measured" is a flag (`peer_cfo_known_`), never
+   |CFO| > ε: a peer at 0 Hz is measured (BUG-PEER-CFO-ZERO-SENTINEL).
+10. **A certificate is a measurement, not a CRC** (2026-11-25, BUG-CONTROL-CFO-CERT-PRECISION) — the
+   per-symbol pilot CFO tracker is off, so a frame's CFO after the LTS stage is its prior, and CPE
+   correction lets a short codeword decode ~2 Hz off. A decoded control frame's own CFO measurement
+   is its common-phase slope (`src/ofdm/cpe_cfo.hpp`: pilots vs the frame's LTS snapshot); a
+   significant reading corrects the certified value, and the frame certifies only when
+   σ_cpe ≤ max(σ_LTS, 1 mHz) AND it confirms the value (the reading was applied, or lies inside 3σ;
+   between 3σ and the small-sample t threshold it neither corrects nor confirms). Never use the CPE reading before the LDPC verdict: a false lock reads
+   ±10 Hz with a significant-looking slope.
 
 ---
 
@@ -398,6 +414,7 @@ diff = eq_data × conj(ref) = TX_data × e^{-jφ} × conj(e^{-jφ}) = TX_data  �
 | One station 100%, other all failures | Fading distorted chirp → wrong CFO on one direction | LTS residual correction + feedback loop |
 | Progressive phase drift in constellation | Wrong CFO not corrected between frames | CFO feedback loop |
 | After one unproven burst (descriptor lost) every frame decodes as noise, data syncs log `using CFO=0.0 Hz`, LTS logs `residual ... NOT applied (beyond phantom bound)` | The tracked CFO was revoked to the 0 Hz default (BUG-CFO-REVOKE-TO-ZERO) | Session reference (INV-CFO-006) |
+| A fading session's OFDM never decodes (EVM ~4 dB at a true 15 dB) while every chirp logs `Full-anchor CFO sanity: chirp 7.30 Hz (corr=0.9x) rejected to measured 5.95 Hz` | One handshake chirp carried a multipath phantom and the clamp defended it (BUG-SESSION-CFO-SINGLE-CHIRP) | Chirp-median session reference (invariant 9) |
 | First frame fails, rest OK | LTS residual not estimated | Check threshold (0.3 Hz) |
 | All frames fail equally | Systematic CFO error > 5 Hz | Check chirp detection, increase LTS correction range |
 | CW[1]/CW[3] fail more than CW[0]/CW[2] | LLR imbalance in DQPSK demapper | Check `soft_demap.hpp` bit0 vs bit1 scaling |

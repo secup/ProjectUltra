@@ -11,6 +11,7 @@
 #include <sstream>
 #include <vector>
 #include "ultra/ofdm.hpp"
+#include "cpe_cfo.hpp"
 #include "ultra/dsp.hpp"
 #include "ultra/logging.hpp"
 #include "ultra/timing_profiler.hpp"
@@ -781,6 +782,15 @@ float OFDMDemodulator::getLastLTSPairChi() const {
 
 float OFDMDemodulator::getLastLTSResidualCFOHz() const {
     return impl_->last_lts_residual_cfo_hz;
+}
+
+cpe_cfo::FrameMeasurement OFDMDemodulator::getFrameCfoMeasurement() const {
+    const double ts = static_cast<double>(impl_->config.getSymbolDuration()) /
+                      static_cast<double>(impl_->config.sample_rate);
+    cpe_cfo::FrameMeasurement m;
+    m.cpe = cpe_cfo::fromTrajectory(impl_->cpe_trajectory, ts);
+    m.lts_sigma_hz = impl_->last_lts_residual_sigma_hz;
+    return m;
 }
 
 std::string OFDMDemodulator::getFailureAttributionDiagnosticsText() const {

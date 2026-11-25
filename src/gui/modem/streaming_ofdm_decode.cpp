@@ -1,6 +1,7 @@
 // StreamingDecoder module
 
 #include "ofdm/genie_tx_capture.hpp"
+#include "ofdm/lts_cfo_update.hpp"
 #include "streaming_decoder.hpp"
 #include "handshake_mfsk.hpp"
 #include "protocol/connection_policy.hpp"  // MC-DPSK data constellations
@@ -1543,19 +1544,47 @@ void StreamingDecoder::decodeCurrentFrame() {
                         // phantom was stored as 0.7 Hz (2.7 - 2.0 clamp) and certified, so the
                         // group's DATA frames started 0.7-0.9 Hz off with a "certified" prior
                         // that the LTS stage then (correctly) refused to correct.
-                        const float control_residual_cfo = waveform_->estimatedCFO();
+                        // BUG-CONTROL-CFO-CERT-PRECISION (2026-11-25): the CRC proves the
+                        // demodulation, not the CFO to a certificate's precision. With the
+                        // per-symbol pilot CFO tracker off, the frame's CFO is its prior plus any
+                        // LTS correction, and CPE correction lets one R1/4 codeword decode ~2 Hz
+                        // off (dial 0 Hz, ITU Good 15 dB: a 1.90 Hz prior certified, held for 83
+                        // frames). What the frame does measure is its common-phase slope
+                        // (cpe_cfo.hpp): significant, it corrects the value; and the value is
+                        // certified only when that measurement is fine enough for a certificate
+                        // (K_LTS <= 0.1, cpe_cfo::certifies). A coarser frame keeps the value
+                        // tracked, uncertified, so the LTS stage still corrects it.
+                        const auto control_measured = waveform_->getFrameCfoMeasurement();
+                        const bool control_cpe_significant = cpe_cfo::significant(
+                            control_measured.cpe,
+                            lts_cfo::significanceThreshold(control_measured.cpe.symbols - 1));
+                        const float control_residual_cfo =
+                            waveform_->estimatedCFO() +
+                            (control_cpe_significant
+                                 ? static_cast<float>(control_measured.cpe.cfo_hz) : 0.0f);
                         const float control_current_cfo = cfo_tracker_.tracked();
                         const auto control_cfo_update = cfo_tracker_.ingestPilotResidual(
                             frame_demodulator_.preCorrectionCfo(), control_residual_cfo,
                             control_current_cfo, /*clamp_drift=*/false);
                         sync_cfo_ = control_cfo_update.accepted_cfo;
-                        cfo_tracker_.certifyWarm();
+                        const bool control_certifies =
+                            cpe_cfo::certifies(control_measured) &&
+                            cpe_cfo::confirms(control_measured.cpe, control_cpe_significant,
+                                              lts_cfo::kSignificanceSigmas);
+                        if (control_certifies) {
+                            cfo_tracker_.certifyWarm();
+                        }
                         LOG_MODEM(INFO,
-                                  "[%s] Classic OFDM control CFO certified: %.2f Hz "
-                                  "(pre_corr=%.2f residual=%.2f)",
-                                  log_prefix_.c_str(), sync_cfo_,
-                                  frame_demodulator_.preCorrectionCfo(),
-                                  control_residual_cfo);
+                                  "[%s] Classic OFDM control CFO %s: %.2f Hz "
+                                  "(pre_corr=%.2f residual=%.2f, CPE %+.2f +- %.2f Hz over %d "
+                                  "symbols%s, LTS sigma %.2f Hz)",
+                                  log_prefix_.c_str(),
+                                  control_certifies ? "certified" : "kept uncertified",
+                                  sync_cfo_, frame_demodulator_.preCorrectionCfo(),
+                                  control_residual_cfo, control_measured.cpe.cfo_hz,
+                                  control_measured.cpe.sigma_hz, control_measured.cpe.symbols,
+                                  control_cpe_significant ? " applied" : "",
+                                  control_measured.lts_sigma_hz);
                         // Self-describing burst (design §14.17): a BURST_HEADER
                         // descriptor configures THIS receiver's group decode from
                         // the SENDER's declaration (group size, CW/frame, interleave

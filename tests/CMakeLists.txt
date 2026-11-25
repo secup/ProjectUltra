@@ -650,7 +650,8 @@ target_compile_definitions(test_ping_detector PRIVATE
 target_link_libraries(test_ping_detector PRIVATE ultra_core)
 add_test(NAME PingDetector COMMAND test_ping_detector)
 
-add_executable(test_streaming_signal_policy test_streaming_signal_policy.cpp)
+add_executable(test_streaming_signal_policy test_streaming_signal_policy.cpp
+    ../src/sync/cfo_tracker.cpp)
 target_include_directories(test_streaming_signal_policy PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../src
 )

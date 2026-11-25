@@ -395,6 +395,52 @@ void test_burst_outcome_cfo_reconciliation() {
               "a non-finite reference is ignored");
     }
 
+    // BUG-SESSION-CFO-SINGLE-CHIRP: until a certificate, the session reference is the median of the
+    // session's trusted chirp readings, not the first. TNC ITU Good 15 dB: a 5.95 Hz handshake
+    // phantom on a 7.30 Hz link, three 7.30 Hz anchors rejected back to it, 250 s without OFDM.
+    {
+        CFOTracker phantom_seed;
+        phantom_seed.store(5.95f);
+        phantom_seed.setSessionReference(5.95f);
+        phantom_seed.noteTrustedChirp(7.30f, 0.88f);
+        CHECK(phantom_seed.applyBurstDecodeOutcome(0, 4) == Action::RESTORED_SESSION_REFERENCE,
+              "a 0/N group restores the session reference");
+        CHECK_CLOSE(phantom_seed.tracked(), 7.30f, 0.0001f,
+                    "two readings that disagree: the newer one, not the handshake's");
+        phantom_seed.store(5.95f);
+        phantom_seed.noteTrustedChirp(7.30f, 0.98f);
+        CHECK_CLOSE(phantom_seed.sessionReferenceCfoHz(), 7.30f, 0.0001f,
+                    "three readings: the median outvotes the phantom");
+        CHECK_CLOSE(phantom_seed.seedFromChirpConnectedAnchor(7.30f, 0.98f, "test"), 7.30f, 0.0001f,
+                    "an uncertified tracker no longer clamps a majority chirp back to the phantom");
+        phantom_seed.noteTrustedChirp(5.0f, 0.90f);  // a new phantom on the anchor in hand
+        CHECK_CLOSE(phantom_seed.seedFromChirpConnectedAnchor(5.0f, 0.90f, "test"), 7.30f, 0.0001f,
+                    "and a single phantom chirp is clamped to the majority");
+        phantom_seed.noteTrustedChirp(-40.0f, 0.50f);
+        CHECK(phantom_seed.chirpReadingCount() == 4, "a weak lock does not vote");
+        // Certified: the warm value wins over any chirp majority (BUG-ANCHOR-CFO-KILL).
+        phantom_seed.store(7.32f);
+        phantom_seed.applyBurstDecodeOutcome(4, 4);
+        phantom_seed.noteTrustedChirp(6.0f, 0.95f);
+        phantom_seed.noteTrustedChirp(6.0f, 0.95f);
+        phantom_seed.noteTrustedChirp(6.0f, 0.95f);
+        CHECK_CLOSE(phantom_seed.seedFromChirpConnectedAnchor(6.0f, 0.95f, "test"), 7.32f, 0.0001f,
+                    "a certified tracker keeps its warm value");
+        phantom_seed.reset();
+        CHECK(phantom_seed.chirpReadingCount() == 0 &&
+                  !std::isfinite(phantom_seed.sessionReferenceCfoHz()),
+              "reset clears the readings with the reference");
+    }
+    {
+        // Two readings cannot outvote each other: the clamp keeps the tracked value.
+        CFOTracker two;
+        two.store(7.30f);
+        two.setSessionReference(7.30f);
+        two.noteTrustedChirp(5.0f, 0.90f);
+        CHECK_CLOSE(two.seedFromChirpConnectedAnchor(5.0f, 0.90f, "test"), 7.30f, 0.0001f,
+                    "two readings: the connected clamp keeps the tracked value");
+    }
+
     // A historical snapshot may still be useful numerically after 0/N revoked
     // warm trust, but restoring it must not silently re-certify it.
     CFOTracker historical;

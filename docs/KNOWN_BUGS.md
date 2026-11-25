@@ -9,6 +9,48 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### TNC host-facing gaps found 2026-11-23 (`tools/tnc_scenario.py`, open) — P2/P3
+- **BUG-HANDSHAKE-CFO-SEED-STALE** (P1, FIXED 2026-11-25, see CHANGELOG): every session's CFO seed was
+  the frame BEFORE the one that completed the handshake. setConnected seeds the decoders from
+  `peer_cfo_hz_` inside the delivery of the CONNECT / CONNECT_ACK, and the engine saved each frame's CFO
+  only after delivering it: the responder seeded from the PING, the initiator from the PONG. TNC ITU
+  Good 15 dB: a 0.71-correlation PING read 5.95 Hz on a 7.30 Hz link and became the session's
+  reference. Fix: the CFO is saved before delivery, from LDPC-verified frames only. CTest
+  DualListenEngine (fails without the fix: 0.00 Hz held while a 7.30 Hz CONNECT is delivered).
+- **BUG-SESSION-CFO-SINGLE-CHIRP** (P1, FIXED 2026-11-25, see CHANGELOG): an uncertified session's CFO
+  reference was ONE chirp reading, defended by the 1 Hz connected clamp against every later chirp. A
+  dual-chirp reading carries a multipath phantom in ~1 of 3 Moderate handshakes (2.4 Hz) and a few % of
+  Good ones (1.3 Hz); the LTS significance test cannot see 1.3 Hz on a 2-symbol fading LTS, and every
+  0/N group restored the phantom (INV-CFO-006). Same session as above: three 7.30 Hz anchors at corr
+  0.88-0.98 rejected, no OFDM group decoded for 250 s. Fix: until a decoded group certifies the CFO, the
+  clamp's reference is the median of the session's last 5 trusted chirps (corr >= 0.85).
+  CTest StreamingSignalPolicy (phantom outvoted / clamped / weak lock ignored / certificate wins).
+- **BUG-PEER-CFO-ZERO-SENTINEL** (P1, FIXED 2026-11-25, see CHANGELOG): a peer measured at |CFO| <= 0.01
+  Hz was treated as never measured (`std::abs(peer_cfo_hz_) > 0.01f` at both seeding sites), so neither
+  decoder got a session reference. Well-calibrated rigs sit within a fraction of a hertz of each other:
+  this is the common case on air, hidden because every gate since 2026-11-08 runs at a 7.3 Hz dial. The
+  dual-listen OFDM decoder then adopted one light-LTS sync's own CFO reading (corr 0.59 on fading, read
+  1.9 Hz) and a control frame certified it (next entry). TNC ITU Good, dial 0 Hz, seeds 501-524: a
+  wrong certificate (|CFO| 0.7-2.1 Hz) in 5/24 sessions at 15 dB (median 196 s vs 127 s) and 4/24 at
+  8 dB, including 3 of the 5 failures; 0/48 with the CFO forced to the truth. Fix: an explicit
+  `peer_cfo_known_` flag. CTest DualListenEngine (fails without the fix).
+- **BUG-CONTROL-CFO-CERT-PRECISION** (P1, FIXED 2026-11-25, see CHANGELOG): a decoded connected OFDM
+  control frame certified the CFO it was demodulated with, and a certified prior is never LTS-corrected.
+  With the per-symbol pilot CFO tracker disabled that CFO is the prior itself, and CPE correction lets
+  one R1/4 codeword decode ~2 Hz off. Seen (dial 0 Hz, ITU Good 15 dB seed 501): a 1.90 Hz prior
+  certified while the frame's structure sync measured -1.89 Hz and its LTS -2.15 Hz; held for 83 frames.
+  Fix: `src/ofdm/cpe_cfo.hpp` measures the frame's CFO from its common-phase trajectory (pilots vs the
+  LTS snapshot, least-squares slope and its standard error); a significant reading corrects the
+  certified value, and the frame certifies only when sigma_cpe <= max(sigma_LTS, 1 mHz) and the value
+  is confirmed (applied, or the reading inside 3 sigma). Remaining:
+  group certification (`applyBurstDecodeOutcome`) still certifies the tracked value without it (no
+  wrong group certificate seen in 96 A/B sessions); and the confirm band is 3 sigma wide, so a reading
+  just inside it confirms a prior up to ~3 sigma_cpe off (TNC Good 15 dB seed 506: CPE -0.71 +- 0.24 Hz,
+  the 1.05 Hz prior of a 0 Hz link certified; 1 of 48 sessions). CTest LtsCfoUpdate §5.
+- **BUG-TNC-BUFFER0-NOT-REPORTED** (open, 2026-11-25) — P3: TNC ITU Good 8 dB seed 506, short scenario:
+  "a2b_250B: ALPHA never reported BUFFER 0 after delivery" at ~180 s, in the genie-CFO arm and both
+  candidate arms alike (the old build passed it in 383 s). Not investigated. The same A/B's other
+  failure: 11 sessions stalled at exactly 323/1223 B of a2b_900B (old build 5, candidates 6, genie 0;
+  seeds 504/508/511/521/522/524) - the stall seen in sweep 21 (BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING).
 - **BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG** (P1, FIXED 2026-11-25; throughput-neutral, see CHANGELOG): every failed
   up-crossing probe also reset the MC-DPSK rung ladder. With OFDM commanded, BRAVO's MC-DPSK decoder
   locks the peer's OFDM burst chirp (the same position the dual-listen OFDM decoder locks), fails to

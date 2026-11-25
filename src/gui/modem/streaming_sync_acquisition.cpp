@@ -1178,6 +1178,13 @@ void StreamingDecoder::searchForSync() {
                       log_prefix_.c_str(), sync_result.measured_cfo_hz, sync_result.cfo_hz);
             sync_result.cfo_hz = sync_result.measured_cfo_hz;
         }
+        // A dual-chirp reading votes in the session's CFO reference (BUG-SESSION-CFO-SINGLE-CHIRP).
+        // Structure acquisition and warm LTS windows report the CFO they SEARCHED at (the tracked
+        // value) beside their own measurement: neither is a new chirp reading.
+        if (!used_structure_anchor && !used_warm_timed_window &&
+            !std::isfinite(sync_result.measured_cfo_hz)) {
+            cfo_tracker_.noteTrustedChirp(sync_result.cfo_hz, sync_result.correlation);
+        }
         float new_cfo = use_full_ofdm_anchor_search
             ? cfo_tracker_.seedFromChirpConnectedAnchor(
                   sync_result.cfo_hz, sync_result.correlation, log_prefix_.c_str())

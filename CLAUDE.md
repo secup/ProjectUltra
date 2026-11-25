@@ -71,6 +71,8 @@ results; see docs/CHANGELOG.md):
 - A burst that proves nothing never resets the CFO to 0 Hz: without a certificate the tracker
   restores the handshake's dual-chirp CFO (session reference, INV-CFO-006). 0 Hz on a 7 Hz link is
   beyond the LTS correction's 5 Hz phantom bound and killed the link (BUG-CFO-REVOKE-TO-ZERO)
+- "CFO measured" is a flag, never `|cfo| > ε`: a peer at 0 Hz is measured (BUG-PEER-CFO-ZERO-SENTINEL —
+  the gates' fixed 7.3 Hz dial hid a 0 Hz session getting no CFO reference). Run CFO A/Bs at 0 Hz too
 - NEVER remove the feedback in `ofdm_chirp_waveform.cpp:process()` or `streaming_decoder.cpp` — without it, wrong chirp CFO re-injects every frame → progressive phase drift → CW failures
 - Soundcard clock drift: burst members are sliced at stride + the session drift model (`sync/sco_tracker.hpp`, INV-SCO-001); NEVER re-slice a member from its own LTS timing estimate (§14.25: lost ~50 % of bursts on fading)
 

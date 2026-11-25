@@ -5,6 +5,8 @@
 #include <string>
 
 namespace ultra {
+namespace cpe_cfo { struct FrameMeasurement; }  // src/ofdm/cpe_cfo.hpp
+
 
 // Forward declarations
 class FFT;
@@ -225,6 +227,9 @@ public:
     // coherence disc's noise-floor de-bias (read-only diagnostic for now).
     float getLastLTSNoiseVariance() const;
     float getLastLTSResidualCFOHz() const;
+    // What the last frame measured about its own CFO error (src/ofdm/cpe_cfo.hpp): the CPE
+    // trajectory's slope and the LTS pair's standard error.
+    cpe_cfo::FrameMeasurement getFrameCfoMeasurement() const;
     // LTS-pair structure statistic of the last frame (see demodulator_impl.hpp).
     float getLastLTSPairChi() const;
 

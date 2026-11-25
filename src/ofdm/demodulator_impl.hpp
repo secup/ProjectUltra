@@ -146,6 +146,7 @@ struct OFDMDemodulator::Impl {
     // noise or a misaligned window; large on ANY aligned real frame, faded or not (unit
     // normalization ignores amplitude). FEC-independent "a peer frame is here" evidence.
     float last_lts_pair_chi = 0.0f;
+    double last_lts_residual_sigma_hz = std::numeric_limits<double>::infinity();
 
     // Internal per-symbol fading index from raw pilot magnitude variance.
     // This scale feeds demapper/two-pass decisions; it is intentionally
@@ -260,6 +261,10 @@ struct OFDMDemodulator::Impl {
     // otherwise the uncertified dual-chirp phantom sigma. Set per frame by the decoder.
     double cfo_prior_sigma_hz = std::numeric_limits<double>::infinity();
     float last_lts_cfo_gain = 0.0f;  // K applied by the last LTS residual update (diagnostic)
+    // Cumulative CPE phase per data symbol since this frame's LTS (cpe_cfo.hpp): the frame-level
+    // residual CFO measurement. Cleared with the LTS residual at each frame's LTS estimate.
+    std::vector<float> cpe_trajectory;
+    std::vector<Complex> cpe_lts_reference;  // full-band LTS channel estimate of this frame
     std::vector<Complex> prev_pilot_phases;
     std::vector<size_t> prev_pilot_logical_indices;
     int symbols_since_sync = 0;

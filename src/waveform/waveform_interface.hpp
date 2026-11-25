@@ -13,6 +13,7 @@
 
 #include "ultra/types.hpp"
 #include "protocol/frame_v2.hpp"
+#include "ofdm/cpe_cfo.hpp"
 #include <limits>
 #include <string>
 #include <vector>
@@ -309,6 +310,8 @@ public:
     virtual std::vector<float> getCarrierGammaSnapshot() const { return {}; }
     virtual float getLastLTSNoiseVariance() const { return 0.0f; }
     virtual float getLastLTSResidualCFOHz() const { return 0.0f; }
+    // What the last frame measured about its own CFO error (OFDM; src/ofdm/cpe_cfo.hpp).
+    virtual cpe_cfo::FrameMeasurement getFrameCfoMeasurement() const { return {}; }
     // LTS-pair structure statistic of the last processed frame (0 = unavailable).
     virtual float getLastLTSPairChi() const { return 0.0f; }
 

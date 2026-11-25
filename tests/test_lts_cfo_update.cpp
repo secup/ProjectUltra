@@ -8,7 +8,12 @@
 //     (96 samples) gives CP/(2 kappa sqrt 3) = 96/(20 sqrt 3) = 2.771 Hz;
 //  4. gain: certified prior -> 0, no-information prior -> 1, uncertified chirp vs a typical
 //     LTS sigma -> > 0.95 (the LTS takes over), and a noisy LTS shrinks the gain.
+//  5. cpe_cfo (frame CFO from the common-phase trajectory, BUG-CONTROL-CFO-CERT-PRECISION): the
+//     slope is unbiased, its stated sigma is calibrated (|err| > 3 sigma on ~0.3-1 % of frames
+//     with the t threshold), < 4 symbols give no estimate, and a frame certifies only when its
+//     sigma is no coarser than the LTS pair's.
 #include "ofdm/lts_cfo_update.hpp"
+#include "ofdm/cpe_cfo.hpp"
 
 #include <cmath>
 #include <complex>
@@ -119,6 +124,65 @@ int main() {
         std::snprintf(m, sizeof(m), "2.5 Hz chirp phantom: corrected on %.2f %% of frames", 100.0 * phantom_fixed / trials);
         check(phantom_fixed > trials * 0.99, m);
         check(certified_moved == 0, "certified prior: never corrected");
+    }
+
+    // 5. CPE-trajectory frame CFO.
+    {
+        for (int K : {7, 28}) {
+            const double true_hz = 1.9;
+            const double phase_sigma = 0.1;  // 12 pilots at ~6 dB
+            const int trials = 4000;
+            std::normal_distribution<double> nd(0.0, phase_sigma);
+            double sum_err = 0.0, sum_sq_err = 0.0, sum_sigma = 0.0;
+            int beyond = 0, significant = 0;
+            for (int t = 0; t < trials; ++t) {
+                std::vector<float> theta(K);
+                for (int k = 0; k < K; ++k) {
+                    theta[k] = static_cast<float>(0.4 + 2.0 * M_PI * true_hz * T * k + nd(rng));
+                }
+                const auto e = cpe_cfo::fromTrajectory(theta, T);
+                const double err = e.cfo_hz - true_hz;
+                sum_err += err;
+                sum_sq_err += err * err;
+                sum_sigma += e.sigma_hz;
+                if (std::abs(err) > lts_cfo::significanceThreshold(K - 1) * e.sigma_hz) ++beyond;
+                if (cpe_cfo::significant(e, lts_cfo::significanceThreshold(K - 1))) ++significant;
+            }
+            const double rms = std::sqrt(sum_sq_err / trials);
+            const double pred = phase_sigma * std::sqrt(12.0 / (K * (double(K) * K - 1.0))) /
+                                (2.0 * M_PI * T);
+            char m[200];
+            std::snprintf(m, sizeof(m),
+                          "cpe K=%d: bias %.4f Hz, rms %.3f Hz vs law %.3f, mean stated sigma %.3f, "
+                          "beyond t*sigma %.2f %%",
+                          K, sum_err / trials, rms, pred, sum_sigma / trials, 100.0 * beyond / trials);
+            check(std::abs(sum_err / trials) < 3.0 * rms / std::sqrt(double(trials)) &&
+                      std::abs(rms / pred - 1.0) < 0.1 && std::abs(sum_sigma / trials / pred - 1.0) < 0.15 &&
+                      beyond < trials * 0.012,
+                  m);
+            check(significant > trials * 0.99, "cpe: a 1.9 Hz error is significant on every frame");
+        }
+        const auto short_e = cpe_cfo::fromTrajectory({0.0f, 0.1f, 0.2f}, T);
+        check(!std::isfinite(short_e.cfo_hz) && !std::isfinite(short_e.sigma_hz),
+              "cpe: fewer than 4 symbols give no estimate");
+        cpe_cfo::FrameMeasurement fine, coarse, exact, none;
+        fine.cpe.sigma_hz = 0.1;   fine.lts_sigma_hz = 0.4;
+        coarse.cpe.sigma_hz = 0.9; coarse.lts_sigma_hz = 0.4;
+        exact.cpe.sigma_hz = 1e-6; exact.lts_sigma_hz = 0.0;
+        check(cpe_cfo::certifies(fine), "cpe: a frame measured finer than its LTS certifies");
+        check(!cpe_cfo::certifies(coarse), "cpe: a coarser frame does not certify");
+        check(cpe_cfo::certifies(exact), "cpe: a noise-free frame certifies");
+        check(!cpe_cfo::certifies(none), "cpe: no measurement, no certificate");
+        cpe_cfo::Estimate ambiguous;
+        ambiguous.cfo_hz = -0.60; ambiguous.sigma_hz = 0.16;  // 3.75 sigma, below t(5) = 5.2
+        check(!cpe_cfo::significant(ambiguous, lts_cfo::significanceThreshold(6)) &&
+                  !cpe_cfo::confirms(ambiguous, false, lts_cfo::kSignificanceSigmas),
+              "cpe: a reading between 3 sigma and the t threshold neither corrects nor confirms");
+        cpe_cfo::Estimate quiet;
+        quiet.cfo_hz = 0.2; quiet.sigma_hz = 0.16;
+        check(cpe_cfo::confirms(quiet, false, lts_cfo::kSignificanceSigmas) &&
+                  cpe_cfo::confirms(ambiguous, true, lts_cfo::kSignificanceSigmas),
+              "cpe: a reading inside 3 sigma, or an applied one, confirms");
     }
 
     if (g_fail == 0) {

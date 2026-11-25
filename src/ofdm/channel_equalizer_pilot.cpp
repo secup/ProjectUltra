@@ -720,6 +720,32 @@ void OFDMDemodulator::Impl::updateChannelEstimate(const std::vector<Complex>& fr
     }
     h_sum *= carrier_phase_correction;
 
+    // Frame CFO measurement (cpe_cfo.hpp): this symbol's common phase against the frame's LTS
+    // channel estimate at the same carriers (pilots are scattered, so the snapshot is full-band),
+    // unwrapped symbol to symbol. Against a FIXED reference: increments against the running
+    // estimate do not add up to the rotation (it is smoothed and re-tracked between symbols).
+    {
+        if (soft_bits.empty() || cpe_lts_reference.size() != channel_estimate.size()) {
+            cpe_lts_reference = channel_estimate;  // the LTS estimate, before any data symbol
+            cpe_trajectory.clear();
+        }
+        Complex z(0, 0);
+        for (size_t i = 0; i < pilot_carrier_indices.size() && i < h_ls_all.size(); ++i) {
+            const int idx = pilot_carrier_indices[i];
+            if (idx >= 0 && static_cast<size_t>(idx) < cpe_lts_reference.size()) {
+                z += h_ls_all[i] * std::conj(cpe_lts_reference[idx]);
+            }
+        }
+        if (std::norm(z) > 0.0f) {
+            float theta = std::arg(z);
+            if (!cpe_trajectory.empty()) {
+                const float prev = cpe_trajectory.back();
+                theta = prev + std::remainder(theta - prev, 2.0f * static_cast<float>(M_PI));
+            }
+            cpe_trajectory.push_back(theta);
+        }
+    }
+
     // CPE (Common Phase Error) correction. Estimate average phase drift from pilot
     // LS vs current H, apply to all carriers. This tracks residual CFO and slow
     // oscillator drift without modifying freq_offset_hz. Standard approach used in

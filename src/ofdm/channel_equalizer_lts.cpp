@@ -364,6 +364,9 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
     // that phase = residual_CFO × T_symbol.
     last_lts_residual_cfo_hz = 0.0f;
     last_lts_pair_chi = 0.0f;
+    cpe_trajectory.clear();
+    cpe_lts_reference.clear();
+    last_lts_residual_sigma_hz = std::numeric_limits<double>::infinity();
     if (valid_symbols >= 2) {
         Complex phase_diff_sum(0, 0);
         int cfo_valid = 0;
@@ -403,6 +406,7 @@ void OFDMDemodulator::Impl::estimateChannelFromLTS(const float* training_samples
             // the uncertified prior's own phantom bound (CP / (2 kappa) = 4.8 Hz) rounded up.
             const double sigma_r = lts_cfo::residualSigmaHz(
                 cfo_coherence, cfo_valid, static_cast<double>(symbol_duration));
+            last_lts_residual_sigma_hz = sigma_r;
             const double cfo_gain = lts_cfo::gain(cfo_prior_sigma_hz, sigma_r);
             const bool pair_evidence = last_lts_pair_chi >= lts_cfo::kEvidenceChi;
             const float old_cfo = freq_offset_hz;

@@ -10,6 +10,66 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — fix: four ways a session's CFO went wrong and stayed wrong
+
+A TNC A/B at a 0 Hz dial (ITU Good 8 and 15 dB, seeds 501-524) against a genie arm with the sync
+CFO forced to the truth showed the CFO estimate costing 10-16 % of session time and 4 of 24
+sessions at 8 dB. Four causes, fixed together:
+
+**BUG-HANDSHAKE-CFO-SEED-STALE.** setConnected seeds the session CFO from `peer_cfo_hz_` inside the
+delivery of the CONNECT / CONNECT_ACK, but the engine saved each frame's CFO after delivering it:
+every session was seeded from the frame before (the responder's PING, the initiator's PONG). TNC
+Good 15 dB, 7.3 Hz dial: a 0.71-correlation PING read 5.95 Hz and became the reference. Now saved
+before delivery, from decoded frames only (`modem_dual_listen.cpp`).
+
+**BUG-SESSION-CFO-SINGLE-CHIRP.** That one reading was the uncertified session's reference, and the
+1 Hz connected clamp defended it against every later chirp (three 7.30 Hz anchors at corr 0.88-0.98
+rejected, no OFDM group for 250 s); every 0/N group restored it. Until a decoded group certifies, the
+clamp's reference is now the median of the session's last five trusted chirps
+(`CFOTracker::noteTrustedChirp` / `clampReference`). One phantom no longer outvotes the rest.
+
+**BUG-PEER-CFO-ZERO-SENTINEL.** Both seeding sites skipped a peer CFO with |CFO| <= 0.01 Hz, so a
+session between rigs within a fraction of a hertz (the common case on air; every gate since
+2026-11-08 runs at 7.3 Hz) had no reference: the dual-listen OFDM decoder adopted one weak light-LTS
+sync's own reading (corr 0.59 on fading, 1.9 Hz) and a control frame certified it. Now an explicit
+`peer_cfo_known_` flag.
+
+**BUG-CONTROL-CFO-CERT-PRECISION.** A decoded OFDM control frame certified the CFO it ran at, and a
+certified prior is never LTS-corrected. With the per-symbol pilot CFO tracker off, that CFO is just
+the prior: CPE correction lets an R1/4 codeword decode ~2 Hz off. New `src/ofdm/cpe_cfo.hpp`: each
+data symbol's pilots against the frame's full-band LTS snapshot, unwrapped; the least-squares slope
+is the frame's residual CFO and the regression residuals its standard error. A control frame's CPE
+reading corrects the certified value when significant (t, K-2 df, 3 sigma), and the frame certifies
+only when sigma_cpe <= max(sigma_LTS, 1 mHz) — then the certificate blocks an LTS-detectable
+correction no more often than the LTS's own 0.27 % false-alarm rate — and only a value it confirms
+(the reading applied, or inside 3 sigma: sweep 24 certified a -6.60 Hz prior on a -7.30 Hz link from
+a -0.60 +- 0.16 Hz reading, 3.75 sigma but below t(5) = 5.2). Otherwise the value stays uncertified. Used only on decoded frames: a false lock reads +-10 Hz.
+
+**Verification.** CTests: DualListenEngine (seed is the CONNECT's own CFO; a 0 Hz CONNECT is a
+measurement — both fail without their fix), StreamingSignalPolicy 147/147 (pool: 128/129 with it
+disabled), LtsCfoUpdate §5 (CPE slope unbiased, sigma calibrated: 0.30 % beyond t*sigma at K = 7,
+0.33 % at K = 28), StreamingConfig 160/160. Forced 1.5 Hz error on AWGN: 28/51-symbol frames read
+-1.50 +- 0.01 Hz. TNC A/B, dial 0 Hz, ITU Good, seeds 501-524, short scenario (paired elapsed ratio
+vs the old build, t):
+
+| arm | 8 dB PASS | 8 dB ratio | 15 dB PASS | 15 dB ratio | sessions with a wrong certificate (8 / 15) |
+|---|---|---|---|---|---|
+| old build | 19/24 | 1 | 24/24 | 1 | 4 / 5 |
+| + seed order + chirp median | 22/24 | 0.98 (-0.3) | 24/24 | 1.03 (0.3) | 4 / 8 |
+| + zero sentinel | 23/24 | 0.84 (-2.6) | 24/24 | 0.89 (-1.6) | 2 / 1 |
+| + CPE certificate, no confirm rule | 21/24 | 0.90 (-1.3) | 24/24 | 0.79 (-3.3) | 0 / 0 |
+| + confirm rule (shipped) | 21/24 | 0.87 (-2.1) | 24/24 | 0.84 (-2.6) | 0 / 1 |
+| genie (true CFO forced) | 23/24 | 0.90 (-1.5) | 24/24 | 0.84 (-2.6) | 0 / 0 |
+
+The shipped build's three 8 dB failures are not CFO (certificates within 0.1 Hz): seed 506 fails at
+~180 s in the genie arm too ("ALPHA never reported BUFFER 0", BUG-TNC-BUFFER0-NOT-REPORTED), 504 and
+524 stall at 323/1223 B like five of the old build's failures (11 such stalls over the five non-genie
+arms, none in the genie arm). Its one wrong certificate (15 dB seed 506, BRAVO, 1.05 Hz on a 0 Hz
+link) passed the confirm rule at 2.96 sigma (CPE -0.71 +- 0.24 Hz): see BUG-CONTROL-CFO-CERT-PRECISION.
+TNC sweep 25 (seeds 451-452, dial 7.3 Hz, all scenarios): 70/70 PASS, 351 control certificates, 9 kept
+uncertified. TncScenario CTests 4/4. The chirp-median clamp never fired at the 0 Hz dial; it
+is for the phantom-seed case (7.3 Hz, ITU Good / Moderate).
+
 ## 2026-11-25 — cleanup: four rate-policy helpers without a caller deleted
 
 `calibrationAnchorDbFor`, `rungClassAnchorDb`, `maxValidatedCoherentRate` and `qam16R34Enabled`

@@ -2,8 +2,11 @@
 
 #include "sync/signal_policy.hpp"   // PilotCFOUpdate (return type of ingestPilotResidual)
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <mutex>
 
 namespace ultra {
@@ -60,6 +63,8 @@ public:
     // feedback invariant is untouched).
     float seedFromChirpConnectedAnchor(float measured_cfo, float correlation,
                                        const char* log_prefix) const;
+    // The value a chirp is clamped against (cfo_tracker.cpp).
+    float clampReference(const char* log_prefix) const;
 
     // True once a successful decode outcome certified the estimate since the
     // last reset. Pilot feedback alone is not proof: failed demodulations also
@@ -174,6 +179,35 @@ public:
         if (!std::isfinite(cfo_hz)) return;
         session_reference_cfo_.store(cfo_hz);
         has_session_reference_.store(true);
+        pushChirpLocked(cfo_hz);
+    }
+
+    // The session's chirp readings (BUG-SESSION-CFO-SINGLE-CHIRP). Each dual-chirp CFO is an
+    // independent draw of the same estimator: accurate almost always, occasionally a multipath
+    // phantom (up to CP / (2 kappa) = 4.8 Hz; measured 1.3 Hz on ITU Good, 2.4 Hz on Moderate in
+    // ~1 of 3 handshakes) - the sparse prior lts_cfo_update.hpp describes. Until a decoded group
+    // certifies the CFO, no single reading outranks another, so the reference is their MEDIAN
+    // (the robust location of a sparse-outlier sample). Before, the handshake's one reading was
+    // the reference and the 1 Hz connected clamp defended it against every later chirp: TNC ITU
+    // Good 15 dB, a 5.95 Hz phantom on a 7.30 Hz link rejected three 7.30 Hz anchors at
+    // corr 0.88-0.98, and every 0/N group restored it - no OFDM group decoded for 250 s.
+    // Only chirps at the trust correlation vote (a weaker lock reads phantoms far more often).
+    // Call BEFORE seeding from the same chirp, so its own reading is counted.
+    void noteTrustedChirp(float cfo_hz, float correlation) {
+        if (!std::isfinite(cfo_hz) || !(correlation >= signal_policy::kChirpTrustCorr)) return;
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        pushChirpLocked(cfo_hz);
+    }
+    // The robust session reference: the median of the chirp readings (an even count drops the
+    // oldest - with two readings that disagree, the newer one, as oscillator drift would have
+    // it); the handshake reference when there are none. NaN when the tracker has neither.
+    float sessionReferenceCfoHz() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return robustReferenceLocked();
+    }
+    int chirpReadingCount() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return chirp_count_;
     }
 
     // §7 C-CFO-3: ingest the per-frame pilot/LTS residual — combine it (and the pre-correction that
@@ -221,6 +255,8 @@ public:
         certified_cfo_.store(0.0f);
         has_session_reference_.store(false);
         session_reference_cfo_.store(0.0f);
+        chirp_count_ = 0;
+        chirp_head_ = 0;
     }
 
 private:
@@ -237,10 +273,31 @@ private:
     }
 
     bool restoreSessionReferenceLocked() {
-        if (!has_session_reference_.load()) return false;
-        cfo_.store(session_reference_cfo_.load());
+        const float ref = robustReferenceLocked();
+        if (!std::isfinite(ref)) return false;
+        cfo_.store(ref);
         established_.store(true);
         return true;
+    }
+
+    void pushChirpLocked(float cfo_hz) {
+        chirp_pool_[static_cast<size_t>(chirp_head_)] = cfo_hz;
+        chirp_head_ = (chirp_head_ + 1) % kChirpPoolSize;
+        chirp_count_ = std::min(chirp_count_ + 1, kChirpPoolSize);
+    }
+    float robustReferenceLocked() const {
+        if (chirp_count_ == 0) {
+            return has_session_reference_.load() ? session_reference_cfo_.load()
+                                                 : std::numeric_limits<float>::quiet_NaN();
+        }
+        const int n = (chirp_count_ % 2 == 0) ? chirp_count_ - 1 : chirp_count_;
+        std::array<float, kChirpPoolSize> v{};
+        for (int i = 0; i < n; ++i) {  // the n newest, walking back from the head
+            const int idx = (chirp_head_ - 1 - i + 2 * kChirpPoolSize) % kChirpPoolSize;
+            v[static_cast<size_t>(i)] = chirp_pool_[static_cast<size_t>(idx)];
+        }
+        std::nth_element(v.begin(), v.begin() + n / 2, v.begin() + n);
+        return v[static_cast<size_t>(n / 2)];
     }
     // No certificate: the session reference if there is one, else the 0 Hz default.
     BurstOutcomeAction revokeToSessionReferenceLocked() {
@@ -277,6 +334,11 @@ private:
     std::atomic<bool> has_certified_{false};
     std::atomic<float> session_reference_cfo_{0.0f};  // handshake dual-chirp CFO
     std::atomic<bool> has_session_reference_{false};
+    // The session's trusted chirp readings, newest at chirp_head_ - 1 (under state_mutex_).
+    static constexpr int kChirpPoolSize = 5;
+    std::array<float, kChirpPoolSize> chirp_pool_{};
+    int chirp_count_ = 0;
+    int chirp_head_ = 0;
 };
 
 }  // namespace sync

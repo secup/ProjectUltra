@@ -8,6 +8,28 @@
 namespace ultra {
 namespace sync {
 
+// What a chirp is compared against. Certified: the tracked (pilot-refined) value. Uncertified with
+// at least three chirp readings: their median - the tracked value is then one reading, or a pilot
+// walk from a burst that proved nothing, and outranks no other reading (BUG-SESSION-CFO-SINGLE-
+// CHIRP). With fewer readings a median cannot outvote a phantom, so the tracked value stands.
+float CFOTracker::clampReference(const char* log_prefix) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const float tracked_now = cfo_.load();
+    if (!pilot_seeded_.load() && chirp_count_ >= 3) {
+        const float ref = robustReferenceLocked();
+        if (std::isfinite(ref)) {
+            if (std::abs(ref - tracked_now) > signal_policy::kMaxSyncCFODriftHz) {
+                LOG_MODEM(INFO,
+                          "[%s] CFO reference: median of %d chirp readings %.2f Hz (tracked %.2f Hz, "
+                          "uncertified)",
+                          log_prefix, chirp_count_, ref, tracked_now);
+            }
+            return ref;
+        }
+    }
+    return tracked_now;
+}
+
 // §7 C-CFO-2: moved verbatim from the post-found CFO-handling block of
 // StreamingDecoder::searchForSync (the `limitConnectedCFODrift` clamp + its "CFO sanity" log).
 // Same policy call, same log, same return (measured when un-clamped, accepted when clamped) →
@@ -15,7 +37,7 @@ namespace sync {
 // stores the final value back into the tracker.
 float CFOTracker::seedFromChirp(float measured_cfo, float correlation, bool connected,
                                 const char* log_prefix) const {
-    const float known = cfo_.load();
+    const float known = clampReference(log_prefix);
     if (!std::isfinite(measured_cfo)) {
         LOG_MODEM(WARN, "[%s] CFO sanity: non-finite chirp estimate rejected", log_prefix);
         return std::isfinite(known) ? known : 0.0f;
@@ -63,8 +85,8 @@ signal_policy::PilotCFOUpdate CFOTracker::ingestPilotResidual(
 // full-anchor groups killed at 16QAM vs 0% of warm-LTS groups over 4 gate runs).
 float CFOTracker::seedFromChirpConnectedAnchor(float measured_cfo, float correlation,
                                                const char* log_prefix) const {
+    const float known = clampReference(log_prefix);
     std::lock_guard<std::mutex> lock(state_mutex_);
-    const float known = cfo_.load();
     if (!std::isfinite(measured_cfo)) {
         LOG_MODEM(WARN, "[%s] Full-anchor CFO: non-finite chirp estimate rejected", log_prefix);
         return std::isfinite(known) ? known : 0.0f;

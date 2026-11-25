@@ -9,6 +9,7 @@
 #include "waveform/mc_dpsk_waveform.hpp"
 #include "protocol/connection_policy.hpp"
 #include "protocol/frame_v2.hpp"
+#include "ota_channel_core/models.hpp"
 
 #include <atomic>
 #include <cstdio>
@@ -291,6 +292,57 @@ std::vector<std::string> receiveBurstWithGapCrash() {
     return heard;
 }
 
+// BUG-HANDSHAKE-CFO-SEED-STALE: setConnected seeds the session's decoders with the peer CFO, and it
+// runs inside the delivery of the frame that completes the handshake. The engine saved each frame's
+// CFO only after delivering it, so the seed was the frame BEFORE: the responder's PING, the
+// initiator's PONG. A disconnected receiver hears a CONNECT_NAK at 3.0 Hz, then a CONNECT at 7.3 Hz;
+// returns the peer CFO the engine held while the CONNECT was being delivered (NaN when the engine held
+// none). BUG-PEER-CFO-ZERO-SENTINEL: with the CONNECT at 0 Hz the engine must still hold a measurement
+// - a |cfo| > epsilon test treated a peer at 0 Hz as never measured, and its session had no reference.
+float peerCfoWhileConnectIsDelivered(float connect_cfo_hz = 7.3f) {
+    ModemEngine tx;  // not connected: the handshake profile
+    tx.setLogPrefix("ALPHA");
+    const auto nak = tx.transmit(v2::ControlFrame::makeConnectNak("ALPHA", "BRAVO").serialize());
+    const auto connect =
+        tx.transmit(v2::ConnectFrame::makeConnect("ALPHA", "BRAVO", 0xF0, 0xFF).serialize());
+    auto shifted = [](const std::vector<float>& burst, float cfo_hz) {
+        namespace occ = ultra::ota_channel_core;
+        occ::ChannelConfig cfg;
+        cfg.type = occ::ChannelType::PASSTHROUGH;
+        cfg.cfo_hz = cfo_hz;
+        occ::RngRoot root(0x5eedu);
+        auto model = occ::createChannelModel(cfg, root, "handshake-cfo");
+        std::vector<float> in(24000, 0.0f);
+        in.insert(in.end(), burst.begin(), burst.end());
+        in.insert(in.end(), 3 * 48000, 0.0f);
+        std::vector<float> out;
+        model->process(std::span<const float>(in.data(), in.size()), 0, out);
+        return out;
+    };
+    std::vector<float> air = shifted(nak, 3.0f);
+    const auto second = shifted(connect, connect_cfo_hz);
+    air.insert(air.end(), second.begin(), second.end());
+    std::mt19937 rng(29);
+    std::normal_distribution<double> bg(0.0, 1e-3);
+    for (auto& v : air) v += static_cast<float>(bg(rng));
+
+    ModemEngine rx;
+    rx.setLogPrefix("BRAVO");
+    rx.setSynchronousMode(true);
+    float at_connect = NAN;
+    rx.setRawDataCallback([&](const Bytes& data, bool) {
+        if (data.size() >= 3 && static_cast<v2::FrameType>(data[2]) == v2::FrameType::CONNECT) {
+            at_connect = rx.peerCfoKnownForTesting() ? rx.peerCfoHzForTesting() : NAN;
+        }
+    });
+    constexpr size_t kChunk = 960;
+    for (size_t i = 0; i < air.size(); i += kChunk) {
+        rx.feedAudio(air.data() + i, std::min(kChunk, air.size() - i));
+        rx.processRxBuffer();
+    }
+    return at_connect;
+}
+
 // BUG-MCDPSK-CONNECT-AFTER-DQPSK-PICK: a responder connected on a DQPSK session (4 codewords) has
 // lost its CONNECT_ACK; the initiator repeats its CONNECT, which rides the handshake's DBPSK control
 // profile (#72). The responder demodulated the repeat at its session constellation, never decoded
@@ -547,6 +599,16 @@ int main(int argc, char** argv) {
         return failures == 0 ? 0 : 1;
     }
     checkGapCrashBurst("compact");
+    {
+        const float cfo = peerCfoWhileConnectIsDelivered();
+        std::printf("peer CFO while the CONNECT is delivered: %.2f Hz (CONNECT at 7.30, NAK before it at 3.00)\n", cfo);
+        check(std::isfinite(cfo) && std::abs(cfo - 7.3f) < 0.5f,
+              "the session CFO seed is the handshake frame's own CFO, not the previous frame's");
+        const float zero = peerCfoWhileConnectIsDelivered(0.0f);
+        std::printf("peer CFO while a 0 Hz CONNECT is delivered: %.2f Hz\n", zero);
+        check(std::isfinite(zero) && std::abs(zero) < 0.5f,
+              "a peer measured at 0 Hz is a measurement: the session gets its CFO reference");
+    }
     {
         const auto heard = robustSessionHearsFallbackAfterUpCrossing();
         check(heard.size() == 2 && heard[1] == "the fallback's MC-DPSK frame",

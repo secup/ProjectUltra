@@ -1564,6 +1564,11 @@ bool OFDMChirpWaveform::process(SampleSpan samples) {
         // pilot tracking and LTS residual estimation correct it. Propagate
         // this correction back so subsequent frames use the refined CFO.
         float corrected_cfo = demodulator_->getFrequencyOffset();
+        if (const auto m = demodulator_->getFrameCfoMeasurement(); m.cpe.symbols >= 4) {
+            LOG_MODEM(DEBUG, "OFDMChirpWaveform: CPE residual CFO %+.2f +- %.2f Hz over %d symbols "
+                      "(LTS sigma %.2f Hz, demod CFO %.2f Hz)", m.cpe.cfo_hz, m.cpe.sigma_hz,
+                      m.cpe.symbols, m.lts_sigma_hz, corrected_cfo);
+        }
         if (std::abs(corrected_cfo - cfo_hz_) > 0.1f) {
             LOG_MODEM(INFO, "OFDMChirpWaveform: CFO feedback: chirp=%.2f -> corrected=%.2f Hz",
                       cfo_hz_, corrected_cfo);
@@ -1723,6 +1728,10 @@ float OFDMChirpWaveform::getLastLTSNoiseVariance() const {
 
 float OFDMChirpWaveform::getLastLTSPairChi() const {
     return demodulator_ ? demodulator_->getLastLTSPairChi() : 0.0f;
+}
+
+cpe_cfo::FrameMeasurement OFDMChirpWaveform::getFrameCfoMeasurement() const {
+    return demodulator_ ? demodulator_->getFrameCfoMeasurement() : cpe_cfo::FrameMeasurement{};
 }
 
 float OFDMChirpWaveform::getLastLTSResidualCFOHz() const {

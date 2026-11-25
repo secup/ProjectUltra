@@ -55,6 +55,22 @@ void ModemEngine::wireDecoderCoreCallbacks(StreamingDecoder* decoder) {
         });
 
         if (delivered) {
+            // The peer's CFO, from this frame, before it is delivered: delivering the CONNECT (or
+            // CONNECT_ACK) enters the session, and setConnected seeds the decoders' session CFO
+            // from peer_cfo_hz_ inside this call. Saved after delivery, every session was seeded
+            // from the frame BEFORE the one that completed the handshake - the responder from the
+            // PING, the initiator from the PONG (BUG-HANDSHAKE-CFO-SEED-STALE: TNC ITU Good 15 dB,
+            // a 0.71-correlation PING read 5.95 Hz on a 7.30 Hz link, the CONNECT's 7.30 Hz was
+            // overwritten by it at connect, and the 1 Hz connected clamp then rejected every later
+            // 7.30 Hz chirp: no OFDM group decoded for 250 s). Only an LDPC-verified frame
+            // speaks for the peer: a failed decode's chirp may be a false lock.
+            // A measured 0 Hz is a measurement: well-calibrated rigs sit within a fraction of a hertz,
+            // and a magnitude test here (and at the two seeding sites) left such a session with no
+            // reference at all (BUG-PEER-CFO-ZERO-SENTINEL).
+            if (std::isfinite(result.cfo_hz)) {
+                peer_cfo_hz_ = result.cfo_hz;
+                peer_cfo_known_ = true;
+            }
             if (result.frame_type == v2::FrameType::CONNECT ||
                 result.frame_type == v2::FrameType::CONNECT_ACK ||
                 result.frame_type == v2::FrameType::CONNECT_NAK) {
@@ -76,10 +92,6 @@ void ModemEngine::wireDecoderCoreCallbacks(StreamingDecoder* decoder) {
                           snrSourceToString(result.snr_source));
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText(
                 "phy", "decode.fail", fields);
-        }
-        // Save peer CFO for future frames
-        if (std::abs(result.cfo_hz) > 0.1f) {
-            peer_cfo_hz_ = result.cfo_hz;
         }
         last_rx_complete_time_ = std::chrono::steady_clock::now();
     });
@@ -242,7 +254,7 @@ void ModemEngine::configureListener(StreamingDecoder* listener, protocol::Wavefo
         listener->setDataMode(rung.modulation, rung.code_rate);
         listener->setFixedFrameCodewords(rung.cw_count);
     }
-    if (std::abs(peer_cfo_hz_) > 0.01f) {
+    if (peer_cfo_known_) {
         listener->setKnownCFO(peer_cfo_hz_);
     }
     listener->setMfskLookaheadAllowed(false);  // a listener never sees a 16-FSK frame first

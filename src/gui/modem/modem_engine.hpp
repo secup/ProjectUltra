@@ -195,6 +195,9 @@ public:
 
     // Set known CFO for light preamble mode (for testing or external CFO source)
     void setKnownCFO(float cfo_hz);
+    // The peer CFO setConnected seeds the session's decoders with (the last delivered frame's).
+    float peerCfoHzForTesting() const { return peer_cfo_hz_; }
+    bool peerCfoKnownForTesting() const { return peer_cfo_known_; }
     std::vector<std::complex<float>> getConstellationSymbols() const;
     Modulation getConstellationModulation() const;
 
@@ -791,6 +794,9 @@ private:
 
     // Estimated CFO from peer (detected during connection, persists for connected mode)
     float peer_cfo_hz_ = 0.0f;
+    // Whether peer_cfo_hz_ holds a measurement (a decoded frame's CFO). Not |cfo| > epsilon: a
+    // peer at 0 Hz is measured too (BUG-PEER-CFO-ZERO-SENTINEL).
+    bool peer_cfo_known_ = false;
     // M-FSK handshake frames (handshake_mfsk.hpp, 2026-11-22). The first CONNECT of an attempt goes
     // out as DBPSK (the connect pick's readings are calibrated on it, and a strong link needs
     // nothing else); every retry goes out as M-FSK: a CONNECT that drew no CONNECT_ACK says the link
