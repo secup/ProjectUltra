@@ -29,6 +29,16 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   remains is the crossing case where the cold search MISSES member 1 entirely (seed 415: no member-1
   acquisition after the descriptor, a LATE-JOIN at frame 2, 0/40): the next step is why the cold
   search missed a light member whose position the descriptor fixes.
+  Found: structure acquisition at the floor - member 1 fell under the detector (the seed-415 crossing ran
+  at a physical 2.8 dB; frame 2 acquired at rho 0.63), in the good runs it acquires at rho ~0.96.
+  **Second A/B, also no ship (2026-11-25):** a full chirp+LTS anchor on the first burst after every
+  up-crossing (one-shot, structure acquisition or not; patch kept in the session scratchpad,
+  `follow_up_anchor.patch`, with a WaveformFollow test that fails without it). GUI, ITU Good, profile
+  2 dB -> 8 or 15 dB at 80-90 s, 21 KB, seeds 51-54, 16/16 PASS: 2->15 948 -> 983 bps (+3.7 %),
+  2->8 668 -> 613 bps (-8 %, one seed 740 -> 440 with five crater groups later in the run), totals
+  flat; first-burst no-ACKs 3 -> 2. The failure is rare on the GUI (3 of 16 baseline runs) and the
+  fix costs ~1.2 s per crossing: not proven, reverted. Both arms crossed up at 72 s while the profile
+  still read 2 dB - the crossing is decided on fading-crest readings, which is the 0-5 dB tuning item.
 - **BUG-FIRST-OFDM-FRAME-LTS-CFO** (P1, intermittent, pre-existing): on the first OFDM frame after the
   MC-DPSK handshake the LTS residual "corrects" the handshake's accurate dual-chirp CFO by ~1.2-1.3 Hz
   (AWGN 10 dB, true 7.3 Hz: 7.30 -> 8.64 in one run, 7.30 -> 6.11 in another, both logged
