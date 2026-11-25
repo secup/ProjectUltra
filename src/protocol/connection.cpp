@@ -3065,13 +3065,10 @@ void Connection::executeEscapeDrop(const char* trigger) {
         // landing (that lever targets 16QAM R1/2).
         const bool esc_is_qam16 = data_modulation_ == Modulation::QAM16;
         // QAM16 top-gear stuck on a fade. When QAM16 craters off the decodability cliff it may emit
-        // NO tone-burst ack at all, so the ack-driven demote in applyAdaptiveRateFeedback never sees
-        // it — this escape path is the only one that fires. Demote STRAIGHT to the robust QPSK R3/4
-        // home gear (not a QAM16 code-rate step — this applies from EITHER QAM16 rate, so the
-        // ULTRA_QAM16_R34 crest rung takes the same straight exit) and arm a DOUBLE-weight re-climb
-        // cooldown (a frame nearly died — stronger evidence than a soft demote, but not a permanent
-        // forfeit of the next fade crest). requestModeChange re-anchors both stations at a clean
-        // boundary.
+        // NO tone-burst ack at all, so the receiver authority never commands down from it - this
+        // escape is the sender's only exit. Demote STRAIGHT to the robust QPSK R3/4 home gear (not a
+        // QAM16 code-rate step - from EITHER QAM16 rate). requestModeChange re-anchors both
+        // stations at a clean boundary.
         // MID-RUNG landing (ULTRA_QAM16_DEMOTE_MIDRUNG): the escape lands at 16QAM
         // R1/2 (2x margin, stays on QAM16 ⇒ no reclimb cooldown) unless already
         // there — a second escape then takes the QPSK R3/4 exit below.

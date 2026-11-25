@@ -10,6 +10,15 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — cleanup: four rate-policy helpers without a caller deleted
+
+`calibrationAnchorDbFor`, `rungClassAnchorDb`, `maxValidatedCoherentRate` and `qam16R34Enabled`
+(`ULTRA_QAM16_R34`) lost their last production callers with R10/R14 (waveform_selection.hpp). CTest
+ConnectionPolicy's knob checks went with them; its structural check that 16QAM R3/4 is never
+connect-selectable stays (`test_qam16_r34_not_connect_selectable`). A stale escape comment that
+described the deleted re-climb cooldown is corrected. No behaviour change: CTest 130/130; TNC sweep 23
+(seeds 447-448): 70/70 PASS.
+
 ## 2026-11-25 — fix: a failed OFDM probe no longer resets the MC-DPSK rung ladder
 
 **What broke (BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG).** With an up-crossing commanded, the receiver's

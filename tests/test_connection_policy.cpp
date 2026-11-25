@@ -1399,16 +1399,7 @@ void test_coherent_window_override_disabled_keeps_default() {
           "DQPSK R1/2 high-throughput window is unaffected by the coherent override knob");
 }
 
-void test_qam16_r34_cap_knob_off_keeps_r23() {
-    // ULTRA_QAM16_R34 is pinned to "0" in main() BEFORE any policy call — the knob is
-    // latched once (static). Baseline contract: with the crest rung disabled, the
-    // per-modulation validated-rate cap is byte-identical to the pre-knob behavior —
-    // QAM16 caps at R2/3, QPSK at R3/4 (the auto-ladder top).
-    CHECK(!qam16R34Enabled(), "ULTRA_QAM16_R34=0 must read as disabled");
-    CHECK(maxValidatedCoherentRate(Modulation::QAM16) == CodeRate::R2_3,
-          "QAM16 validated-rate cap stays R2/3 with the crest-rung knob disabled");
-    CHECK(maxValidatedCoherentRate(Modulation::QPSK) == CodeRate::R3_4,
-          "QPSK validated-rate cap stays R3/4 (ladder top) regardless of the knob");
+void test_qam16_r34_not_connect_selectable() {
     // Connect-time gate (knob-independent, structural): {QAM16, R3/4} is kRungDisabledDb
     // in BOTH ladder tables, so the crest rung is reachable ONLY via the adaptive walk —
     // even with the knob ON, selectCoherentOFDM can never pick it at CONNECT.
@@ -2086,7 +2077,6 @@ int main() {
     test_session_data_rate_orders_the_rungs();
     // Same latch-once pattern: pin the 16QAM R3/4 crest-rung A/B knob to its disabled
     // default so this binary deterministically tests the byte-identical baseline cap.
-    setenv("ULTRA_QAM16_R34", "0", 1);
     // #58 increment 3: pin the connect-SNR-pool knobs to their disabled defaults —
     // the pool tests below drive ConnectSnrPool/shouldDeferConnectPick directly
     // (param-driven, env-free); the knobs gate only the Connection wiring.
@@ -2124,7 +2114,7 @@ int main() {
     test_mcdpsk_rate_controller();
     test_mcdpsk_inflight_timeout_table();
     test_coherent_window_override_disabled_keeps_default();
-    test_qam16_r34_cap_knob_off_keeps_r23();
+    test_qam16_r34_not_connect_selectable();
     test_retx_trough_defer();
     test_connect_snr_pool_population_and_identity();
     test_connect_snr_pool_tc_clustering();

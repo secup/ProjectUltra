@@ -273,20 +273,6 @@ inline bool qam16LadderEnabled() {
     return on;
 }
 
-// ── 16QAM R3/4 crest rung (2026-07-03): env-gated A/B knob ─────────────────────
-// ULTRA_QAM16_R34=1 lets the ADAPTIVE walk (applyAdaptiveRateFeedback, connection.cpp)
-// step QAM16 R2/3 -> R3/4 after a clean-group streak, and lifts the QAM16 cap in
-// maxValidatedCoherentRate() below to match. Default OFF -> byte-identical. The rung
-// is NEVER connect-time selectable: BOTH ladders keep {QAM16, R3/4} at kRungDisabledDb,
-// so the only way in is the mid-stream walk (which also owns the immediate demote).
-inline bool qam16R34Enabled() {
-    static const bool on = [] {
-        const char* e = std::getenv("ULTRA_QAM16_R34");
-        return e == nullptr || std::atoi(e) != 0;  // DEFAULT-ON 2026-07-05
-    }();
-    return on;
-}
-
 inline constexpr CoherentRung kCoherentLadderQAM16Exp[] = {
     // mod              rate            AWGN             GOOD             MODERATE
     {Modulation::QAM16, CodeRate::R3_4, {kRungDisabledDb, kRungDisabledDb, kRungDisabledDb}},
@@ -612,36 +598,6 @@ inline bool coherentRungLocallyEnabled(Modulation mod, CodeRate rate) {
     return false;
 }
 
-// ── RX-AUTHORITY PREDICTIVE (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md) ──
-// Calibration anchor for a rung: the MINIMUM enabled column, honoring the
-// active ladder variant. The AWGN column is the flat-channel physics floor and
-// wins when present; several rungs (16QAM R2/3, 16QAM R1/2) are enabled ONLY
-// in fading columns — their column value carries scalar-fading margin, which
-// makes the derived EESM alpha CONSERVATIVE (under-predicts capacity): the
-// safe direction for a climb decision. kRungDisabledDb if fully disabled.
-inline float calibrationAnchorDbFor(Modulation mod, CodeRate rate) {
-    const CoherentRung* rungs = kCoherentLadder;
-    size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
-    if (psk8LadderEnabled()) {
-        rungs = kCoherentLadderPsk8Exp;
-        n = sizeof(kCoherentLadderPsk8Exp) / sizeof(kCoherentLadderPsk8Exp[0]);
-    } else if (qam16LadderEnabled()) {
-        rungs = kCoherentLadderQAM16Exp;
-        n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
-    }
-    for (size_t i = 0; i < n; ++i) {
-        if (rungs[i].mod == mod && rungs[i].rate == rate) {
-            if (!coherentRungUsableWithDataFec(rungs[i])) return kRungDisabledDb;
-            float best = kRungDisabledDb;
-            for (int c = 0; c < 3; ++c) {
-                if (rungs[i].min_snr_db[c] < best) best = rungs[i].min_snr_db[c];
-            }
-            return best;
-        }
-    }
-    return kRungDisabledDb;
-}
-
 // ── RADIO-AGNOSTIC EVM-USABLE RUNG FLOORS (Stage 2, ULTRA_EVM_DEMOTE) ──────────
 // The decision-directed EVM SNR estimator (src/ofdm/demodulator_impl.hpp) measures
 // the scatter of the equalized constellation around its hard decisions — it reads
@@ -705,39 +661,6 @@ inline uint8_t highestRungSupportedByEvm(float evm_db, float hold_margin_db) {
         if (evm_db >= evmUsableFloorDbForRung(r) - hold_margin_db) return r;
     }
     return kRungIdxQpskR14;
-}
-
-// Anchor for one rung at the SPECIFIC fading class, honoring the active ladder
-// variant. Unlike coherentLadderAnchorDb() (reads ONLY kCoherentLadder, so returns
-// kRungDisabledDb for the experimental 16QAM/8PSK rungs) and calibrationAnchorDbFor()
-// (ladder-aware but returns the class-BLIND minimum column), this gives the current
-// rung's floor ON the current channel class. Used by the EMA-supported crater-hold:
-// "does the fade-averaged SNR clear THIS rung's calibrated floor on THIS class?"
-// If the class column is disabled but another is enabled (e.g. 16QAM enabled only in
-// fading columns), fall back to the minimum enabled column (the rung's physics floor).
-inline float rungClassAnchorDb(Modulation mod, CodeRate rate, float fading_index) {
-    const int cls = static_cast<int>(classifyFading(fading_index));
-    const CoherentRung* rungs = kCoherentLadder;
-    size_t n = sizeof(kCoherentLadder) / sizeof(kCoherentLadder[0]);
-    if (psk8LadderEnabled()) {
-        rungs = kCoherentLadderPsk8Exp;
-        n = sizeof(kCoherentLadderPsk8Exp) / sizeof(kCoherentLadderPsk8Exp[0]);
-    } else if (qam16LadderEnabled()) {
-        rungs = kCoherentLadderQAM16Exp;
-        n = sizeof(kCoherentLadderQAM16Exp) / sizeof(kCoherentLadderQAM16Exp[0]);
-    }
-    for (size_t i = 0; i < n; ++i) {
-        if (rungs[i].mod == mod && rungs[i].rate == rate) {
-            if (!coherentRungUsableWithDataFec(rungs[i])) return kRungDisabledDb;
-            if (rungs[i].min_snr_db[cls] < kRungDisabledDb) return rungs[i].min_snr_db[cls];
-            float best = kRungDisabledDb;  // class column disabled → rung's physics floor
-            for (int c = 0; c < 3; ++c) {
-                if (rungs[i].min_snr_db[c] < best) best = rungs[i].min_snr_db[c];
-            }
-            return best;
-        }
-    }
-    return kRungDisabledDb;
 }
 
 // EESM virtual rung evaluation: is rung (mod, rate) predicted decodable on the
@@ -825,8 +748,8 @@ inline float rungFerFloorDb(Modulation mod, CodeRate rate, float fading_index) {
 // KEPT deliberately (do not remove these while cleaning): kMeasuredFerFloor / rungFerFloorDb
 // above — real data at n=80/point across 9 rungs x 3 classes, pinned by
 // test_waveform_policy.cpp, and the right source to fit a PER-CLASS theta_r for the latent
-// controller, whose table is currently ITU-Good-only. Also rungClassAnchorDb, which has a
-// separate caller in connection.cpp.
+// controller, whose table is currently ITU-Good-only. (rungClassAnchorDb, kept here earlier for its
+// connection.cpp caller, went with that caller - the legacy authority ladder - on 2026-11-25.)
 
 // Nearest locally-enabled rung at or below idx (canonical order is monotone in
 // speed), kRungIdxNone if nothing at/below is enabled. EVERY consumer of rung
@@ -913,17 +836,6 @@ inline float goodputBreakEvenDeliveredFraction(uint8_t cur) {
 // measurements through the rate selector and commands the sender's next rung on every group ACK
 // ([rate_hint|rung_cmd] = one absolute 5-bit rung word); the sender obeys (descriptor commit).
 
-// Highest GUI-validated code rate for a given coherent modulation — a per-modulation
-// ceiling for the adaptive RateController, which is otherwise modulation-BLIND (it walks
-// {R1/4..R3/4} at whatever modulation was fixed at CONNECT). Without this, a clean stretch
-// promotes the connect-time 16QAM R1/2 up into the measured DAMAGE-BOUND 16QAM R2/3/R3/4
-// (Phase 0a: 55-70% frame loss, 1-of-3 link-death — fable_analysis/07) BEFORE the reactive
-// ssthresh can cap it, taking a frame into a fade at the over-climbed rung. QAM16 is capped
-// at R2/3 (validated on the GUI gate 2026-06-14 with cross-frame interleave); the R3/4
-// crest rung sits behind ULTRA_QAM16_R34 (A/B, default OFF). RAISE a cap per rung only as
-// the GUI gate validates it. Non-QAM16 (QPSK) is capped at R3/4 — the top of the auto
-// ladder since R5/6 was retired (2026-06-17, a measured-losing rung; see
-// rate_controller.hpp). R5_6 is no longer a cap value.
 // The stuck-frame escape's one-rung step on the OFDM code-rate ladder (R1/4 < R1/2 < R2/3 < R3/4,
 // the rates a coherent rung uses below the modulation steps): the next more robust rate, or `r`
 // itself at the floor or off the ladder. Replaced the sender-side RateController (2026-11-25, R10),
@@ -934,29 +846,6 @@ inline CodeRate moreRobustOfdmCodeRate(CodeRate r) {
         case CodeRate::R2_3: return CodeRate::R1_2;
         case CodeRate::R3_4: return CodeRate::R2_3;
         default: return r;
-    }
-}
-
-inline CodeRate maxValidatedCoherentRate(Modulation mod) {
-    switch (mod) {
-        // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (then auto-on for QAM16 via
-        // burstCrossFrameInterleaveOn) made 16QAM R2/3 Good@20 viable at ~1790 bps GUI-measured
-        // (6/6 seeds), then ABOVE the R1/2 clean rung (~1550). NOTE (2026-07-21): interleave is now
-        // DEFAULT-OFF (rig-measured harmful on MPG@20 fading — see burstCrossFrameInterleaveOn); the
-        // R2/3 cap stands but its interleave-dependent margin is UNRE-MEASURED without it — re-A/B
-        // 16QAM R2/3 vs R1/2 on the rig (per-frame SACK) before trusting R2/3 as the 16QAM cap. 2026-07-03: the R2/3 measured
-        // ceiling is 3520 bps AWGN@20 with the wide window (the old "~2850 AWGN@30" figure is
-        // stale); R3/4 raw = 9/8 of R2/3 -> projected ceiling ~3900. R3/4 measured damage-bound
-        // PRE-interleave (55-70% frame loss — fable_analysis/07), so it ships knob-gated
-        // (ULTRA_QAM16_R34): reachable ONLY via the adaptive walk, one-bad-group demote to R2/3.
-        case Modulation::QAM16:
-            return qam16R34Enabled() ? CodeRate::R3_4 : CodeRate::R2_3;
-        // 8PSK revival (2026-07-05): R2/3 is the probe-validated ceiling (good@20
-        // PASS 2040, 0 craters). R3/4 is AWGN-validated only (May, 2330 clean) —
-        // its Good behavior (tight 45° boundaries on fading) is unmeasured on the
-        // modern stack; raise only after a GUI-gate validation.
-        case Modulation::QAM8:  return CodeRate::R2_3;
-        default:                return CodeRate::R3_4;  // QPSK ceiling = top of the auto ladder
     }
 }
 
