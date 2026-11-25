@@ -281,6 +281,11 @@ inline constexpr uint32_t kCostasSymbols = kCostasPattern.size();
 //                miscorrect that lands on the epoch fails SAFE at the sender — an
 //                epoch-mismatched ACK is IGNORED (= ACK-lost -> RTO resend), never
 //                mis-credited.
+//   CURRENT STATE (2026-11-25): the knobs below are gone. The CRC always covers the rung bits
+//                (rungCmdCrcSpanEnabled); [rate_hint|rung_cmd] is the receiver authority's
+//                absolute 5-bit rung word on an ACK, rung_cmd=3 on a NACK is the
+//                WAITING-REBASE voice, and the relative DownOne/DownHard command is no longer
+//                emitted or consumed. The history below describes how the layout arrived.
 //   bits 42..43  rung_cmd (2 bits, 2026-07-03, MODE_SWITCH_PIGGYBACK Phase 2, knob
 //                ULTRA_RX_RATE_CMD default-OFF): receiver-commanded relative rung step
 //                for the wideband-OFDM fade-riding ladder — 0 = no command (back-compat

@@ -10,6 +10,21 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — cleanup: ULTRA_RX_RATE_CMD removed; the WAITING-REBASE voice is unconditional
+
+**What was there.** After R10 the knob (default on since 2026-07-05) gated only the WAITING-REBASE voice
+(rung_cmd=3 on a NACK: the unanchored receiver asking for the era base) - its emission, the sender's
+acceptance and its consumption. ConnectionAdaptive pinned it OFF for the whole binary (one test turned
+it on), so the voice was tested in one case and the rest of the suite ran without it.
+
+**What changed.** The knob and `rx_rate_cmd_enabled_` are deleted; the three gates are unconditional.
+ConnectionAdaptive, RxAuthority and the payload test no longer set it; `tools/qso_sweep.sh` no longer
+turns it off. The tone-ACK constants header gains a current-state note (the CRC always covers the rung
+bits). No behaviour change on a default build.
+
+**Verification.** CTest 131/131 (ConnectionAdaptive 922/922 with the voice on throughout). TNC sweep 19
+(seeds 421-422, 7 scenarios x 5 channels): 70/70 PASS.
+
 ## 2026-11-25 — cleanup: receiver rate authority is permanent; the sender-side rate walk is deleted (R10)
 
 **What was there.** The receiver has commanded the rung on every group ACK since 2026-07-05

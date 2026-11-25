@@ -219,7 +219,7 @@ public:
     // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3): receiver
     // side — true while the unanchored interregnum holds (epoch adopted, era base
     // not yet seen, total ack silence). Connection reads it per burst-group event
-    // to emit the rung_cmd=3 "waiting-rebase" tone signal (ULTRA_RX_RATE_CMD).
+    // to emit the rung_cmd=3 "waiting-rebase" tone signal.
     bool rxWaitingRebase() const { return rx_epoch_wait_rebase_; }
     // The peer's burst descriptor named its window anchor (INV-DESC-WINDOW-001,
     // protocol/descriptor_window_anchor.hpp): its move epoch and its tx base mod 8192. Adopts

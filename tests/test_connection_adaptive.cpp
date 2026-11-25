@@ -5959,11 +5959,9 @@ void test_terminal_file_failure_disconnects_to_reset_peer_assembler() {
 
 void test_waiting_rebase_voice_has_per_outcome_event_identity() {
     setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
-    setenv("ULTRA_RX_RATE_CMD", "1", 1);
     Connection receiver;
     Connection sender;
     unsetenv("ULTRA_ARQ_MOVE_EPOCH");
-    setenv("ULTRA_RX_RATE_CMD", "0", 1);
 
     std::vector<ToneBurstAckPayload> voices;
     receiver.setTransmitToneBurstAckCallback(
@@ -7402,11 +7400,6 @@ int main() {
     // this one is latched PER Connection in its ctor — the knob-ON tests flip the env
     // around a single construction and restore it, so ordering here is baseline-only.
     setenv("ULTRA_DESCRIPTOR_MODE_SWITCH", "0", 1);
-    // RX-RATE-CMD (design Phase 2): same per-Connection-ctor latch pattern. NOTE: the
-    // tone_burst_payload CRC-span binding reads this env ONCE process-wide, but this
-    // binary never routes payloads through the parameter-less codec overloads, so the
-    // per-test flips below cannot skew the wire span (payload tests use explicit spans).
-    setenv("ULTRA_RX_RATE_CMD", "0", 1);
     // Exercise the derived wide-control deadline and single-ACK default, never
     // inherited rig A/B pins.
     unsetenv("ULTRA_MODE_CHANGE_RETRY_MS");

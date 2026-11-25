@@ -340,15 +340,6 @@ Connection::Connection(const ConnectionConfig& config)
     }
     mcdpsk_ack_repair_enabled_ = connection_policy::mcDpskAckRepairFromEnvironment();
 
-    // RX-RATE-CMD Phase 2 (design §5.2, knob ULTRA_RX_RATE_CMD, read once per
-    // Connection; default ON since 2026-07-05). The tone-ACK codec must use the
-    // widened CRC span whenever this command path or RX authority is enabled.
-    // SEMANTICS-BREAKING lockstep when ON; the descriptor-committed consume path
-    // additionally needs ULTRA_DESCRIPTOR_MODE_SWITCH (+ ULTRA_ARQ_MOVE_EPOCH for
-    // mid-window) — it falls back to the legacy MODE_CHANGE exchange without them.
-    if (const char* rc = std::getenv("ULTRA_RX_RATE_CMD"); !(rc && rc[0] == '0')) {  // DEFAULT-ON 2026-07-05 (voice; demote-cmd inert under authority)
-        rx_rate_cmd_enabled_ = true;
-    }
 
     // Progress-bearing partial-SACK descriptor-only repair experiment.  Strict
     // default OFF and read per Connection so two local test peers can independently
@@ -2691,8 +2682,7 @@ bool Connection::isToneBurstAckCandidatePlausible(
     // The reserved WAITING-REBASE voice is intentionally outside the sender's
     // ordinary SACK support. It is the one legitimate NACK-typed tone accepted by
     // onToneBurstAck(), and must remain audible while the ARQ grid is unanchored.
-    if (rx_rate_cmd_enabled_ &&
-        payload.type == ultra::waveform::tone_burst_ack::AckType::Nack &&
+    if (payload.type == ultra::waveform::tone_burst_ack::AckType::Nack &&
         payload.rung_cmd ==
             ultra::waveform::tone_burst_ack::kRungCmdReserved &&
         payload.frame_mask == 0 && payload.rate_hint == 0 &&
@@ -2780,15 +2770,13 @@ bool Connection::onToneBurstAck(
 
     if (state_ != ConnectionState::CONNECTED) return false;
 
-    // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3, gated on
-    // ULTRA_RX_RATE_CMD): rung_cmd==3 is NOT an ack — it is the unanchored peer's
+    // WAITING-REBASE voice (BUG-UNANCHORED-SILENCE-ESCAPE, design §5.3): rung_cmd==3 is NOT an ack — it is the unanchored peer's
     // only utterance ("I am alive, forward data is arriving, but the era-base frame
     // keeps dying — resend it"). Consume it FIRST and consume it WHOLE: its mask is
     // meaningless (must not reach the ARQ as a SACK) and it must not feed the rate
     // controller a 0 (the voice is proof the forward link WORKS — treating it as
     // demote evidence would re-manufacture the exact collapse it exists to prevent).
-    if (rx_rate_cmd_enabled_ &&
-        detection.payload.type ==
+    if (detection.payload.type ==
             ultra::waveform::tone_burst_ack::AckType::Nack &&
         detection.payload.rung_cmd ==
             ultra::waveform::tone_burst_ack::kRungCmdReserved &&
@@ -2816,7 +2804,7 @@ bool Connection::onToneBurstAck(
     // an Ack-typed no-progress SACK (sendSack: base = rx_base-1, holes in the mask),
     // and the only real Nack producer is the WAITING-REBASE voice, whose group_seq is
     // a BURST-GROUP ordinal in a DIFFERENT sequence space (consumed above when
-    // ULTRA_RX_RATE_CMD is on). A Nack-typed detection reaching this point is foreign
+    // always). A Nack-typed detection reaching this point is foreign
     // or corrupt (F116: a stale-audio re-decode at the wrong symbol_ms rung that
     // fluked Costas+Hamming+CRC-12) — its fields must NEVER be indexed into the ARQ
     // window, the rate controller, or the drive advisory. Consume it whole; worst
@@ -5122,7 +5110,7 @@ void Connection::onBurstGroupReceived(uint16_t group_seq, const std::vector<Byte
         // onToneBurstAck). It tells the sender "alive + forward link works + resend
         // the era base" — the anti-manufactured-collapse signal, on the 4-FSK plane
         // that out-survives every OFDM waveform in the trough.
-        if (rx_rate_cmd_enabled_ && arq_.rxWaitingRebase() &&
+        if (arq_.rxWaitingRebase() &&
             kInteractiveToneAckEnabled() && on_transmit_tone_burst_ack_) {
             ultra::waveform::tone_burst_ack::ToneBurstAckPayload voice;
             // This is an event identity, not the descriptor's transport group_seq.

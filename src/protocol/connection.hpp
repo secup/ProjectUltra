@@ -1044,14 +1044,6 @@ private:
     // tone-ACK callback and consumed before the corresponding physical request can be
     // CCA-deferred; it never survives a deferred/no-op refill.
     bool partial_sack_descriptor_repair_scope_ = false;
-    // RX-RATE-CMD Phase 2 (docs/MODE_SWITCH_PIGGYBACK_DESIGN_2026_07_03.md §5.2, knob
-    // ULTRA_RX_RATE_CMD, read ONCE in the ctor like ULTRA_DESCRIPTOR_MODE_SWITCH;
-    // default OFF = byte-identical — the tone-ACK rung_cmd bits stay 0 and the CRC
-    // span stays 28 bits). SEMANTICS-BREAKING lockstep when ON (live command bits +
-    // widened CRC span in tone_burst_payload — both ends must run it; requires
-    // Phase 1 for the descriptor-committed consume path, falls back to the legacy
-    // MODE_CHANGE exchange otherwise).
-    bool rx_rate_cmd_enabled_ = false;
     // Four retries at the single-control geometry deadline. Wide OFDM defaults to
     // 8 s (also >= one capped coherence interval), and retry egress is carrier-sense
     // gated. The receiver sends one immediate ACK; duplicate requests earn one

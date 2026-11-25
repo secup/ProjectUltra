@@ -626,8 +626,8 @@ Buckets per the env-knobs→runtime-derivation workstream: **[FEAT]** in-flight 
     `ULTRA_ENTRY_CAP_R34`, `ULTRA_ESCAPE_EPISODE_CAP` (value default 1), `ULTRA_LLR_REJECT_SHAPE`,
     `ULTRA_PRESERVE_ANCHOR_WAIT`, `ULTRA_PROMOTE_EMA_CARRY`, `ULTRA_QAM16_CW16`,
     `ULTRA_QAM16_DEMOTE_MIDRUNG`, `ULTRA_QAM16_R34`, `ULTRA_R34_FAST_CREST`,
-    `ULTRA_RETX_TROUGH_PACING`, `ULTRA_RX_RATE_AUTHORITY` (9f), `ULTRA_RX_RATE_CMD`
-    (voice-only under authority), `ULTRA_TROUGH_AMNESTY`, `ULTRA_EARLY_FRAME_DECODE`
+    `ULTRA_RETX_TROUGH_PACING`, `ULTRA_RX_RATE_AUTHORITY` (9f, removed 2026-11-25), `ULTRA_RX_RATE_CMD`
+    (voice-only under authority; removed 2026-11-25 - the WAITING-REBASE voice is unconditional), `ULTRA_TROUGH_AMNESTY`, `ULTRA_EARLY_FRAME_DECODE`
     (born default-ON), `ULTRA_ACK_CCA_DEFER_MS` (born default 2500).
     Value defaults changed in that campaign: `ULTRA_ACK_REPEAT_SILENT_MS`
     0→4000 (**later reverted; current production default is OFF and only an

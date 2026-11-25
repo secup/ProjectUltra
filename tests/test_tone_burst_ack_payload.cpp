@@ -663,7 +663,6 @@ int main() {
 
     // Receiver authority is default-on, so the parameter-less production codec
     // must cover its command bits even when no environment knob is present.
-    unsetenv("ULTRA_RX_RATE_CMD");
     unsetenv("ULTRA_RX_RATE_AUTHORITY");
     EXPECT(rungCmdCrcSpanEnabled());
 
