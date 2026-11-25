@@ -586,6 +586,15 @@ void test_fer_floor_monotonic() {
     }
 }
 
+// The stuck-frame escape's one-rung step (moreRobustOfdmCodeRate, replaced RateController 2026-11-25).
+static void test_more_robust_ofdm_code_rate() {
+    CHECK(moreRobustOfdmCodeRate(CodeRate::R3_4) == CodeRate::R2_3, "R3/4 steps to R2/3");
+    CHECK(moreRobustOfdmCodeRate(CodeRate::R2_3) == CodeRate::R1_2, "R2/3 steps to R1/2");
+    CHECK(moreRobustOfdmCodeRate(CodeRate::R1_2) == CodeRate::R1_4, "R1/2 steps to R1/4");
+    CHECK(moreRobustOfdmCodeRate(CodeRate::R1_4) == CodeRate::R1_4, "R1/4 is the floor");
+    CHECK(moreRobustOfdmCodeRate(CodeRate::R5_6) == CodeRate::R5_6, "off the ladder: no step");
+}
+
 int main() {
     // ULTRA_ENTRY_CAP_R34 is read ONCE (static lambda): remove any parent override
     // before the first policy call and prove that the documented unset default is OFF.
@@ -593,6 +602,7 @@ int main() {
     unsetenv("ULTRA_ENTRY_CAP_R34");
 
     test_ofdm_rate_thresholds();
+    test_more_robust_ofdm_code_rate();
     test_narrow_data_mode();
     test_coherent_ladder_selection();
     test_bootstrap_caps();

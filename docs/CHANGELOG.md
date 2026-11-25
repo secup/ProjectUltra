@@ -10,6 +10,19 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — cleanup: RateController replaced by a pure one-rung step
+
+**What was there.** After R10 the sender-side `RateController` (rate_controller.hpp, 299 lines: an EMA
+walk, climb streaks, an ssthresh ceiling, two env knobs) served the stuck-frame escape alone, through
+`isAtFloor` and `moreRobustRung`; `noteRungFailed` set a ceiling that nothing read any more.
+
+**What changed.** `moreRobustOfdmCodeRate` (waveform_selection.hpp) steps R3/4 -> R2/3 -> R1/2 -> R1/4
+and returns its input at the floor or off the ladder - exactly the old `isAtFloor`/`moreRobustRung`
+pair on the default ladder. The class, CTest RateController (260 lines) and `ULTRA_RATE_CLIMB_STREAK` /
+`ULTRA_PROMOTE_EMA_CARRY` are deleted; CTest WaveformPolicy covers the step. No behaviour change.
+
+**Verification.** CTest 130/130 (WaveformPolicy 179/179). TNC sweep 20 (seeds 423-424): 70/70 PASS.
+
 ## 2026-11-25 — cleanup: ULTRA_RX_RATE_CMD removed; the WAITING-REBASE voice is unconditional
 
 **What was there.** After R10 the knob (default on since 2026-07-05) gated only the WAITING-REBASE voice

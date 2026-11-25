@@ -10,7 +10,6 @@
 #include "close_state.hpp"
 #include <atomic>
 #include "waveform/tone_burst_ack/tone_burst_ack_monitor.hpp"
-#include "rate_controller.hpp"
 #include "latent_rate_controller.hpp"
 #include "evm_rate_selector.hpp"
 #include "file_transfer.hpp"
@@ -1322,7 +1321,6 @@ private:
                                          // wideband OFDM since 2026-07-02; ULTRA_RATE_ADAPT=0 or
                                          // ULTRA_LOCK_RATE=1 opts out). Opt out of the feedback
                                          // computation itself with ULTRA_ADAPTIVE_RATE=0.
-    RateController rate_controller_;
     uint8_t pending_ack_quality_q_ = 0xFF;  // RX: byte to stamp on the next GROUP_ACK
     float last_group_quality_ = -1.0f;      // GUI: most recent group decode headroom
     // Software-ALC receiver-side state (per-connection; reset in enterConnected /

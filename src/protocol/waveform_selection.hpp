@@ -924,6 +924,19 @@ inline float goodputBreakEvenDeliveredFraction(uint8_t cur) {
 // the GUI gate validates it. Non-QAM16 (QPSK) is capped at R3/4 — the top of the auto
 // ladder since R5/6 was retired (2026-06-17, a measured-losing rung; see
 // rate_controller.hpp). R5_6 is no longer a cap value.
+// The stuck-frame escape's one-rung step on the OFDM code-rate ladder (R1/4 < R1/2 < R2/3 < R3/4,
+// the rates a coherent rung uses below the modulation steps): the next more robust rate, or `r`
+// itself at the floor or off the ladder. Replaced the sender-side RateController (2026-11-25, R10),
+// whose walk was dead under the receiver authority.
+inline CodeRate moreRobustOfdmCodeRate(CodeRate r) {
+    switch (r) {
+        case CodeRate::R1_2: return CodeRate::R1_4;
+        case CodeRate::R2_3: return CodeRate::R1_2;
+        case CodeRate::R3_4: return CodeRate::R2_3;
+        default: return r;
+    }
+}
+
 inline CodeRate maxValidatedCoherentRate(Modulation mod) {
     switch (mod) {
         // 2026-06-14: lifted R1/2 -> R2/3. Cross-frame TIME interleave (then auto-on for QAM16 via

@@ -546,9 +546,6 @@ add_executable(test_channel_truth_h test_channel_truth_h.cpp)
 target_link_libraries(test_channel_truth_h PRIVATE ota_channel_core)
 add_test(NAME ChannelTruthH COMMAND test_channel_truth_h)
 
-add_executable(test_rate_controller test_rate_controller.cpp)
-target_link_libraries(test_rate_controller PRIVATE ultra_core)
-add_test(NAME RateController COMMAND test_rate_controller)
 
 add_executable(test_ofdm_link_adaptation test_ofdm_link_adaptation.cpp)
 target_link_libraries(test_ofdm_link_adaptation PRIVATE ultra_core)

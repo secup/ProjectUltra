@@ -3236,11 +3236,10 @@ void Connection::executeEscapeDrop(const char* trigger) {
     // adapt climbed R1/4->R3/4, a frame stuck 248 retx and died; locked R1/4 completed). Force a
     // ONE-rung drop to a more robust rate so the frame can punch through. requestModeChange
     // re-anchors both stations; setCodeRate re-sends the in-flight frames at the new rate KEEPING
-    // their seqs (tx_next=tx_base) so there is no receiver seq-hole; ssthresh (noteRungFailed) stops
-    // the controller from immediately climbing back into the rung that just failed.
-    const CodeRate robust = rate_controller_.moreRobustRung(data_code_rate_);
+    // their seqs (tx_next=tx_base) so there is no receiver seq-hole; the receiver authority then
+    // commands the rung from what it measures.
+    const CodeRate robust = moreRobustOfdmCodeRate(data_code_rate_);
     if (robust == data_code_rate_) return;
-    rate_controller_.noteRungFailed(data_code_rate_);
     const Modulation esc_from_mod = data_modulation_;
     const CodeRate esc_from_rate = data_code_rate_;
     ++consecutive_escape_drops_;
@@ -4545,7 +4544,7 @@ void Connection::maybeEscapeStuckFrame() {
     if (mode_change_pending_) return;             // a rate change is already in flight
     if (!isOFDMMode(negotiated_mode_)) return;    // burst-transport rate ladder only
     if (arq_.getTxInFlightBytes() == 0) return;   // nothing in flight to be stuck
-    if (rate_controller_.isAtFloor(data_code_rate_)) return;  // already most robust — irreducible
+    if (moreRobustOfdmCodeRate(data_code_rate_) == data_code_rate_) return;  // already most robust — irreducible
     // Frame-death evidence: ACK rounds that came back without the frame. Retransmissions into a
     // dead channel are no evidence (INV-RATE-EVIDENCE-001): GUI, follow off, ITU Good dips of
     // 100-145 s - the first ACK after the return carried 8-11 silent "retx" and dropped 8PSK R2/3

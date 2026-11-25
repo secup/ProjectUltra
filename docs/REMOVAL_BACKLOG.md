@@ -509,7 +509,9 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   production authority (it pinned the authority OFF, so its 900+ checks exercised the legacy walk).
   KEPT: `executeEscapeDrop`/`maybeEscapeStuckFrame`, retx pacing, entry-time selection, all MC-DPSK and
   narrowband rate code, `ULTRA_RX_RATE_CMD` (still gates the WAITING-REBASE voice - untangle separately),
-  `RateController` (the stuck-frame escape's one-rung step only). Original entry:
+  `RateController` (the stuck-frame escape's one-rung step only) - itself deleted the same day for the
+  pure `moreRobustOfdmCodeRate` (waveform_selection.hpp), with `ULTRA_RATE_CLIMB_STREAK`,
+  `ULTRA_PROMOTE_EMA_CARRY` and CTest RateController. Original entry:
 - **R10 (original). Sender-side mid-transfer rate drivers (superseded by RX-AUTHORITY)** — logged
   2026-07-05, deletion HARD-GATED on `ULTRA_RX_RATE_AUTHORITY` graduating default-ON
   (multi-seed faithful gate + rig campaign). Once the receiver commands the rung per group
