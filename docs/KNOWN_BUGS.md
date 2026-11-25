@@ -39,6 +39,8 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   flat; first-burst no-ACKs 3 -> 2. The failure is rare on the GUI (3 of 16 baseline runs) and the
   fix costs ~1.2 s per crossing: not proven, reverted. Both arms crossed up at 72 s while the profile
   still read 2 dB - the crossing is decided on fading-crest readings, which is the 0-5 dB tuning item.
+  More occurrences (TNC sweep 21, 2026-11-25): ITU Good 8 dB seed 425 short (11 crossings, 323/1223 B in
+  240 s), AWGN 3 dB seed 426 bulk_then_short (4096/6000 B in 600 s). Sweeps 17-20: 0 of 280.
 - **BUG-FIRST-OFDM-FRAME-LTS-CFO** (P1, intermittent, pre-existing): on the first OFDM frame after the
   MC-DPSK handshake the LTS residual "corrects" the handshake's accurate dual-chirp CFO by ~1.2-1.3 Hz
   (AWGN 10 dB, true 7.3 Hz: 7.30 -> 8.64 in one run, 7.30 -> 6.11 in another, both logged

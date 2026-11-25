@@ -528,6 +528,15 @@ Sourced from `MODEM_INFRASTRUCTURE_MAP.md §7` (file:line authoritative there):
   `selectCoherentOFDM`/`selectLadderRung`; the whole MC-DPSK/narrow rate machinery (RX-AUTHORITY
   is wideband-coherent-only); `RateController` itself if entry/fallback still consults it.
 
+- **R14 — DONE 2026-11-25. The legacy SNR-anchor authority ladder.** `updateRxAuthorityCommand`'s
+  tail after the latent selector (reachable only with `ULTRA_LATENT_RATE=0`, default-on since
+  2026-08-01): the two-crater rule, climb dwell, per-rung crater penalties, EMA hold, dense fast demote,
+  EVM demote (+ confident form), goodput-graded crater; the fade-averaged verdict-SNR ring and sticky
+  fading class that fed only it; `setBurstEvmObservation` (its group EVM was read only by the EVM
+  demote); six env knobs; ten RxAuthority cases. KEPT: the latent selector, the startup probe, the
+  clean-streak (burst-ceiling evidence), the predictive gamma ring, `rx_auth_clean_streak_`.
+  Left for a follow-up: policy helpers that may now have no production caller (`calibrationAnchorDbFor`,
+  `selectCoherentOFDM` outside connect-time selection) - check before deleting.
 - **R13 — DONE 2026-11-24.** `Impl::interpolateChannel()` + its N×N phasor tables (found 2026-07-28; `buildInterpolationPhasors`, both tables and the four scratch buffers deleted; `interp_table` / `buildInterpTable` kept) — an earlier
   DFT-channel-interpolation attempt that is **declared and defined but called from nowhere**.
   **Scope:** `demodulator_impl.hpp:415` (decl), `channel_equalizer_pilot.cpp:1204` (defn),

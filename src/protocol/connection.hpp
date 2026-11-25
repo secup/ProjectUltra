@@ -722,19 +722,6 @@ public:
         burst_obs_doppler_hz_ = doppler_hz;
     }
 
-    // RX-AUTHORITY EVM DEMOTE (2026-07-24): this group's radio-agnostic
-    // decision-directed EVM usable-SNR (dB) from the decoder's finalized estimate.
-    // Fed alongside setBurstChannelObservation, BEFORE onBurstGroupReceived, so the
-    // demote clamp derived from it rides THIS group's ACK. The default latent-rate
-    // path returns before consulting EVM; this remains a legacy-selector clamp when
-    // ULTRA_LATENT_RATE=0. Validity is nevertheless per-group so toggling paths can
-    // never revive an older observation.
-    void setBurstEvmObservation(float evm_snr_db) {
-        burst_obs_evm_snr_db_ = evm_snr_db;
-    }
-    void clearBurstEvmObservation() {
-        burst_obs_evm_snr_db_ = -1.0f;
-    }
     // ULTRA_RATE_EVM: every data frame's EVM SNR for THIS group (decoder-ordered; NaN where a
     // frame was not measured). Fed BEFORE onBurstGroupReceived so the rung command this
     // group's ACK carries uses it; consumed once.
@@ -1370,12 +1357,6 @@ private:
     float burst_obs_coh_score_ = 0.0f;
     bool burst_obs_coh_valid_ = false;
     float burst_obs_doppler_hz_ = -1.0f;
-    // RECEIVER: this group's radio-agnostic decision-directed EVM usable-SNR (dB),
-    // fed by setBurstEvmObservation from the decoder BEFORE onBurstGroupReceived.
-    // <0 = never fed / no OFDM decode this group. Consumed by the EVM demote authority
-    // (ULTRA_EVM_DEMOTE) in updateRxAuthorityCommand — a constant-free, non-inflating
-    // clamp that reads usable dB directly (no dial/hardware offset).
-    float burst_obs_evm_snr_db_ = -1.0f;
     // RECEIVER: canonical rung this end commands (0 = none); re-stamped on every
     // ACK emit until superseded by the next group's verdict.
     uint8_t rx_authority_cmd_ = 0;
@@ -1443,63 +1424,9 @@ private:
     size_t mcdpsk_probe_cap_frames_ = 0;
     int mcdpsk_probe_command_group_seq_ = -1;
     int rx_mcdpsk_margin_ = -1;  // -1 no test this burst, 0 failed, 1 passed
-    // RECEIVER: fade-averaging ring for the verdict SNR. The per-frame broadband
-    // EMA is a fade SNAPSHOT (measured ±5 dB swing on a dial-20 Good channel) —
-    // rate anchors are calibrated on dial-equivalent SNR, so the verdict input is
-    // the dB mean over the last few groups (~30 s ≈ many Tc), not the instant
-    // fade state. Entries age out via tick (stale channel must not steer).
-    static constexpr size_t kRxAuthObsRing = 6;
-    static constexpr uint32_t kRxAuthObsMaxAgeMs = 180000;
-    float rx_auth_obs_db_[kRxAuthObsRing] = {0};
-    uint32_t rx_auth_obs_age_ms_[kRxAuthObsRing] = {0};
-    size_t rx_auth_obs_count_ = 0;
-    size_t rx_auth_obs_next_ = 0;
-    // RECEIVER: ring of recent per-group EVM usable-SNR samples, for the CONFIDENCE-GATED
-    // form of the clamp (ULTRA_EVM_DEMOTE_CONFIDENT). The per-group estimate is NOISY —
-    // measured sd 3.1-4.4 dB on the rig — while adjacent rung EVM floors are only
-    // 1.2-3.1 dB apart, so a single sample cannot resolve which rung is supported
-    // (sigma/sqrt(N) <= gap/2 needs N ~= 27 at the tightest gap). Clamping on one sample
-    // therefore scatters the target across 2-3 rungs from noise alone, which is exactly
-    // what the 2026-07-26 A/B measured (rung commands 15 vs 7 per run against the
-    // ladder's SMOOTHED snr_avg). Same depth as kRxAuthObsRing so both inputs to the
-    // verdict are averaged over comparable evidence.
-    float rx_auth_evm_ring_[kRxAuthObsRing] = {0};
-    size_t rx_auth_evm_count_ = 0;
-    size_t rx_auth_evm_next_ = 0;
-    // RECEIVER: per-rung crater-margin memory — the anchor map is a PRIOR; the
-    // observed crater rate at a rung is the POSTERIOR (second-probe finding: at
-    // avg 22 dB the map re-commanded 16QAM R2/3 after every crater — anchor 20
-    // said yes, the decode said no every ~2.5 groups). A crater AT a rung raises
-    // the extra dB margin needed to re-command it (+2, cap 6); every clean group
-    // decays all penalties (0.25) — the fade epoch ends, the evidence expires.
-    // Receiver-side analogue of the sender's ssthresh, measured where the
-    // channel actually is. Sized by kRungIdxCount (waveform_selection.hpp).
-    float rx_auth_rung_penalty_db_[16] = {0};
-    // TWO-CRATER rule (F122 finding: 10 moves/283 s, each paying the full-anchor
-    // + requeue-rewind tax): at a ~10 s decision quantum vs Tc 2-4 s a SINGLE
-    // crater is an irreducible deep null — the ARQ's job, not the ladder's.
-    // Only CONSECUTIVE craters demote (and charge the crater margin).
-    int rx_auth_crater_streak_ = 0;
-    // DECODE-EVIDENCE class veto (F125): consecutive clean (all_ok) verdicts. A
-    // fading-class DEGRADATION is vetoed while decodes stay clean — the rig's
-    // fading/coherence estimators carry hardware artifacts and their class
-    // thresholds are sim-calibrated (documented 2026-06-17: "[MODERATE] on
-    // everything"); a rung delivering q>=0.9 at 24 dB REFUTES "Moderate". The
-    // posterior (decode record) vetoes the prior (classifier) — a genuinely
-    // degrading channel fails within a couple of groups and lifts the veto.
+    // Consecutive clean (all_ok) group verdicts at the receiver: burst-ceiling prediction and
+    // the latent selector's escalation evidence.
     int rx_auth_clean_streak_ = 0;
-    // FADING input conditioning (F123 finding: the SNR was averaged but the
-    // fading/coherence input was a raw per-frame snapshot flapping 0.15<->0.30 —
-    // and the anchor table quantizes it into three CLIFF-EDGED columns, so class
-    // flaps swung the verdict across whole columns at rock-steady 24 dB SNR:
-    // AWGN-snapshot -> 8PSK R3/4, Moderate-snapshot -> QPSK R1/2). Ring-average
-    // the coherence-adjusted fading like the SNR, and make the CLASS sticky:
-    // a column switch needs the smoothed value's class to persist 2 consecutive
-    // verdicts (the Good/Moderate boundary is documented intrinsically fuzzy).
-    float rx_auth_fading_ring_[kRxAuthObsRing] = {0};
-    int rx_auth_class_sticky_ = 1;      // FadingClass::GOOD — sane starting column
-    int rx_auth_class_streak_ = 0;
-    float rx_auth_fading_passed_ = 0.3f;  // last fading fed to the map (in-class)
     // RX-AUTHORITY PREDICTIVE state (see setBurstCarrierGammas).
     static constexpr size_t kRxAuthGammaRing = 4;
     static constexpr int64_t kRxAuthGammaMaxAgeMs = 180000;
@@ -1507,11 +1434,6 @@ private:
     std::array<std::chrono::steady_clock::time_point, kRxAuthGammaRing> rx_auth_gamma_time_;
     size_t rx_auth_gamma_next_ = 0;
     size_t rx_auth_gamma_count_ = 0;
-    // F149/F160: clean groups required before up-commands unlock after a
-    // confirmed crater (post-episode reality must displace the survivor-biased
-    // crest reads; 3 = gate re-betting without taxing recovery at slow rungs).
-    static constexpr int kRxAuthClimbDwellGroups = 3;
-    int rx_auth_climb_dwell_ = 0;
     // GROUP-SIZE LEVER: consecutive clean (full-retire, no-hole) ack rounds at
     // the current rung; >=2 unlocks the escalated burst-airtime ceiling.
     int burst_clean_group_streak_ = 0;

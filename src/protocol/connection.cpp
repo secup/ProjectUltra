@@ -56,111 +56,6 @@ bool qpskR34LongLdpcExperimentEnabled() {
     return e && e[0] == '1' && e[1] == '\0';
 }
 
-// ULTRA_RX_EMA_HOLD (default-OFF; =1 opts in): lever #1 of the throughput-ceiling audit.
-// REVERTED to default-off 2026-07-23 — the honest all-levers-ON vs baseline reckoning
-// (F580-591, MPG@20) showed the four throughput levers as an AGGREGATE WASH (delivered
-// mean +11% but ALL-ON failed 2/6 vs baseline 1/6 → effective throughput ~tied/slightly
-// negative), and this "hold" lever contributes to over-holding a failing rung (the 88s
-// crater stalls). Was briefly default-ON 2026-07-21 on the F500-511 A/B (which read +8.5%,
-// mostly a floor win); that gain did not survive the aggregate reckoning. Kept behind the
-// knob for measurement. The REAL cap is the rung controller over-committing to 16QAM +
-// demoting too slowly — a rung-SELECTION fix, not more holding. Two coupled corrections to
-// the RX-authority rung controller's crater response, targeting the fast-vs-slow variance
-// (F344 2.61 vs F372 1.16 kbps on the SAME MPG@20 channel — a rate-controller limit cycle):
-// (1) EMA-SUPPORTED HOLD — a confirmed crater does NOT demote while
-// the fade-averaged broadband SNR still clears the CURRENT rung's calibrated floor
-// (rungClassAnchorDb); consecutive craters at a healthy average are deep-null fade
-// brushes the ARQ absorbs, not rung failure. (2) CENSORED failed-group SNR — a
-// cratered group feeds a sample right-censored at the rung floor into the obs ring,
-// killing the survivor bias (a fully-cratered group otherwise re-feeds a STALE CREST
-// read; a partial crater's fresh read is itself crest-biased) that let the ring read
-// 26-32 dB on a 20 dB channel and re-clear the climb bar after every demote. (2)
-// makes (1) honest: the hold gate cannot latch on a crest-biased average.
-bool emaHoldEnabled() {
-    const char* e = std::getenv("ULTRA_RX_EMA_HOLD");
-    return e && e[0] == '1' && e[1] == '\0';  // default-OFF (reverted 2026-07-23); =1 opts in
-}
-
-// ULTRA_DENSE_FAST_DEMOTE (default-off; =1 opts in): the RX-authority over-commit fix
-// (2026-07-23). The predictive climb makes AGGRESSIVE direct multi-rung jumps INTO 16QAM
-// (idx 3→8 on 2.5 dB EESM margin over crest-biased snapshots), but the demote is
-// deliberately SLOW (F122 two-crater rule + one-rung steps, anti-oscillation). Aggressive-up
-// + slow-down = the measured 82s crater stall when the jump is wrong (channel can't hold
-// 16QAM). The two-crater grace is CALIBRATED FOR ROBUST RUNGS: a single crater on QPSK's
-// WIDE margin is an ARQ-absorbed deep null, not rung failure. But 16QAM's TIGHT rings make a
-// FULL crater (0/N) much more likely genuine over-commit — and the cost is asymmetric (82s of
-// craters vs one rung down, quickly re-climbable when the EESM re-proves it). So on a
-// dense-mod rung (bits/symbol ≥ 4), a FULL crater demotes IMMEDIATELY (streak ≥ 1) instead of
-// waiting for two. Modulation-adaptive by construction; QPSK/8PSK keep the grace. Targets
-// FULL craters only (frame_mask==0) — partial 16QAM now resends cheaply via per-frame SACK
-// (interleave-off), so it keeps the two-crater grace. The demote's penalty ratchet still
-// gates re-climb (no oscillation). Leaves the CLIMB untouched.
-bool denseFastDemoteEnabled() {
-    const char* e = std::getenv("ULTRA_DENSE_FAST_DEMOTE");
-    return e && e[0] == '1' && e[1] == '\0';
-}
-
-// ULTRA_EVM_DEMOTE (default-off; =1 opts in): radio-agnostic EVM demote authority
-// (Stage 2, 2026-07-24). The RX-authority ladder is steered by the OFDM broadband
-// SNR estimator, which is marked up by the +8.70 dB kOfdmLegacyAnchorScaleOffsetDb
-// quarantine to the dial/channel scale the legacy anchors assume — on a real radio
-// that offset MASKS the hardware loss (~5 dB on the IONOS bench) and over-commits the
-// rung. The decision-directed EVM SNR (demodulator_impl.hpp) reads USABLE dB directly,
-// constant-free and non-inflating. When this group's measured usable EVM cannot support
-// the CURRENT rung's EVM-usable floor (evmUsableFloorDbForRung), clamp the command DOWN
-// to the highest rung the EVM CAN support. Demote-only: it can never raise the command
-// (EVM saturates at the demod ceiling, so it is not a climb input) — it only strips an
-// over-commit the broadband estimator's optimism let through. Orthogonal to the crater/
-// penalty machinery: a pure output clamp so the A/B reads its effect cleanly.
-bool evmDemoteEnabled() {
-    const char* e = std::getenv("ULTRA_EVM_DEMOTE");
-    return e && e[0] == '1' && e[1] == '\0';
-}
-
-// ULTRA_CRATER_GOODPUT_GRADE (2026-07-25; DEFAULT ON since 2026-07-26, opt out with =0):
-// grade the crater predicate by DELIVERED FRACTION against the goodput break-even instead
-// of the binary quality byte.
-//
-// The decoder assigns quality EXACTLY 0.0 to any group that is not perfect
-// (streaming_burst_interleave), so `quality <= 0` means "at least one frame of N was
-// lost" — NOT "the rung failed". Measured on the MPG@20 rig (3 transfers, 64 groups):
-// 21 groups fed crater evidence, but only 6 were true 0/N craters; the other 15 (71%)
-// delivered a MEAN of 67% of their frames, including 7/8 (88%) and 4/5 (80%) groups
-// counted identically to total loss. Two such groups in a row ratchet the rung down one
-// step, and since climbing needs clean groups plus cooldowns, the fast-down/slow-up
-// asymmetry walks a healthy link to the floor: run 2 spent t=48..127 s ratcheting
-// idx 4 -> 1 while snr_avg ROSE to 22 dB and the ladder's own pick was idx 8, then
-// delivered 3111/4842 bps once it climbed back. That first quartile ran at 54% of the
-// rest of the transfer = 19% of wall clock.
-//
-// Treating "not perfect" as rung failure also contradicts the project's own physics
-// doctrine: fading loss is irreducible and ARQ is mandatory, so a group whose losses
-// the ARQ resends more cheaply than a whole rung demote is the system WORKING.
-// goodputBreakEvenDeliveredFraction() is the geometry-derived line between the two.
-//
-// DEFAULT-ON RATIONALE (rig A/B, 16 interleaved runs, 8/arm, 2026-07-26). This is a
-// CORRECTNESS fix before it is a throughput lever: "7/8 frames delivered" is simply not
-// evidence that a rung failed, so the binary predicate is wrong independent of any measured
-// delta. The A/B supports it on six independent metrics, with the honest numbers:
-//   completion            8/8 vs 5/8      (one-sided p = 0.100)
-//   completed-run goodput 1689 vs 1554 bps = +8.7%
-//   pathological demotes  1.57 vs 2.88 /run = -45%   <- the DIRECT causal metric
-//   craters               1.0 vs 2.1 /run  (the pre-committed falsifier passed INVERTED)
-//   rung changes          5.4 vs 8.0 /run
-//   sign test on 8 pairs  6 pos / 1 neg / 1 tie, p = 0.0625, median +29.8%
-// No single metric reaches p < 0.05 on a rig with documented +/-25% epoch noise, so the case
-// rests on the convergence plus the derivation. Two earlier headline figures were ARTIFACTS
-// and are not the effect size: +56% came from timeout draws (a timed-out run scores ~830 bps
-// vs 1380-2170 completed, so any pair drawing one timeout reads +70..110%), and an ON run with
-// regrades == 0 is byte-identical to OFF -- such a NULL CONTROL landed at 1590 bps, +2.3% vs
-// the OFF mean, which is the harness's internal-validity check.
-// "Pathological demote" = q == 0 && cmd < cur && raw > cmd && fading <= kFadingGoodMax: a
-// demote BELOW what the ladder itself picked, on a channel the fading index calls GOOD.
-bool craterGoodputGradeEnabled() {
-    const char* e = std::getenv("ULTRA_CRATER_GOODPUT_GRADE");
-    return !(e && e[0] == '0' && e[1] == '\0');
-}
-
 Modulation wideOFDMControlModulationForData(Modulation data_modulation) {
     return ofdm_link_adaptation::isCoherentModulation(data_modulation)
         ? Modulation::QPSK
@@ -3300,117 +3195,14 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
         rx_authority_cmd_ = kRungIdxNone;
         return;
     }
-    // FADE-AVERAGED verdict SNR (2026-07-05, first-probe finding): the per-frame
-    // broadband EMA swung 16.9..26.8 dB on a dial-20 Good channel — a fade
-    // snapshot. Commanding on it aliases the fade cycle (crest reading -> climb ->
-    // trough crater -> demote -> repeat; 12 moves/300 s measured). The rung anchors
-    // are calibrated on dial-equivalent SNR, so the verdict input is the dB mean of
-    // the last few group observations (~30 s ≈ many Tc). Decode-evidence overrides
-    // below keep the fast reactions (crater = instant clamp).
-    float inst_fading = connection_policy::coherenceAdjustedFadingIndex(
-        (burst_obs_fading_ >= 0.0f) ? burst_obs_fading_ : fading_index_,
-        burst_obs_coh_score_, burst_obs_coh_valid_);
-    // ESTIMATOR HYGIENE (F142): a fading index > 1.5 is not a channel — it is the
-    // across-carrier CV of a tone/noise snapshot (measured 2.9-3.1 on our own ACK
-    // echo). One such sample in a 6-ring lifts the average by ~+0.45 and flips
-    // the class. Reject absurd readings; reuse the last sane value.
-    if (inst_fading > 1.5f) inst_fading = rx_auth_fading_passed_;
-    // CENSORED failed-group SNR (ULTRA_RX_EMA_HOLD): a group that did not fully
-    // deliver is right-censored at the current rung's calibrated floor before it
-    // enters the obs ring. A fully-cratered group feeds NO fresh broadband SNR, so
-    // burst_obs_snr_db_ is a STALE CREST read from an earlier good group; a partial
-    // crater's fresh read is itself crest-biased (only the frames that DECODED
-    // contributed). Either way, capping the sample at the rung anchor stops a failure
-    // from pulling the ring average UP — the survivor bias that let the ring read
-    // 26-32 dB on a 20 dB channel and re-clear the climb bar ~60 s after every demote.
-    float obs_sample = burst_obs_snr_db_;
-    if (emaHoldEnabled() && !all_ok) {
-        const float a = calibrationAnchorDbFor(data_modulation_, data_code_rate_);
-        if (a < kRungDisabledDb) obs_sample = std::min(obs_sample, a);
-    }
-    rx_auth_obs_db_[rx_auth_obs_next_] = obs_sample;
-    rx_auth_fading_ring_[rx_auth_obs_next_] = inst_fading;
-    rx_auth_obs_age_ms_[rx_auth_obs_next_] = 0;
-    rx_auth_obs_next_ = (rx_auth_obs_next_ + 1) % kRxAuthObsRing;
-    if (rx_auth_obs_count_ < kRxAuthObsRing) ++rx_auth_obs_count_;
-    float snr_sum = 0.0f;
-    float fading_sum = 0.0f;
-    int snr_n = 0;
-    // ULTRA_LINEAR_SNR_RING: average LINEAR POWER, not dB. The dial and the anchor table are
-    // mean-power definitions, so a dB-domain mean reads systematically LOW on fading (Jensen)
-    // — measured 1.65 dB on this ring's own samples. streaming_decoder.hpp::physicalSnrStats
-    // already does it this way and documents the intent; this ring was the odd one out.
-    // The knob also carries the compensating anchor-offset reduction (see
-    // connection_policy.hpp::ofdmAnchorScaleOffsetDb) because fixing the domain ALONE raises
-    // the ladder's input on a path already measured to over-commit ~2 rungs.
-    const bool linear_ring = connection_policy::linearSnrRingEnabled();
-    double snr_lin_sum = 0.0;
-    for (size_t i = 0; i < rx_auth_obs_count_; ++i) {
-        if (rx_auth_obs_age_ms_[i] <= kRxAuthObsMaxAgeMs) {
-            snr_sum += rx_auth_obs_db_[i];
-            snr_lin_sum += std::pow(10.0, static_cast<double>(rx_auth_obs_db_[i]) / 10.0);
-            fading_sum += rx_auth_fading_ring_[i];
-            ++snr_n;
-        }
-    }
-    const float snr_avg =
-        (snr_n > 0)
-            ? (linear_ring ? static_cast<float>(
-                                 10.0 * std::log10(snr_lin_sum / static_cast<double>(snr_n)))
-                           : (snr_sum / static_cast<float>(snr_n)))
-            : burst_obs_snr_db_;
-    const float fading_avg = (snr_n > 0)
-        ? (fading_sum / static_cast<float>(snr_n)) : inst_fading;
-    // STICKY CLASS (F123): the anchor table's three fading columns are cliffs and
-    // the class boundary is intrinsically fuzzy — a column switch must be an epoch
-    // verdict, not a snapshot. Adopt a new class only when the SMOOTHED fading's
-    // class persists 2 consecutive group verdicts; until then keep feeding the map
-    // the last in-class fading value.
-    const int raw_class = static_cast<int>(classifyFading(fading_avg));
-    float eff_fading = fading_avg;
-    if (raw_class == rx_auth_class_sticky_) {
-        rx_auth_class_streak_ = 0;
-        rx_auth_fading_passed_ = fading_avg;
-    } else if (raw_class < rx_auth_class_sticky_ && rx_auth_class_streak_ < 4) {
-        // ASYMMETRIC PERSISTENCE (F143): class IMPROVEMENTS (e.g. Good -> AWGN)
-        // adopt only after ~4 consecutive verdicts (vs 2 for degradations) — a
-        // calm dip in the fading average unlocked the AWGN-only 8PSK R3/4 rung
-        // on a fading channel TWICE in one run, cratering on arrival each time.
-        // Optimism is earned at half the speed of caution. While unconfirmed,
-        // the map keeps seeing the last IN-CLASS fading value (passing the
-        // improved reading would classify itself and bypass this hold).
-        ++rx_auth_class_streak_;
-        eff_fading = rx_auth_fading_passed_;
-    } else if (raw_class > rx_auth_class_sticky_ && rx_auth_clean_streak_ >= 2) {
-        // DECODE-EVIDENCE VETO (F125): the classifier says the channel got WORSE
-        // while the last 2+ groups decoded clean — the decode record refutes it
-        // (measured: fading walked 0.26->0.77 into MODERATE while 16QAM R2/3 ran
-        // q=0.9-0.98 at 24-25 dB; the Moderate column has no dense rungs, so the
-        // flip commanded a delivering link into the QPSK basement). Hold the
-        // class; a genuine degradation craters within a couple of groups, the
-        // clean streak dies, and the switch proceeds.
-        rx_auth_class_streak_ = 0;
-    } else if (++rx_auth_class_streak_ >= 2) {
-        rx_auth_class_sticky_ = raw_class;
-        rx_auth_class_streak_ = 0;
-        rx_auth_fading_passed_ = fading_avg;
-        LOG_MODEM(INFO, "Connection: RX-AUTHORITY fading class -> %d (fading=%.2f)",
-                  raw_class, fading_avg);
-    } else {
-        eff_fading = rx_auth_fading_passed_;  // unconfirmed flap: hold the column
-    }
-    const CoherentPick mapped = selectCoherentOFDM(snr_avg, eff_fading);
-    uint8_t cmd = coherentRungIndexFor(mapped.mod, mapped.rate);
     const uint8_t cur = coherentRungIndexFor(data_modulation_, data_code_rate_);
 
-    // QSO-scoped clean-delivery evidence is shared by the legacy authority gates,
-    // burst-ceiling prediction, and the latent selector.  Update it before the
-    // selector's early return; otherwise the default latent path permanently sees
-    // zero clean groups even while the transmitter has already earned escalation.
+    // QSO-scoped clean-delivery evidence, shared by burst-ceiling prediction and the latent
+    // selector.
     if (all_ok) ++rx_auth_clean_streak_;
     else rx_auth_clean_streak_ = 0;
 
-    // ── LATENT-STATE PATH (ULTRA_LATENT_RATE, DEFAULT-ON; =0 restores the legacy ladder)
+    // ── LATENT-STATE PATH (the rung selector; the legacy SNR ladder was deleted 2026-11-25)
     //
     // Consumes NO SNR ESTIMATE. It fits a latent operating point from OUTCOMES (frames
     // SACKed per group) against a link model measured directly as FER-vs-SNR
@@ -3427,723 +3219,403 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
     //
     // No dwell, no ratchet, no penalty array, no crater trigger: Minstrel's discipline, that
     // stability belongs in the estimator and not in the actuator.
-    if (latentRateControllerEnabled()) {
-        const auto now_tp = std::chrono::steady_clock::now();
-        float group_s = 10.0f;
-        if (goodput_last_verdict_valid_) {
-            const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                   now_tp - goodput_last_verdict_).count();
-            if (dt_ms > 1000 && dt_ms < 60000) group_s = static_cast<float>(dt_ms) / 1000.0f;
-        }
-        goodput_last_verdict_ = now_tp;
-        goodput_last_verdict_valid_ = true;
+    const auto now_tp = std::chrono::steady_clock::now();
+    float group_s = 10.0f;
+    if (goodput_last_verdict_valid_) {
+        const auto dt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               now_tp - goodput_last_verdict_).count();
+        if (dt_ms > 1000 && dt_ms < 60000) group_s = static_cast<float>(dt_ms) / 1000.0f;
+    }
+    goodput_last_verdict_ = now_tp;
+    goodput_last_verdict_valid_ = true;
 
-        if (!latent_ctl_.havePrior()) {
-            // Seed from the connect-time pick expressed as a LADDER POSITION, not as an SNR:
-            // use the theta of the automatic pick BEFORE the conservative first-group
-            // cap.  The cap is an acquisition-safety probe, not evidence that the link
-            // lives at R1/2.  Forced modes replace this bootstrap at the handshake sites.
-            // This keeps even the prior free of the calibration chain while avoiding an
-            // artificial multi-group slow-start after a clean probe.
-            const uint8_t seed_rung =
-                latent_bootstrap_rung_ != kRungIdxNone
-                    ? latent_bootstrap_rung_
-                    : cur;
-            latent_ctl_.seedPrior(latentSeedXForRung(seed_rung), 3.0f);
-            latent_bootstrap_rung_ = kRungIdxNone;
-        }
+    if (!latent_ctl_.havePrior()) {
+        // Seed from the connect-time pick expressed as a LADDER POSITION, not as an SNR:
+        // use the theta of the automatic pick BEFORE the conservative first-group
+        // cap.  The cap is an acquisition-safety probe, not evidence that the link
+        // lives at R1/2.  Forced modes replace this bootstrap at the handshake sites.
+        // This keeps even the prior free of the calibration chain while avoiding an
+        // artificial multi-group slow-start after a clean probe.
+        const uint8_t seed_rung =
+            latent_bootstrap_rung_ != kRungIdxNone
+                ? latent_bootstrap_rung_
+                : cur;
+        latent_ctl_.seedPrior(latentSeedXForRung(seed_rung), 3.0f);
+        latent_bootstrap_rung_ = kRungIdxNone;
+    }
 
-        // Consume the descriptor's REAL group geometry. Production dynamically switches
-        // between five- and eight-frame turns (and emits shorter file tails); reducing 6/8
-        // to round(0.75*5)=4/5 changes both the posterior and the predicted cycle economics.
-        // Anchored-no-descriptor backstops have no group_size and retain the conservative
-        // five-frame fallback.
-        const int M = group_size > 0 ? static_cast<int>(group_size) : 5;
-        const int k = group_size > 0
-                          ? std::clamp(static_cast<int>(delivered_frames), 0, M)
-                          : ((delivered_fraction >= 0.0f)
-                                 ? static_cast<int>(std::lround(delivered_fraction * M))
-                                 : (all_ok ? M : 0));
-        constexpr int kStartupMinTrustedGroupFrames = 4;
-        const bool geometry_known = geometry_proven && group_size > 0;
-        const bool trusted_group =
-            geometry_known && group_size >= kStartupMinTrustedGroupFrames;
-        const bool exact_clean_group = trusted_group && all_ok && k == M;
-        const bool fail_unknown_probe = latent_startup_probe_waiting_ && !trusted_group;
-        if (fail_unknown_probe) {
-            // Do this BEFORE any posterior update or ACK emission.  A descriptorless
-            // callback may carry a plausible stale k/M; it is neither success nor failure
-            // evidence for the one-shot probe and must not leave the standing UP command.
-            failClosedLatentStartupProbeUnknown("group geometry not wire-proven");
+    // Consume the descriptor's REAL group geometry. Production dynamically switches
+    // between five- and eight-frame turns (and emits shorter file tails); reducing 6/8
+    // to round(0.75*5)=4/5 changes both the posterior and the predicted cycle economics.
+    // Anchored-no-descriptor backstops have no group_size and retain the conservative
+    // five-frame fallback.
+    const int M = group_size > 0 ? static_cast<int>(group_size) : 5;
+    const int k = group_size > 0
+                      ? std::clamp(static_cast<int>(delivered_frames), 0, M)
+                      : ((delivered_fraction >= 0.0f)
+                             ? static_cast<int>(std::lround(delivered_fraction * M))
+                             : (all_ok ? M : 0));
+    constexpr int kStartupMinTrustedGroupFrames = 4;
+    const bool geometry_known = geometry_proven && group_size > 0;
+    const bool trusted_group =
+        geometry_known && group_size >= kStartupMinTrustedGroupFrames;
+    const bool exact_clean_group = trusted_group && all_ok && k == M;
+    const bool fail_unknown_probe = latent_startup_probe_waiting_ && !trusted_group;
+    if (fail_unknown_probe) {
+        // Do this BEFORE any posterior update or ACK emission.  A descriptorless
+        // callback may carry a plausible stale k/M; it is neither success nor failure
+        // evidence for the one-shot probe and must not leave the standing UP command.
+        failClosedLatentStartupProbeUnknown("group geometry not wire-proven");
+    }
+    // Never fabricate a denominator from stale fallback geometry.  Proven short
+    // physical tails remain valid general posterior evidence, but cannot qualify
+    // the startup probe's two full-group gate.
+    if (geometry_known) {
+        latent_ctl_.observe(cur, k, M);
+    }
+    // ULTRA_RATE_EVM: this group's frames join the effective-SNR window (and calibrate
+    // its margin against what they delivered). Consumed once per group.
+    const bool evm_rate = evmRateSelectionEnabled();
+    if (evm_rate && geometry_known) {
+        evm_selector_.observeGroup(cur, burst_obs_frame_evm_db_, k, M);
+    }
+    burst_obs_frame_evm_db_.clear();
+    // Forget at the rate the ionosphere actually moves. THE ONE FREE PARAMETER; see the
+    // header. Too small freezes the controller and looks perfect on OTASim (stationary
+    // Watterson, no ITV) while failing on the rig.
+    static const float kRelaxDb = [] {
+        if (const char* e = std::getenv("ULTRA_LATENT_RELAX_DB")) {
+            const float v = std::strtof(e, nullptr);
+            if (v >= 0.0f && v <= 5.0f) return v;
         }
-        // Never fabricate a denominator from stale fallback geometry.  Proven short
-        // physical tails remain valid general posterior evidence, but cannot qualify
-        // the startup probe's two full-group gate.
-        if (geometry_known) {
-            latent_ctl_.observe(cur, k, M);
-        }
-        // ULTRA_RATE_EVM: this group's frames join the effective-SNR window (and calibrate
-        // its margin against what they delivered). Consumed once per group.
-        const bool evm_rate = evmRateSelectionEnabled();
-        if (evm_rate && geometry_known) {
-            evm_selector_.observeGroup(cur, burst_obs_frame_evm_db_, k, M);
-        }
-        burst_obs_frame_evm_db_.clear();
-        // Forget at the rate the ionosphere actually moves. THE ONE FREE PARAMETER; see the
-        // header. Too small freezes the controller and looks perfect on OTASim (stationary
-        // Watterson, no ITV) while failing on the rig.
-        static const float kRelaxDb = [] {
-            if (const char* e = std::getenv("ULTRA_LATENT_RELAX_DB")) {
-                const float v = std::strtof(e, nullptr);
-                if (v >= 0.0f && v <= 5.0f) return v;
-            }
-            return 0.35f;
-        }();
-        if (geometry_known) {
-            latent_ctl_.relax(kRelaxDb);
-        }
+        return 0.35f;
+    }();
+    if (geometry_known) {
+        latent_ctl_.relax(kRelaxDb);
+    }
 
-        // Code-faithful bulk-transfer geometry. The old objective both compressed airtime
-        // by 1/eta AND multiplied value by eta, rewarding dense rungs twice. It also ignored
-        // modulation-aware CW normalisation (QPSK=8, 8PSK=12, 16QAM=16), which makes the
-        // active rungs nearly equal-duration frames. Build useful file bytes and burst
-        // airtime from the same production helpers used by TX, then add the rig-measured
-        // median non-data turnaround.  IMPORTANT: M above belongs only to the OBSERVATION.
-        // Every candidate gets its own CW/window/duty-ceiling-derived frame count; reusing
-        // observed M here overvalues whichever rungs happen to fit fewer frames per turn.
-        // The full 1.2 s anchor is already in burst airtime.
-        LatentRateController::RungGeometryTable geometry{};
-        std::array<int, kRungIdxCount> candidate_logical_cw{};
-        std::array<int, kRungIdxCount> candidate_physical_cw{};
-        std::array<int, kRungIdxCount> candidate_z{};
-        std::array<bool, kRungIdxCount> candidate_full_anchor{};
-        for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
-            const CoherentPick candidate = coherentRungFromIndex(r);
-            if (!coherentRungLocallyEnabled(candidate.mod, candidate.rate)) continue;
-            // The receiver commands only a rung.  Its local fading estimate is not
-            // transmitted and therefore cannot determine the sender's next CW shape;
-            // the following descriptor will announce the sender's actual choice.  Price
-            // the logical CW from the peer-independent baseline and resolve any explicitly
-            // configured long-file representation through the same CW/Z contract as TX.
-            // Every descriptor-committed rung move arms one extra full group-start
-            // anchor.  It consumes both airtime and enough of the first cycle's PA
-            // ceiling to reduce N on several profiles, so a non-incumbent must be
-            // priced as the first burst the sender will actually emit.
-            // Structure acquisition never anchors a descriptor-committed switch
-            // (flushBurstBuffer: desc_switch_anchor requires chirp mode), so pricing
-            // one there would be a phantom switching penalty (one frame of budget plus
-            // 1.2 s per cycle, ~25 % at 8PSK R2/3).
-            const bool force_full_group_start =
-                r != cur && !sync::structureAcquisitionEnabled();
-            const auto physical = latentRateCandidateGeometryFor(
-                candidate.mod, candidate.rate, force_full_group_start);
-            candidate_logical_cw[r] = physical.logical_cw;
-            candidate_physical_cw[r] = physical.physical_cw;
-            candidate_z[r] = physical.lifting_z;
-            candidate_full_anchor[r] = physical.force_full_group_start;
-            geometry[r] = physical.value;
-        }
-        const uint8_t latent_ceiling = latentConfiguredRungCeiling();
-        const auto best = latent_ctl_.best(
-            geometry, latent_ceiling, latentTieBreakProbeEnabled());
-        // EFFECTIVE-SNR DECISION (ULTRA_RATE_EVM): when the window holds enough measured
-        // frames, the rung comes from every rung's counterfactual success on them, priced on
-        // the same geometry. The latent posterior keeps learning and remains the fallback.
-        bool evm_decided = false;
-        LatentRateController::Pick evm_pick;
-        if (evm_rate && evm_selector_.ready()) {
-            // What is left of this transfer, when the receiver knows it: the selector then
-            // minimises the time to deliver it (tail rounds included) instead of the long-run
-            // rate, which over-values a lossy rung on a transfer of a few groups.
-            float remaining = 0.0f;
-            if (file_transfer_.getState() == FileTransferState::RECEIVING) {
-                const auto progress = file_transfer_.getProgress();
-                if (progress.total_bytes > progress.received_bytes) {
-                    remaining = static_cast<float>(progress.total_bytes - progress.received_bytes);
-                }
-            }
-            if (evmRateSelectionMode() == EvmRateMode::Full) {
-                evm_pick = evm_selector_.best(geometry, latent_ceiling, remaining);
-                evm_decided = evm_pick.rung != kRungIdxNone;
-            } else {
-                // CLIMB: lift the latent pick only to a rung the recent frames say decodes as
-                // reliably as the controller ever credits any rung.
-                const uint8_t latent_rung = best.rung != kRungIdxNone ? best.rung : cur;
-                // One group is one fade realization: until the window holds two, climb at most
-                // to the next enabled rung (EvmRateSelector::kMinGroupsForMultiRungClimb).
-                uint8_t climb_ceiling = latent_ceiling;
-                if (!evm_selector_.multiRungClimbReady()) {
-                    const uint8_t next_up = snapRungIndexUpToEnabled(std::max(cur, latent_rung));
-                    if (next_up != kRungIdxNone &&
-                        (climb_ceiling == kRungIdxNone || next_up < climb_ceiling)) {
-                        climb_ceiling = next_up;
-                    }
-                }
-                const uint8_t up = evm_selector_.bestReliable(
-                    geometry, climb_ceiling, LatentRateController::kCapProb);
-                if (up != kRungIdxNone && up > latent_rung) {
-                    evm_pick.rung = up;
-                    evm_pick.goodput = geometry[up].useful_bytes_per_frame *
-                                       static_cast<float>(geometry[up].frames_per_cycle) *
-                                       LatentRateController::kCapProb / geometry[up].cycle_s;
-                    evm_decided = true;
-                } else if (latent_rung != kRungIdxNone && cur < kRungIdxCount &&
-                           latent_rung > cur && geometry[latent_rung].valid() &&
-                           geometry[cur].valid() &&
-                           evmPredictedGoodput(geometry, latent_rung) <
-                               evmPredictedGoodput(geometry, cur)) {
-                    // CLIMB MUST PAY (BUG-LATENT-RATE-CLIMB-NO-BACKOFF, 2026-11-24). The latent
-                    // posterior prices rungs with ONE slope (0.41 /dB, fitted on fading) and the
-                    // ITU Good thetas, so on a steady channel - where a code's waterfall is ~1 dB
-                    // wide and adjacent QPSK rates sit 1.4 dB apart, not 2.4 - clean R1/4 groups
-                    // ("x is well above 4.9") and failing R1/2 groups ("x is below 7.3") settle
-                    // where it predicts R1/2 at ~50 % and, at twice the bytes, commands it: TNC
-                    // AWGN 3 dB, 10-12 R1/4 <-> R1/2 flaps per 6 KB transfer, every R1/2 group
-                    // 0/4, each switch aborting the frames in flight. The window's own frames
-                    // measure the margin the outcome model cannot (channel-independent effective
-                    // SNR): an upward move it predicts to DELIVER LESS than the incumbent is
-                    // held. The mirror of the climb above, which lifts only at no reliability
-                    // cost; demotions stay with the posterior and the dead-rung veto below.
-                    evm_pick.rung = cur;
-                    evm_pick.goodput = evmPredictedGoodput(geometry, cur);
-                    evm_decided = true;
-                } else if (latent_rung != kRungIdxNone &&
-                           evm_selector_.successProb(latent_rung) <
-                               LatentRateController::kDeadProb) {
-                    // DEAD-RUNG VETO, the climb's mirror (2026-11-22). The posterior learns
-                    // only from outcomes and, seeded high, held a rung whose measured frames
-                    // predicted 4 % success for three whole groups (QPSK R1/2 at EVM 5.0 dB,
-                    // 0/32 codewords each; AWGN 4 dB, peak-limited TX). The window's own
-                    // frames say it is DEAD by the criterion the controller itself uses
-                    // (p < kDeadProb: "dead, not merely bad"), so command the best rung below
-                    // it they do not rule out, or the most robust one when they rule out all.
-                    const uint8_t below = latent_rung > kRungIdxQpskR14
-                                              ? static_cast<uint8_t>(latent_rung - 1)
-                                              : kRungIdxQpskR14;
-                    const uint8_t down = evm_selector_.bestReliable(
-                        geometry, below, LatentRateController::kDeadProb);
-                    evm_pick.rung = down != kRungIdxNone ? down : kRungIdxQpskR14;
-                    evm_pick.goodput = geometry[evm_pick.rung].valid()
-                        ? geometry[evm_pick.rung].useful_bytes_per_frame *
-                              static_cast<float>(geometry[evm_pick.rung].frames_per_cycle) *
-                              std::min(evm_selector_.successProb(evm_pick.rung),
-                                       LatentRateController::kCapProb) /
-                              geometry[evm_pick.rung].cycle_s
-                        : 0.0f;
-                    evm_decided = evm_pick.rung < latent_rung;
-                    if (!evm_decided) evm_pick = {};
-                }
+    // Code-faithful bulk-transfer geometry. The old objective both compressed airtime
+    // by 1/eta AND multiplied value by eta, rewarding dense rungs twice. It also ignored
+    // modulation-aware CW normalisation (QPSK=8, 8PSK=12, 16QAM=16), which makes the
+    // active rungs nearly equal-duration frames. Build useful file bytes and burst
+    // airtime from the same production helpers used by TX, then add the rig-measured
+    // median non-data turnaround.  IMPORTANT: M above belongs only to the OBSERVATION.
+    // Every candidate gets its own CW/window/duty-ceiling-derived frame count; reusing
+    // observed M here overvalues whichever rungs happen to fit fewer frames per turn.
+    // The full 1.2 s anchor is already in burst airtime.
+    LatentRateController::RungGeometryTable geometry{};
+    std::array<int, kRungIdxCount> candidate_logical_cw{};
+    std::array<int, kRungIdxCount> candidate_physical_cw{};
+    std::array<int, kRungIdxCount> candidate_z{};
+    std::array<bool, kRungIdxCount> candidate_full_anchor{};
+    for (uint8_t r = kRungIdxQpskR14; r < kRungIdxCount; ++r) {
+        const CoherentPick candidate = coherentRungFromIndex(r);
+        if (!coherentRungLocallyEnabled(candidate.mod, candidate.rate)) continue;
+        // The receiver commands only a rung.  Its local fading estimate is not
+        // transmitted and therefore cannot determine the sender's next CW shape;
+        // the following descriptor will announce the sender's actual choice.  Price
+        // the logical CW from the peer-independent baseline and resolve any explicitly
+        // configured long-file representation through the same CW/Z contract as TX.
+        // Every descriptor-committed rung move arms one extra full group-start
+        // anchor.  It consumes both airtime and enough of the first cycle's PA
+        // ceiling to reduce N on several profiles, so a non-incumbent must be
+        // priced as the first burst the sender will actually emit.
+        // Structure acquisition never anchors a descriptor-committed switch
+        // (flushBurstBuffer: desc_switch_anchor requires chirp mode), so pricing
+        // one there would be a phantom switching penalty (one frame of budget plus
+        // 1.2 s per cycle, ~25 % at 8PSK R2/3).
+        const bool force_full_group_start =
+            r != cur && !sync::structureAcquisitionEnabled();
+        const auto physical = latentRateCandidateGeometryFor(
+            candidate.mod, candidate.rate, force_full_group_start);
+        candidate_logical_cw[r] = physical.logical_cw;
+        candidate_physical_cw[r] = physical.physical_cw;
+        candidate_z[r] = physical.lifting_z;
+        candidate_full_anchor[r] = physical.force_full_group_start;
+        geometry[r] = physical.value;
+    }
+    const uint8_t latent_ceiling = latentConfiguredRungCeiling();
+    const auto best = latent_ctl_.best(
+        geometry, latent_ceiling, latentTieBreakProbeEnabled());
+    // EFFECTIVE-SNR DECISION (ULTRA_RATE_EVM): when the window holds enough measured
+    // frames, the rung comes from every rung's counterfactual success on them, priced on
+    // the same geometry. The latent posterior keeps learning and remains the fallback.
+    bool evm_decided = false;
+    LatentRateController::Pick evm_pick;
+    if (evm_rate && evm_selector_.ready()) {
+        // What is left of this transfer, when the receiver knows it: the selector then
+        // minimises the time to deliver it (tail rounds included) instead of the long-run
+        // rate, which over-values a lossy rung on a transfer of a few groups.
+        float remaining = 0.0f;
+        if (file_transfer_.getState() == FileTransferState::RECEIVING) {
+            const auto progress = file_transfer_.getProgress();
+            if (progress.total_bytes > progress.received_bytes) {
+                remaining = static_cast<float>(progress.total_bytes - progress.received_bytes);
             }
         }
-        uint8_t lat_cmd = evm_decided ? evm_pick.rung
-                                      : ((best.rung != kRungIdxNone) ? best.rung : cur);
-        if (lat_cmd != cur) {
-            const uint8_t snapped = snapRungIndexDownToEnabled(lat_cmd);
-            lat_cmd = (snapped != kRungIdxNone) ? snapped : cur;
+        if (evmRateSelectionMode() == EvmRateMode::Full) {
+            evm_pick = evm_selector_.best(geometry, latent_ceiling, remaining);
+            evm_decided = evm_pick.rung != kRungIdxNone;
+        } else {
+            // CLIMB: lift the latent pick only to a rung the recent frames say decodes as
+            // reliably as the controller ever credits any rung.
+            const uint8_t latent_rung = best.rung != kRungIdxNone ? best.rung : cur;
+            // One group is one fade realization: until the window holds two, climb at most
+            // to the next enabled rung (EvmRateSelector::kMinGroupsForMultiRungClimb).
+            uint8_t climb_ceiling = latent_ceiling;
+            if (!evm_selector_.multiRungClimbReady()) {
+                const uint8_t next_up = snapRungIndexUpToEnabled(std::max(cur, latent_rung));
+                if (next_up != kRungIdxNone &&
+                    (climb_ceiling == kRungIdxNone || next_up < climb_ceiling)) {
+                    climb_ceiling = next_up;
+                }
+            }
+            const uint8_t up = evm_selector_.bestReliable(
+                geometry, climb_ceiling, LatentRateController::kCapProb);
+            if (up != kRungIdxNone && up > latent_rung) {
+                evm_pick.rung = up;
+                evm_pick.goodput = geometry[up].useful_bytes_per_frame *
+                                   static_cast<float>(geometry[up].frames_per_cycle) *
+                                   LatentRateController::kCapProb / geometry[up].cycle_s;
+                evm_decided = true;
+            } else if (latent_rung != kRungIdxNone && cur < kRungIdxCount &&
+                       latent_rung > cur && geometry[latent_rung].valid() &&
+                       geometry[cur].valid() &&
+                       evmPredictedGoodput(geometry, latent_rung) <
+                           evmPredictedGoodput(geometry, cur)) {
+                // CLIMB MUST PAY (BUG-LATENT-RATE-CLIMB-NO-BACKOFF, 2026-11-24). The latent
+                // posterior prices rungs with ONE slope (0.41 /dB, fitted on fading) and the
+                // ITU Good thetas, so on a steady channel - where a code's waterfall is ~1 dB
+                // wide and adjacent QPSK rates sit 1.4 dB apart, not 2.4 - clean R1/4 groups
+                // ("x is well above 4.9") and failing R1/2 groups ("x is below 7.3") settle
+                // where it predicts R1/2 at ~50 % and, at twice the bytes, commands it: TNC
+                // AWGN 3 dB, 10-12 R1/4 <-> R1/2 flaps per 6 KB transfer, every R1/2 group
+                // 0/4, each switch aborting the frames in flight. The window's own frames
+                // measure the margin the outcome model cannot (channel-independent effective
+                // SNR): an upward move it predicts to DELIVER LESS than the incumbent is
+                // held. The mirror of the climb above, which lifts only at no reliability
+                // cost; demotions stay with the posterior and the dead-rung veto below.
+                evm_pick.rung = cur;
+                evm_pick.goodput = evmPredictedGoodput(geometry, cur);
+                evm_decided = true;
+            } else if (latent_rung != kRungIdxNone &&
+                       evm_selector_.successProb(latent_rung) <
+                           LatentRateController::kDeadProb) {
+                // DEAD-RUNG VETO, the climb's mirror (2026-11-22). The posterior learns
+                // only from outcomes and, seeded high, held a rung whose measured frames
+                // predicted 4 % success for three whole groups (QPSK R1/2 at EVM 5.0 dB,
+                // 0/32 codewords each; AWGN 4 dB, peak-limited TX). The window's own
+                // frames say it is DEAD by the criterion the controller itself uses
+                // (p < kDeadProb: "dead, not merely bad"), so command the best rung below
+                // it they do not rule out, or the most robust one when they rule out all.
+                const uint8_t below = latent_rung > kRungIdxQpskR14
+                                          ? static_cast<uint8_t>(latent_rung - 1)
+                                          : kRungIdxQpskR14;
+                const uint8_t down = evm_selector_.bestReliable(
+                    geometry, below, LatentRateController::kDeadProb);
+                evm_pick.rung = down != kRungIdxNone ? down : kRungIdxQpskR14;
+                evm_pick.goodput = geometry[evm_pick.rung].valid()
+                    ? geometry[evm_pick.rung].useful_bytes_per_frame *
+                          static_cast<float>(geometry[evm_pick.rung].frames_per_cycle) *
+                          std::min(evm_selector_.successProb(evm_pick.rung),
+                                   LatentRateController::kCapProb) /
+                          geometry[evm_pick.rung].cycle_s
+                    : 0.0f;
+                evm_decided = evm_pick.rung < latent_rung;
+                if (!evm_decided) evm_pick = {};
+            }
         }
-        if (latent_startup_probe_failed_ && lat_cmd > kRungIdxQpskR12) {
-            // A failed/unknown one-shot establishes a QSO-scoped safety ceiling.  The
-            // posterior may recover after clean base groups, but it may not silently
-            // recreate the exploration that was promised to happen only once.
-            lat_cmd = kRungIdxQpskR12;
-        }
+    }
+    uint8_t lat_cmd = evm_decided ? evm_pick.rung
+                                  : ((best.rung != kRungIdxNone) ? best.rung : cur);
+    if (lat_cmd != cur) {
+        const uint8_t snapped = snapRungIndexDownToEnabled(lat_cmd);
+        lat_cmd = (snapped != kRungIdxNone) ? snapped : cur;
+    }
+    if (latent_startup_probe_failed_ && lat_cmd > kRungIdxQpskR12) {
+        // A failed/unknown one-shot establishes a QSO-scoped safety ceiling.  The
+        // posterior may recover after clean base groups, but it may not silently
+        // recreate the exploration that was promised to happen only once.
+        lat_cmd = kRungIdxQpskR12;
+    }
 
-        if (evm_decided && !latent_startup_probe_waiting_ &&
-            !latent_startup_probe_rollback_pending_) {
-            // The one-shot probe exists only because a clean R1/2 cannot reveal its margin to
-            // an outcome-only estimator. The effective-SNR window sees that margin directly.
-            latent_startup_probe_spent_ = true;
-        }
+    if (evm_decided && !latent_startup_probe_waiting_ &&
+        !latent_startup_probe_rollback_pending_) {
+        // The one-shot probe exists only because a clean R1/2 cannot reveal its margin to
+        // an outcome-only estimator. The effective-SNR window sees that margin directly.
+        latent_startup_probe_spent_ = true;
+    }
 
-        // BOUNDED STARTUP EXPLORATION.  R1/2 successes saturate the likelihood, so the
-        // estimator cannot learn whether R2/3 works by observing R1/2 forever (fixed04:
-        // clean physical N=5 groups until the natural climb at observation 16).  Spend at
-        // most ONE higher-rung group per unforced QSO, and only after two consecutive
-        // descriptor/tail-proven clean groups.  This is deliberately separate from the
-        // periodic tie-probe experiment, which remains default-off after doubling rig-run
-        // variance.  Unknown geometry is not positive evidence and a lossy probe rolls
-        // back in the ACK for that very group.
-        constexpr int kStartupCleanGroupsRequired = 2;
-        constexpr int kStartupArmObservationLimit = 4;
-        constexpr int kStartupMaxPendingBaseGroups = 2;
-        const uint8_t startup_base = kRungIdxQpskR12;
-        const uint8_t startup_target = kRungIdxQpskR23;
-        const bool target_enabled =
-            snapRungIndexDownToEnabled(startup_target) == startup_target &&
-            (latent_ceiling == kRungIdxNone || startup_target <= latent_ceiling);
-        const float target_p_at_decision = LatentRateController::successProb(
-            best.x_used, latentThetaForRung(startup_target));
-        const char* startup_note = "";
+    // BOUNDED STARTUP EXPLORATION.  R1/2 successes saturate the likelihood, so the
+    // estimator cannot learn whether R2/3 works by observing R1/2 forever (fixed04:
+    // clean physical N=5 groups until the natural climb at observation 16).  Spend at
+    // most ONE higher-rung group per unforced QSO, and only after two consecutive
+    // descriptor/tail-proven clean groups.  This is deliberately separate from the
+    // periodic tie-probe experiment, which remains default-off after doubling rig-run
+    // variance.  Unknown geometry is not positive evidence and a lossy probe rolls
+    // back in the ACK for that very group.
+    constexpr int kStartupCleanGroupsRequired = 2;
+    constexpr int kStartupArmObservationLimit = 4;
+    constexpr int kStartupMaxPendingBaseGroups = 2;
+    const uint8_t startup_base = kRungIdxQpskR12;
+    const uint8_t startup_target = kRungIdxQpskR23;
+    const bool target_enabled =
+        snapRungIndexDownToEnabled(startup_target) == startup_target &&
+        (latent_ceiling == kRungIdxNone || startup_target <= latent_ceiling);
+    const float target_p_at_decision = LatentRateController::successProb(
+        best.x_used, latentThetaForRung(startup_target));
+    const char* startup_note = "";
 
-        const bool automatic_rate_allowed =
-            latent_startup_probe_allowed_ && rateAdaptationActive() &&
-            latentStartupProbeAllowedByOperator();
-        if (!automatic_rate_allowed) {
-            // Config-forced CONNECT profiles and live force/lock knobs freeze the WHOLE
-            // latent actuator.  Merely suppressing the special probe still let the normal
-            // argmax escape an operator's fixed-rung measurement on a later verdict.
-            lat_cmd = cur;
-            latent_startup_probe_spent_ = true;
-            latent_startup_probe_waiting_ = false;
-            latent_startup_probe_clean_groups_ = 0;
-            latent_startup_probe_pending_base_groups_ = 0;
+    const bool automatic_rate_allowed =
+        latent_startup_probe_allowed_ && rateAdaptationActive() &&
+        latentStartupProbeAllowedByOperator();
+    if (!automatic_rate_allowed) {
+        // Config-forced CONNECT profiles and live force/lock knobs freeze the WHOLE
+        // latent actuator.  Merely suppressing the special probe still let the normal
+        // argmax escape an operator's fixed-rung measurement on a later verdict.
+        lat_cmd = cur;
+        latent_startup_probe_spent_ = true;
+        latent_startup_probe_waiting_ = false;
+        latent_startup_probe_clean_groups_ = 0;
+        latent_startup_probe_pending_base_groups_ = 0;
+        latent_startup_probe_rollback_pending_ = false;
+        latent_startup_probe_failed_ = false;
+        startup_note = " operator-rate-pin";
+    } else if (latent_startup_probe_rollback_pending_) {
+        // Re-carry the rollback until the sender's descriptor proves it adopted a
+        // base-or-lower rung, then keep that rung for one trusted clean group.  This
+        // prevents the posterior update from the failed probe undoing the rollback on
+        // the very next ACK.
+        const uint8_t rollback =
+            (cur != kRungIdxNone && cur < startup_base) ? cur : startup_base;
+        lat_cmd = rollback;
+        if (cur <= startup_base && exact_clean_group) {
             latent_startup_probe_rollback_pending_ = false;
-            latent_startup_probe_failed_ = false;
-            startup_note = " operator-rate-pin";
-        } else if (latent_startup_probe_rollback_pending_) {
-            // Re-carry the rollback until the sender's descriptor proves it adopted a
-            // base-or-lower rung, then keep that rung for one trusted clean group.  This
-            // prevents the posterior update from the failed probe undoing the rollback on
-            // the very next ACK.
-            const uint8_t rollback =
-                (cur != kRungIdxNone && cur < startup_base) ? cur : startup_base;
-            lat_cmd = rollback;
-            if (cur <= startup_base && exact_clean_group) {
-                latent_startup_probe_rollback_pending_ = false;
-                startup_note = " startup-probe-rollback-settled";
+            startup_note = " startup-probe-rollback-settled";
+        } else {
+            startup_note = " startup-probe-rollback-pending";
+        }
+    } else if (!geometry_known) {
+        // No fresh selector evidence: no new decision.  Keep the command this end
+        // issued last - the sender may already be on it behind a descriptor this end
+        // lost - and fall back to the physical rung only when there is none.  Holding
+        // the physical rung instead reversed this end's own step-down whenever the
+        // switch's descriptor was lost: GUI ITU Good 20 -> 5 dB drop, idx 2 commanded and
+        // obeyed, its descriptor lost, and the next unproven verdict commanded idx 3 -
+        // the rung that had just failed (4 of 5 such reversals in 45 runs were upward).
+        // The rollback branch above deliberately has priority so an unknown result
+        // cannot erase a safety landing that is already in progress.
+        lat_cmd = (rx_authority_cmd_ != kRungIdxNone &&
+                   snapRungIndexDownToEnabled(rx_authority_cmd_) == rx_authority_cmd_)
+                      ? rx_authority_cmd_
+                      : cur;
+        latent_startup_probe_clean_groups_ = 0;
+        startup_note = " geometry-unproven-hold";
+    } else if (latent_startup_probe_waiting_) {
+        if (cur == startup_target) {
+            // This is the one physical probe group.  A clean result is direct
+            // evidence that R2/3 works, so retain it for the next group while the
+            // posterior catches up.  Anything else reverts immediately to R1/2.
+            if (exact_clean_group) {
+                latent_startup_probe_waiting_ = false;
+                latent_startup_probe_spent_ = true;
+                latent_startup_probe_pending_base_groups_ = 0;
+                lat_cmd = startup_target;
+                startup_note = " startup-probe-pass";
             } else {
-                startup_note = " startup-probe-rollback-pending";
-            }
-        } else if (!geometry_known) {
-            // No fresh selector evidence: no new decision.  Keep the command this end
-            // issued last - the sender may already be on it behind a descriptor this end
-            // lost - and fall back to the physical rung only when there is none.  Holding
-            // the physical rung instead reversed this end's own step-down whenever the
-            // switch's descriptor was lost: GUI ITU Good 20 -> 5 dB drop, idx 2 commanded and
-            // obeyed, its descriptor lost, and the next unproven verdict commanded idx 3 -
-            // the rung that had just failed (4 of 5 such reversals in 45 runs were upward).
-            // The rollback branch above deliberately has priority so an unknown result
-            // cannot erase a safety landing that is already in progress.
-            lat_cmd = (rx_authority_cmd_ != kRungIdxNone &&
-                       snapRungIndexDownToEnabled(rx_authority_cmd_) == rx_authority_cmd_)
-                          ? rx_authority_cmd_
-                          : cur;
-            latent_startup_probe_clean_groups_ = 0;
-            startup_note = " geometry-unproven-hold";
-        } else if (latent_startup_probe_waiting_) {
-            if (cur == startup_target) {
-                // This is the one physical probe group.  A clean result is direct
-                // evidence that R2/3 works, so retain it for the next group while the
-                // posterior catches up.  Anything else reverts immediately to R1/2.
-                if (exact_clean_group) {
-                    latent_startup_probe_waiting_ = false;
-                    latent_startup_probe_spent_ = true;
-                    latent_startup_probe_pending_base_groups_ = 0;
-                    lat_cmd = startup_target;
-                    startup_note = " startup-probe-pass";
-                } else {
-                    failClosedLatentStartupProbeUnknown(
-                        trusted_group ? "probe group imperfect" : "probe result unknown");
-                    lat_cmd = startup_base;
-                    startup_note = " startup-probe-rollback";
-                }
-            } else if (cur == startup_base && exact_clean_group) {
-                // The absolute command may need ACK diversity before the sender adopts it.
-                // Clean intervening base-rung groups are not extra probes: keep requesting
-                // the same target until its descriptor arrives.
-                ++latent_startup_probe_pending_base_groups_;
-                if (latent_startup_probe_pending_base_groups_ <=
-                        kStartupMaxPendingBaseGroups) {
-                    lat_cmd = startup_target;
-                    startup_note = " startup-probe-pending";
-                } else {
-                    failClosedLatentStartupProbeUnknown("target descriptor not adopted");
-                    lat_cmd = startup_base;
-                    startup_note = " startup-probe-expired";
-                }
-            } else {
-                // Adoption did not occur and the intervening evidence is imperfect or has
-                // no trusted geometry.  Cancel without ever risking the higher rung.
                 failClosedLatentStartupProbeUnknown(
-                    trusted_group ? "unexpected rung before adoption"
-                                  : "pre-adoption result unknown");
-                lat_cmd = (cur != kRungIdxNone && cur < startup_base)
-                    ? cur
-                    : startup_base;
+                    trusted_group ? "probe group imperfect" : "probe result unknown");
+                lat_cmd = startup_base;
                 startup_note = " startup-probe-rollback";
             }
-        } else if (!latent_startup_probe_spent_) {
-            if (cur != startup_base ||
-                latent_ctl_.observations() > kStartupArmObservationLimit) {
-                // This is a startup-only escape from R1/2 identifiability, not a general
-                // periodic probe.  Once the normal selector moves, or four verdicts pass,
-                // it is permanently out of the decision path for this QSO.
-                latent_startup_probe_spent_ = true;
-                latent_startup_probe_clean_groups_ = 0;
+        } else if (cur == startup_base && exact_clean_group) {
+            // The absolute command may need ACK diversity before the sender adopts it.
+            // Clean intervening base-rung groups are not extra probes: keep requesting
+            // the same target until its descriptor arrives.
+            ++latent_startup_probe_pending_base_groups_;
+            if (latent_startup_probe_pending_base_groups_ <=
+                    kStartupMaxPendingBaseGroups) {
+                lat_cmd = startup_target;
+                startup_note = " startup-probe-pending";
             } else {
-                latent_startup_probe_clean_groups_ = exact_clean_group
-                    ? latent_startup_probe_clean_groups_ + 1
-                    : 0;
-                if (latent_startup_probe_clean_groups_ >=
-                        kStartupCleanGroupsRequired) {
-                    // Never override a natural upward argmax, and never probe a target the
-                    // model itself declares dead.  The clean-pair is the exploration
-                    // evidence; these gates prevent blind forcing.
-                    if (lat_cmd != startup_base) {
-                        latent_startup_probe_spent_ = true;
-                    } else if (target_enabled &&
-                               target_p_at_decision >=
-                                   LatentRateController::kDeadProb) {
-                        latent_startup_probe_waiting_ = true;
-                        latent_startup_probe_pending_base_groups_ = 0;
-                        lat_cmd = startup_target;
-                        startup_note = " startup-probe-start";
-                    } else {
-                        latent_startup_probe_spent_ = true;
-                    }
-                }
+                failClosedLatentStartupProbeUnknown("target descriptor not adopted");
+                lat_cmd = startup_base;
+                startup_note = " startup-probe-expired";
             }
+        } else {
+            // Adoption did not occur and the intervening evidence is imperfect or has
+            // no trusted geometry.  Cancel without ever risking the higher rung.
+            failClosedLatentStartupProbeUnknown(
+                trusted_group ? "unexpected rung before adoption"
+                              : "pre-adoption result unknown");
+            lat_cmd = (cur != kRungIdxNone && cur < startup_base)
+                ? cur
+                : startup_base;
+            startup_note = " startup-probe-rollback";
         }
-        rx_authority_cmd_ = lat_cmd;
-        std::string evm_note;
-        if (evm_rate) {
-            char buf[160];
-            std::snprintf(buf, sizeof(buf),
-                          " EVM-RATE%s n=%zu m=%+.1f P[Q12 %.2f Q23 %.2f Q34 %.2f 8P23 %.2f "
-                          "16Q23 %.2f]",
-                          evm_decided ? "" : (evm_selector_.ready() ? "(latent)" : "(not ready)"),
-                          evm_selector_.frames(),
-                          evm_selector_.marginDb(),
-                          evm_selector_.successProb(kRungIdxQpskR12),
-                          evm_selector_.successProb(kRungIdxQpskR23),
-                          evm_selector_.successProb(kRungIdxQpskR34),
-                          evm_selector_.successProb(kRungIdxQam8R23),
-                          evm_selector_.successProb(kRungIdxQam16R23));
-            evm_note = buf;
-        }
-        LOG_MODEM(INFO,
-                  "Connection: LATENT-RATE idx %u -> %u  x_p25=%.1f mean=%.1f sd=%.1f "
-                  "obs=%d  k=%d/%d  group=%.1fs  candidate_LCW=%d "
-                  "candidate_CW=%d candidate_Z=%d candidate_N=%d candidate_FULL=%d  "
-                  "predicted=%.0fB/s%s%s%s  "
-                  "(NO SNR CONSUMED)",
-                  cur, lat_cmd, best.x_used, latent_ctl_.posteriorMean(),
-                  latent_ctl_.spreadDb(), latent_ctl_.observations(), k, M, group_s,
-                  candidate_logical_cw[lat_cmd],
-                  candidate_physical_cw[lat_cmd], candidate_z[lat_cmd],
-                  geometry[lat_cmd].frames_per_cycle,
-                  candidate_full_anchor[lat_cmd] ? 1 : 0,
-                  evm_decided ? evm_pick.goodput : best.goodput,
-                  best.tie_break_probe ? " probe" : "", startup_note, evm_note.c_str());
-        return;
-    }
-
-    // TWO-CRATER rule + CRATER-MARGIN memory (F122: 10 moves/283 s — a single
-    // crater at a ~10 s decision quantum vs Tc 2-4 s is an irreducible deep null
-    // the ARQ absorbs, NOT rate evidence; chasing singles paid the full-anchor +
-    // requeue-rewind tax every ~28 s). Only CONSECUTIVE craters demote and charge
-    // the rung's margin memory (+2 dB, cap 6; posterior beats prior). Every clean
-    // group decays all penalties (0.25 dB) — the fade epoch ends, evidence expires.
-    bool crater = (quality <= 0.0f && !all_ok);
-    // GOODPUT-GRADED CRATER (ULTRA_CRATER_GOODPUT_GRADE): the binary quality byte
-    // cannot tell 7/8 from 0/8. Re-grade against the geometry-derived break-even —
-    // a lossy group is rung-failure evidence only when this rung's delivered
-    // fraction no longer beats a PERFECT run at the rung below. A true 0/N crater
-    // is always evidence (fraction 0 < any positive break-even), so the cliff case
-    // is unchanged; only the "ARQ is absorbing it cheaply" middle is reclassified.
-    // Requires a real measurement: with no frame count (delivered_fraction < 0) the
-    // predicate falls through to the legacy binary form untouched.
-    if (crater && craterGoodputGradeEnabled() && delivered_fraction >= 0.0f) {
-        const float break_even = goodputBreakEvenDeliveredFraction(cur);
-        if (break_even > 0.0f && delivered_fraction >= break_even) {
-            LOG_MODEM(INFO,
-                      "Connection: RX-AUTHORITY crater REGRADED to hold (idx %u "
-                      "delivered=%.2f >= break-even=%.2f vs rung below) — ARQ "
-                      "absorbs this cheaper than a demote",
-                      cur, delivered_fraction, break_even);
-            crater = false;
-        }
-    }
-    if (crater) ++rx_auth_crater_streak_;
-    else if (all_ok) rx_auth_crater_streak_ = 0;
-    // DENSE-MOD FAST DEMOTE (ULTRA_DENSE_FAST_DEMOTE): the two-crater grace is calibrated
-    // for robust rungs (a single QPSK crater is an ARQ-absorbed null). A dense-mod rung's
-    // tight rings make a FULL crater (0/N) genuine over-commit, and the stall cost is
-    // asymmetric — so leave after ONE full crater instead of two. Robust mods and partial
-    // craters keep the grace (partial 16QAM resends cheaply via per-frame SACK).
-    const bool dense_mod = getBitsPerSymbol(data_modulation_) >= 4;
-    const int crater_threshold =
-        (denseFastDemoteEnabled() && dense_mod && full_crater) ? 1 : 2;
-    const bool crater_confirmed = crater && rx_auth_crater_streak_ >= crater_threshold;
-    // EMA-SUPPORTED HOLD (ULTRA_RX_EMA_HOLD, lever #1): a confirmed crater is only
-    // rung-failure EVIDENCE if the fade-averaged SNR no longer clears the current
-    // rung's floor ON the current class. While snr_avg strictly exceeds that class
-    // anchor, consecutive craters are deep-null fade brushes the ARQ resends through
-    // (F344: 5/5 craters were partial, 24/31 frames decoded, avg 18-26 dB) — demoting
-    // there is the limit cycle that stranded F372 at QPSK (1.16 vs 2.61 kbps, same
-    // channel). The censored ring feed above keeps snr_avg honest, so sustained real
-    // failure (samples driven toward the physics floor) crosses below and DOES demote.
-    // Strict '>' avoids a latch when censor floor == class anchor (AWGN class).
-    const float cur_class_anchor =
-        rungClassAnchorDb(data_modulation_, data_code_rate_, eff_fading);
-    const bool ema_supports_cur =
-        emaHoldEnabled() && cur_class_anchor < kRungDisabledDb && snr_avg > cur_class_anchor;
-    const bool demote_on_crater = crater_confirmed && !ema_supports_cur;
-    if (cur != kRungIdxNone && cur < kRungIdxCount) {
-        if (demote_on_crater) {
-            // RATCHET (F126): the penalty DOUBLES per confirmed failure episode of
-            // the rung (2 -> 4 -> 8, cap 8) and decays 40x slower than before —
-            // "this rung does not work TODAY" must survive minutes, not one clean
-            // stretch. F125/F126 oscillated 16QAM<->QPSK every ~10 groups: +2dB
-            // penalties decayed within ~8 clean groups, the 24-25 dB average
-            // re-cleared anchor+margin, and every re-climb bought two dead groups
-            // and two anchors. Episode 2 now demands avg >= anchor+2.5+4 (~26.5),
-            // episode 3 pins the rung out until the channel genuinely improves.
-            // F160: first confirmed episode prices at 4 dB (was 2) — with
-            // one-rung climbs a toxic rung's second visit already costs a full
-            // ladder walk, so the first episode must push the re-try bar to
-            // anchor+6.5 (locks the rung out for the transfer at the ~24 dB
-            // ring averages this bench produces; a genuinely improved channel
-            // still clears it).
-            const float p = rx_auth_rung_penalty_db_[cur];
-            rx_auth_rung_penalty_db_[cur] =
-                std::min(8.0f, (p < 4.0f) ? 4.0f : p * 2.0f);
-            // F149 CLIMB DWELL, F160-rebalanced: a confirmed episode arms a
-            // dwell — no up-command until post-episode reality displaces the
-            // survivor-biased crest reads (failed groups contribute NO SNR
-            // observation; the ring read 26-32 dB on a 20 dB channel and
-            // re-cleared any fixed haircut ~60 s after every demote). THREE
-            // clean groups, not a full ring turnover: F160 parked 61 s at
-            // QPSK R1/4 on a 22 dB channel waiting out dwell=6 — the dwell
-            // gates RE-BETTING, it must not tax the recovery.
-            rx_auth_climb_dwell_ = kRxAuthClimbDwellGroups;
-        } else if (all_ok) {
-            for (size_t i = 0; i < kRungIdxCount; ++i) {
-                rx_auth_rung_penalty_db_[i] =
-                    std::max(0.0f, rx_auth_rung_penalty_db_[i] - 0.05f);
-            }
-            if (rx_auth_climb_dwell_ > 0) --rx_auth_climb_dwell_;
-        }
-    }
-    if (cur != kRungIdxNone) {
-        if (cmd > cur && rx_auth_climb_dwell_ > 0) {
-            // F149: post-episode dwell — the ring is still crest-biased from
-            // the last confirmed crater; hold until it turns over.
-            cmd = cur;
-        }
-        // RX-AUTHORITY PREDICTIVE CLIMB — RETIRED 2026-08-01.
-        //
-        // It gated every up-command on an EESM prediction over a ring of per-carrier gamma
-        // snapshots, and it was the ONLY reader of the gamma vector that
-        // streaming_burst_interleave.cpp marked up with kOfdmLegacyAnchorScaleOffsetDb.
-        // Removing it removes that offset consumer.
-        //
-        // Why it went rather than being fixed (25-agent corrective-stack audit, 2026-07-31):
-        //  - It answers the WRONG QUESTION. rungPredictedSustainable asks "will this rung
-        //    decode", not "which rung delivers more bps", so its bar is LOWER for lower-eta
-        //    rungs. It handed back QPSK R3/4 (2066 bps @20) in place of 8PSK R2/3 (2450 incl.
-        //    craters), undoing the 2026-07-26 anchor re-measure whose entire point was to put
-        //    8PSK R2/3's Good anchor at the throughput crossover.
-        //  - Measured asymmetry: when it disagreed with the map it downgraded 51x and
-        //    upgraded 6x.
-        //  - Its hold (cmd = cur) is INVISIBLE in the clamp statistics, because the verdict
-        //    log only prints when cmd != cur — so the measured "46% of decisions clamped"
-        //    UNDERSTATES the real rate.
-        //  - The conjunction "all fresh snapshots must pass" over a 4-deep ring with a 180 s
-        //    max age means one weak snapshot blocks every climb until four newer ones
-        //    displace it.
-        //
-        // The latent-state controller supersedes it properly: it predicts EVERY rung from a
-        // posterior fitted to outcomes, which is the job this was attempting with a single
-        // pass/fail test on a stale ring.
-        if (cmd > cur) {
-            // CLIMB HYSTERESIS + crater margin: an up-command must survive a
-            // haircut — the base 2.5 dB guards against slow swells; the target
-            // rung's crater penalty demands the channel PROVE headroom the anchors
-            // only assumed. Descents take the map directly (down is safe).
-            constexpr float kClimbMarginDb = 2.5f;
-            const float haircut = kClimbMarginDb +
-                ((cmd < kRungIdxCount) ? rx_auth_rung_penalty_db_[cmd] : 0.0f);
-            const CoherentPick guarded =
-                selectCoherentOFDM(snr_avg - haircut, eff_fading);
-            const uint8_t guarded_idx =
-                coherentRungIndexFor(guarded.mod, guarded.rate);
-            if (guarded_idx <= cur) cmd = cur;  // not a margin-proof climb: hold
-        }
-        if (cmd > cur) {
-            // F149 ONE-RUNG CLIMB (FALLBACK path — the predictive climb above
-            // replaces it whenever measurements exist): a climb is a bet on
-            // headroom no delivered group has proven — bet the minimum stake.
-            // Walk UP to the first enabled rung above cur (holes skipped
-            // upward), never past the map's own pick.
-            uint8_t step = kRungIdxNone;
-            for (uint8_t i = static_cast<uint8_t>(cur + 1);
-                 i <= cmd && i < kRungIdxCount; ++i) {
-                const CoherentPick p = coherentRungFromIndex(i);
-                if (coherentRungLocallyEnabled(p.mod, p.rate)) {
-                    step = i;
-                    break;
-                }
-            }
-            cmd = (step != kRungIdxNone) ? step : cur;
-        }
-        if (demote_on_crater) {
-            // Confirmed-crater override: two in a row is the rung failing, not a
-            // null — command the FIRST ENABLED rung below it. F160 rebalance: the
-            // old cur-2 stride, snapped down THROUGH the QAM8 R3/4 hole, turned
-            // every 16QAM R2/3 episode into a 3-rung collapse (8 -> 5) that the
-            // one-rung climb then repaid across 3 switches — fast-down/slow-up
-            // parked the run below the sustainable rung (F160: 0.89 kbps, 17
-            // switches). One enabled rung down lands exactly on the rung the
-            // ladder just PROVED on the way up (16QAM R1/2 here); the crater
-            // penalty + dwell — not collapse depth — do the recidivism work.
-            // (F129's ~70 s grind predates both; honest sustained failure still
-            // descends verdict by verdict.)
-            uint8_t below = kRungIdxQpskR14;
-            if (cur > kRungIdxQpskR14) {
-                const uint8_t b =
-                    snapRungIndexDownToEnabled(static_cast<uint8_t>(cur - 1));
-                if (b != kRungIdxNone) below = b;
-            }
-            if (cmd >= cur) cmd = below;
-        } else if (crater && cmd > cur) {
-            // Single crater — OR a confirmed crater the EMA still supports
-            // (ULTRA_RX_EMA_HOLD): hold the rung (the ARQ resends through the null),
-            // never climb ON a crater. The EMA-supported confirmed crater lands here
-            // because demote_on_crater is false, so the demote branch is skipped.
-            cmd = cur;
-        } else if (crater && ema_supports_cur && cmd < cur) {
-            // EMA-supported confirmed crater where the map independently wants down
-            // (fading-class flap): the fade-averaged SNR still clears the rung floor,
-            // so hold rather than let the map drop us — the whole point of the hold.
-            cmd = cur;
-        } else if (all_ok && cmd < cur) {
-            // Clean-group override: this rung just WORKED end to end.
-            cmd = cur;
-        }
-        if (cmd < cur) {
-            // DOWN RATE-LIMIT (F123, made UNCONDITIONAL after F125): any single
-            // verdict steps at most 2 canonical rungs down — confirmed craters
-            // included (F125: a confirmed pair let the class-cliff map pick
-            // through unclamped, 16QAM R2/3 -> QPSK R2/3 in ONE command on a
-            // 23 dB channel). The confirmed-crater clamp above already guarantees
-            // at least one step below the failed rung; repeated honest verdicts
-            // still reach any depth, bounded step by bounded step.
-            const uint8_t floor_step = static_cast<uint8_t>(cur > 2 ? cur - 2 : 1);
-            if (cmd < floor_step) cmd = floor_step;
-        }
-        if (cmd != cur && cmd != kRungIdxNone) {
-            // ENABLED-LADDER ARITHMETIC (F145 deadlock): the stride/limit math
-            // above is raw index arithmetic and can land on an anchor-table hole
-            // (QAM8 R3/4 disabled => idx 6). A command naming a disabled rung is
-            // unobeyable — the sender holds and a cratering rung pins forever.
-            // Snap DOWN to the nearest enabled rung; the walk meets cur (enabled,
-            // we are running it) before ever inverting a climb into a descent.
-            const uint8_t snapped = snapRungIndexDownToEnabled(cmd);
-            cmd = (snapped != kRungIdxNone) ? snapped : cur;
-        }
-        // ── RADIO-AGNOSTIC EVM DEMOTE (ULTRA_EVM_DEMOTE, Stage 2) ── the DEFAULT
-        // latent-rate path returned above and never reaches this block; this clamp
-        // belongs to the legacy selector selected by ULTRA_LATENT_RATE=0. The broadband
-        // estimator that drove cmd is dial/channel-scaled (+kOfdmLegacyAnchorScaleOffsetDb)
-        // and on a real radio over-reads the usable channel by the hardware loss. The
-        // decision-directed EVM reads USABLE dB directly and cannot inflate. If this
-        // group's usable EVM cannot support the CURRENT rung's EVM-usable floor, strip
-        // the over-commit: clamp DOWN to the highest rung the EVM can carry (never up —
-        // EVM saturates at the demod ceiling), then re-snap to the enabled ladder. A
-        // pure output clamp, orthogonal to the crater/penalty machinery.
-        if (evmDemoteEnabled() && burst_obs_evm_snr_db_ >= 0.0f) {
-            // Feed the ring first so the confident form always sees THIS group.
-            rx_auth_evm_ring_[rx_auth_evm_next_] = burst_obs_evm_snr_db_;
-            rx_auth_evm_next_ = (rx_auth_evm_next_ + 1) % kRxAuthObsRing;
-            if (rx_auth_evm_count_ < kRxAuthObsRing) ++rx_auth_evm_count_;
-
-            // CONFIDENCE-GATED EVM DEMOTE (ULTRA_EVM_DEMOTE_CONFIDENT, default OFF).
-            //
-            // The raw clamp compares ONE per-group EVM sample against a fixed rung floor.
-            // Measured on the rig 2026-07-26: that sample has sd 3.1-4.4 dB, while adjacent
-            // rung EVM floors are only 1.2-3.1 dB apart. The noise EXCEEDS the rung
-            // spacing, so a single sample cannot resolve which rung is supported — and a
-            // noisy fast signal hard-clamping the output of the ladder's SMOOTHED snr_avg
-            // (ring of 6) saws: rung commands 15 vs 7 per run, EVM firings scattering
-            // across idx 5->4, 3->2, 7->5, 7->3, 3->1 in ONE transfer. This is an
-            // SNR-RESOLUTION error, not an estimator defect (the estimator is calibrated).
-            //
-            // Fix: demote only when the rung is UNAMBIGUOUSLY unsupported — when even the
-            // OPTIMISTIC end of the confidence interval on usable SNR still misses the
-            // floor. With mean m and standard error se = s/sqrt(N):
-            //     demote iff  m + z*se  <  floor - margin
-            // z = 1.645 (one-sided 95%) is a PROBABILITY constant, not a bench constant, so
-            // the gate stays radio-agnostic. It also self-sharpens: se shrinks as evidence
-            // accumulates, so a genuinely unsupported rung is still caught, just later and
-            // correctly. The TARGET stays the point estimate (mean), never the pessimistic
-            // bound, so a confirmed demote cannot overshoot downward on noise.
-            // Deliberately NOT a function-local static: a latched knob cannot be A/B'd
-            // within one process, which made the confidence gate untestable (the first
-            // arm's value stuck for every later arm). This runs once per burst group
-            // (~10 s), so a getenv here is free.
-            const char* kEvmConfidentEnv = std::getenv("ULTRA_EVM_DEMOTE_CONFIDENT");
-            const bool kEvmConfident =
-                kEvmConfidentEnv && kEvmConfidentEnv[0] == '1' && kEvmConfidentEnv[1] == '\0';
-            float evm_for_clamp = burst_obs_evm_snr_db_;
-            float evm_upper = burst_obs_evm_snr_db_;  // raw form: the sample IS the bound
-            if (kEvmConfident) {
-                const size_t n = rx_auth_evm_count_;
-                float sum = 0.0f;
-                for (size_t i = 0; i < n; ++i) sum += rx_auth_evm_ring_[i];
-                const float mean = sum / static_cast<float>(n);
-                float var = 0.0f;
-                for (size_t i = 0; i < n; ++i) {
-                    const float d = rx_auth_evm_ring_[i] - mean;
-                    var += d * d;
-                }
-                // Sample sd (n-1); with n<2 there is no spread estimate yet, so fall back
-                // to the measured per-group sd so a single sample can never fire the clamp.
-                constexpr float kMeasuredPerGroupSdDb = 3.1f;
-                const float sd = (n >= 2) ? std::sqrt(var / static_cast<float>(n - 1))
-                                          : kMeasuredPerGroupSdDb;
-                constexpr float kOneSidedZ95 = 1.645f;
-                const float se = sd / std::sqrt(static_cast<float>(n));
-                evm_for_clamp = mean;
-                evm_upper = mean + kOneSidedZ95 * se;
-            }
-            const float cur_floor = evmUsableFloorDbForRung(cur);
-            if (cur_floor < kRungDisabledDb &&
-                evm_upper < cur_floor - kEvmDemoteHoldMarginDb) {
-                uint8_t evm_cap =
-                    highestRungSupportedByEvm(evm_for_clamp, kEvmDemoteHoldMarginDb);
-                const uint8_t snapped_evm = snapRungIndexDownToEnabled(evm_cap);
-                evm_cap = (snapped_evm != kRungIdxNone) ? snapped_evm : kRungIdxQpskR14;
-                if (evm_cap < cmd) {
-                    LOG_MODEM(INFO,
-                              "Connection: RX-AUTHORITY EVM-DEMOTE idx %u -> %u "
-                              "(usable EVM=%.1f upper=%.1f n=%zu < rung floor=%.1f-%.1f margin)",
-                              cmd, evm_cap, evm_for_clamp, evm_upper, rx_auth_evm_count_,
-                              cur_floor, kEvmDemoteHoldMarginDb);
-                    cmd = evm_cap;
+    } else if (!latent_startup_probe_spent_) {
+        if (cur != startup_base ||
+            latent_ctl_.observations() > kStartupArmObservationLimit) {
+            // This is a startup-only escape from R1/2 identifiability, not a general
+            // periodic probe.  Once the normal selector moves, or four verdicts pass,
+            // it is permanently out of the decision path for this QSO.
+            latent_startup_probe_spent_ = true;
+            latent_startup_probe_clean_groups_ = 0;
+        } else {
+            latent_startup_probe_clean_groups_ = exact_clean_group
+                ? latent_startup_probe_clean_groups_ + 1
+                : 0;
+            if (latent_startup_probe_clean_groups_ >=
+                    kStartupCleanGroupsRequired) {
+                // Never override a natural upward argmax, and never probe a target the
+                // model itself declares dead.  The clean-pair is the exploration
+                // evidence; these gates prevent blind forcing.
+                if (lat_cmd != startup_base) {
+                    latent_startup_probe_spent_ = true;
+                } else if (target_enabled &&
+                           target_p_at_decision >=
+                               LatentRateController::kDeadProb) {
+                    latent_startup_probe_waiting_ = true;
+                    latent_startup_probe_pending_base_groups_ = 0;
+                    lat_cmd = startup_target;
+                    startup_note = " startup-probe-start";
+                } else {
+                    latent_startup_probe_spent_ = true;
                 }
             }
         }
     }
-    // Canonical indices stay < 24 so bits [rung_cmd] never equal kRungCmdReserved
-    // (3) — the WAITING-REBASE voice encoding stays unambiguous (it is also
-    // type=NACK, but keep the value space disjoint regardless).
-    static_assert(kRungIdxCount <= 24, "rung index would alias the rebase voice");
-    rx_authority_cmd_ = cmd;
-    if (cmd != cur) {
-        // Print the rung actually COMMANDED, not the raw ladder pick: `mapped` is
-        // the pre-clamp selection and `cmd` is rewritten by the crater/hold/floor/
-        // snap/EVM clamps below it, so the two disagree whenever a clamp fires.
-        // Logging `mapped` here made the printed modulation contradict the printed
-        // index and corrupted offline rung-trajectory analysis. `raw` is kept so a
-        // clamped decision stays diagnosable (raw != idx means a clamp moved it).
-        const CoherentPick commanded = coherentRungFromIndex(cmd);
-        const uint8_t raw_idx = coherentRungIndexFor(mapped.mod, mapped.rate);
-        LOG_MODEM(INFO,
-                  "Connection: RX-AUTHORITY verdict %s %s (idx %u -> %u raw=%u) "
-                  "snr_avg=%.1f (inst=%.1f n=%d) fading=%.2f coh=%.2f q=%.2f",
-                  modulationToString(commanded.mod), codeRateToString(commanded.rate),
-                  cur, cmd, raw_idx, snr_avg, burst_obs_snr_db_, snr_n, eff_fading,
-                  burst_obs_coh_score_, quality);
-    } else if (crater_confirmed && ema_supports_cur) {
-        // Made-visible: a confirmed crater that would have demoted but the EMA still
-        // clears the rung floor — the crux of ULTRA_RX_EMA_HOLD's A/B signature.
-        LOG_MODEM(INFO,
-                  "Connection: RX-AUTHORITY EMA-HOLD idx %u (snr_avg=%.1f > anchor=%.1f) "
-                  "confirmed crater absorbed (streak=%d fading=%.2f q=%.2f)",
-                  cur, snr_avg, cur_class_anchor, rx_auth_crater_streak_, eff_fading,
-                  quality);
+    rx_authority_cmd_ = lat_cmd;
+    std::string evm_note;
+    if (evm_rate) {
+        char buf[160];
+        std::snprintf(buf, sizeof(buf),
+                      " EVM-RATE%s n=%zu m=%+.1f P[Q12 %.2f Q23 %.2f Q34 %.2f 8P23 %.2f "
+                      "16Q23 %.2f]",
+                      evm_decided ? "" : (evm_selector_.ready() ? "(latent)" : "(not ready)"),
+                      evm_selector_.frames(),
+                      evm_selector_.marginDb(),
+                      evm_selector_.successProb(kRungIdxQpskR12),
+                      evm_selector_.successProb(kRungIdxQpskR23),
+                      evm_selector_.successProb(kRungIdxQpskR34),
+                      evm_selector_.successProb(kRungIdxQam8R23),
+                      evm_selector_.successProb(kRungIdxQam16R23));
+        evm_note = buf;
     }
+    LOG_MODEM(INFO,
+              "Connection: LATENT-RATE idx %u -> %u  x_p25=%.1f mean=%.1f sd=%.1f "
+              "obs=%d  k=%d/%d  group=%.1fs  candidate_LCW=%d "
+              "candidate_CW=%d candidate_Z=%d candidate_N=%d candidate_FULL=%d  "
+              "predicted=%.0fB/s%s%s%s  "
+              "(NO SNR CONSUMED)",
+              cur, lat_cmd, best.x_used, latent_ctl_.posteriorMean(),
+              latent_ctl_.spreadDb(), latent_ctl_.observations(), k, M, group_s,
+              candidate_logical_cw[lat_cmd],
+              candidate_physical_cw[lat_cmd], candidate_z[lat_cmd],
+              geometry[lat_cmd].frames_per_cycle,
+              candidate_full_anchor[lat_cmd] ? 1 : 0,
+              evm_decided ? evm_pick.goodput : best.goodput,
+              best.tie_break_probe ? " probe" : "", startup_note, evm_note.c_str());
 }
 
 // SENDER side of RX-AUTHORITY: obey a non-zero absolute rung command from the
@@ -6382,13 +5854,6 @@ void Connection::tick(uint32_t elapsed_ms) {
                 arq_.keepaliveAckIfStalled(keepalive_ack_ms);
             }
 
-            // RX-AUTHORITY: age the verdict-SNR ring (stale readings must not
-            // steer the rung after a quiet stretch).
-            for (size_t i = 0; i < kRxAuthObsRing; ++i) {
-                if (rx_auth_obs_age_ms_[i] <= kRxAuthObsMaxAgeMs) {
-                    rx_auth_obs_age_ms_[i] += elapsed_ms;
-                }
-            }
             // Waveform follow first: with a waveform below OFDM available, rounds without
             // progress cross to it instead of escaping to another OFDM rung.
             maybeCrossDownOnCollapse();
@@ -9575,21 +9040,12 @@ void Connection::resetOfdmLadderState() {
     rx_rebase_voice_seq_seen_ = -1;
     rx_authority_cmd_ = 0;
     tx_authority_last_obeyed_ = 0;
-    rx_auth_obs_count_ = 0;
-    rx_auth_obs_next_ = 0;
-    rx_auth_crater_streak_ = 0;
     rx_auth_clean_streak_ = 0;
-    rx_auth_class_sticky_ = 1;
-    rx_auth_class_streak_ = 0;
-    rx_auth_fading_passed_ = 0.3f;
-    rx_auth_climb_dwell_ = 0;
     rx_auth_gamma_count_ = 0;
     rx_auth_gamma_next_ = 0;
     for (auto& v : rx_auth_gamma_ring_) v.clear();
-    for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
-    burst_obs_evm_snr_db_ = -1.0f;
     burst_obs_coh_valid_ = false;
 }
 
@@ -9757,21 +9213,12 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_rebase_voice_seq_seen_ = -1;
     rx_authority_cmd_ = 0;
     tx_authority_last_obeyed_ = 0;
-    rx_auth_obs_count_ = 0;
-    rx_auth_obs_next_ = 0;
-    rx_auth_crater_streak_ = 0;
     rx_auth_clean_streak_ = 0;
-    rx_auth_class_sticky_ = 1;
-    rx_auth_class_streak_ = 0;
-    rx_auth_fading_passed_ = 0.3f;
-    rx_auth_climb_dwell_ = 0;
     rx_auth_gamma_count_ = 0;
     rx_auth_gamma_next_ = 0;
     for (auto& v : rx_auth_gamma_ring_) v.clear();
-    for (size_t i = 0; i < kRungIdxCount; ++i) rx_auth_rung_penalty_db_[i] = 0.0f;
     burst_obs_snr_db_ = -1.0f;
     burst_obs_fading_ = -1.0f;
-    burst_obs_evm_snr_db_ = -1.0f;
     burst_obs_coh_valid_ = false;
     last_applied_mode_change_valid_ = false;  // MC dedup (fix 3) is session-scoped
     mode_change_ack_repeat_jobs_.clear();

@@ -286,13 +286,6 @@ public:
     void setBurstChannelObservation(float snr_db, float fading_index,
                                     float coherence_score, bool coherence_valid,
                                     float doppler_hz);
-    // RX-AUTHORITY EVM DEMOTE (ULTRA_EVM_DEMOTE): forward this group's radio-agnostic
-    // decision-directed EVM usable-SNR (dB) to the Connection. Call BEFORE
-    // onBurstGroupReceived so the demote clamp rides that group's ACK.
-    void setBurstEvmObservation(float evm_snr_db);
-    // Explicit invalid observation for a group without complete physical-frame
-    // EVM coverage. Prevents reuse of the preceding group's scalar.
-    void clearBurstEvmObservation();
     bool shouldUseRxFrameForChannelQuality(const Bytes& data) const;
     float getFadingIndex() const;
     // Connection::expectedPeerResendMs (the listen-before-ACK deadline's sender RTO).

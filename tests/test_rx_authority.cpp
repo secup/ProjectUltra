@@ -112,8 +112,6 @@ struct ConnectionAdaptiveTestAccess {
     static void fillArq(Connection& c) {
         c.arq_.sendData(Bytes{0x01, 0x02, 0x03});  // one frame in flight = busy
     }
-    static constexpr size_t obsRing() { return Connection::kRxAuthObsRing; }
-    static constexpr int climbDwell() { return Connection::kRxAuthClimbDwellGroups; }
     // Simulate the sender obeying + the receiver adopting the standing command
     // (the real loop moves `cur`; without this every verdict re-climbs from the
     // same rung and dwell/one-rung assertions measure the wrong thing).
@@ -130,108 +128,6 @@ struct ConnectionAdaptiveTestAccess {
 
 using TA = ConnectionAdaptiveTestAccess;
 
-// Receiver verdict: a strong calm channel climbs ONE enabled rung per clean
-// verdict (F149: multi-rung crest jumps fueled the climb-crater-demote cycle —
-// 11 switches / 5.5 min; each rung must now prove itself with a delivered
-// group), and repeated clean verdicts still reach the map's top pick. Descents
-// keep taking the map directly (bounded by the 2-rung down-limit).
-static bool test_verdict_maps_snr_to_rung() {
-    TEST("verdict climbs one rung per clean verdict; 13 dB maps straight down");
-
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R3_4, 20.0f, 0.05f, Modulation::QPSK);
-    c.setBurstChannelObservation(21.0f, 0.30f, 0.8f, true, 0.2f);
-    TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
-    if (TA::rxCmd(c) != kRungIdxQam8R23)
-        FAIL("first clean 21 dB verdict from QPSK R3/4 was idx " +
-             std::to_string(TA::rxCmd(c)) +
-             " (want ONE enabled rung up = QAM8 R2/3 = " +
-             std::to_string(kRungIdxQam8R23) + ")");
-    // Each further step must ITSELF clear anchor + 2.5 dB margin (the old code
-    // proved "some climb" then jumped to the raw map target — the crest-jump hole).
-    // 2026-07-26 ANCHORS RE-MEASURED ON FADING: at 21 dB Good the ladder now TOPS OUT at
-    // 8PSK R2/3. 16QAM R2/3's Good anchor moved 20 -> 26 (it measured 51.4% FER at 20 on
-    // ITU Good and never beats 8PSK R2/3 in 16-24 dB), and 16QAM R1/2 is now unreachable
-    // because it is STRICTLY DOMINATED: identical spectral efficiency (eta = 2.0) but a
-    // denser constellation AND non-constant envelope, while 8PSK R2/3 sits at a LOWER
-    // anchor (17) and precedes it in the table. At equal eta, prefer the lower order.
-    // The property under test is unchanged: the climb must not over-run the ladder top.
-    TA::adoptCmd(c);
-    TA::verdict(c, true, 0.9f);
-    if (TA::rxCmd(c) != kRungIdxQam8R23)
-        FAIL("second step was idx " + std::to_string(TA::rxCmd(c)) +
-             " (want the ladder top on Good = QAM8 R2/3 = " +
-             std::to_string(kRungIdxQam8R23) + ")");
-    TA::adoptCmd(c);
-    TA::verdict(c, true, 0.9f);
-    if (TA::rxCmd(c) != kRungIdxQam8R23)
-        FAIL("21 dB over-climbed past the measured ladder top to idx " +
-             std::to_string(TA::rxCmd(c)) + " (margin-proof ladder must hold)");
-
-    Connection d;
-    TA::makeConnectedOFDM(d, CodeRate::R1_2, 13.0f, 0.05f, Modulation::QPSK);
-    d.setBurstChannelObservation(13.0f, 0.30f, 0.8f, true, 0.2f);
-    TA::verdict(d, true, 0.9f);
-    if (TA::rxCmd(d) != kRungIdxQpskR12)
-        FAIL("13 dB Good verdict was idx " + std::to_string(TA::rxCmd(d)) +
-             " (want QPSK R1/2)");
-    PASS();
-    return true;
-}
-
-// F149/F160 CLIMB DWELL: after a confirmed crater episode, post-episode reality
-// must displace the crest-biased reads (kRxAuthClimbDwellGroups clean groups)
-// before ANY up-command — a fade
-// crest read right after the demote must not re-arm the loop.
-static bool test_confirmed_crater_arms_climb_dwell() {
-    TEST("confirmed crater blocks re-climb until the ring turns over");
-
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-    TA::verdict(c, false, 0.0f);  // crater #1 — hold
-    TA::verdict(c, false, 0.0f);  // crater #2 — confirmed: demote + dwell armed
-    const uint8_t demoted = TA::rxCmd(c);
-    if (demoted >= kRungIdxQam16R23)
-        FAIL("confirmed crater did not demote");
-    TA::adoptCmd(c);  // sender obeys the demote
-
-    // Fade-crest reads right after the demote: climbs must stay blocked for a
-    // full ring turnover even though the map screams UP.
-    for (int i = 0; i + 1 < TA::climbDwell(); ++i) {
-        c.setBurstChannelObservation(36.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdict(c, true, 0.95f);
-        if (TA::rxCmd(c) > demoted)
-            FAIL("climb re-armed after only " + std::to_string(i + 1) +
-                 " clean groups (dwell must hold " +
-                 std::to_string(TA::climbDwell()) + ")");
-    }
-    // Ring turned over: the next clean verdict may climb (one rung).
-    // 36 dB, not 32: the re-climb must clear anchor + crater penalty + margin, and 16QAM
-    // R2/3's Good anchor moved 20 -> 26 (2026-07-26 fading re-measure). 26 + 4 (confirmed-
-    // crater penalty) + 2.5 (climb margin) = 32.5, so 32 dB is now CORRECTLY refused. The
-    // dwell property under test is unchanged; only the SNR that clears the new requirement.
-    c.setBurstChannelObservation(36.0f, 0.20f, 0.9f, true, 0.1f);
-    TA::verdict(c, true, 0.95f);
-    if (TA::rxCmd(c) <= demoted)
-        FAIL("climb still blocked after the dwell expired");
-    // Assert against the next ENABLED rung, not a raw index delta: the ladder has holes
-    // (QAM8 R3/4 auto-disabled, and 16QAM R1/2 disabled 2026-07-26 as dominated), so a
-    // single ENABLED step can span several indices. A fixed "+2" silently encoded the old
-    // hole layout and broke when the layout changed.
-    uint8_t next_enabled = demoted;
-    for (uint8_t i = static_cast<uint8_t>(demoted + 1); i < kRungIdxCount; ++i) {
-        const CoherentPick p = coherentRungFromIndex(i);
-        if (coherentRungLocallyEnabled(p.mod, p.rate)) { next_enabled = i; break; }
-    }
-    if (TA::rxCmd(c) > next_enabled)
-        FAIL("post-dwell climb jumped past the next ENABLED rung (got idx " +
-             std::to_string(TA::rxCmd(c)) + ", next enabled above " +
-             std::to_string(demoted) + " is " + std::to_string(next_enabled) + ")");
-    PASS();
-    return true;
-}
-
 // ── RX-AUTHORITY PREDICTIVE (docs/RX_AUTHORITY_PREDICTIVE_2026_07_07.md) ──
 
 // EESM self-calibration identity: on a FLAT channel the predictor must
@@ -240,55 +136,6 @@ static bool test_confirmed_crater_arms_climb_dwell() {
 // 2026-08-01 with rungPredictedSustainable(). Its only production caller was the
 // RX-authority predictive climb (retired), so the predictor had no reader left outside
 // these tests. See docs/REMOVAL_BACKLOG.md R12.
-
-static bool test_two_crater_rule() {
-    TEST("single crater holds; second consecutive crater clamps below");
-
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);  // map says stay high
-    const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
-
-    TA::verdict(c, /*all_ok=*/false, /*quality=*/0.0f);  // crater #1
-    if (TA::rxCmd(c) != cur)
-        FAIL("single crater moved the command (idx " +
-             std::to_string(TA::rxCmd(c)) + ", want hold " + std::to_string(cur) + ")");
-
-    TA::verdict(c, false, 0.0f);  // crater #2 — confirmed
-    if (TA::rxCmd(c) >= cur)
-        FAIL("confirmed crater verdict idx " + std::to_string(TA::rxCmd(c)) +
-             " not below current " + std::to_string(cur));
-    // F160: demote lands on the FIRST ENABLED rung below — 16QAM R1/2 (idx 7),
-    // the rung the ladder proved on the way up. The old cur-2 stride snapped
-    // through the QAM8 R3/4 hole to idx 5 = a 3-rung collapse the one-rung
-    // climb repaid across 3 switches.
-    if (TA::rxCmd(c) != kRungIdxQam8R23)
-        FAIL("confirmed crater demoted to idx " + std::to_string(TA::rxCmd(c)) +
-             " (want first enabled below = QAM8 R2/3 = " +
-             std::to_string(kRungIdxQam8R23) + "; 16QAM R1/2 is disabled as dominated, and "
-             "idx 5 carries the SAME eta = 2.0)");
-    // ENABLED-LADDER pin (F145 deadlock): the raw cur-2 stride from QAM16 R2/3
-    // (idx 8) lands on QAM8 R3/4 (idx 6) — a fully-disabled anchor row. The
-    // command must snap to an ENABLED rung (idx 5, QAM8 R2/3) or the sender's
-    // guard refuses it and the cratering rung pins forever (F145: 50 s, six
-    // 0/5 whole-burst resends, four refused DOWN commands).
-    {
-        const CoherentPick p = coherentRungFromIndex(TA::rxCmd(c));
-        if (!coherentRungLocallyEnabled(p.mod, p.rate))
-            FAIL("confirmed crater commanded a DISABLED rung (idx " +
-                 std::to_string(TA::rxCmd(c)) + ") — unobeyable, deadlocks the link");
-    }
-
-    // A clean group resets the streak: the next single crater holds again.
-    c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-    TA::verdict(c, true, 0.9f);
-    TA::verdict(c, false, 0.0f);
-    const uint8_t cur2 = coherentRungIndexFor(c.getDataModulation(), c.getDataCodeRate());
-    if (TA::rxCmd(c) < cur2 && cur2 != kRungIdxNone)
-        FAIL("post-clean single crater demoted (streak not reset)");
-    PASS();
-    return true;
-}
 
 // Boundary asymmetry: with data in flight, an UP command defers (no mode change);
 // a DOWN command obeys immediately.
@@ -404,102 +251,6 @@ static bool test_operator_lock_overrides_authority() {
     return true;
 }
 
-// ── ULTRA_RX_EMA_HOLD (throughput-ceiling audit lever #1, 2026-07-21) ──
-// A confirmed crater must HOLD the rung while the fade-averaged SNR still clears the
-// rung's class floor (deep-null brush the ARQ absorbs), but sustained real failure —
-// censored samples driving the average down — must still eventually demote. Same
-// scenario, knob ON vs OFF, is the A/B: OFF demotes on the 2nd crater, ON holds.
-static bool test_ema_hold_absorbs_supported_crater() {
-    TEST("EMA-HOLD holds a confirmed crater the fade-averaged SNR still supports");
-    // 16QAM R2/3 on Good reads 24 dB (> the 20 dB Good anchor). Seed clean history
-    // so the ring average sits above the anchor, THEN two craters (a fade brush).
-    auto run = [](bool knob_on) -> uint8_t {
-        setenv("ULTRA_RX_EMA_HOLD", knob_on ? "1" : "0", 1);  // explicit (default is ON)
-        Connection c;
-        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
-        for (int i = 0; i < 4; ++i) {  // clean history keeps the ring average high
-            c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-            TA::verdict(c, true, 0.95f);
-        }
-        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdict(c, false, 0.0f);  // crater #1
-        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdict(c, false, 0.0f);  // crater #2 — confirmed
-        const uint8_t cmd = TA::rxCmd(c);
-        setenv("ULTRA_RX_EMA_HOLD", "0", 1);  // restore the suite baseline (off)
-        return cmd;
-    };
-    const uint8_t off_cmd = run(false);
-    const uint8_t on_cmd = run(true);
-    if (off_cmd >= kRungIdxQam16R23)
-        FAIL("knob OFF: confirmed crater must still demote (regression guard)");
-    if (on_cmd != kRungIdxQam16R23)
-        FAIL("knob ON: EMA-supported confirmed crater must HOLD 16QAM R2/3, got idx " +
-             std::to_string(on_cmd));
-    PASS();
-    return true;
-}
-
-static bool test_ema_hold_still_demotes_sustained_failure() {
-    TEST("EMA-HOLD does NOT latch: sustained failure demotes once the average drops");
-    setenv("ULTRA_RX_EMA_HOLD", "1", 1);
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
-    for (int i = 0; i < 3; ++i) {  // brief clean history
-        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdict(c, true, 0.95f);
-    }
-    // Sustained craters: each failed group is censored toward the rung floor, so the
-    // ring average is dragged down and MUST cross below the anchor within a bounded
-    // number of groups (strict '>' breaks the censor==anchor equality latch).
-    int demoted_at = -1;
-    for (int k = 1; k <= 10; ++k) {
-        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdict(c, false, 0.0f);
-        if (TA::rxCmd(c) < kRungIdxQam16R23) { demoted_at = k; break; }
-    }
-    setenv("ULTRA_RX_EMA_HOLD", "0", 1);  // restore the suite baseline (off)
-    if (demoted_at < 0)
-        FAIL("sustained crater never demoted — EMA-HOLD latched (bug)");
-    if (demoted_at < 2)
-        FAIL("demoted on the very first confirmed crater — the hold did not engage");
-    PASS();
-    return true;
-}
-
-// ── ULTRA_DENSE_FAST_DEMOTE (RX-authority over-commit fix, 2026-07-23) ──
-// On a dense-mod rung (16QAM), a FULL crater (0/N) demotes on the FIRST crater instead of
-// waiting for two — the two-crater grace is for robust rungs. Robust mods and partial
-// craters keep the grace. Knob-gated (default-off).
-static bool test_dense_fast_demote_full_crater() {
-    TEST("dense-mod full crater demotes on crater #1 (fast); robust/partial keep the grace");
-    auto run_16qam = [](bool knob_on, bool full_crater) -> uint8_t {
-        setenv("ULTRA_DENSE_FAST_DEMOTE", knob_on ? "1" : "0", 1);
-        Connection c;
-        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.20f, Modulation::QAM16);
-        for (int i = 0; i < 3; ++i) {  // clean history at 16QAM R2/3
-            c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-            TA::verdict(c, true, 0.95f);
-        }
-        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdictFull(c, false, 0.0f, full_crater);  // ONE crater
-        const uint8_t cmd = TA::rxCmd(c);
-        setenv("ULTRA_DENSE_FAST_DEMOTE", "0", 1);
-        return cmd;
-    };
-    // knob ON, dense mod, FULL crater → single crater demotes below 16QAM R2/3.
-    if (run_16qam(true, true) >= kRungIdxQam16R23)
-        FAIL("knob ON: a full 16QAM crater must demote on crater #1");
-    // knob ON but PARTIAL crater → keeps the two-crater grace (no demote on #1).
-    if (run_16qam(true, false) != kRungIdxQam16R23)
-        FAIL("knob ON but PARTIAL crater must keep the grace (hold on #1)");
-    // knob OFF → legacy two-crater rule (no demote on #1 even for a full crater).
-    if (run_16qam(false, true) != kRungIdxQam16R23)
-        FAIL("knob OFF: single crater must NOT demote (legacy two-crater rule)");
-    PASS();
-    return true;
-}
-
 // ── RADIO-AGNOSTIC EVM DEMOTE (ULTRA_EVM_DEMOTE, Stage 2) ───────────────────────
 // The measured OTASim AWGN anchor floors (2026-07-24): QPSK R2/3 9.4, R3/4 12.5,
 // 8PSK R2/3 13.7, 16QAM R1/2 14.9, 16QAM R2/3 16.7 dB usable EVM. The table must
@@ -527,126 +278,6 @@ static bool test_evm_floor_table_and_mapping() {
         FAIL("10 dB usable EVM must support QPSK R2/3 only");
     if (highestRungSupportedByEvm(5.0f, kEvmDemoteHoldMarginDb) != kRungIdxQpskR14)
         FAIL("5 dB usable EVM must floor at QPSK R1/4");
-    PASS();
-    return true;
-}
-
-// End-to-end: the broadband ladder holds 16QAM R2/3 on a clean, high-SNR group, but
-// the honest usable EVM says the rung is over-committed. With the knob ON the command
-// is clamped DOWN to the EVM-supported rung; with the knob OFF the clamp is inert
-// (byte-identical to legacy). This is the IONOS over-commit the +8.70 offset caused.
-static bool test_evm_demote_strips_overcommit() {
-    TEST("EVM demote clamps an over-committed 16QAM R2/3 down (knob-gated)");
-    auto run = [](bool knob_on, float evm_db) -> uint8_t {
-        if (knob_on) setenv("ULTRA_EVM_DEMOTE", "1", 1);
-        else unsetenv("ULTRA_EVM_DEMOTE");
-        Connection c;
-        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-        // Broadband meter says stay high (survivor-crest read); EVM tells the truth.
-        c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
-        c.setBurstEvmObservation(evm_db);
-        TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
-        unsetenv("ULTRA_EVM_DEMOTE");
-        return TA::rxCmd(c);
-    };
-    // Knob ON, usable EVM 13 dB: 16QAM R2/3 floor 16.7 is not cleared → demote to the
-    // highest supported rung (8PSK R2/3, floor 13.7 -1 margin). Measurement-backed, so
-    // it lands directly (not bounded by the broadband 2-rung down-limit).
-    if (run(true, 13.0f) != kRungIdxQam8R23)
-        FAIL("knob ON, EVM 13 dB: must demote 16QAM R2/3 -> 8PSK R2/3");
-    // Knob ON, usable EVM 14 dB: clears 16QAM R1/2 (13.9) but not R2/3 → one rung down.
-    // 16QAM R1/2 is disabled as dominated (2026-07-26), so the clamp snaps to the first
-    // ENABLED rung at or below the EVM-supported one: 8PSK R2/3, which carries the SAME
-    // eta = 2.0, so no rate is given up by the snap.
-    if (run(true, 14.0f) != kRungIdxQam8R23)
-        FAIL("knob ON, EVM 14 dB: must demote 16QAM R2/3 -> QAM8 R2/3 (16QAM R1/2 disabled)");
-    // Knob OFF: the clamp is inert — the clean high-SNR group holds the top rung.
-    if (run(false, 13.0f) < kRungIdxQam16R23)
-        FAIL("knob OFF: EVM demote must be inert (no clamp below 16QAM R2/3)");
-    PASS();
-    return true;
-}
-
-// The demote is a floor, not a ceiling: a usable EVM that CLEARS the current rung's
-// floor never demotes (and EVM can never RAISE the command — it saturates at the demod
-// ceiling and is only ever a min-clamp).
-static bool test_evm_demote_inert_when_supported() {
-    TEST("EVM demote never fires when the rung floor is cleared");
-    setenv("ULTRA_EVM_DEMOTE", "1", 1);
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-    c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
-    c.setBurstEvmObservation(20.0f);  // clears 16QAM R2/3 (16.7) comfortably
-    TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
-    const uint8_t got = TA::rxCmd(c);
-    unsetenv("ULTRA_EVM_DEMOTE");
-    if (got < kRungIdxQam16R23)
-        FAIL("EVM 20 dB clears the rung floor — must NOT demote (idx " +
-             std::to_string(got) + ")");
-    PASS();
-    return true;
-}
-
-static bool test_missing_group_evm_clears_prior_observation() {
-    TEST("missing group EVM explicitly clears a prior low observation");
-    setenv("ULTRA_EVM_DEMOTE", "1", 1);
-    Connection c;
-    TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-    c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
-    c.setBurstEvmObservation(5.0f);  // would force a deep demote if reused
-    c.clearBurstEvmObservation();    // this group has incomplete/no-process coverage
-    TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
-    const uint8_t got = TA::rxCmd(c);
-    unsetenv("ULTRA_EVM_DEMOTE");
-    if (got < kRungIdxQam16R23)
-        FAIL("invalid current-group EVM must not reuse the prior low scalar (idx " +
-             std::to_string(got) + ")");
-    PASS();
-    return true;
-}
-
-// CONFIDENCE-GATED EVM DEMOTE (ULTRA_EVM_DEMOTE_CONFIDENT). The per-group EVM estimate
-// has measured sd 3.1-4.4 dB while adjacent rung floors are 1.2-3.1 dB apart, so ONE
-// sample cannot resolve a rung. Property under test: a single low sample must NOT fire
-// the clamp (that is the sawing the raw form produced -- 15 vs 7 rung commands/run),
-// while SUSTAINED low evidence still must (the clamp's whole purpose survives).
-static bool test_evm_demote_confidence_gate() {
-    TEST("confident EVM demote: a MARGINAL sample holds, sustained evidence still demotes");
-    const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
-    // 16QAM R2/3 floor is 16.7 dB, hold margin 1.0 => the clamp fires below 15.7.
-    // A MARGINAL reading is one inside the estimator's own noise band of that line:
-    // 13.0 dB is 2.7 dB low, well within the measured 3.1 dB per-group sd, so a single
-    // sample cannot distinguish "rung unsupported" from "noise-low sample".
-    auto run = [&](const char* confident, const std::vector<float>& samples) {
-        setenv("ULTRA_EVM_DEMOTE", "1", 1);
-        if (confident) setenv("ULTRA_EVM_DEMOTE_CONFIDENT", confident, 1);
-        else unsetenv("ULTRA_EVM_DEMOTE_CONFIDENT");
-        Connection c;
-        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-        for (float db : samples) {
-            c.setBurstChannelObservation(24.0f, 0.20f, 0.9f, true, 0.1f);
-            c.setBurstEvmObservation(db);
-            TA::verdict(c, /*all_ok=*/true, /*quality=*/0.9f);
-        }
-        return TA::rxCmd(c);
-    };
-    // RAW form (knob off): one marginal sample clamps immediately -- the documented saw.
-    if (!(run(nullptr, {13.0f}) < cur))
-        FAIL("raw EVM demote should clamp on a single marginal sample (baseline behaviour)");
-    // CONFIDENT form: one marginal sample carries no spread estimate; the optimistic
-    // bound (13.0 + 1.645*3.1 = 18.1) still clears 15.7, so it must HOLD.
-    if (run("1", {13.0f}) < cur)
-        FAIL("confident gate must NOT demote on a single marginal sample");
-    // SUSTAINED marginal evidence with realistic spread: mean ~13, se shrinks with n, the
-    // optimistic bound falls under the floor, so the clamp must still fire.
-    if (!(run("1", {11.5f, 13.0f, 14.5f, 12.0f, 14.0f, 13.0f}) < cur))
-        FAIL("confident gate must still demote once sustained evidence is unambiguous");
-    // An UNAMBIGUOUS single sample (8.0 dB = 8.7 below the floor, far outside the noise
-    // band) SHOULD still fire even at n=1 -- the gate must not be a blanket delay.
-    if (!(run("1", {8.0f}) < cur))
-        FAIL("confident gate must fire at n=1 when the sample is unambiguous");
-    unsetenv("ULTRA_EVM_DEMOTE_CONFIDENT");
-    unsetenv("ULTRA_EVM_DEMOTE");
     PASS();
     return true;
 }
@@ -688,48 +319,6 @@ static bool test_goodput_break_even_is_rate_ratio() {
         if (be > 0.0f && !(0.0f < be))
             FAIL("a 0/N crater must remain rung-failure evidence at every rung");
     }
-    PASS();
-    return true;
-}
-
-// DEFAULT-ON PIN (2026-07-26): with the knob UNSET, two consecutive partial groups that
-// each clear the goodput break-even must NOT demote — the whole point of the fix. With
-// ULTRA_CRATER_GOODPUT_GRADE=0 the legacy binary predicate returns and the same evidence
-// demotes. This is what fails if anyone silently flips the default back.
-static bool test_crater_grading_is_default_on() {
-    TEST("goodput-graded crater is DEFAULT ON; =0 restores the legacy binary demote");
-    const uint8_t cur = coherentRungIndexFor(Modulation::QAM16, CodeRate::R2_3);
-    // 7/8 delivered = 0.875, comfortably above the 0.75 break-even for 16QAM R2/3.
-    auto run = [&](const char* knob) {
-        if (knob) setenv("ULTRA_CRATER_GOODPUT_GRADE", knob, 1);
-        else unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
-        Connection c;
-        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdictGraded(c, /*all_ok=*/false, /*quality=*/0.0f, /*full_crater=*/false, 0.875f);
-        TA::verdictGraded(c, false, 0.0f, false, 0.875f);
-        return TA::rxCmd(c);
-    };
-    // Not lower: since 2026-11-10 16QAM R2/3 is no longer the ladder top (16QAM R3/4 and 32QAM
-    // R2/3 sit above it with turbo data frames), so the same evidence may also climb.
-    if (run(nullptr) < cur)
-        FAIL("DEFAULT (knob unset): two 7/8 groups must NOT demote from idx " +
-             std::to_string(cur) + ", got " + std::to_string(run(nullptr)));
-    if (run("0") >= cur)
-        FAIL("knob=0 must restore the legacy binary demote (got idx " +
-             std::to_string(run("0")) + ", want < " + std::to_string(cur) + ")");
-    // A TRUE crater still demotes with the default ON — the cliff case is untouched.
-    unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
-    {
-        Connection c;
-        TA::makeConnectedOFDM(c, CodeRate::R2_3, 20.0f, 0.05f, Modulation::QAM16);
-        c.setBurstChannelObservation(28.0f, 0.20f, 0.9f, true, 0.1f);
-        TA::verdictGraded(c, false, 0.0f, /*full_crater=*/true, 0.0f);
-        TA::verdictGraded(c, false, 0.0f, true, 0.0f);
-        if (TA::rxCmd(c) >= cur)
-            FAIL("a true 0/N crater must STILL demote under the default-on grading");
-    }
-    unsetenv("ULTRA_CRATER_GOODPUT_GRADE");
     PASS();
     return true;
 }
@@ -870,31 +459,14 @@ static bool test_identical_ack_authority_revisions_are_downward_only() {
 }
 
 int main() {
-    // MUST precede any Connection construction (env-latched statics).
-    // ULTRA_LATENT_RATE went DEFAULT-ON 2026-08-01 and returns EARLY from
-    // updateRxAuthorityCommand, bypassing every legacy clamp. This whole suite exercises
-    // that legacy ladder — the two-crater rule, climb dwell, EMA hold, rung penalties — so
-    // it must select the path it is written for. This is not a workaround: the legacy path
-    // is a supported opt-out for 0.5.1 and it needs coverage as long as it ships.
-    // The latent controller has its own suite in test_latent_rate_controller.cpp.
-    setenv("ULTRA_LATENT_RATE", "0", 1);
-    setenv("ULTRA_DENSE_FAST_DEMOTE", "0", 1);  // explicit baseline; the test toggles it
+    // MUST precede any Connection construction (env-latched statics). The suite runs the
+    // production latent controller; the legacy ladder it once tested (ULTRA_LATENT_RATE=0)
+    // was deleted 2026-11-25.
     setenv("ULTRA_ENABLE_PSK8_LADDER", "1", 1);
     unsetenv("ULTRA_DESCRIPTOR_MODE_SWITCH");  // legacy path -> pending_* observable
-    // ULTRA_RX_EMA_HOLD is default-OFF (reverted 2026-07-23) — matches the legacy
-    // demote-machinery tests (two-crater rule, climb-dwell), which exercise the path that
-    // runs when the hold does NOT engage. Set explicitly so the baseline is unambiguous
-    // regardless of the default. The two test_ema_hold_* cases toggle it on and restore "0".
-    setenv("ULTRA_RX_EMA_HOLD", "0", 1);
 
     std::cout << "RX-AUTHORITY suite\n";
     bool ok = true;
-    ok &= test_verdict_maps_snr_to_rung();
-    ok &= test_two_crater_rule();
-    ok &= test_confirmed_crater_arms_climb_dwell();
-    ok &= test_ema_hold_absorbs_supported_crater();
-    ok &= test_ema_hold_still_demotes_sustained_failure();
-    ok &= test_dense_fast_demote_full_crater();
     ok &= test_busy_defers_up_not_down();
     ok &= test_clean_never_commands_down();
     ok &= test_no_observation_no_command();
@@ -902,12 +474,7 @@ int main() {
     ok &= test_sender_ignores_none_and_garbage();
     ok &= test_operator_lock_overrides_authority();
     ok &= test_evm_floor_table_and_mapping();
-    ok &= test_evm_demote_strips_overcommit();
-    ok &= test_evm_demote_inert_when_supported();
-    ok &= test_missing_group_evm_clears_prior_observation();
-    ok &= test_evm_demote_confidence_gate();
     ok &= test_goodput_break_even_is_rate_ratio();
-    ok &= test_crater_grading_is_default_on();
     ok &= test_group_size_gate_streak();
     ok &= test_startup_probe_wire_tail_and_async_safety();
     ok &= test_identical_ack_authority_revisions_are_downward_only();

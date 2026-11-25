@@ -81,8 +81,9 @@
 namespace ultra {
 namespace protocol {
 
-// DEFAULT-ON since 2026-08-01. Opt out with ULTRA_LATENT_RATE=0, which restores the legacy
-// SNR-anchor ladder and its corrective stack.
+// The receiver authority's rung selector: DEFAULT-ON since 2026-08-01, the only selector since
+// 2026-11-25 (its ULTRA_LATENT_RATE=0 opt-out and the legacy SNR-anchor ladder with its corrective
+// stack - two-crater rule, climb dwell, EMA hold, rung penalties, EVM demote - were deleted).
 //
 // EVIDENCE FOR THE FLIP:
 //   - Rig A/B, 8 interleaved pairs at IONOS MPG@20: +14.5% mean, median +18.4%, 7/8
@@ -102,13 +103,6 @@ namespace protocol {
 //   - The tie-break probe (kTieBreakMarginFrac / kTieBreakPeriod) raised the mean slightly
 //     but DOUBLED the variance (+16.5% sd 27.3% over 7 pairs, losing significance). It is
 //     therefore an explicit experiment, disabled by the production caller unless requested.
-inline bool latentRateControllerEnabled() {
-    static const bool on = [] {
-        const char* e = std::getenv("ULTRA_LATENT_RATE");
-        return !(e != nullptr && e[0] == '0' && e[1] == '\0');  // DEFAULT-ON
-    }();
-    return on;
-}
 
 // Dedicated whole-group probes doubled the paired-run variance and erased the otherwise
 // significant controller result. Keep the mechanism available for controlled experiments,

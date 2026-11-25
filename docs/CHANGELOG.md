@@ -10,6 +10,27 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — cleanup: the legacy SNR-anchor authority ladder is deleted (R14)
+
+**What was there.** `updateRxAuthorityCommand` ran the latent selector (default since 2026-08-01) and
+returned; the ~320 lines after it - the legacy SNR-anchor ladder with its two-crater rule, climb dwell,
+crater penalties, EMA hold, dense fast demote, EVM demote and goodput-graded crater - ran only with
+`ULTRA_LATENT_RATE=0`. The fade-averaged verdict-SNR ring and sticky fading class before the latent
+branch fed only that ladder, and the group EVM the modem handed the protocol (`setBurstEvmObservation`)
+was read only by its EVM demote. CTest RxAuthority pinned `ULTRA_LATENT_RATE=0`, so ten of its cases
+tested the dead path.
+
+**What changed.** All of it deleted (~1,100 lines net), with `ULTRA_LATENT_RATE`, `ULTRA_RX_EMA_HOLD`,
+`ULTRA_DENSE_FAST_DEMOTE`, `ULTRA_EVM_DEMOTE`, `ULTRA_EVM_DEMOTE_CONFIDENT`, `ULTRA_CRATER_GOODPUT_GRADE`
+and the ten legacy RxAuthority cases; the suite (12 cases) now runs the production selector. No behaviour
+change on a default build.
+
+**Verification.** CTest 130/130 (RxAuthority 12/12). GUI ITU Good 15 dB 21 KB seeds 41-44:
+1980/2020/1510/1690 bps vs 1980/2030/1630/1590 before (mean 1800 vs 1808), 4/4 PASS. TNC sweep 21
+(seeds 425-426): 68/70 - both failures waveform-follow flapping at the floor (ITU Good 8 dB short: 11
+crossings; AWGN 3 dB bulk: OFDM 160 s then down), the open crossing-zone class
+(BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING notes), not the rate selector.
+
 ## 2026-11-25 — cleanup: RateController replaced by a pure one-rung step
 
 **What was there.** After R10 the sender-side `RateController` (rate_controller.hpp, 299 lines: an EMA
