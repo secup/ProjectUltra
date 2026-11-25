@@ -29,11 +29,11 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
   (`tone_ack_burst_frames_`, any group size) - a one-frame resend with unproven geometry kept the cap at
   the previous 8-frame burst and a 6.8 s final ACK ran past the sender's 8.2 s resend.
 
-**Size.** Since 78af254c: 19 files, +23 / -1446 lines. Connection since 8902cead: fields 261 -> 244,
-booleans 82 -> 68, lines 15319 -> 15022.
+**Size.** Since 78af254c: 21 files, +131 / -1368 lines (the hint kept). Connection since 8902cead:
+fields 261 -> 246, booleans 82 -> 69, lines 15319 -> 15047.
 
-**Verification.** CTest 132/132 (GoodputRateController removed with its controller). TNC smoke sweep 13
-(seeds 409-410) and a GUI check below.
+**Verification.** CTest 132/132 (GoodputRateController removed with its controller). TNC sweep 14 (seeds
+411-412, 70 runs): 69/70; the failure was the MODE_CHANGE provenance case fixed alongside, re-run PASS.
 
 ## 2026-11-24 (night) — refactor: session close state (state machine slice 5)
 
