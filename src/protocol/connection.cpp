@@ -7973,6 +7973,17 @@ void Connection::noteRxMcDpskFrameLost(int modulation) {
     const int rung = (modulation >= 0)
         ? connection_policy::mcDpskRungIndexFor(static_cast<Modulation>(modulation))
         : -1;
+    if (rung < 0 && rx_command_.upCommanded()) {
+        // BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG: this end commanded OFDM, so the chirp-anchored burst
+        // its MC-DPSK decoder could not attribute to any rung is the peer's OFDM burst (the
+        // dual-listen OFDM decoder locked the same chirp). It says nothing about the MC-DPSK rungs.
+        // Counted, every failed up-crossing probe also dropped the rung and doubled the next rung
+        // probe's wait: TNC ITU Good 8 dB seed 425 stayed on 16-FSK-F for 400 s (probes after 2, 4,
+        // 8 clean bursts), the DQPSK probe never landed.
+        LOG_MODEM(INFO, "Connection: MC-DPSK RATE rx: unattributed frame while OFDM is commanded - "
+                        "the peer's OFDM burst, no rung evidence");
+        return;
+    }
     // The same floor as a burst verdict (mcDpskRungCommandForAck): into 16-FSK only when this
     // spell's readings name it.
     const bool readings_name_mfsk = sessionLadderPick().rung.modulation == Modulation::MFSK16;

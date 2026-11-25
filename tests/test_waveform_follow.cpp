@@ -319,6 +319,11 @@ struct ConnectionAdaptiveTestAccess {
         c.rx_mcdpsk_frames_since_command_ += n;
     }
     static bool dualUpCommanded(const Connection& c) { return c.rx_command_.upCommanded(); }
+    static void markUpCommanded(Connection& c) { c.rx_command_.markUpCommanded(); }
+    static int mcDpskRungCommand(const Connection& c) { return c.mcdpsk_rate_ctl_.command(); }
+    static int mcDpskProbeAfter(const Connection& c) { return c.mcdpsk_rate_ctl_.probeAfterCleanBursts(); }
+    static void mcDpskFrameLost(Connection& c, int modulation) { c.noteRxMcDpskFrameLost(modulation); }
+    static void mcDpskObserveClean(Connection& c, int rung) { c.mcdpsk_rate_ctl_.observe(rung, true); }
     // One retransmission timeout inside the ARQ (no ACK heard).
     static void arqTimeoutRound(Connection& c) { c.arq_.tick(c.arq_.getAckTimeout() + 1); }
     // One heard ACK round in which seq `missing` (the base) did not arrive: an empty ACK.
@@ -415,6 +420,37 @@ void test_waveform_follow_sender_crossings_switch_modem_first() {
           "down-crossing lands on the middle rung (16-FSK-F) at the standard 3-codeword geometry");
     CHECK(events.size() == 2 && cross_carriers == 8 && cross_sps == 1024 && cross_cw == 3,
           "the modem gets the MC-DPSK profile with the crossing");
+}
+
+// BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG: while this receiver has commanded an up-crossing, an MC-DPSK
+// frame lost at an unknown rung is the peer's OFDM burst and leaves the MC-DPSK rate controller
+// alone; outside that window the same loss still counts.
+void test_ofdm_probe_does_not_punish_mcdpsk_rung() {
+    for (int commanded = 0; commanded < 2; ++commanded) {
+        Connection c;
+        ConnectionAdaptiveTestAccess::makeConnectedMCDPSK(c);
+        ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+        // Clean 16-FSK-F bursts until the controller probes the rung above (DQPSK).
+        const int ffast = connection_policy::mcDpskRungIndexFor(Modulation::MFSK16_FAST);
+        for (int i = 0; i < 16 && ConnectionAdaptiveTestAccess::mcDpskRungCommand(c) <= ffast; ++i) {
+            ConnectionAdaptiveTestAccess::mcDpskObserveClean(
+                c, ConnectionAdaptiveTestAccess::mcDpskRungCommand(c));
+        }
+        CHECK(ConnectionAdaptiveTestAccess::mcDpskRungCommand(c) > ffast,
+              "the fixture's controller probes above 16-FSK-F");
+        const int rung_before = ConnectionAdaptiveTestAccess::mcDpskRungCommand(c);
+        const int probe_before = ConnectionAdaptiveTestAccess::mcDpskProbeAfter(c);
+        if (commanded) ConnectionAdaptiveTestAccess::markUpCommanded(c);
+        ConnectionAdaptiveTestAccess::mcDpskFrameLost(c, -1);
+        const bool untouched =
+            ConnectionAdaptiveTestAccess::mcDpskRungCommand(c) == rung_before &&
+            ConnectionAdaptiveTestAccess::mcDpskProbeAfter(c) == probe_before;
+        if (commanded) {
+            CHECK(untouched, "OFDM commanded: an unattributed loss leaves the MC-DPSK rung and probe");
+        } else {
+            CHECK(!untouched, "no crossing commanded: an unattributed loss still counts");
+        }
+    }
 }
 
 // Knob off (the default): crossing words change nothing.
@@ -1800,6 +1836,7 @@ int main() {
         return 1;
     }
     test_waveform_follow_sender_crossings_switch_modem_first();
+    test_ofdm_probe_does_not_punish_mcdpsk_rung();
     test_last_disconnect_retry_rides_robust_waveform();
     test_turn_request_retry_rides_robust_waveform_only_into_silence();
     test_control_reply_rides_the_arrival_waveform();

@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-25 — fix: a failed OFDM probe no longer resets the MC-DPSK rung ladder
+
+**What broke (BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG).** With an up-crossing commanded, the receiver's
+MC-DPSK decoder locks the peer's OFDM burst chirp, fails it at every constellation and reports an MC-DPSK
+frame lost at an unknown rung. `noteRxMcDpskFrameLost(-1)` scored it against the commanded rung: each
+failed OFDM probe also dropped a DQPSK probe to 16-FSK-F and doubled the next probe's wait (TNC ITU Good
+8 dB seed 425: 16-FSK-F for 400 s).
+
+**What changed.** While `rx_command_.upCommanded()`, an unattributed loss is no rung evidence (logged,
+ignored). Outside that window it still counts.
+
+**Verification.** CTest 130/130; WaveformFollow `test_ofdm_probe_does_not_punish_mcdpsk_rung` fails with the
+fix disabled. TNC A/B, same seeds and binaries otherwise: unattributed losses 52 -> 2, up-crossings
+107 -> 85. Elapsed (paired ratio cand/base, n): ITU Good 8 dB short 0.94 (20), bulk 1.00 (20); AWGN 3 dB
+short 0.95 (10), bulk 1.04 (10) - none significant (|t| <= 1.5). PASS 58/60 vs 60/60: one candidate
+failure is unrelated (the fix never fired; a reverse 40 B reply waited out the cross-down patience on a
+~5 dB OFDM link), the other near-floor variance (seed 428, base 220 s / cand 402 s). A correctness fix
+with neutral throughput. TNC sweep 22 (seeds 445-446): 70/70 PASS.
+
 ## 2026-11-25 — cleanup: the legacy SNR-anchor authority ladder is deleted (R14)
 
 **What was there.** `updateRxAuthorityCommand` ran the latent selector (default since 2026-08-01) and

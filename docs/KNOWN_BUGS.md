@@ -9,6 +9,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
 ## Active Issues
 
 ### TNC host-facing gaps found 2026-11-23 (`tools/tnc_scenario.py`, open) — P2/P3
+- **BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG** (P1, FIXED 2026-11-25; throughput-neutral, see CHANGELOG): every failed
+  up-crossing probe also reset the MC-DPSK rung ladder. With OFDM commanded, BRAVO's MC-DPSK decoder
+  locks the peer's OFDM burst chirp (the same position the dual-listen OFDM decoder locks), fails to
+  decode it at any constellation and reports an MC-DPSK frame lost at an unknown rung;
+  `noteRxMcDpskFrameLost(-1)` counted it against the commanded rung - a DQPSK probe dropped back to
+  16-FSK-F and the next probe's wait doubled (2 -> 4 -> 8 clean bursts). TNC ITU Good 8 dB seed 425
+  short: 16-FSK-F for 400 s, five failed probes, 323/1223 B in 240 s. Fix: while this end has an
+  up-crossing commanded (`rx_command_.upCommanded()`), an unattributed loss is no rung evidence.
+  CTest WaveformFollow `test_ofdm_probe_does_not_punish_mcdpsk_rung` (fails without the fix).
 - **BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING** (P1, open 2026-11-25): an up-crossing's first OFDM burst gets
   no ACK and the sender crosses back (TNC sweep 16, ITU Good 8 dB seed 415 bulk_then_short: four up/down
   cycles). BRAVO's OFDM listener decoded the descriptor (R1/4 -> R1/2, `current_anchor=LIGHT`), reset to
