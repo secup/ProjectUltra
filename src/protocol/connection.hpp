@@ -1107,6 +1107,11 @@ private:
         uint8_t geometry_regrid_attempts = 0;
         // A binary block (PayloadType::BINARY_OBJECT) rather than a text message.
         bool binary = false;
+        // Resume across re-grids (PayloadType::OBJECT_RESUME): the object's wire bytes the peer
+        // holds as a contiguous prefix (fragments retired in order), and where the current
+        // attempt's payload starts in them (0 = a whole-object attempt, no resume header).
+        uint32_t confirmed_wire_bytes = 0;
+        uint32_t attempt_offset = 0;
     };
     std::deque<OutboundMessageTxRecord> outbound_message_tx_records_;
     uint64_t next_outbound_message_token_ = 1;
@@ -1150,6 +1155,9 @@ private:
     bool rx_reassembly_active_ = false;
     bool rx_reassembly_binary_ = false;
     uint8_t rx_reassembly_epoch_ = 0;
+    // The partial prefix of the object a move-epoch change interrupted ({type, id, content...}),
+    // kept for its OBJECT_RESUME (BUG-OBJECT-REGRID-RESTARTS). One slot: fragments are sequential.
+    Bytes rx_resume_stash_;
     // Identities of recently delivered message objects, most recent last. A resend
     // whose id is still here is dropped BEFORE any application callback fires — the
     // duplicate-suppression half of the idempotent-resend contract.
@@ -1907,6 +1915,9 @@ private:
     // Rebuilt on demand rather than stored, so a re-grid cannot serialize a payload
     // that has drifted from the record the operator sees. Empty if token is unknown.
     Bytes outboundMessageWireBytes(uint64_t token) const;
+    // The next attempt's payload for a re-gridded object: an OBJECT_RESUME from the confirmed
+    // prefix when there is one and it fits `capacity`, else the whole object. Records the attempt.
+    Bytes outboundMessageAttemptWireBytes(uint64_t token, size_t capacity);
     uint64_t outboundMessageEnqueueOrder(uint64_t token) const;
     uint8_t allocateMessageObjectId();
     bool messageObjectAlreadyDelivered(uint8_t object_id) const;

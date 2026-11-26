@@ -1255,9 +1255,56 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
                   rx_reassembly_buffer_.size(),
                   static_cast<unsigned>(rx_reassembly_epoch_),
                   static_cast<unsigned>(frame_epoch));
+        // Keep an identified object's prefix for its OBJECT_RESUME (BUG-OBJECT-REGRID-RESTARTS):
+        // the sender resumes from what it saw retired in order, which this prefix covers.
+        if (rx_reassembly_buffer_.size() >= kMessageObjectPrefixBytes &&
+            (rx_reassembly_buffer_[0] == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT) ||
+             rx_reassembly_buffer_[0] == static_cast<uint8_t>(PayloadType::BINARY_OBJECT))) {
+            rx_resume_stash_ = std::move(rx_reassembly_buffer_);
+        }
         rx_reassembly_buffer_.clear();
         rx_reassembly_active_ = false;
         rx_reassembly_binary_ = false;
+    }
+    // The first frame of a resumed object: rebuild its wire bytes from the kept prefix and go on
+    // as if the object had never been interrupted.
+    if (!rx_reassembly_active_ && payload.size() >= kObjectResumeHeaderBytes &&
+        payload[0] == static_cast<uint8_t>(PayloadType::OBJECT_RESUME)) {
+        const uint8_t type = payload[1];
+        const uint8_t object_id = payload[2];
+        const uint32_t off = (static_cast<uint32_t>(payload[3]) << 16) |
+                             (static_cast<uint32_t>(payload[4]) << 8) |
+                             static_cast<uint32_t>(payload[5]);
+        const bool object_type =
+            type == static_cast<uint8_t>(PayloadType::TEXT_MESSAGE_OBJECT) ||
+            type == static_cast<uint8_t>(PayloadType::BINARY_OBJECT);
+        Bytes rebuilt;
+        if (!object_type) {
+            LOG_MODEM(WARN, "Connection: OBJECT_RESUME of unknown object type 0x%02X; discarding",
+                      static_cast<unsigned>(type));
+            rebuilt = {kUnresumableObjectMarker};
+        } else if (rx_resume_stash_.size() >= off && off >= kMessageObjectPrefixBytes &&
+            rx_resume_stash_[0] == type && rx_resume_stash_[1] == object_id) {
+            rebuilt.assign(rx_resume_stash_.begin(), rx_resume_stash_.begin() + off);
+            LOG_MODEM(INFO, "Connection: Resuming object id=%u at byte %u (held %zu)",
+                      static_cast<unsigned>(object_id), off, rx_resume_stash_.size());
+        } else if (messageObjectAlreadyDelivered(object_id)) {
+            rebuilt = {type, object_id};  // dropped as a duplicate when it completes
+        } else {
+            // The sender resumes only from fragments this end retired in order, so this is a
+            // broken contract, not a channel event: never present a gapped object as content.
+            LOG_MODEM(ERROR,
+                      "Connection: OBJECT_RESUME id=%u at byte %u without its prefix (held %zu, "
+                      "id %u); discarding the object",
+                      static_cast<unsigned>(object_id), off, rx_resume_stash_.size(),
+                      rx_resume_stash_.size() >= 2 ? static_cast<unsigned>(rx_resume_stash_[1]) : 0u);
+            rebuilt = {kUnresumableObjectMarker};
+        }
+        rx_resume_stash_.clear();
+        rebuilt.insert(rebuilt.end(), payload.begin() + kObjectResumeHeaderBytes, payload.end());
+        handleDataPayload(rebuilt, more_data, frame_type,
+                          static_cast<uint8_t>(flags & ~v2::Flags::EPOCH_REBASE));
+        return;
     }
     turn_.setPeerDataSinceConnect(true);
     turn_.setYieldedWaiting(false);
@@ -1268,7 +1315,12 @@ void Connection::handleDataPayload(const Bytes& payload, bool more_data,
         frame_type == v2::FrameType::DATA_CONT ||
         frame_type == v2::FrameType::DATA_END;
 
-    if (!binary_payload && file_transfer_.processPayload(payload, more_data)) {
+    // Only a frame that can start a payload is the file layer's: inside a message's reassembly a
+    // fragment's first byte is content, and one that read 0x01-0x03 was taken as a FILE_* frame and
+    // cut out of the object (BUG-FRAGMENT-ROUTED-AS-FILE: ~1 % of binary fragments).
+    const bool mid_object = rx_reassembly_active_ &&
+                            file_transfer_.getState() != FileTransferState::RECEIVING;
+    if (!binary_payload && !mid_object && file_transfer_.processPayload(payload, more_data)) {
         LOG_MODEM(DEBUG, "Connection: Processed file transfer payload (%zu bytes)",
                   payload.size());
         return;

@@ -10,6 +10,47 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — fix: a waveform crossing no longer restarts an in-flight message from byte 0
+
+**BUG-OBJECT-REGRID-RESTARTS.** Every waveform crossing or geometry change re-fragmented an in-flight
+text (0x04) or binary (0x05) object from byte 0, and the move-epoch change made the receiver drop the
+prefix it held. At ITU Good 8 dB the link crosses every 30-40 s, and a 900-byte TNC block (18 MC-DPSK
+fragments) restarted at each crossing and never completed: the "323/1223 B" stall (323 = 1+12+60+250,
+no byte of the 900 B block), 11 of 120 sessions in the 2026-11-25 CFO A/B, 0 in the genie arm only
+because its trajectory crossed less. Files never had it: FILE_DATA carries offsets.
+Fix (wire change): `PayloadType::OBJECT_RESUME` `{0x06, type, id, offset24 BE, wire bytes from offset}`
+(`file_transfer.hpp`). The sender counts the fragments ARQ retired in order (`acked_fragment_count_`,
+a contiguous delivered prefix; per message token, since one batch can hold several messages) into
+`OutboundMessageTxRecord::confirmed_wire_bytes`, and the re-queue sends the rest
+(`outboundMessageAttemptWireBytes`, `connection.cpp`). The receiver keeps an identified prefix across
+the epoch change (`rx_resume_stash_`) and stitches the resume at its offset
+(`connection_handlers.cpp`); an id already delivered becomes a duplicate; a resume without its prefix
+becomes `kUnresumableObjectMarker` (0xFF) and is discarded, logged at ERROR, never delivered short.
+
+**BUG-FRAGMENT-ROUTED-AS-FILE.** `handleDataPayload` offered every fragment to the file layer first, so
+a middle fragment of a text/binary object whose first byte read 0x01-0x03 was taken as FILE_* and cut
+out: the block was delivered short (~1.2 % per fragment of random binary, ~19 % of an 18-fragment
+block; ASCII never hits it). Inside an object's reassembly (no file being received) a fragment is now
+content.
+
+**Verification.** CTest ConnectionAdaptive `test_binary_geometry_regrid_resumes_from_confirmed_prefix`
+(resume offset, stitched delivery exactly once, duplicate suppressed, orphan not delivered; fails with
+either fix disabled); CTest 130/130. TNC short scenario, ITU Good, 0 Hz dial, seeds 501-524 vs the
+committed build (ff29f397): **48/48 PASS vs 45/48** (8 dB 24/24 vs 21/24, 15 dB 24/24 both); resume
+fired in 21 sessions, no orphan. Time over both-pass seeds 1.08x at 8 dB (t 1.6), 0.93x at 15 dB
+(t -1.5): no significant change (seed 501 +129 s came from a different crossing trajectory, the
+resume itself fired correctly). TNC sweep 27 at the 7.3 Hz dial (seeds 455-456, 7 scenarios x AWGN 3/10, Good
+8/15, Moderate 16): 70/70 PASS, 14 resumes, no orphan.
+
+**Rejected (A/B, not shipped): a certifying OFDM frame always applying its CPE reading** (closing the
+3-sigma confirm band of BUG-CONTROL-CFO-CERT-PRECISION): 5/24 wrong certificates at 8 dB vs 0, paired
+time 0.86/0.84 vs 0.87/0.84. The readings' ~0.6 Hz sigma on fading is too coarse to replace the prior
+outright; the principled step is an inverse-variance combination, which needs the prior's sigma in
+CFOTracker. Patch kept in `git stash` ("fix5 rejected"). The 2026-11-25 fix's 7.3 Hz sweep 26
+(seeds 453-454, 7 scenarios x 5 conditions): 70/70.
+
+---
+
 ## 2026-11-25 — fix: four ways a session's CFO went wrong and stayed wrong
 
 A TNC A/B at a 0 Hz dial (ITU Good 8 and 15 dB, seeds 501-524) against a genie arm with the sync

@@ -278,7 +278,16 @@ payload; NOT part of `DataFrame::HEADER_SIZE`):
   `delivered_message_object_ids_` (depth 8), applied in `handleDataPayload`
   (`connection_handlers.cpp`) AFTER reassembly and BEFORE any application callback. Both the id
   counter and the delivered-set are per-session (cleared in `disconnect()` and `reset()`).
-  Binary payloads (`sendBinary`, the TNC path) carry NO identity and are NOT re-gridded.
+- `0x05 BINARY_OBJECT` 🟢 (2026-11-23) — `{0x05, object_id, bytes…}`, the TNC `sendBinary` path;
+  same id, re-grid and dedup rules as 0x04.
+- `0x06 OBJECT_RESUME` 🟢 (2026-11-26, wire change) — `{0x06, type, object_id, offset24 BE, wire
+  bytes from offset}`: the rest of a 0x04/0x05 object after a geometry re-grid, from the prefix ARQ
+  retired in order (`acked_fragment_count_` → `OutboundMessageTxRecord::confirmed_wire_bytes`,
+  `outboundMessageAttemptWireBytes`, `connection.cpp`). RX (`handleDataPayload`): the prefix kept
+  across the move-epoch change in `rx_resume_stash_` is stitched at the offset; an id already
+  delivered becomes a duplicate; a resume without its prefix becomes `kUnresumableObjectMarker`
+  (0xFF) and is discarded, never delivered (BUG-OBJECT-REGRID-RESTARTS). Inside an object's
+  reassembly no fragment is offered to the file layer (BUG-FRAGMENT-ROUTED-AS-FILE).
 
 **Stale-SNR decision screen** 🟢 (2026-08-05, no env knob — `connection_policy.hpp`):
 `kConnectSnrStaleSentinelDb` (−10.0) is the WIRE marker for "no measurement" and is correct

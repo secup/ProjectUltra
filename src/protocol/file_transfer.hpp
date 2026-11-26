@@ -38,10 +38,24 @@ enum class PayloadType : uint8_t {
     // block silently while the TNC host was told BUFFER 0 (BUG-BINARY-LOST-ON-GEOMETRY-CHANGE). A
     // receiver still accepts a bare block from an older sender (no duplicate suppression there).
     BINARY_OBJECT = 0x05,
+    // The rest of a text/binary object after a geometry change (BUG-OBJECT-REGRID-RESTARTS,
+    // 2026-11-26): {0x06, object type, object_id, offset (24 bit BE), the object's wire bytes from
+    // that offset on}. The offset is into the object's wire bytes ({type, id, content}) and is a
+    // prefix the receiver already holds: the sender counts only fragments retired in order, and
+    // the receiver keeps its partial prefix across the move-epoch change. Before, every crossing
+    // re-sent the whole object from byte 0; at 8 dB on ITU Good the link crosses every 30-40 s and
+    // a 900-byte TNC block never completed (11 of 120 A/B sessions stalled).
+    OBJECT_RESUME = 0x06,
 };
 
 // {type, object_id} — see PayloadType::TEXT_MESSAGE_OBJECT.
 constexpr size_t kMessageObjectPrefixBytes = 2;
+// {OBJECT_RESUME, type, object_id, offset[3]} — see PayloadType::OBJECT_RESUME.
+constexpr size_t kObjectResumeHeaderBytes = 6;
+constexpr uint32_t kObjectResumeMaxOffset = 0xFFFFFFu;
+// Leads the bytes of an object that cannot be resumed (its prefix is gone): no payload type, so
+// the completed "object" is discarded as an unknown discriminator, and never re-enters the resume.
+constexpr uint8_t kUnresumableObjectMarker = 0xFF;
 
 // Transfer identity (BUG-FILE-CHUNK-CROSSES-TRANSFERS, 2026-11-23): the top byte of FILE_DATA's
 // 32-bit offset and of FILE_START's / FILE_BLOCK's original-size field names the transfer; the low

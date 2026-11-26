@@ -4,6 +4,7 @@
 #include <chrono>
 #include <atomic>
 #include "connection.hpp"
+#include <map>
 #include "link_control_plan.hpp"
 #include "mcdpsk_frame.hpp"
 #include "connection_policy.hpp"
@@ -1240,6 +1241,39 @@ Bytes Connection::outboundMessageWireBytes(uint64_t token) const {
         return wire;
     }
     return {};
+}
+
+Bytes Connection::outboundMessageAttemptWireBytes(uint64_t token, size_t capacity) {
+    Bytes wire = outboundMessageWireBytes(token);
+    for (auto& record : outbound_message_tx_records_) {
+        if (record.token != token) {
+            continue;
+        }
+        const uint32_t off = record.confirmed_wire_bytes;
+        // A resume pays its 6-byte header to skip `off` bytes: only when it skips more than it
+        // costs, and when the first frame carries some content after the header.
+        if (wire.size() < kMessageObjectPrefixBytes || off <= kObjectResumeHeaderBytes ||
+            off >= wire.size() || off > kObjectResumeMaxOffset ||
+            capacity <= kObjectResumeHeaderBytes) {
+            record.attempt_offset = 0;
+            return wire;
+        }
+        Bytes resume;
+        resume.reserve(kObjectResumeHeaderBytes + wire.size() - off);
+        resume.push_back(static_cast<uint8_t>(PayloadType::OBJECT_RESUME));
+        resume.push_back(wire[0]);
+        resume.push_back(wire[1]);
+        resume.push_back(static_cast<uint8_t>(off >> 16));
+        resume.push_back(static_cast<uint8_t>(off >> 8));
+        resume.push_back(static_cast<uint8_t>(off));
+        resume.insert(resume.end(), wire.begin() + off, wire.end());
+        record.attempt_offset = off;
+        LOG_MODEM(INFO,
+                  "Connection: Resuming object id=%u from byte %u of %zu (peer holds the prefix)",
+                  static_cast<unsigned>(record.object_id), off, wire.size());
+        return resume;
+    }
+    return wire;
 }
 
 uint64_t Connection::outboundMessageEnqueueOrder(uint64_t token) const {
@@ -7564,6 +7598,16 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
             // path fails closed (and disconnects, below) exactly as before.
             const bool regrid_contract_available =
                 arq_.moveEpochEnabled() && state_ == ConnectionState::CONNECTED;
+            // What the peer already holds of each object: ARQ completes slots in order, so the
+            // first acked_fragment_count_ fragments of the batch are delivered at the receiver,
+            // which keeps that prefix across the move-epoch change (BUG-OBJECT-REGRID-RESTARTS).
+            std::map<uint64_t, size_t> acked_bytes_by_token;
+            for (size_t i = 0; i < std::min(acked_fragment_count_, pending_tx_fragments_.size()) &&
+                               i < pending_tx_fragment_message_tokens_.size();
+                 ++i) {
+                acked_bytes_by_token[pending_tx_fragment_message_tokens_[i]] +=
+                    pending_tx_fragments_[i].size();
+            }
             for (auto it = outbound_message_tx_records_.begin();
                  it != outbound_message_tx_records_.end();) {
                 const bool token_in_fragment_batch =
@@ -7592,6 +7636,21 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
                         kMaxQueuedPayloads;
                 if (can_regrid) {
                     if (!receiver_commanded_geometry_change_) ++it->geometry_regrid_attempts;
+                    const auto acked = acked_bytes_by_token.find(it->token);
+                    if (acked != acked_bytes_by_token.end() && acked->second > 0) {
+                        // In wire-byte coordinates: a resume attempt's payload starts with its
+                        // header, then the object from attempt_offset on.
+                        const size_t p = acked->second;
+                        const size_t confirmed =
+                            it->attempt_offset == 0
+                                ? p
+                                : it->attempt_offset +
+                                      (p > kObjectResumeHeaderBytes ? p - kObjectResumeHeaderBytes
+                                                                    : 0);
+                        it->confirmed_wire_bytes = std::max<uint32_t>(
+                            it->confirmed_wire_bytes, static_cast<uint32_t>(std::min<size_t>(
+                                                          confirmed, kObjectResumeMaxOffset)));
+                    }
                     // Drop only the WIRE identity of the old attempt. token,
                     // object_id, text, submitted_at and submitted_reported survive,
                     // so the operator still sees exactly one SUBMITTED and, later,
@@ -7736,7 +7795,7 @@ void Connection::applyDataMode(Modulation mod, CodeRate rate, int cw_count,
         state_ == ConnectionState::CONNECTED) {
         for (auto it = geometry_regridded_message_records.rbegin();
              it != geometry_regridded_message_records.rend(); ++it) {
-            Bytes wire = outboundMessageWireBytes(it->token);
+            Bytes wire = outboundMessageAttemptWireBytes(it->token, currentDataPayloadCapacity());
             if (wire.empty()) {
                 // Unreachable: the record was deliberately kept above. Loud rather
                 // than silent — a stranded record would never reach a terminal
@@ -9277,6 +9336,7 @@ void Connection::enterDisconnected(const std::string& reason) {
     rx_reassembly_active_ = false;
     rx_reassembly_binary_ = false;
     rx_reassembly_epoch_ = 0;
+    rx_resume_stash_.clear();
     // Message-object identity is per-session: ids restart at 1 on the next
     // connection, so a stale delivered-set would suppress a NEW message.
     delivered_message_object_ids_.clear();
@@ -9956,6 +10016,7 @@ void Connection::reset() {
     rx_reassembly_active_ = false;
     rx_reassembly_binary_ = false;
     rx_reassembly_epoch_ = 0;
+    rx_resume_stash_.clear();
     // Message-object identity is per-session: ids restart at 1 on the next
     // connection, so a stale delivered-set would suppress a NEW message.
     delivered_message_object_ids_.clear();

@@ -46,9 +46,36 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   wrong group certificate seen in 96 A/B sessions); and the confirm band is 3 sigma wide, so a reading
   just inside it confirms a prior up to ~3 sigma_cpe off (TNC Good 15 dB seed 506: CPE -0.71 +- 0.24 Hz,
   the 1.05 Hz prior of a 0 Hz link certified; 1 of 48 sessions). CTest LtsCfoUpdate §5.
+  A/B REJECTED 2026-11-26: a certifying frame always applying its reading (closes the 3-sigma band)
+  gave 5/24 wrong certificates at 8 dB vs 0 (readings with ~0.6 Hz sigma), paired time 0.86/0.84 vs
+  0.87/0.84: no gain. The principled next step is an inverse-variance combination of prior and
+  reading, which needs the prior's sigma in CFOTracker. Patch kept in `git stash` ("fix5 rejected").
+- **BUG-OBJECT-REGRID-RESTARTS** (P1, FIXED 2026-11-26, see CHANGELOG): every waveform crossing /
+  geometry change re-sent an in-flight text or binary object from byte 0 ("Re-queued 1 message object(s)
+  for re-fragmentation"), and the move-epoch change made the receiver drop its partial prefix. At ITU
+  Good 8 dB the link crosses every 30-40 s; a 900-byte TNC block (18 MC-DPSK fragments, ~15 s per 3)
+  restarted at each crossing and never completed: the "323/1223 B" stall, 11 of 120 sessions in the
+  2026-11-25 CFO A/B (TNC seed 504: ALPHA's BUFFER back to 900 at 180 s and 333 s). Files never had it
+  (FILE_DATA carries offsets). Fix: PayloadType::OBJECT_RESUME {0x06, type, id, offset24} - the sender
+  resumes from the fragments ARQ retired in order (`acked_fragment_count_`), the receiver keeps the
+  prefix across the epoch change (`rx_resume_stash_`) and stitches at the offset; a resume without its
+  prefix is discarded, never delivered. Wire change. CTest ConnectionAdaptive
+  `test_binary_geometry_regrid_resumes_from_confirmed_prefix`.
+- **BUG-FRAGMENT-ROUTED-AS-FILE** (P1, FIXED 2026-11-26, see CHANGELOG): `handleDataPayload` offered EVERY
+  fragment to the file layer, so a middle fragment of a text/binary object whose first byte read 0x01-0x03
+  was taken as FILE_START/DATA/BLOCK (staged as a pre-start chunk) and cut out of the object: the block
+  was delivered short. ~1.2 % per fragment of random binary (~19 % of an 18-fragment block); ASCII never
+  hits it. Fix: inside an object's reassembly (no file receiving) a fragment is content. The same CTest
+  fails with the guard disabled.
 - **BUG-TNC-BUFFER0-NOT-REPORTED** (open, 2026-11-25) — P3: TNC ITU Good 8 dB seed 506, short scenario:
   "a2b_250B: ALPHA never reported BUFFER 0 after delivery" at ~180 s, in the genie-CFO arm and both
-  candidate arms alike (the old build passed it in 383 s). Not investigated. The same A/B's other
+  candidate arms alike (the old build passed it in 383 s). MECHANISM (2026-11-26, fix4 log): BRAVO
+  delivered the 250 B in one OFDM burst at 114.7 s, ALPHA never heard that burst's ACK, crossed to
+  MC-DPSK 16-FSK-F at 128 s and re-sent the WHOLE object (BUFFER 250 -> 96 by 172 s at ~4 B/s);
+  BRAVO drops it as a duplicate by id, but the sender pays the airtime and the step deadline expires.
+  OBJECT_RESUME cannot help (no ACK = no confirmed prefix). Fix direction: the receiver tells the
+  sender "object id N already delivered" on the first duplicate fragment (an ACK-side signal), and the
+  sender retires the object. The resume arm passed seed 506 only on a different trajectory. The same A/B's other
   failure: 11 sessions stalled at exactly 323/1223 B of a2b_900B (old build 5, candidates 6, genie 0;
   seeds 504/508/511/521/522/524) - the stall seen in sweep 21 (BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING).
 - **BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG** (P1, FIXED 2026-11-25; throughput-neutral, see CHANGELOG): every failed

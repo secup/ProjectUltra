@@ -550,6 +550,15 @@ struct ConnectionAdaptiveTestAccess {
         c.handleDataPayload(payload, false, v2::FrameType::DATA_END, v2::Flags::FINAL);
     }
 
+    static void deliverDataPayloadWithFlags(Connection& c, const Bytes& payload,
+                                            bool more_data, uint8_t flags) {
+        c.handleDataPayload(payload, more_data, v2::FrameType::DATA, flags);
+    }
+
+    static Bytes queuedPayloadData(const Connection& c, size_t index) {
+        return index < c.queued_payloads_.size() ? c.queued_payloads_[index].data : Bytes{};
+    }
+
     static void deliverDataPayload(Connection& c, const Bytes& payload,
                                    bool more_data) {
         c.handleDataPayload(payload, more_data, v2::FrameType::DATA,
@@ -3548,6 +3557,98 @@ void test_midwindow_binary_geometry_change_regrids_block() {
     ConnectionAdaptiveTestAccess::deliverDataPayload(rx, in_data, /*more_data=*/false);
     CHECK(got.size() == 3 && got.back() == Bytes({0x00, 'X', 'Y'}) && texts.empty(),
           "a binary object in DATA frames goes to the data consumer once, never as text");
+}
+
+// BUG-OBJECT-REGRID-RESTARTS: a geometry change re-sent a fragmented object from byte 0, so on a
+// link crossing every 30-40 s a 900-byte TNC block never completed. The sender now resumes from the
+// prefix it saw retired in order, and the receiver keeps that prefix across the move-epoch change.
+// Fragments whose first byte is 0x02 also pin BUG-FRAGMENT-ROUTED-AS-FILE.
+void test_binary_geometry_regrid_resumes_from_confirmed_prefix() {
+    setenv("ULTRA_ARQ_MOVE_EPOCH", "1", 1);
+    Connection c;
+    unsetenv("ULTRA_ARQ_MOVE_EPOCH");
+    std::vector<Bytes> transmitted;
+    c.setTransmitCallback([&](const Bytes& frame) { transmitted.push_back(frame); });
+    c.setTransmitToneBurstAckCallback(
+        [](const ultra::waveform::tone_burst_ack::ToneBurstAckPayload&) {});
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        c, CodeRate::R3_4, 20.0f, 0.30f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::setDataGeometry(
+        c, Modulation::QPSK, CodeRate::R3_4, /*logical_cw=*/4);
+    const size_t cap = ConnectionAdaptiveTestAccess::currentPayloadCapacity(c);
+    // Every byte 0x02 (FILE_DATA's type): any fragment start reads as a file frame.
+    Bytes block(3 * cap + 17, 0x02);
+    for (size_t i = 0; i < block.size(); i += 7) block[i] = static_cast<uint8_t>(i);
+    CHECK(c.sendBinary(block) && !transmitted.empty(), "resume fixture must start the block");
+    const auto f0 = v2::DataFrame::deserialize(transmitted.front());
+    CHECK(f0 && f0->payload.size() == cap &&
+              f0->payload[0] == static_cast<uint8_t>(PayloadType::BINARY_OBJECT),
+          "the first fragment fills the old geometry behind the identity");
+    const uint8_t object_id = f0 ? f0->payload[1] : 0;
+
+    ToneBurstAckDetection ack;
+    ack.payload.group_seq = static_cast<uint8_t>(f0->seq & 0x3F);
+    ack.payload.frame_mask = 0;
+    ack.payload.rate_hint = 7;
+    ack.payload.type = AckType::Ack;
+    ack.payload.move_epoch = ConnectionAdaptiveTestAccess::arqTxMoveEpoch(c);
+    ack.payload.rung_cmd = kRungCmdNone;
+    ConnectionAdaptiveTestAccess::simulatePreviousBurstAired(c);
+    CHECK(c.onToneBurstAck(ack), "the first fragment's ACK must be accepted");
+
+    ConnectionAdaptiveTestAccess::applyDataMode(
+        c, Modulation::QPSK, CodeRate::R1_3, /*cw_count=*/1);
+    const Bytes resume = ConnectionAdaptiveTestAccess::queuedPayloadData(c, 0);
+    CHECK(ConnectionAdaptiveTestAccess::queuedPayloadCount(c) == 1 && resume.size() >= 6 &&
+              resume[0] == static_cast<uint8_t>(PayloadType::OBJECT_RESUME) &&
+              resume[1] == static_cast<uint8_t>(PayloadType::BINARY_OBJECT) &&
+              resume[2] == object_id &&
+              ((size_t(resume[3]) << 16) | (size_t(resume[4]) << 8) | resume[5]) == cap,
+          "the re-grid resumes after the retired first fragment, not from byte 0");
+    Bytes wire = {static_cast<uint8_t>(PayloadType::BINARY_OBJECT), object_id};
+    wire.insert(wire.end(), block.begin(), block.end());
+    CHECK(Bytes(resume.begin() + 6, resume.end()) == Bytes(wire.begin() + cap, wire.end()),
+          "the resume carries exactly the rest of the object");
+
+    // Receiver: the first fragment, then the resume (new epoch, rebase) cut at the new capacity.
+    Connection rx;
+    std::vector<Bytes> got;
+    rx.setTransmitCallback([](const Bytes&) {});
+    rx.setDataReceivedCallback([&](const Bytes& data, bool) { got.push_back(data); });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(
+        rx, CodeRate::R2_3, 20.0f, 0.30f, Modulation::QPSK);
+    // The receiver had more than the sender saw acknowledged (a lost ACK): it truncates.
+    ConnectionAdaptiveTestAccess::deliverDataPayload(rx, Bytes(wire.begin(), wire.begin() + cap), true);
+    ConnectionAdaptiveTestAccess::deliverDataPayload(
+        rx, Bytes(wire.begin() + cap, wire.begin() + 2 * cap), true);
+    const uint8_t new_epoch = v2::epochToFlags(1);
+    const size_t new_cap = 8;
+    for (size_t off = 0; off < resume.size(); off += new_cap) {
+        const size_t n = std::min(new_cap, resume.size() - off);
+        const bool more = off + n < resume.size();
+        uint8_t flags = static_cast<uint8_t>(new_epoch | (more ? v2::Flags::MORE_FRAG : v2::Flags::FINAL));
+        if (off == 0) flags |= v2::Flags::EPOCH_REBASE;
+        ConnectionAdaptiveTestAccess::deliverDataPayloadWithFlags(
+            rx, Bytes(resume.begin() + off, resume.begin() + off + n), more, flags);
+    }
+    CHECK(got.size() == 1 && got.front() == block,
+          "the receiver must deliver the whole block once, stitched at the resume offset");
+
+    // A resume of an object already delivered is a duplicate; one without its prefix is dropped.
+    for (size_t off = 0; off < resume.size(); off += new_cap) {
+        const size_t n = std::min(new_cap, resume.size() - off);
+        const bool more = off + n < resume.size();
+        ConnectionAdaptiveTestAccess::deliverDataPayloadWithFlags(
+            rx, Bytes(resume.begin() + off, resume.begin() + off + n), more,
+            static_cast<uint8_t>(new_epoch | (more ? v2::Flags::MORE_FRAG : v2::Flags::FINAL)));
+    }
+    CHECK(got.size() == 1, "a resend of a delivered object must be suppressed");
+    Bytes orphan = resume;
+    orphan[2] = static_cast<uint8_t>(object_id + 40);
+    ConnectionAdaptiveTestAccess::deliverDataPayloadWithFlags(rx, orphan, false,
+                                                              static_cast<uint8_t>(new_epoch | v2::Flags::FINAL));
+    CHECK(got.size() == 1, "a resume without its prefix must never be delivered as content");
+    c.abortTxNow();
 }
 
 void test_message_geometry_regrid_recuts_fragments_at_new_capacity() {
@@ -7480,6 +7581,7 @@ int main() {
     test_single_frame_message_carries_turn_end_marker();
     test_ping_answered_only_when_taking_calls();
     test_midwindow_binary_geometry_change_regrids_block();
+    test_binary_geometry_regrid_resumes_from_confirmed_prefix();
     test_mcdpsk_message_fragments_burst();
     test_orphaned_data_turn_is_granted();
     test_receiver_declares_lost_peer_only_past_the_retry_budget();
