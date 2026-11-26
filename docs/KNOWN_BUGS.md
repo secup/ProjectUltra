@@ -81,8 +81,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   backstop that gate's anchor armed is disarmed on the decode thread). An exact (descriptor/marker)
   air end is left alone. Half-duplex: a peer whose turn ended sends nothing until it hears the ACK or
   its timeout. CTest StreamingMcDpsk (listener pair: 202368 samples held at the turn's end, 0 after).
-- (BUG-ACK-STAIRCASE-UNMEASURED-FADING, BUG-ACK-12MS-EDGE-ON-FADING, BUG-ACK-OUTLIVES-RESEND,
-  BUG-FOLLOW-SPELL-WINDOW-UNBOUNDED: FIXED 2026-11-26, see Fixed Bugs.) Still open from that analysis:
+- **BUG-ACK-12MS-EDGE-ON-FADING** (P3, open; fix REVERTED 2026-11-26): a TNC log join (~6000 ACKs
+  matched to the sender's armed monitor) read the 12 ms rung losing 15 % at a 10-12 dB OFDM reading on
+  ITU Good and 9 % at 12-14 (25 ms: 3-5 % at 6-10), so the fading edge went 8 -> 12 dB (e48fa196). The
+  GUI gate disagreed: main's 12 ms ACKs at a 12-14 dB reading lost 0/17, and the 12 dB edge ran ITU Good
+  15 dB 15 % slower (seeds 61-67, 7.3 Hz, 8 KB: 576 s vs 500 s; the same build with the 8 dB edge 496 s
+  vs main's 496 s). Back to 8 dB. Open question: why the TNC path loses 12 ms ACKs the GUI path keeps
+  (0 Hz vs 7.3 Hz dial, TNC timing) - measure on the GUI before moving any staircase edge.
+- (BUG-ACK-STAIRCASE-UNMEASURED-FADING, BUG-ACK-OUTLIVES-RESEND, BUG-FOLLOW-SPELL-WINDOW-UNBOUNDED:
+  FIXED 2026-11-26, see Fixed Bugs.) Still open from that analysis:
   the staircase picks by a 95 % edge, not by expected cost T_ack + P_loss(snr, fading) x C_round.
 - **BUG-TNC-BUFFER0-NOT-REPORTED** (open, 2026-11-25) — P3: TNC ITU Good 8 dB seed 506, short scenario:
   "a2b_250B: ALPHA never reported BUFFER 0 after delivery" at ~180 s, in the genie-CFO arm and both
@@ -3022,13 +3029,8 @@ Current blockers:
 - An MC-DPSK frame (no fading measurement) entered the staircase's fading median as 0.0 = AWGN; after
   an MC-DPSK spell the first OFDM group's ACK went out on the AWGN column (seed 506: 25 ms at 1.1 dB,
   fading 0.385, lost). Unmeasured = NaN, skipped (`tone_ack_staircase.hpp` `fading_idx_`). The
-  first fix alone (2026-11-26 morning) was rejected (15 dB 1.10x); it shipped with the three below.
+  first fix alone (2026-11-26 morning) was rejected (15 dB 1.10x); it shipped with the two below.
   CTest ToneAckStaircase (seed 506 case).
-
-### BUG-ACK-12MS-EDGE-ON-FADING (FIXED 2026-11-26) — was P3
-- The 12 ms rung's fading edge (+8 dB, a bench channel SNR) sat 4-6 dB optimistic on the receiver's
-  OFDM reading scale: 12 ms lost 15 % at a 10-12 dB reading (n 179). `kAck12msFadingEdgeDb` = 12
-  (`tone_burst_constants.hpp`), from the expected-cost break-even against 25 ms.
 
 ### BUG-ACK-OUTLIVES-RESEND (FIXED 2026-11-26) — was P2
 - The ACK cap of BUG-RTO-SHORTER-THAN-PEER-ACK assumed a fixed 1.4 s decode margin; a receiver
@@ -3042,7 +3044,8 @@ Current blockers:
 - The MC-DPSK spell's small-window period after a down-crossing (`followFallbackSmallWindowMs`) was
   unbounded (5-25 min); a link at MC-DPSK level ran one-frame rounds for all of it (seed 511: 52 B per
   DQPSK round). Bounded by `kFollowPatienceMs` (`connection.cpp` `applyWaveformCrossing`). Without it
-  the two ACK fixes ran 1.13x at 8 dB (t 3.0); with it 1.01x (t 0.2) vs 3f4b82e9, 15 dB 0.98x.
+  the two ACK fixes ran 1.13x at 8 dB (t 3.0); with it 1.01x (t 0.2) vs 3f4b82e9, 15 dB 0.98x
+  (those TNC arms included the 12 ms edge change, since reverted).
 
 ### TNC + short-message polish, 2026-11-23 (found by `tools/tnc_scenario.py`: two real `ultra_tnc` stations over OTASim, driven like a messaging client)
 

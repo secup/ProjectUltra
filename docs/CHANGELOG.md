@@ -10,10 +10,24 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — revert: the 12 ms fading ACK edge back to 8 dB (GUI gate)
+
+e48fa196 moved the 12 ms tone-ACK rung's fading edge from 8 to 12 dB on a TNC loss measurement. The
+GUI gate (two real `ultra_gui -sim` stations, ITU Good, 7.3 Hz dial, 8 KB, seeds 61-67, paired runs
+side by side) found it 15 % slower at 15 dB: 576 s vs main's 500 s. The same build with only the
+edge back at 8 dB: 496 s vs a main rerun's 496 s, seed by seed within 0-1 s on six of seven. Main's 12 ms
+ACKs at a 12-14 dB reading lost 0/17 on the GUI. At 8 dB the arms sit within main's own A/A spread
+(main twice: 806 / 758 s; seed 66 166 vs 90 s). The other three fixes of e48fa196 stay.
+`kAck12msFadingEdgeDb` = 8, ToneBurstAckPayload expectations restored; BUG-ACK-12MS-EDGE-ON-FADING
+back to open. All runs PASS (56 GUI sessions).
+
+---
+
 ## 2026-11-26 — fix: tone ACK length from the measured channel, capped by the time actually left
 
 Three tone-ACK changes and one follow change, shipped together because the staircase change alone
-regressed (below) and the spell-window cap is what brought it back to level.
+regressed (below) and the spell-window cap is what brought it back to level. (The 12 ms edge change
+was reverted the same day on the GUI gate, entry above.)
 
 **BUG-ACK-STAIRCASE-UNMEASURED-FADING (fixed).** The staircase's fading column was a median over the
 last 5 frames' fading indices, and an MC-DPSK frame (no fading measurement) entered it as 0.0 = AWGN:

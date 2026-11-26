@@ -198,15 +198,13 @@ inline constexpr float kAckEdgeMarginDb = 2.0f;
 // AWGN the 100 ms band is then empty (its edge + margin is the 50 ms rung's start).
 inline constexpr float kAck100msAwgnEdgeDb = -6.0f;
 inline constexpr float kAck100msFadingEdgeDb = 0.0f;
-// The 12 ms rung on fading, MEASURED IN SESSION 2026-11-26 on the scale the staircase actually reads
-// (the receiver's OFDM broadband reading, not the channel's SNR): ~6000 TNC-scenario ACKs, each
-// matched to the sender's armed monitor (tools: session-log join, KNOWN_BUGS
-// BUG-ACK-12MS-EDGE-ON-FADING). ITU Good, fading column: 12 ms lost 15 % at a 10-12 dB reading (n 179)
-// and 9 % at 12-14 (n 23), 0/13 at >= 14; 25 ms lost 3-5 % at 6-10 (n 830). The criterion is the
-// expected cost T_ack + P_loss x C_round: 12 ms saves 0.44 s of air over 25 ms and a lost ACK costs a
-// round (C ~ 10-16 s), so it pays only while it loses < ~3-4 % more than 25 ms - from a 14 dB reading
-// (edge 12 + the margin). The bench edge (+6 dB) sat ~4-6 dB optimistic on this scale.
-inline constexpr float kAck12msFadingEdgeDb = 12.0f;
+// The 12 ms rung on fading: 8 dB (+ the margin) on the receiver's OFDM broadband reading. A TNC
+// log join (~6000 ACKs, 2026-11-26) read 12 ms losing 15 % at a 10-12 dB reading and 9 % at 12-14,
+// and 12 dB was tried: the GUI gate disagreed - 12 ms at a 12-14 dB reading lost 0/17 there, and the
+// 12 dB edge ran ITU Good 15 dB 15 % slower (seeds 61-67: 576 s vs 500 s; the same build with 8 dB
+// matched main exactly, 496 s vs 496 s). The TNC measurement does not transfer to the GUI path;
+// see KNOWN_BUGS BUG-ACK-12MS-EDGE-ON-FADING (open, not changed).
+inline constexpr float kAck12msFadingEdgeDb = 8.0f;
 
 // The longest staircase rung no longer than max_symbol_ms (the shortest rung when none fits): the
 // receiver's ACK must end before the sender's retransmission (BUG-RTO-SHORTER-THAN-PEER-ACK).
