@@ -573,11 +573,18 @@ private:
                                      ultra::SNRSource snr_source, bool used_for_quality) {
             // The tone-ACK staircase's readings (same rule as the GUI, BUG-TNC-ACK-FIXED-25MS).
             tone_ack_staircase_.noteFrame(snr_db, snr_source, fading);
+            // fading is NaN when the decoder measured none: JSON null, not "nan".
+            char fading_json[16];
+            if (std::isfinite(fading)) {
+                std::snprintf(fading_json, sizeof(fading_json), "%.2f", fading);
+            } else {
+                std::snprintf(fading_json, sizeof(fading_json), "null");
+            }
             char fields[224];
             std::snprintf(fields, sizeof(fields),
                           "{\"bytes\":%zu,\"snr_db\":%.1f,\"snr_source\":\"%s\","
-                          "\"fading\":%.2f,\"quality_sample\":%s}",
-                          data.size(), snr_db, ultra::snrSourceToString(snr_source), fading,
+                          "\"fading\":%s,\"quality_sample\":%s}",
+                          data.size(), snr_db, ultra::snrSourceToString(snr_source), fading_json,
                           used_for_quality ? "true" : "false");
             ultra::diagnostics::DiagnosticsRecorder::instance().emitText("phy", "frame.rx",
                                                                          fields);
@@ -702,8 +709,15 @@ private:
                 }
                 const auto staircase = tone_ack_staircase_.choose();
                 // Capped so the ACK ends before the sender's resend (BUG-RTO-SHORTER-THAN-PEER-ACK).
+                // The modeled cap, then the same deadline from the audio time measured since the
+                // group's anchor: a receiver decoding behind live audio keys later than the model
+                // budgets (BUG-ACK-OUTLIVES-RESEND).
                 const uint32_t symbol_ms = ultra::waveform::tone_burst_ack::capSymbolMsToRung(
-                    staircase.symbol_ms, engine_.toneAckMaxSymbolMs());
+                    staircase.symbol_ms,
+                    std::min(engine_.toneAckMaxSymbolMs(),
+                             ultra::protocol::connection_policy::toneAckSymbolMsCapSinceAnchor(
+                                 modem_.msSinceLastGroupAnchor(), engine_.toneAckPeerRtoMs(),
+                                 ultra::waveform::tone_burst_ack::kTotalSymbols)));
                 LOG_INFO("AUDIO",
                          "ToneBurstAck staircase: symbol_ms=%u (picked %u) snr_used=%.1f "
                          "snr_current=%.1f src=%s fading_index=%.2f fading_present=%d",

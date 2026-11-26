@@ -194,6 +194,7 @@ public:
     }
     // Lock-free (the frontend's tone-ACK callback runs under the engine lock).
     uint32_t toneAckMaxSymbolMs() const { return connection_.toneAckMaxSymbolMs(); }
+    uint32_t toneAckPeerRtoMs() const { return connection_.toneAckPeerRtoMs(); }
 
     ConnectionStats getStats() const;
     void resetStats();

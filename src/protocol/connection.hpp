@@ -370,6 +370,12 @@ public:
     uint32_t toneAckMaxSymbolMs() const {
         return tone_ack_max_symbol_ms_.load(std::memory_order_acquire);
     }
+    // The resend deadline (ms after the sender's key-up) that cap was derived from, 0 when unknown:
+    // the frontend re-checks it against the audio time measured since the group's anchor
+    // (connection_policy::toneAckSymbolMsCapSinceAnchor, BUG-ACK-OUTLIVES-RESEND).
+    uint32_t toneAckPeerRtoMs() const {
+        return tone_ack_peer_rto_ms_.load(std::memory_order_acquire);
+    }
     // In the responder's re-ACK grace after the peer's DISCONNECT (still CONNECTED on the wire).
     bool peerClosedGraceActive() const {
         return close_.grace && state_ == ConnectionState::CONNECTED;
@@ -1851,6 +1857,7 @@ private:
     IncomingCallCallback on_incoming_call_;
     PeerClosedCallback on_peer_closed_;
     std::atomic<uint32_t> tone_ack_max_symbol_ms_{UINT32_MAX};
+    std::atomic<uint32_t> tone_ack_peer_rto_ms_{0};
     void publishToneAckAirtimeCap();
     DataReceivedCallback on_data_received_;
     FileSentCallback on_file_sent_;

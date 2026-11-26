@@ -10,7 +10,7 @@
 //   the median held the pre-drop SNR for three frames and 12 ms ACKs were lost at 0.3-6 dB; a lost
 //   ACK costs the sender's whole round, 8-17 s, a needlessly long one at most ~3 s of air).
 // - The column: fading when the frames measured fading (>= kFadingAwgnMax, ULTRA_ACK_FADE_EDGE), on
-//   the median of the last kRing frames' fading indices like the SNR: one frame's index is noisy at
+//   the median of the last kRing MEASURED fading indices (a frame without one, NaN, is skipped): one frame's index is noisy at
 //   low SNR (AWGN 3 dB: 0.00, then 0.35 on the next frame), and that single reading moved an AWGN
 //   link's ACK from 0.85 s to the 6.8 s fading floor, past the sender's retransmit timeout - every
 //   ACK of the message then met the resend (BUG-ACK-STAIRCASE-FADING-SPIKE).
@@ -64,10 +64,19 @@ public:
         if (!isSnrReading(source) || !std::isfinite(snr_db)) return;
         current_.store(snr_db, std::memory_order_relaxed);
         source_.store(source, std::memory_order_relaxed);
-        fading_.store(fading_index, std::memory_order_relaxed);
         const uint32_t slot = idx_.fetch_add(1, std::memory_order_relaxed) % kRing;
         ring_[slot].store(snr_db, std::memory_order_relaxed);
-        fading_ring_[slot].store(fading_index, std::memory_order_relaxed);
+        // NaN = the decoder measured no fading index (an MC-DPSK frame): no evidence either way,
+        // so it does not enter the column's median. Counted as 0 ("AWGN"), four MC-DPSK frames
+        // outvoted the first OFDM group after an up-crossing that measured 0.385 on ITU Good, and
+        // its ACK went out at 25 ms at 1.1 dB, under the 25 ms fading edge (+2 dB): lost, and the
+        // sender re-sent the delivered object at 16-FSK-F (TNC Good 8 dB seed 506,
+        // BUG-ACK-STAIRCASE-UNMEASURED-FADING).
+        if (std::isfinite(fading_index)) {
+            fading_.store(fading_index, std::memory_order_relaxed);
+            const uint32_t fslot = fading_idx_.fetch_add(1, std::memory_order_relaxed) % kRing;
+            fading_ring_[fslot].store(fading_index, std::memory_order_relaxed);
+        }
     }
 
     // The duration for an ACK sent now.
@@ -84,7 +93,7 @@ public:
             c.snr_used = std::min(v[kRing / 2], c.snr_current);
             // Over the frames seen so far (a new session's first frames are not diluted by
             // placeholder zeros): the median of n, the mean of two, the frame itself alone.
-            const size_t n = std::min<size_t>(idx_.load(std::memory_order_relaxed), kRing);
+            const size_t n = std::min<size_t>(fading_idx_.load(std::memory_order_relaxed), kRing);
             if (n >= 1) {
                 std::array<float, kRing> f;
                 for (size_t i = 0; i < n; ++i) f[i] = fading_ring_[i].load(std::memory_order_relaxed);
@@ -140,6 +149,7 @@ private:
     std::array<std::atomic<float>, kRing> ring_{{12.0f, 12.0f, 12.0f, 12.0f, 12.0f}};
     std::array<std::atomic<float>, kRing> fading_ring_{{0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
     std::atomic<uint32_t> idx_{0};
+    std::atomic<uint32_t> fading_idx_{0};  // measured fading indices only
 };
 
 }  // namespace gui

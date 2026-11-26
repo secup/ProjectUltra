@@ -215,6 +215,26 @@ inline constexpr bool deferredToneAckCannotEndBeforeResend(int64_t since_anchor_
            sender_rto_ms;
 }
 
+// The same arithmetic before the ACK is keyed: the longest symbol duration (ms) whose ACK of
+// `total_symbols` still ends before the sender's resend, from the audio time measured since the
+// group's anchor. The receiver's modeled cap (Connection::publishToneAckAirtimeCap) budgets a
+// fixed 1.4 s decode/turnaround margin after the burst; a receiver whose decode runs behind live
+// audio keys later than that (TNC ITU Good 8 dB seed 502: a 6.8 s ACK keyed 3.7 s after an 8-frame
+// burst's end met the 17.0 s resend 0.8 s before its end, BUG-ACK-OUTLIVES-RESEND). UINT32_MAX when
+// unknown: no anchor, no RTO, or an anchor older than the RTO (stale - not this group's).
+inline constexpr uint32_t toneAckSymbolMsCapSinceAnchor(int64_t since_anchor_ms,
+                                                        uint32_t sender_rto_ms,
+                                                        uint32_t total_symbols) {
+    if (since_anchor_ms < 0 || sender_rto_ms == 0 || total_symbols == 0 ||
+        static_cast<uint64_t>(since_anchor_ms) >= sender_rto_ms) {
+        return UINT32_MAX;
+    }
+    const uint64_t used = static_cast<uint64_t>(kDefaultTxLeadInMs) + kWideOFDMFullAnchorExtraMs +
+                          static_cast<uint64_t>(since_anchor_ms) + kBackstopReconfirmGuardMs;
+    const uint64_t slot = sender_rto_ms > used ? sender_rto_ms - used : 0;
+    return static_cast<uint32_t>(slot / total_symbols);
+}
+
 inline int configuredTxLeadInMs() {
     static const int value = [] {
         const char* e = std::getenv("ULTRA_TX_LEADIN_MS");

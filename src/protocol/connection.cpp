@@ -2641,9 +2641,9 @@ void Connection::publishToneAckAirtimeCap() {
     // DATA frames delivered since then (a resend that came frame by frame, never through a group -
     // TNC pingpong, ITU Good 8 dB seed 416: the cap stayed at an 8-frame burst and 6.8 s ACKs met the
     // 8.3 s one-frame resend), else one frame (the shortest deadline the sender can be on).
-    const size_t frames = tone_ack_group_sized_ && tone_ack_burst_frames_ > 0
-                              ? tone_ack_burst_frames_
-                              : std::max<size_t>(1, tone_ack_frames_since_ack_);
+    const bool group_sized = tone_ack_group_sized_ && tone_ack_burst_frames_ > 0;
+    const size_t frames = group_sized ? tone_ack_burst_frames_
+                                      : std::max<size_t>(1, tone_ack_frames_since_ack_);
     tone_ack_group_sized_ = false;
     tone_ack_frames_since_ack_ = 0;
     uint32_t burst_ms = 0;
@@ -2664,6 +2664,7 @@ void Connection::publishToneAckAirtimeCap() {
         burst_ms = frame_ms * static_cast<uint32_t>(frames);
     } else {
         tone_ack_max_symbol_ms_.store(UINT32_MAX, std::memory_order_release);
+        tone_ack_peer_rto_ms_.store(0, std::memory_order_release);
         return;
     }
     // The deadline the sender commits for such a round: the unified-burst physical timeout on wide
@@ -2676,6 +2677,14 @@ void Connection::publishToneAckAirtimeCap() {
     const uint64_t slot = rto > used ? rto - used : 0;
     const uint32_t cap = static_cast<uint32_t>(slot / tba::kTotalSymbols);
     tone_ack_max_symbol_ms_.store(cap, std::memory_order_release);
+    // Only a wideband OFDM group stamps its start on the sample clock (noteGroupStartAbs): for a
+    // frame-by-frame resend or a light-LTS singleton the frontend's anchor is an older group's, and
+    // on another waveform another waveform's, so no measured re-check there.
+    tone_ack_peer_rto_ms_.store(
+        negotiated_mode_ == WaveformMode::OFDM_CHIRP && group_sized
+            ? static_cast<uint32_t>(std::min<uint64_t>(rto, UINT32_MAX))
+            : 0u,
+        std::memory_order_release);
 }
 
 bool Connection::onToneBurstAck(
@@ -8333,11 +8342,19 @@ bool Connection::applyWaveformCrossing(uint8_t session_word, const char* reason)
                 connection_policy::mcDpskCompactFrameEnabled()
                     ? mcdpsk_frame::payloadCapacity(fb_rung.cw_count, fb_rung.code_rate)
                     : v2::getVariableFramePayloadCapacity(fb_rung.code_rate, fb_rung.cw_count);
-            follow_fallback_small_window_ms_ = connection_policy::followFallbackSmallWindowMs(
-                ofdm_delivered_bytes_per_s, fb_timing.data_ms, fb_timing.ack_ms,
-                connection_policy::mcDpskWindowSizeForTiming(fb_timing), payload,
-                2 * static_cast<uint32_t>(connection_policy::kDefaultTxLeadInMs +
-                                          connection_policy::kDefaultTxTailMs));
+            // Bounded by the operator's patience, like the down-crossing's own ski rental: the
+            // single-frame bet is on a fade that returns, and fades deep enough to take OFDM out
+            // last seconds, QSB troughs tens of seconds; a drop that has outlived a minute is a band
+            // that changed. Unbounded, T* ran 5-25 min (a 38 B/s OFDM spell: ~280 s), and a link
+            // that stayed at MC-DPSK level carried ~70 % of the full window's rate for all of it (TNC
+            // ITU Good 8 dB seed 511: 52 B per one-frame DQPSK round; BUG-FOLLOW-SPELL-WINDOW-UNBOUNDED).
+            follow_fallback_small_window_ms_ = std::min<uint64_t>(
+                connection_policy::followFallbackSmallWindowMs(
+                    ofdm_delivered_bytes_per_s, fb_timing.data_ms, fb_timing.ack_ms,
+                    connection_policy::mcDpskWindowSizeForTiming(fb_timing), payload,
+                    2 * static_cast<uint32_t>(connection_policy::kDefaultTxLeadInMs +
+                                              connection_policy::kDefaultTxTailMs)),
+                connection_policy::kFollowPatienceMs);
             follow_fallback_spell_ = follow_fallback_small_window_ms_ > 0;
             follow_fallback_age_ms_ = 0;
             ms_since_rx_burst_verdict_ = UINT64_MAX;  // no verdict in this spell yet

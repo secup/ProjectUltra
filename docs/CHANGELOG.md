@@ -10,6 +10,50 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — fix: tone ACK length from the measured channel, capped by the time actually left
+
+Three tone-ACK changes and one follow change, shipped together because the staircase change alone
+regressed (below) and the spell-window cap is what brought it back to level.
+
+**BUG-ACK-STAIRCASE-UNMEASURED-FADING (fixed).** The staircase's fading column was a median over the
+last 5 frames' fading indices, and an MC-DPSK frame (no fading measurement) entered it as 0.0 = AWGN:
+after an MC-DPSK spell the first OFDM group's ACK was sized on the AWGN column (TNC Good 8 dB seed 506:
+fading 0.385 at 1.1 dB, a 25 ms ACK, lost). Now an unmeasured frame (NaN, `modem_protocol_binding.hpp`)
+is skipped: the column is the median of the MEASURED indices (`tone_ack_staircase.hpp` `fading_idx_`).
+The TNC's frame.rx JSON writes `"fading":null` for it.
+
+**BUG-ACK-12MS-EDGE-ON-FADING (fixed).** The 12 ms rung's fading edge was +8 dB (bench, channel SNR).
+Measured on the scale the staircase reads (the receiver's OFDM broadband reading, ~6000 TNC ACKs
+matched to the sender's armed monitor): 12 ms lost 15 % at a 10-12 dB reading, 9 % at 12-14, 0/13 at
+>= 14; 25 ms lost 3-5 % at 6-10. 12 ms saves 0.44 s of air and a lost ACK costs a round (10-16 s), so it
+pays only from a 14 dB reading: `kAck12msFadingEdgeDb` = 12 (+ the 2 dB margin).
+
+**BUG-ACK-OUTLIVES-RESEND (fixed).** The receiver's ACK cap (BUG-RTO-SHORTER-THAN-PEER-ACK) assumed
+the ACK starts a fixed decode margin after the burst; a receiver decoding behind live audio keys it
+later. TNC Good 8 dB seed 502: decode 3.7 s behind, a 6.8 s ACK, the sender's resend at 17.0 s - the
+ACK straddled the armed monitor's end and was dropped. With the two fixes above (longer ACKs on fading)
+200 ms ACKs at 8 dB lost 11/24 vs 0/10. Now, before keying, the frontend re-caps the symbol length
+from the audio time since the group's start (`msSinceLastGroupAnchor`, which includes decode backlog)
+against the sender's committed RTO: `connection_policy::toneAckSymbolMsCapSinceAnchor`, the RTO
+published by `publishToneAckAirtimeCap` (`toneAckPeerRtoMs`, only for a group-sized wideband OFDM ACK:
+elsewhere the anchor is an older group's). GUI (`app.cpp`) and TNC (`ultra_tnc.cpp`).
+
+**BUG-FOLLOW-SPELL-WINDOW-UNBOUNDED (fixed).** After a down-crossing the MC-DPSK spell's small-window
+period (`followFallbackSmallWindowMs`, a ski-rental T*) had no upper bound: 5-25 min (a 38 B/s OFDM
+spell: ~280 s), during which a link sitting at MC-DPSK level ran one-frame rounds at ~70 % of the full
+window's rate (TNC Good 8 dB seed 511: 52 B per DQPSK round). Bounded by `kFollowPatienceMs`, the
+down-crossing's own patience.
+
+**Verification.** CTest ConnectionPolicy (cap: unknown inputs, stale anchor, agreement with
+`deferredToneAckCannotEndBeforeResend` over 0-14 s, seed 502's 10.4 s -> 100 ms), ToneAckStaircase
+(seed 506 repro; no-measurement stays AWGN), ToneBurstAck*, WaveformFollow, ConnectionAdaptive: pass.
+TNC short, Good, 0 Hz, seeds 501-524, three paired arms vs 3f4b82e9 (144 sessions, all PASS):
+staircase + cap without the spell bound 8 dB 1.13x (t 3.0, slower: more MC-DPSK time, 183 vs 83
+MC-DPSK ACKs), 15 dB 0.97x; **shipped set 8 dB 1.01x (t 0.2), 15 dB 0.98x (t -0.5)**, 200 ms ACK loss
+at 8 dB 4/22 -> 1/22, 100 ms 1/68 -> 3/84. Neutral on time, fewer lost long ACKs.
+
+---
+
 ## 2026-11-26 — fix: an MC-DPSK end-of-turn ACK no longer waits on the OFDM listener's air gate
 
 **BUG-LISTENER-GATE-HOLDS-MCDPSK-ACK.** In an MC-DPSK session every end-of-turn tone ACK was held up to

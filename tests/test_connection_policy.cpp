@@ -1154,6 +1154,7 @@ void test_mcdpsk_rate_controller() {
                   gate.observe(true, kRungIdxQpskR14) == kRungIdxNone &&
                   gate.observe(true, kRungIdxQpskR14) == kRungIdxQpskR14,
               "a loss or an MC-DPSK pick restarts the run");
+        gate.observe(true, kRungIdxQpskR12);  // completes that run
         gate.crossingFailed();
         gate.crossingFailed();
         gate.crossingFailed();
@@ -1912,6 +1913,24 @@ void test_anchored_backstop_reconfirm_fit() {
           "held to the 12 s provisional ceiling, a 3.4 s ACK lands on the resend (GUI seed 46)");
     CHECK(!deferredToneAckCannotEndBeforeResend(12500, 408, 15728),
           "a 0.4 s ACK still ends before it");
+    // BUG-ACK-OUTLIVES-RESEND: the cap before keying, from the same arithmetic. Every symbol duration
+    // it returns ends by the resend (the deferred check agrees), one ms more does not.
+    CHECK(toneAckSymbolMsCapSinceAnchor(-1, 16976, 34) == UINT32_MAX, "no anchor: unknown");
+    CHECK(toneAckSymbolMsCapSinceAnchor(5000, 0, 34) == UINT32_MAX, "no RTO: unknown");
+    CHECK(toneAckSymbolMsCapSinceAnchor(17000, 16976, 34) == UINT32_MAX,
+          "an anchor older than the RTO is another group's: unknown, not a 12 ms ACK");
+    for (const int64_t since : {0LL, 4000LL, 8700LL, 10000LL, 14000LL}) {
+        const uint32_t cap = toneAckSymbolMsCapSinceAnchor(since, 16976, 34);
+        CHECK(!deferredToneAckCannotEndBeforeResend(since, cap * 34, 16976),
+              "an ACK at the cap ends before the resend");
+        CHECK(deferredToneAckCannotEndBeforeResend(since, (cap + 1) * 34, 16976),
+              "one ms per symbol longer does not");
+    }
+    // Seed 502: RTO 16976, keyed ~10.4 s after the anchor (7.2 s burst + 3.7 s decode lag - lead):
+    // the 200 ms rung (6.8 s) no longer fits; 100 ms (3.4 s) does.
+    CHECK(toneAckSymbolMsCapSinceAnchor(10400, 16976, 34) < 200 &&
+              toneAckSymbolMsCapSinceAnchor(10400, 16976, 34) >= 100,
+          "a lagging receiver's ACK drops to the rung that still ends before the resend");
 }
 
 void test_deferred_tone_ack_policy() {

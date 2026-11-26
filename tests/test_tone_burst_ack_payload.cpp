@@ -613,8 +613,9 @@ void test_symbol_ms_staircase() {
 
     // FADING column — materially stricter: a deep null inside a short symbol is unrecoverable.
     EXPECT_EQ(symbolMsForSNR(25.0f, true), kSymbolMsHighSNR);
-    EXPECT_EQ(symbolMsForSNR(10.0f, true), kSymbolMsHighSNR);  // Moderate +8 + 2
-    EXPECT_EQ(symbolMsForSNR(9.9f,  true), kSymbolMsMidSNR);
+    EXPECT_EQ(symbolMsForSNR(14.0f, true), kSymbolMsHighSNR);  // session-measured 12 + 2 (2026-11-26)
+    EXPECT_EQ(symbolMsForSNR(13.9f, true), kSymbolMsMidSNR);   // 12 ms lost 9-15 % at 10-14 dB on Good
+    EXPECT_EQ(symbolMsForSNR(10.0f, true), kSymbolMsMidSNR);
     EXPECT_EQ(symbolMsForSNR(6.0f,  true), kSymbolMsMidSNR);   // Moderate +4 + 2
     EXPECT_EQ(symbolMsForSNR(5.9f,  true), kSymbolMsLowSNR);
     EXPECT_EQ(symbolMsForSNR(4.0f,  true), kSymbolMsLowSNR);   // Moderate +2 + 2

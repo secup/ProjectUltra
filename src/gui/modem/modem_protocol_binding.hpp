@@ -89,7 +89,7 @@ inline void wireModemToProtocol(ModemEngine& modem,
             }
             protocol.onRxData(data, physical_turn_complete);
             if (hooks.after_rx_data) {
-                hooks.after_rx_data(data, snr_db, fading, snr_source, use_quality);
+                hooks.after_rx_data(data, snr_db, measured_fading, snr_source, use_quality);
             }
         });
 
@@ -113,18 +113,21 @@ inline void wireModemToProtocol(ModemEngine& modem,
             // below); used_for_quality=false — protocol channel-quality/coherence stay
             // on their existing paths, this is frontend observation only.
             if (hooks.after_rx_data) {
+                // NaN when the decoder measured none: the ACK staircase skips it
+                // (BUG-ACK-STAIRCASE-UNMEASURED-FADING), as setChannelQuality does above.
+                const float measured_fading = modem.hasFadingIndex() ? modem.getFadingIndex() : NAN;
                 // stats.snr_db/snr_source are stats-queue-drained and stay stale on
                 // this path (measured: frozen at the handshake mcdpsk reading while
                 // fading updated live) — the decoder's lock-free last-broadband
                 // atomics are the honest per-logical-frame feed.
                 if (modem.hasLastOFDMBroadbandSNR()) {
                     hooks.after_rx_data(Bytes{}, modem.getLastOFDMBroadbandSNR(),
-                                        modem.getFadingIndex(),
+                                        measured_fading,
                                         SNRSource::OFDM_BROADBAND,
                                         /*used_for_quality=*/false);
                 } else {
                     const auto stats = modem.getStats();
-                    hooks.after_rx_data(Bytes{}, stats.snr_db, modem.getFadingIndex(),
+                    hooks.after_rx_data(Bytes{}, stats.snr_db, measured_fading,
                                         stats.snr_source, /*used_for_quality=*/false);
                 }
             }

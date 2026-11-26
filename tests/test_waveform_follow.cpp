@@ -1220,14 +1220,17 @@ void test_waveform_follow_fallback_spell_starts_with_single_frames() {
           "the delivering link crosses down");
     const uint64_t span = ConnectionAdaptiveTestAccess::fallbackSmallWindowMs(delivering);
     const size_t window = ConnectionAdaptiveTestAccess::arqWindow(delivering);
-    CHECK(span > 10 * 60000 && ConnectionAdaptiveTestAccess::txCap(delivering) == 1 && window > 1,
-          "its MC-DPSK spell sends one-frame bursts for minutes; the receive window stays whole");
+    // The break-even ran to tens of minutes here (8PSK R2/3); the operator's patience bounds it
+    // (BUG-FOLLOW-SPELL-WINDOW-UNBOUNDED): a drop that outlived a minute is not a fade.
+    CHECK(span == connection_policy::kFollowPatienceMs &&
+              ConnectionAdaptiveTestAccess::txCap(delivering) == 1 && window > 1,
+          "its MC-DPSK spell sends one-frame bursts for the patience; the receive window stays whole");
     ConnectionAdaptiveTestAccess::tickFollow(delivering, static_cast<uint32_t>(span - 1));
     CHECK(ConnectionAdaptiveTestAccess::txCap(delivering) == 1, "still single frames");
     ConnectionAdaptiveTestAccess::tickFollow(delivering, 2);
     CHECK(ConnectionAdaptiveTestAccess::txCap(delivering) == 0 &&
               ConnectionAdaptiveTestAccess::arqWindow(delivering) == window,
-          "the drop outlived the break-even: the full window");
+          "the drop outlived the patience: the full window");
 
     ConnectionAdaptiveTestAccess::makeConnectedOFDM(fresh, CodeRate::R2_3, 20.0f, 0.6f,
                                                     Modulation::QAM8);

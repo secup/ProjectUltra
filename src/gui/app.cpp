@@ -689,8 +689,15 @@ App::App(const Options& opts) : options_(opts), simulation_enabled_(opts.enable_
             const auto staircase = tone_ack_staircase_.choose();
             // Capped so the ACK ends before the sender's resend (BUG-RTO-SHORTER-THAN-PEER-ACK);
             // lock-free read, as this callback runs under the protocol mutex.
+            // The modeled cap, then the same deadline from the audio time measured since the group's
+            // anchor: a receiver decoding behind live audio keys later than the model budgets
+            // (BUG-ACK-OUTLIVES-RESEND).
             const uint32_t symbol_ms = ultra::waveform::tone_burst_ack::capSymbolMsToRung(
-                staircase.symbol_ms, protocol_.toneAckMaxSymbolMs());
+                staircase.symbol_ms,
+                std::min(protocol_.toneAckMaxSymbolMs(),
+                         protocol::connection_policy::toneAckSymbolMsCapSinceAnchor(
+                             modem_.msSinceLastGroupAnchor(), protocol_.toneAckPeerRtoMs(),
+                             ultra::waveform::tone_burst_ack::kTotalSymbols)));
             // Staircase decision trace (BUG-ACK-STAIRCASE-FADE-BIN validation): the
             // inputs behind every ACK duration — greppable on sim and rig.
             LOG_MODEM(INFO,

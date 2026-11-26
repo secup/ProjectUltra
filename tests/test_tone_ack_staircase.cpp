@@ -3,6 +3,7 @@
 // (one rule for both frontends), BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (an MC-DPSK reading may lengthen).
 #include "gui/modem/tone_ack_staircase.hpp"
 
+#include <cmath>
 #include <iostream>
 
 using ultra::SNRSource;
@@ -99,6 +100,26 @@ int main() {
         ToneAckStaircase s;
         for (int i = 0; i < 5; ++i) s.noteFrame(20.0f, SNRSource::SYNC_QUALITY, 0.5f);
         CHECK(s.choose().symbol_ms == 25, "an untrusted source: the baseline");
+    }
+    {
+        // BUG-ACK-STAIRCASE-UNMEASURED-FADING (TNC ITU Good 8 dB seed 506): an MC-DPSK spell, whose
+        // decoder measures no fading index (NaN), then the first OFDM group after the up-crossing
+        // reads 1.1 dB with a fading index of 0.385. Counted as 0, the four MC-DPSK frames made the
+        // median "AWGN" and the ACK went out at 25 ms, under its 2 dB fading edge; it was lost.
+        ToneAckStaircase s;
+        for (int i = 0; i < 4; ++i) s.noteFrame(-0.5f, SNRSource::MCDPSK_IN_BAND, NAN);
+        s.noteFrame(1.1f, SNRSource::OFDM_BROADBAND, 0.385f);
+        const auto c = s.choose();
+        CHECK(c.fading_present, "unmeasured MC-DPSK frames do not outvote a measured fading index");
+        CHECK(c.symbol_ms == 200 || c.symbol_ms == 100,
+              "1.1 dB (or lower, the median) on fading: a long ACK, not 25 ms");
+    }
+    {
+        // No fading measurement at all on an OFDM reading: the AWGN column, as before.
+        ToneAckStaircase s;
+        for (int i = 0; i < 5; ++i) s.noteFrame(3.0f, SNRSource::OFDM_BROADBAND, NAN);
+        const auto c = s.choose();
+        CHECK(!c.fading_present && c.symbol_ms == 12, "no fading measurement: the AWGN column");
     }
     if (failures) {
         std::cout << "ToneAckStaircase: " << failures << " failure(s)\n";
