@@ -109,6 +109,14 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   short: 16-FSK-F for 400 s, five failed probes, 323/1223 B in 240 s. Fix: while this end has an
   up-crossing commanded (`rx_command_.upCommanded()`), an unattributed loss is no rung evidence.
   CTest WaveformFollow `test_ofdm_probe_does_not_punish_mcdpsk_rung` (fails without the fix).
+- **BUG-FOLLOW-UNBOUNDED-RESETS-RUN** (P3, open; fix A/B-NEUTRAL 2026-11-26, not shipped): the up-crossing
+  gate's run (1, doubling to 8 after failed crossings) restarts on any clean burst whose pick is not a
+  physically bounded OFDM rung, including clean MC-DPSK bursts whose data-aided reading has no physical
+  cross-check (TNC Good 8 dB: -1.2..+0.3 dB readings, ~5 dB under the channel on a peak-limited TX):
+  18 broken runs of 2-8 in 48 sessions. Fix tried: such a burst is neutral, a loss still restarts
+  (`UpCrossingGate::observe(clean, rung, evidence)`). TNC short, Good, seeds 525-548 vs e48fa196:
+  48/48 both, 8 dB 0.97x (t -0.5), 15 dB 1.04x (t 1.0); OFDM commands 43 -> 38. No gain: patch in
+  `git stash` ("up-gate neutral evidence").
 - **BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING** (P1, open 2026-11-25): an up-crossing's first OFDM burst gets
   no ACK and the sender crosses back (TNC sweep 16, ITU Good 8 dB seed 415 bulk_then_short: four up/down
   cycles). BRAVO's OFDM listener decoded the descriptor (R1/4 -> R1/2, `current_anchor=LIGHT`), reset to
