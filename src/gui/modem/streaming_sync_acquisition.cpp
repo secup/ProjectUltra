@@ -437,6 +437,12 @@ void StreamingDecoder::searchForSync() {
     // sender RTO-starves at a pinned rung). ~12.5 s covers descriptor + anchor
     // + an 8-frame group; the sender's RTO fires ~11 s AFTER its burst ends
     // (~anchor+21 s), so the backstop ack beats it comfortably.
+    if (peer_turn_completed_elsewhere_.exchange(false, std::memory_order_acquire)) {
+        // The turn this anchor began completed on the other decoder (notePeerTurnCompletedElsewhere):
+        // a re-confirm ACK for it would be false, as in clearProvisionalBurstAirGate.
+        anchored_burst_backstop_armed_ = false;
+        anchored_burst_payload_seen_ = false;
+    }
     if (anchored_burst_backstop_armed_) {
         size_t fed_now;
         {

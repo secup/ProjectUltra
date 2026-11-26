@@ -898,6 +898,86 @@ bool runConnectedOFDMHalfOpenConnectFallback() {
 
 }  // namespace
 
+// BUG-LISTENER-GATE-HOLDS-MCDPSK-ACK: in an MC-DPSK session the dual-listen OFDM decoder locks the
+// MC-DPSK burst's dual chirp and arms its provisional air gate (the longest OFDM turn after an
+// anchor). Only the OFDM decoder ever cleared it, so every MC-DPSK end-of-turn ACK waited out the
+// gate's budget (TNC ITU Good 8 dB seed 511: ~6 s of a 14.8 s one-frame round). The MC-DPSK decoder's
+// completed turn now clears it (ModemEngine -> notePeerTurnCompletedElsewhere).
+bool runListenerGateClearedByCompletedTurn(bool clear_on_turn_end = true) {
+    const uint32_t alpha = v2::hashCallsign("ALPHA");
+    const uint32_t bravo = v2::hashCallsign("BRAVO");
+    StreamingEncoder encoder;
+    encoder.setMode(protocol::WaveformMode::MC_DPSK);
+    encoder.setMCDPSKConfig(mc_dpsk_presets::robust());
+    encoder.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+    encoder.setFixedFrameCodewords(3);
+    encoder.setMcDpskCompactFrames(true);
+    std::vector<Bytes> frames;
+    for (uint16_t i = 0; i < 3; ++i) {
+        Bytes payload(52);
+        for (size_t j = 0; j < payload.size(); ++j) payload[j] = static_cast<uint8_t>(0x11 * (i + 1) + j);
+        auto frame = v2::DataFrame::makeData("ALPHA", "BRAVO", static_cast<uint16_t>(300 + i),
+                                             payload, CodeRate::R1_4);
+        frame.flags = static_cast<uint8_t>(
+            v2::Flags::VERSION_V2 | (i == 2 ? v2::Flags::PHYSICAL_BURST_END : v2::Flags::MORE_FRAG));
+        frames.push_back(frame.serialize());
+    }
+    const auto audio = withSilence(encoder.encodeBurstLight(frames));
+
+    // The session's MC-DPSK decoder (primary) ...
+    StreamingDecoder mc;
+    mc.setLogPrefix("MC-PRIMARY");
+    mc.setMode(protocol::WaveformMode::MC_DPSK, true);
+    mc.setMCDPSKConfig(mc_dpsk_presets::robust());
+    mc.setDataMode(Modulation::DQPSK, CodeRate::R1_4);
+    mc.setFixedFrameCodewords(3);
+    mc.setMcDpskSessionAddresses(bravo, alpha);
+    // ... and the OFDM listener, as ModemEngine::configureListener sets it up.
+    ModemConfig cfg;
+    cfg.fft_size = 1024;
+    cfg.num_carriers = 59;
+    cfg.sample_rate = 48000;
+    cfg.center_freq = 1500.0f;
+    cfg.modulation = Modulation::QPSK;
+    cfg.code_rate = CodeRate::R1_4;
+    cfg.use_pilots = true;
+    StreamingDecoder listener;
+    listener.setLogPrefix("OFDM-LISTENER");
+    listener.setIdleNoiseLearning(false);
+    listener.setBurstTransportRxEnabled(true);
+    listener.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP, cfg, Modulation::QPSK,
+                                  CodeRate::R1_4);
+    listener.expectFullOFDMAnchorOnce();
+    // The engine's wiring (modem_dual_listen.cpp): the chirp hint, and the completed turn.
+    mc.setChirpLockCallback([&](size_t ago) { listener.noteExternalChirpAnchor(ago); });
+    uint64_t held_at_turn_end = 0;
+    bool turn_end = false;
+    mc.setFrameCallback([&](const DecodeResult& r) {
+        if (!(r.success && r.physical_turn_complete)) return;
+        turn_end = true;
+        held_at_turn_end = listener.burstAirSamplesRemaining();
+        if (clear_on_turn_end) listener.notePeerTurnCompletedElsewhere();
+    });
+    constexpr size_t kChunk = 4800;
+    uint64_t after = 0;
+    for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
+        const size_t len = std::min(kChunk, audio.size() - pos);
+        mc.feedAudio(audio.data() + pos, len);
+        listener.feedAudio(audio.data() + pos, len);
+        mc.processBuffer();
+        listener.processBuffer();
+        if (turn_end) {
+            after = listener.burstAirSamplesRemaining();  // the ACK's decision, right after
+            break;
+        }
+    }
+    const bool ok = turn_end && held_at_turn_end > 0 && (clear_on_turn_end ? after == 0 : after > 0);
+    std::cout << (ok ? "" : "FAIL: ") << "OFDM listener gate on an MC-DPSK turn"
+              << (clear_on_turn_end ? "" : " (not cleared)") << ": turn_end=" << turn_end << ", "
+              << held_at_turn_end << " samples held at the turn's end, " << after << " after\n";
+    return ok;
+}
+
 int main() {
     setLogLevel(std::getenv("TEST_LOG") ? LogLevel::INFO : LogLevel::ERROR);
 
@@ -935,6 +1015,8 @@ int main() {
     // (The DBPSK-burst-at-a-DQPSK-receiver case went with DBPSK as a data rung, 2026-11-23: the
     // middle rung is 16-FSK-F, whose frames are compact-only - covered below.)
     if (!runLostFrameReport()) return 1;
+    if (!runListenerGateClearedByCompletedTurn(false)) return 1;  // the defect, reproduced
+    if (!runListenerGateClearedByCompletedTurn(true)) return 1;
     if (!runCompactBurst("compact burst", Modulation::DBPSK, false)) return 1;
     if (!runCompactBurst("compact burst, middle frame lost", Modulation::DBPSK, true)) return 1;
     if (!runCompactBurst("compact DQPSK burst at a DBPSK receiver", Modulation::DQPSK, false)) return 1;

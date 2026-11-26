@@ -736,6 +736,21 @@ public:
         }
         return fed > anchor ? static_cast<int64_t>((fed - anchor) / 48) : 0;
     }
+    // The peer's physical turn ended on ANOTHER decoder: dual-listen's decoder on the other waveform
+    // delivered the turn's last frame. A provisional air gate (armed on a chirp anchor, a ceiling of
+    // the longest OFDM turn) then guards nothing: a half-duplex peer's turn is over, and it sends no
+    // more until it hears the ACK or its timeout. Kept, the OFDM listener's gate - armed on the
+    // MC-DPSK burst's own dual chirp - held every MC-DPSK end-of-turn ACK up to its 5.5 s budget
+    // (TNC ITU Good 8 dB seed 511: one-frame DQPSK rounds of 14.8 s, ~6 s of which were this hold;
+    // BUG-LISTENER-GATE-HOLDS-MCDPSK-ACK). An exact (descriptor/marker) end is left alone. Any thread.
+    void notePeerTurnCompletedElsewhere() {
+        if (burst_air_end_provisional_.exchange(false, std::memory_order_relaxed)) {
+            provisional_burst_anchor_abs_.store(0, std::memory_order_relaxed);
+            provisional_burst_anchor_full_chirp_.store(false, std::memory_order_relaxed);
+            burst_air_end_abs_.store(0, std::memory_order_relaxed);
+            peer_turn_completed_elsewhere_.store(true, std::memory_order_release);
+        }
+    }
     uint64_t burstAirSamplesRemaining() {
         const uint64_t end = burst_air_end_abs_.load(std::memory_order_relaxed);
         if (end == 0) return 0;
@@ -1856,6 +1871,9 @@ private:
     std::atomic<bool> provisional_burst_anchor_full_chirp_{false};
     void armProvisionalBurstAirGate(uint64_t anchor_abs, bool proven_full_chirp);
     void clearProvisionalBurstAirGate();
+    // Set by notePeerTurnCompletedElsewhere (any thread) when it dropped a live provisional gate;
+    // the decode thread disarms the backstop that gate's anchor armed (its flags are thread-owned).
+    std::atomic<bool> peer_turn_completed_elsewhere_{false};
     // F221: absolute sample where the group's DATA frames begin (just past the
     // consumed BURST_HEADER). The air-end derives from this + N x the group's
     // ACTUAL per-frame sample count (burst_min_block_) — the first cut used the

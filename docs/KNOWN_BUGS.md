@@ -67,15 +67,48 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   was delivered short. ~1.2 % per fragment of random binary (~19 % of an 18-fragment block); ASCII never
   hits it. Fix: inside an object's reassembly (no file receiving) a fragment is content. The same CTest
   fails with the guard disabled.
+- **BUG-LISTENER-GATE-HOLDS-MCDPSK-ACK** (P1, FIXED 2026-11-26, see CHANGELOG): in an MC-DPSK
+  session every end-of-turn tone ACK was held up to its ~5.5 s deferral budget ("Tone ACK deferred up to
+  5475 ms (group_complete=1 recent_rx=1 cca_busy=0 air_samples=238810)"). The dual-listen chirp hint
+  hands each MC-DPSK burst's dual-chirp lock to the OFDM listener (`noteExternalChirpAnchor`), whose
+  accepted full anchor arms a PROVISIONAL air gate (`armProvisionalBurstAirGate`: the longest OFDM turn
+  after an anchor); only an OFDM decode clears it, and the engine's air-end is the max over both
+  decoders. TNC ITU Good 8 dB seed 511: one-frame DQPSK rounds of 14.8 s (4.0 s burst, 2.2 s decode,
+  ~5.5 s hold, 1.7 s ACK), 52 B per round; the 900 B block missed its 240 s step deadline (the second
+  "323/1223 B" mechanism, after BUG-OBJECT-REGRID-RESTARTS). Fix: a frame that completes the peer's
+  physical turn on one decoder drops the other decoder's provisional gate
+  (`StreamingDecoder::notePeerTurnCompletedElsewhere`, called from `modem_dual_listen.cpp`; the
+  backstop that gate's anchor armed is disarmed on the decode thread). An exact (descriptor/marker)
+  air end is left alone. Half-duplex: a peer whose turn ended sends nothing until it hears the ACK or
+  its timeout. CTest StreamingMcDpsk (listener pair: 202368 samples held at the turn's end, 0 after).
+- **BUG-ACK-STAIRCASE-UNMEASURED-FADING** (P3, open; the obvious fix A/B-REJECTED 2026-11-26): the tone-ACK
+  staircase takes the fading column from the median of the last 5 frames' fading indices, and a frame
+  whose decoder measured none (every MC-DPSK frame) enters it as 0.0 = AWGN (the frontend hook gets the
+  raw `getFadingIndex()`; the protocol path one call earlier passes NaN). After an MC-DPSK spell the
+  first OFDM group's ACK is sized on the AWGN column: TNC ITU Good 8 dB seed 506, the up-crossing group
+  measured fading 0.385 at 1.1 dB, the ACK went out at 25 ms (its fading 95 % edge is +2 dB; the
+  fading column picks 100 ms) and was lost. REJECTED fix: NaN for unmeasured + measured-only median
+  (patch in `git stash`, "stair rejected", with a ToneAckStaircase case that fails on the old header).
+  TNC short, Good, 0 Hz, seeds 501-524 vs 2f5d8174: 8 dB 22/24 vs 24/24 (time 0.98x), 15 dB 24/24
+  both but 1.10x slower (t 2.2); OFDM ACKs at 100 ms 82 -> 115, at 25 ms 117 -> 99; expired ACK
+  windows 63 -> 76 (no fewer losses). The fading column's edges (95 % decode, worst class, +2 dB) cost
+  more airtime than the losses they prevent on these sessions: the staircase's criterion, not its
+  input, is the thing to fix - pick by expected cost T_ack + P_loss(snr, fading) x C_round with the
+  measured loss curves instead of a 95 % edge.
 - **BUG-TNC-BUFFER0-NOT-REPORTED** (open, 2026-11-25) — P3: TNC ITU Good 8 dB seed 506, short scenario:
   "a2b_250B: ALPHA never reported BUFFER 0 after delivery" at ~180 s, in the genie-CFO arm and both
   candidate arms alike (the old build passed it in 383 s). MECHANISM (2026-11-26, fix4 log): BRAVO
   delivered the 250 B in one OFDM burst at 114.7 s, ALPHA never heard that burst's ACK, crossed to
   MC-DPSK 16-FSK-F at 128 s and re-sent the WHOLE object (BUFFER 250 -> 96 by 172 s at ~4 B/s);
   BRAVO drops it as a duplicate by id, but the sender pays the airtime and the step deadline expires.
-  OBJECT_RESUME cannot help (no ACK = no confirmed prefix). Fix direction: the receiver tells the
-  sender "object id N already delivered" on the first duplicate fragment (an ACK-side signal), and the
-  sender retires the object. The resume arm passed seed 506 only on a different trajectory. The same A/B's other
+  OBJECT_RESUME cannot help (no ACK = no confirmed prefix). Again 2026-11-26, seed 515 (gate A/B): the 900 B block
+  delivered in one OFDM burst at 264.9 s, its ACK lost, resumed from byte 572 and 331 B re-sent at
+  16-FSK-F past the step deadline - now the main remaining TNC short-scenario failure at 8 dB
+  (2 of ~150 sessions). The lost ACK was a 25 ms ACK at
+  1.1 dB on fading (BUG-ACK-STAIRCASE-UNMEASURED-FADING, above; its direct fix was rejected). Not done: a receiver "object id N already delivered"
+  signal would also save the re-send, but the tone ACK has no spare bit and the event is rare (1 in
+  192 A/B sessions); the sender could then drop the object's unsent fragments except its last (no
+  ARQ sequence yet, so ARQ-safe; the receiver drops the truncated copy as a duplicate by id). The same A/B's other
   failure: 11 sessions stalled at exactly 323/1223 B of a2b_900B (old build 5, candidates 6, genie 0;
   seeds 504/508/511/521/522/524) - the stall seen in sweep 21 (BUG-HOP-DESCRIPTOR-DROPS-WARM-TIMING).
 - **BUG-OFDM-PROBE-PUNISHES-MCDPSK-RUNG** (P1, FIXED 2026-11-25; throughput-neutral, see CHANGELOG): every failed
@@ -118,7 +151,7 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   fix costs ~1.2 s per crossing: not proven, reverted. Both arms crossed up at 72 s while the profile
   still read 2 dB - the crossing is decided on fading-crest readings, which is the 0-5 dB tuning item.
   More occurrences (TNC sweep 21, 2026-11-25): ITU Good 8 dB seed 425 short (11 crossings, 323/1223 B in
-  240 s), AWGN 3 dB seed 426 bulk_then_short (4096/6000 B in 600 s). Sweeps 17-20: 0 of 280.
+  240 s) [the 323/1223 B stall was BUG-OBJECT-REGRID-RESTARTS, fixed 2026-11-26], AWGN 3 dB seed 426 bulk_then_short (4096/6000 B in 600 s). Sweeps 17-20: 0 of 280.
 - **BUG-FIRST-OFDM-FRAME-LTS-CFO** (P1, intermittent, pre-existing): on the first OFDM frame after the
   MC-DPSK handshake the LTS residual "corrects" the handshake's accurate dual-chirp CFO by ~1.2-1.3 Hz
   (AWGN 10 dB, true 7.3 Hz: 7.30 -> 8.64 in one run, 7.30 -> 6.11 in another, both logged
@@ -127,6 +160,9 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   `cancel` scenario). Not explained yet: a 2-symbol LTS should resolve far better than 1 Hz at 10 dB;
   suspect the structure anchor's timing (ramp_late) biasing the residual. Repro: tnc_scenario
   `cancel`, AWGN 10, seed 42 (intermittent).
+  NOT REPRODUCED 2026-11-26 on 2f5d8174 (after the ff29f397 session-CFO fixes, incl. the stale
+  handshake seed): `cancel` AWGN 10 seeds 42-47, 6/6 PASS, all 12 stations certified exactly +-7.30 Hz
+  on their first OFDM frame (structure-sync readings of up to 1.5 Hz did not reach it). Reopen on recurrence.
 - **Sticky narrowband idle receiver** (P3): a genuine narrowband PING that never becomes a session leaves
   an idle receiver on the narrowband chirp until its next reset (false locks are gated since
   BUG-FALSE-NARROWBAND-LOCK, real ones are not undone).

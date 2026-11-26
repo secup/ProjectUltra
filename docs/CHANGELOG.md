@@ -10,6 +10,38 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — fix: an MC-DPSK end-of-turn ACK no longer waits on the OFDM listener's air gate
+
+**BUG-LISTENER-GATE-HOLDS-MCDPSK-ACK.** In an MC-DPSK session every end-of-turn tone ACK was held up to
+its ~5.5 s deferral budget. The dual-listen chirp hint hands each MC-DPSK burst's dual-chirp lock to
+the OFDM listener (`noteExternalChirpAnchor`); its accepted full anchor arms a provisional air gate
+(the longest OFDM turn after an anchor) that only an OFDM decode clears, and the ACK's air-end is the
+max over both decoders. TNC ITU Good 8 dB seed 511: one-frame DQPSK rounds of 14.8 s, ~5.5 s of them
+this hold; the 900 B block missed its 240 s step (the second "323/1223 B" mechanism). Fix: a frame
+that completes the peer's physical turn on one decoder drops the other decoder's provisional gate
+(`StreamingDecoder::notePeerTurnCompletedElsewhere`, from `modem_dual_listen.cpp`; the backstop the
+gate's anchor armed is disarmed on the decode thread). An exact (descriptor/marker) air end is left
+alone. Half-duplex: a peer whose turn ended sends nothing more until it hears the ACK or times out.
+GUI and TNC alike (engine path).
+
+**Verification.** CTest StreamingMcDpsk: an MC-DPSK decoder + OFDM listener pair wired as the engine
+does; at the turn's end the listener held 202368 samples (4.2 s), 0 after the clear (the unfixed arm
+of the same test reproduces the hold); CTest 130/130. TNC short, Good, 0 Hz, seeds 501-524: deferred
+ACKs 131 -> 17 (mean budget 5.3 -> 3.6 s), one-frame MC-DPSK rounds 14.8 -> 9.7 s (seed 515);
+PASS 47/48 vs 48/48 (2f5d8174) and 45/48 (ff29f397); time vs ff29f397 1.03x at 8 dB (t 0.7), 1.01x at
+15 dB (t 0.2): neutral. The one failure (seed 515) is BUG-TNC-BUFFER0-NOT-REPORTED (a lost ACK of a
+delivered object's OFDM burst), untouched by this fix. TNC sweep 28 at the 7.3 Hz dial (seeds 455-456, 7 scenarios x AWGN 3/10,
+Good 8/15, Moderate 16): 70/70 PASS (sweep 27 on the same seeds: 70/70).
+
+**Rejected (A/B, not shipped): unmeasured fading kept out of the ACK staircase's median**
+(BUG-ACK-STAIRCASE-UNMEASURED-FADING, KNOWN_BUGS): 46/48 vs 48/48, 15 dB 1.10x vs 2f5d8174 (1.02x vs
+ff29f397), more 3.4 s ACKs and no fewer expired ACK windows. Patch in `git stash` ("stair rejected").
+**Not reproduced:** BUG-FIRST-OFDM-FRAME-LTS-CFO (6/6 seeds of its repro certify exactly 7.30 Hz).
+**Note on the A/B baseline:** the 2f5d8174 arm's 15 dB run was fast against both later candidates
+(1.09-1.10x) but not against ff29f397 (0.93x): treat single-arm 15 dB ratios of +-10 % as noise here.
+
+---
+
 ## 2026-11-26 — fix: a waveform crossing no longer restarts an in-flight message from byte 0
 
 **BUG-OBJECT-REGRID-RESTARTS.** Every waveform crossing or geometry change re-fragmented an in-flight

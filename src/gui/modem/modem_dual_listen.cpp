@@ -47,6 +47,14 @@ void ModemEngine::wireDecoderCoreCallbacks(StreamingDecoder* decoder) {
                 noteListenerDelivery(decoder);
             }
         }
+        if (delivered && result.physical_turn_complete) {
+            // The peer's turn is over: the other decoder's provisional air gate guards nothing
+            // (BUG-LISTENER-GATE-HOLDS-MCDPSK-ACK) - drop it before this frame's ACK is decided.
+            for (int i = 0; i < 2; ++i) {
+                StreamingDecoder* other = streaming_decoder_.slot(i);
+                if (other != nullptr && other != decoder) other->notePeerTurnCompletedElsewhere();
+            }
+        }
         // Update SNR/sync stats before delivering frame so downstream callbacks
         // (ProtocolEngine via raw_data_callback_) read fresh channel estimates.
         updateStats([&](LoopbackStats& s) {
