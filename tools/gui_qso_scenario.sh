@@ -165,7 +165,9 @@ estimate_exit_after() {
       -v disconnect_after="$DISCONNECT_AFTER" \
       -v code_rate="$code_rate" \
       -v pilot_spacing="$pilot_spacing" \
-      -v bits_per_carrier="$bits_per_carrier" '
+      -v bits_per_carrier="$bits_per_carrier" \
+      -v snr_db="$SNR_DB" \
+      -v channel="$CHANNEL" '
     BEGIN {
       carriers = 59
       pilots = int((carriers + pilot_spacing - 1) / pilot_spacing)
@@ -191,6 +193,14 @@ estimate_exit_after() {
       } else {
         expected_payload_bps = raw_info_bps * 0.15
         if (expected_payload_bps < 250.0) expected_payload_bps = 250.0
+        # An auto session near or below the class OFDM entry floor (AWGN 2.5, Good/Poor 5,
+        # Moderate 14 dB) runs MC-DPSK or crosses between the two: GUI-measured ~25-90 bps (ITU
+        # Good 0-3 dB, 2 KB in 245-664 s). The 250 bps floor false-FAILed every such run at the
+        # 218 s ceiling (2026-11-26, Good 3 dB, 2 KB: 8 of 10). Three dB of headroom covers the
+        # crossing zone; the PASS poll still ends a fast run at once.
+        ofdm_floor = (channel == "awgn" ? 2.5 : (channel == "moderate" ? 14.0 : 5.0))
+        if (snr_db != "" && snr_db + 0 < ofdm_floor + 3.0 && expected_payload_bps > 25.0)
+          expected_payload_bps = 25.0
         payload = (file_bytes * 8.0) / expected_payload_bps
       }
       margin = 20.0

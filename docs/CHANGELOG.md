@@ -10,6 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — gate: the GUI scenario ceiling budgets for MC-DPSK near the OFDM floor
+
+`tools/gui_qso_scenario.sh` sized its default `--exit-after` from the expected rung (16QAM R1/4) with a
+250 bps floor, whatever `--snr-db`: at ITU Good 3 dB a 2 KB run got 218 s, and 8 of 10 runs (main and
+candidate alike) were FAIL `process_exit_before_pass` while still transferring - an auto session
+there runs MC-DPSK or crosses between waveforms at ~25-90 bps (2 KB in 245-664 s). Below the class's
+OFDM entry floor + 3 dB (AWGN 5.5, Good/Poor 8, Moderate 17) the budget now assumes 25 bps (2 KB:
+1297 s); above it nothing changes (218 s). A PASS still exits on the success poll.
+
+---
+
 ## 2026-11-26 — revert: the 12 ms fading ACK edge back to 8 dB (GUI gate)
 
 e48fa196 moved the 12 ms tone-ACK rung's fading edge from 8 to 12 dB on a TNC loss measurement. The
