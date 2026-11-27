@@ -363,6 +363,12 @@ DBPSK)"). Direction: configure the MC-DPSK decoder at the constellation this rec
 size the first slice at it, waiting the slowest-rung length only when that decode fails (the second
 stage keeps a sender's rung fallback decodable). A two-stage slice alone does nothing while the
 decoder stays at DBPSK (tried and backed out; patch kept in the session scratchpad).
+**Partly fixed 2026-11-27 (data stage):** in a compact session the first slice now grows control
+frame -> one compact data frame at the configured rung -> the longest first frame
+(`mcDpskFirstFrameStages`); a compact frame at the configured rung decodes at the end of its own span
+(TNC log: "compact first frame decoded from a 259072-sample span", 16-FSK-F 3 CW, against 340992).
+Still open: whether the post-crossing decoder is configured at the rung this receiver commands -
+while it is at DBPSK the data stage equals the full span and changes nothing (not re-measured).
 
 ### BUG-HANDSHAKE-DBPSK-AT-HIGH-SNR (open, 2026-11-12) — P3, efficiency: CONNECT and CONNECT_ACK always go at DBPSK R1/4
 
@@ -2984,6 +2990,14 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG (FIXED 2026-11-27, link-control rule R8) — P1: an MC-DPSK TURN_REQUEST retried at a rung that never carried it
+TNC pingpong, AWGN 0 dB (peak-limited TX), 420185c4: 6 of 6 runs stalled at turn 4. ALPHA re-sent its
+TURN_REQUEST every 18 s at the session's DQPSK R1/4 - the rung that had just carried its 180 B data -
+and BRAVO measured each at -7 dB and lost it, for 240 s. One LDPC control codeword sits ~1 dB above the
+turbo data frame of its rung, and the request never changed rung (R3 covers OFDM sessions only). Fix:
+R8, an MC-DPSK TURN_REQUEST retry into a peer silent for a whole retry interval steps the session one
+rung down, as R5 does for the close (CHANGELOG 2026-11-27).
 
 ### BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (FIXED 2026-11-22, entry closed 2026-11-27) — P2: an MC-DPSK session's tone ACK never lengthened
 `app.cpp` sized the tone ACK by the staircase only for an IDLE_IN_BAND or OFDM_BROADBAND reading, so

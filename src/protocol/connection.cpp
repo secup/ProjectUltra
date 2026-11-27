@@ -1837,6 +1837,12 @@ void Connection::sendTurnRequestIfNeeded(bool retry) {
         }
         on_robust_control_once_(plan.robust_mod);
         robust = true;
+    } else if (plan.step_down_to != Modulation::AUTO) {
+        LOG_MODEM(INFO, "Connection: MC-DPSK TURN_REQUEST retry steps down %s -> %s (peer silent %u ms)",
+                  modulationToString(data_modulation_), modulationToString(plan.step_down_to),
+                  ms_since_peer_heard_);
+        data_modulation_ = plan.step_down_to;
+        notifyDataModeChanged(measured_snr_db_, wireFadingIndex(), /*snr_is_wire=*/false);
     }
     transmitFrame(request.serialize());
     noteTurnRequestSent(robust);

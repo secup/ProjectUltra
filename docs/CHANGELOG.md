@@ -10,6 +10,46 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(protocol): an unanswered MC-DPSK TURN_REQUEST steps the rung down (link-control rule R8)
+
+**Broken (BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG):** TNC pingpong, AWGN 0 dB, peak-limited TX, base 420185c4:
+6 of 6 runs (and the data-stage build, 6 of 6) failed at turn 4. ALPHA re-sent its TURN_REQUEST every
+18 s at the session's DQPSK R1/4 for 240 s; BRAVO measured each at -7 dB (data-aided) and every
+decode failed. A single LDPC control codeword sits ~1 dB above the turbo data frame of the same rung,
+so the rung that carried the previous 180 B turn could not carry the request, and nothing ever changed
+the request's rung: R3 (retry into silence rides MC-DPSK) covers OFDM sessions only.
+
+**Changed:** `planControlTx` TurnRequestRetry (link_control_plan.hpp): in an MC-DPSK session a retry into a
+peer silent for a whole retry interval (R3's evidence) sets `step_down_to` = `mcDpskRungBelow(session_mod)`;
+`Connection::sendTurnRequestIfNeeded` applies it before the frame is encoded, as the DISCONNECT retry does
+for R5. The receiver already re-demodulates a failed first frame at every rung, and its tone ACKs step
+the session back up with the 6 dB margin test. CTest LinkControlPlan `rule8_...`.
+
+**Verified:** ctest 134/134. TNC pingpong seeds 61-63 (base 420185c4 / data stage / data stage + R8): AWGN 0
+0/3 / 0/3 / 3/3 PASS (415-416 s; R8 fired twice per run, turn 4 delivered in 53 s); Good 3 1/3 / 3/3 /
+3/3 (1375 s); Good 8 3/3 all (1068 / 875 / 1029 s); AWGN 3 3/3 all (1138 / 1229 / 1149 s); total 7/12,
+9/12, 12/12. GUI file gate AWGN -5 dB seeds 61-62: 419 / 420 s (base 422 / 422).
+
+## 2026-11-27 — fix(rx): a compact MC-DPSK first frame decodes at the end of its own span
+
+**Broken (BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY, part):** after the control stage failed, a connected
+compact MC-DPSK receiver waited for the longest first frame the peer may send (4 codewords at DBPSK,
+340992 samples) before decoding a data frame at any rung; a 16-FSK-F 3-codeword frame (259072) waited
+1.7 s past its end, a DQPSK one longer.
+
+**Changed:** `StreamingDecoder::mcDpskFirstFrameStages` (streaming_ofdm_decode.cpp) generalizes the
+control stage: the stages are one control frame and one compact data frame at the configured rung
+(`getMinSamplesForCWCount(1)`, `getMinSamplesForCompactFrame`), each kept only below the full span
+(`mcDpskFullFirstFrameSamples`). `decodeCurrentFrame` at a staged slice tries the frame header, then
+`decodeMcDpskCompactFirstFrame`; on failure `mc_stage_index_` advances for that sync. Nothing changes
+when the decoder is configured at DBPSK (its data stage is the full span) or a 16-FSK look-ahead is
+pending.
+
+**Verified:** ctest 134/134; TNC log "MC-DPSK compact first frame decoded from a 259072-sample span". TNC
+pingpong vs 420185c4, seeds 61-63: Good 3 1/3 -> 3/3 PASS, Good 8 1068 -> 875 s, AWGN 3 1138 -> 1229 s
+(seed 61 382 -> 485, the others level), AWGN 0 0/3 both (BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG, fixed
+next).
+
 ## 2026-11-27 — fix(rx): an MC-DPSK control frame decodes at the end of its own span, not the longest data frame's
 
 **Broken (BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN):** in a compact MC-DPSK session (and on the MC-DPSK decoder of a

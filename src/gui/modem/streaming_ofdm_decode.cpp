@@ -2299,19 +2299,37 @@ void StreamingDecoder::decodeCurrentFrame() {
     // first frame whose first codeword fails here is re-demodulated at the other constellation
     // BEFORE the false-lock and PING verdicts: a DBPSK frame read as DQPSK has near-zero soft
     // bits and would be thrown away as a false lock.
-    if (!is_ofdm && connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
-        !soft_bits.empty() && requirement.mode == decode_policy::DecodeSampleMode::ControlPeek &&
-        mcDpskControlStageSamples() == frame_len) {
-        // BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN: one control frame's span. A frame whose first
-        // codeword is a frame header goes on (a control frame decodes on the v2 path below);
-        // anything else waits for the longest data frame and is decoded as before.
-        if (!mcDpskCw0IsFrameHeader(soft_bits, code_rate_)) {
-            mc_control_stage_failed_sync_pos_ = sync_position_ + 1;
+    const bool mc_staged_slice = !is_ofdm && connected_ &&
+        mode_ == protocol::WaveformMode::MC_DPSK && !soft_bits.empty() &&
+        requirement.mode == decode_policy::DecodeSampleMode::ControlPeek &&
+        frame_len < mcDpskFullFirstFrameSamples();
+    if (mc_staged_slice) {
+        // BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN / BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY: a slice
+        // shorter than the longest frame the peer may send. A frame header goes on to the v2 path
+        // (a control frame); a compact data frame that decodes is delivered; anything else waits
+        // for the next stage and is decoded there as before.
+        if (mcDpskCw0IsFrameHeader(soft_bits, code_rate_)) {
+            LOG_MODEM(INFO, "[%s] MC-DPSK control frame decoded from its own span (%zu samples)",
+                      log_prefix_.c_str(), frame_len);
+        } else {
+            if (auto compact = decodeMcDpskCompactFirstFrame(frame_buffer, decode_cfo, soft_bits)) {
+                LOG_MODEM(INFO, "[%s] MC-DPSK compact first frame decoded from a %zu-sample span",
+                          log_prefix_.c_str(), frame_len);
+                mc_first_frame_failures_in_row_ = 0;
+                const int rung = protocol::connection_policy::mcDpskRungIndexFor(
+                    waveform_->getModulation());
+                if (mc_dpsk_margin_callback_ && rung >= 0 &&
+                    rung + 1 < protocol::connection_policy::kMcDpskRungCount) {
+                    mc_dpsk_margin_callback_(mcDpskUpperRungMarginTest(frame_buffer, decode_cfo));
+                }
+                deliverMcDpskCompactFirstFrame(std::move(*compact), frame_sync_abs, gen_at_start);
+                return;
+            }
+            mc_stage_index_ = mcDpskStageIndex() + 1;
+            mc_stage_sync_pos_ = sync_position_ + 1;
             state_ = DecoderState::SYNC_FOUND;
             return;
         }
-        LOG_MODEM(INFO, "[%s] MC-DPSK control frame decoded from its own span (%zu samples)",
-                  log_prefix_.c_str(), frame_len);
     } else if (!is_ofdm && connected_ && mode_ == protocol::WaveformMode::MC_DPSK &&
         !soft_bits.empty()) {
         // Compact DATA frame first (one turbo codeword, fixed length); anything else — a control
@@ -4346,15 +4364,30 @@ bool StreamingDecoder::mcDpskMfskLookaheadWanted(const std::vector<float>& frame
                                                   sync_noise_ref_samples_, 2900.0, 48000.0);
 }
 
-size_t StreamingDecoder::mcDpskControlStageSamples() const {
-    if (!mcDpskCompactActive() || mc_mfsk_lookahead_pending_ || !waveform_ ||
-        mc_control_stage_failed_sync_pos_ == sync_position_ + 1) {
-        return 0;
+std::vector<size_t> StreamingDecoder::mcDpskFirstFrameStages(size_t longest) const {
+    std::vector<size_t> stages;
+    const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get());
+    if (!mc || !mcDpskCompactActive() || mc_mfsk_lookahead_pending_) {
+        return stages;
     }
-    return static_cast<size_t>(std::max(0, waveform_->getMinSamplesForCWCount(1)));
+    for (const int len : {mc->getMinSamplesForCWCount(1),
+                          mc->getMinSamplesForCompactFrame(mcDpskCompactCodewords())}) {
+        const size_t n = static_cast<size_t>(std::max(0, len));
+        if (n > 0 && n < longest && (stages.empty() || n > stages.back())) {
+            stages.push_back(n);
+        }
+    }
+    return stages;
 }
 
 size_t StreamingDecoder::mcDpskControlPeekSamples() const {
+    const size_t full = mcDpskFullFirstFrameSamples();
+    const auto stages = mcDpskFirstFrameStages(full);
+    const size_t stage = mcDpskStageIndex();
+    return stage < stages.size() ? stages[stage] : full;
+}
+
+size_t StreamingDecoder::mcDpskFullFirstFrameSamples() const {
     if (mcDpskCompactActive()) {
         if (const auto* mc = dynamic_cast<const MCDPSKWaveform*>(waveform_.get())) {
             // Long enough for the longest frame the peer may send at any rung above 16-FSK, at
@@ -4377,10 +4410,6 @@ size_t StreamingDecoder::mcDpskControlPeekSamples() const {
             if (mc_mfsk_lookahead_pending_) {
                 longest = std::max(longest, mc->getCompactFrameSamplesAt(Modulation::MFSK16,
                                                                          mcDpskCompactCodewords()));
-            }
-            const size_t stage = mcDpskControlStageSamples();
-            if (stage > 0 && stage < static_cast<size_t>(longest)) {
-                return stage;
             }
             return static_cast<size_t>(longest);
         }

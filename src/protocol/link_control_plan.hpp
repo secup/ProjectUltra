@@ -155,6 +155,17 @@ inline ControlTxPlan planControlTx(const LinkFacts& f, const ControlEvent& e) {
             // retry interval (never while a healthy peer holding the turn is heard).
             if (ofdm && f.peer_decodes_robust && e.peer_silent_ms >= e.retry_interval_ms) {
                 robust("R3 TURN_REQUEST retry into silence");
+            } else if (f.session == WaveformMode::MC_DPSK && e.peer_silent_ms >= e.retry_interval_ms) {
+                // R8 BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG: an unanswered MC-DPSK request steps the
+                // session one rung down, as R5 does for the close. The single LDPC control codeword
+                // sits ~1 dB above the turbo data frame of its rung, so a rung that carried the last
+                // data can lose every request: TNC AWGN 0 dB, 6 of 6 runs re-sent a DQPSK request
+                // every 18 s for 240 s, decoded at -7 dB. The peer's tone ACKs step the rung back up.
+                const Modulation below = connection_policy::mcDpskRungBelow(f.session_mod);
+                if (below != f.session_mod && connection_policy::mcDpskRungIndexFor(below) >= 0) {
+                    p.step_down_to = below;
+                    p.rule = "R8 MC-DPSK TURN_REQUEST retry steps down";
+                }
             }
             break;
     }

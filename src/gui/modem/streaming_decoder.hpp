@@ -1155,14 +1155,22 @@ private:
     // The connected MC-DPSK first-frame look-ahead: one whole compact frame at the slowest
     // constellation when compact frames are active, else the waveform's control-frame span.
     size_t mcDpskControlPeekSamples() const;
-    // BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN: the first look at a connected MC-DPSK sync is one control
-    // frame at the configured rung (getMinSamplesForCWCount(1)); only when its first codeword does
-    // not decode to a frame header does the decoder wait for the longest data frame (the slice
-    // above). A control frame at the listener's rung (every robust TURN_REQUEST / TURNOVER) ends
-    // 3.5 s before the 4-codeword DBPSK data span did. 0 when staging does not apply.
-    size_t mcDpskControlStageSamples() const;
-    // sync_position_ + 1 of the sync whose control stage already failed (0 = none).
-    size_t mc_control_stage_failed_sync_pos_ = 0;
+    // The same without staging: the longest first frame the peer may send.
+    size_t mcDpskFullFirstFrameSamples() const;
+    // BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN / BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY: a connected
+    // compact MC-DPSK sync is decoded in stages of growing length, each shorter than the slice
+    // above: one control frame at the configured rung (getMinSamplesForCWCount(1)), then one
+    // compact data frame at the configured rung and geometry - the frame this receiver commands.
+    // A frame that does not decode at a stage waits for the next; the last is the slice above.
+    // Empty when staging does not apply.
+    std::vector<size_t> mcDpskFirstFrameStages(size_t longest) const;
+    // The stage the current sync is at (an index into mcDpskFirstFrameStages); valid while
+    // mc_stage_sync_pos_ == sync_position_ + 1, else 0.
+    size_t mcDpskStageIndex() const {
+        return mc_stage_sync_pos_ == sync_position_ + 1 ? mc_stage_index_ : 0;
+    }
+    size_t mc_stage_sync_pos_ = 0;
+    size_t mc_stage_index_ = 0;
     // A burst's first frame as a compact DATA frame, at the configured constellation then the
     // others; on success the waveform stays at the one that decoded. nullopt: not a compact frame
     // (the configured demodulation is restored for the v2 path).

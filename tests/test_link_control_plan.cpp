@@ -133,6 +133,26 @@ void rule5_mcdpsk_close_steps_down() {
     CHECK(planControlTx(f, e).step_down_to == Modulation::AUTO, "R5: the bottom rung has nowhere to go");
 }
 
+void rule8_mcdpsk_turn_request_retry_steps_down() {
+    LinkFacts f;
+    f.session = WaveformMode::MC_DPSK;
+    f.session_mod = Modulation::DQPSK;
+    ControlEvent e;
+    e.kind = ControlKind::TurnRequestRetry;
+    e.retry_interval_ms = 18000;
+    e.peer_silent_ms = 17000;
+    CHECK(planControlTx(f, e).step_down_to == Modulation::AUTO,
+          "R8: a peer heard within the retry interval keeps the rung");
+    e.peer_silent_ms = 18000;
+    CHECK(planControlTx(f, e).step_down_to == Modulation::MFSK16_FAST, "R8: DQPSK steps to 16-FSK-F");
+    CHECK(!planControlTx(f, e).robust_once, "R8: no waveform crossing in an MC-DPSK session");
+    f.session_mod = Modulation::MFSK16;
+    CHECK(planControlTx(f, e).step_down_to == Modulation::AUTO, "R8: the bottom rung has nowhere to go");
+    e.kind = ControlKind::TurnRequest;
+    f.session_mod = Modulation::DQPSK;
+    CHECK(planControlTx(f, e).step_down_to == Modulation::AUTO, "R8: a first request keeps the rung");
+}
+
 void rule6_mcdpsk_reply_at_request_rung() {
     LinkFacts f;
     f.session = WaveformMode::MC_DPSK;
@@ -173,6 +193,7 @@ int main() {
     rule7_turn_request_on_faster_waveform();
     rule4_last_disconnect_retry();
     rule5_mcdpsk_close_steps_down();
+    rule8_mcdpsk_turn_request_retry_steps_down();
     rule6_mcdpsk_reply_at_request_rung();
     robust_targets_the_peer_decoder();
     if (failures) {
