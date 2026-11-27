@@ -262,6 +262,16 @@ little while it takes the clip's distortion. Not verified on the GUI gate (the 2
 MC-DPSK at 0 dB "transferred" without an A/B). Next: GUI A/B `ULTRA_PEAK_CONTROL=0` vs default at an AWGN
 -4..-6 dB MC-DPSK session, and the clip's reference over the payload span only. 16-FSK bursts are not clipped.
 
+### BUG-ESCAPE-MODECHANGE-ON-HEARD-LINK (open, 2026-11-27) — P3: the sender's escape-drop handshakes even when the peer is heard
+
+`executeEscapeDrop` always goes through `requestModeChange` (comment: escapes "fire on zero-ACK
+evidence"), but `escapeHasPeerEvidence` lets them fire only after the latest round drew an ACK. GUI
+ITU Good 20 -> 6 dB, seed 63 (84e66262): "ESCAPE-drop R1/2 -> R1/4 (frame stuck, missing from 5 ACKs)"
+at 226 s, the MODE_CHANGE timed out four times (60 s) while the descriptor and ACKs still got through,
+then the follow crossed down. Since the hold-must-pay demotion (d063b121) the receiver demotes first:
+0 escapes in 35 GUI runs (the pad-only arm: 1). Direction if it reappears: with an ACK in hand, ride a
+DESC-SWITCH like the receiver-commanded demote (era-safe via the commit's ARQ abort).
+
 ### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
 
 `capRxAuthorityInitialRung` (waveform_selection.hpp) sends the first coherent group at QPSK R1/2
