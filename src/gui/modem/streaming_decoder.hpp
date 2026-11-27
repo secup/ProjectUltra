@@ -724,6 +724,17 @@ public:
                !last_anchor_abs_.compare_exchange_weak(prev, abs, std::memory_order_relaxed)) {
         }
     }
+    // A delivered group's anchor from its own geometry (finalizeBurstGroup): it replaces any stamp
+    // inside the group (a per-member late-join stamp names a later member, so the anchor read
+    // younger than it was and the ACK-length cap too long); a stamp past the group's end belongs to
+    // a newer group and stays.
+    void noteDeliveredGroupAnchorAbs(uint64_t anchor_abs, uint64_t group_end_abs) {
+        uint64_t prev = last_anchor_abs_.load(std::memory_order_relaxed);
+        while (prev <= group_end_abs &&
+               !last_anchor_abs_.compare_exchange_weak(prev, anchor_abs,
+                                                       std::memory_order_relaxed)) {
+        }
+    }
     // Audio time since the latest group start (noteGroupStartAbs), -1 when none since the last
     // reset: the listen-before-ACK deadline (deferredToneAckCannotEndBeforeResend).
     int64_t msSinceLastAnchor() {

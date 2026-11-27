@@ -1191,6 +1191,7 @@ struct HintReplayResult {
     int group_callbacks = 0;
     bool hint_sent = false;
     bool reentered_delivered_audio = false;  // a burst re-armed inside the delivered group's air
+    int64_t implied_anchor_abs = -1;          // fed - msSinceLastAnchor at delivery, in samples
 };
 
 HintReplayResult runHintAfterDeliveredGroupTrial(bool send_hint, bool full_group_start) {
@@ -1235,10 +1236,15 @@ HintReplayResult runHintAfterDeliveredGroupTrial(bool send_hint, bool full_group
     dec.applyPendingConfigForTesting();
 
     HintReplayResult r;
-    dec.setBurstGroupCallback([&](uint16_t, const std::vector<Bytes>&, bool, float, uint16_t,
-                                  bool, uint8_t, bool) { ++r.group_callbacks; });
-    constexpr size_t kChunk = 4800;
     size_t fed = 0;
+    dec.setBurstGroupCallback([&](uint16_t, const std::vector<Bytes>&, bool, float, uint16_t,
+                                  bool, uint8_t, bool) {
+        if (++r.group_callbacks == 1) {
+            const int64_t since = dec.msSinceLastAnchor();
+            if (since >= 0) r.implied_anchor_abs = static_cast<int64_t>(fed) - since * 48;
+        }
+    });
+    constexpr size_t kChunk = 4800;
     for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
         const size_t len = std::min(kChunk, audio.size() - pos);
         dec.feedAudio(audio.data() + pos, len);
@@ -1398,6 +1404,16 @@ int main(int argc, char** argv) {
             EXPECT(late_hint.hint_sent);
             EXPECT(late_hint.group_callbacks == 1);
             EXPECT(!late_hint.reentered_delivered_audio);
+            // BUG-DROP6-MFSK-UNHEARD: the delivered group's anchor (the descriptor frame, after the
+            // first dual chirp at 48000 + 57600) is what the ACK-length cap ages from - never later
+            // than it, at most one full anchor + the descriptor frame earlier (+1 ms rounding).
+            constexpr int64_t kTrueAnchor = 48000 + 57600;
+            std::fprintf(stderr, "  anchor age at delivery implies abs %lld (true %lld)\n",
+                         static_cast<long long>(no_hint.implied_anchor_abs),
+                         static_cast<long long>(kTrueAnchor));
+            EXPECT(no_hint.implied_anchor_abs >= 0);
+            EXPECT(no_hint.implied_anchor_abs <= kTrueAnchor + 48);
+            EXPECT(no_hint.implied_anchor_abs >= kTrueAnchor - 57600 - 10080 - 48);
         }
         std::fprintf(stderr, "%s\n", g_failures == 0 ? "PASS" : "FAIL");
         return g_failures == 0 ? 0 : 1;

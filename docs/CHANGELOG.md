@@ -10,6 +10,32 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(rx): a delivered group stamps its own anchor, so the receiver's ACK-length cap holds for structure-acquired groups
+
+**Broken (BUG-DROP6-MFSK-UNHEARD):** GUI ITU Good 20 -> 6 dB, seed 65: the receiver delivered a
+failed 4-frame group 3.9 s after its end and keyed a 6.8 s tone ACK (200 ms symbols) that ran past the
+sender's 15.7 s RTO; the sender's resend went out over it (carrier sense cannot see a ~1 dB ACK) and
+every later round overlapped the same way until the link was lost. The measured cap
+(`toneAckSymbolMsCapSinceAnchor`) returns no cap when the last anchor stamp is older than the RTO, and a
+group found by frame structure stamps none, so the cap read the previous chirp-anchored group's stamp.
+
+**Changed:** `StreamingDecoder::finalizeBurstGroup` (streaming_burst_interleave.cpp) computes the group's
+anchor from its geometry: back from the last member's end by N members, one full anchor and the
+descriptor frame. `noteDeliveredGroupAnchorAbs` (streaming_decoder.hpp) stores it, replacing any stamp
+inside the group (a late-join stamp names a later member and made the cap too long) and leaving a stamp
+past the group's end (a newer group).
+
+**Why it is correct:** the estimate is never later than the true anchor and at most one anchor
+(1.2 s) earlier, so the cap can only be conservative (a shorter ACK rung), never let an ACK outlive the
+resend.
+
+**Verified:** ctest 134/134; `BurstStructureMemberAnchor` checks the implied anchor on both group
+layouts (full-start: exact; descriptor layout: 1.2 s early). GUI A/B vs d975d8e9, 7 cases x seeds 61-67
+(sum of elapsed seconds, base -> candidate): AWGN 3 784 -> 831, Good 5 1121 -> 1242, Good 8 861 -> 861,
+Good 15 492 -> 492, Good 20 679 -> 653, AWGN 20 504 -> 506, drop6 1786 -> 1461 (seed 64 518 -> 224);
+49/49 PASS both arms, total 6227 -> 6046 s. The ACK rung chosen per SNR bucket is the same in both arms
+on AWGN 3 and Good 5 (their deltas are fade and decode timing, not the cap).
+
 ## 2026-11-27 — fix(rx): a late chirp hint no longer replays a delivered group; frame waits time out on stopped audio, not slow audio
 
 **Broken (1, BUG-HINT-REPLAYS-DECODED-BURST):** the dual-listen chirp hint (the MC-DPSK decoder's

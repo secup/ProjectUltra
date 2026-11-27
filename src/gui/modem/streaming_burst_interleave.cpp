@@ -1503,6 +1503,18 @@ void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
         if (burst_min_block_ > 0 && end > 0) {
             delivered_group_lo_abs_ = end > span ? end - span : 0;
             delivered_group_hi_abs_ = end;
+            // The group's anchor for the receiver's ACK-length cap (msSinceLastAnchor,
+            // toneAckSymbolMsCapSinceAnchor): a group found by frame structure stamps none, so the
+            // cap read an older group's anchor (or a later member's), called it stale and let a 6.8 s
+            // ACK run past the sender's resend (BUG-DROP6-MFSK-UNHEARD). Back from the last member by
+            // the N members, a full anchor (the group start's chirp, when it carried one) and the
+            // descriptor frame: never later than the true anchor, at most one anchor (1.2 s) earlier.
+            const size_t to_anchor =
+                members * burst_min_block_ +
+                protocol::connection_policy::kWideOFDMFullAnchorExtraSamples +
+                protocol::connection_policy::wideOFDMWireFrameSamplesForCodewords(
+                    Modulation::QPSK, CodeRate::R1_4, 1, 27);
+            if (end > to_anchor) noteDeliveredGroupAnchorAbs(end - to_anchor, end);
         }
     }
     // ULTRA_ITERATIVE_CHEST: a data-aided observation is only valid inside one
