@@ -2993,6 +2993,12 @@ in the AWGN column (the data-aided reading already carries the fade loss), with 
 on the channel scale. The A/B logs of 2026-11-27 show MC-DPSK readings of -4..-1 dB keying 25-50 ms
 ACKs and 0-1 dB keying up to 200 ms.
 
+### BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN (FIXED 2026-11-27) — P2: a robust control frame was decoded 3.5 s after it ended
+The connected MC-DPSK first slice was the longest compact data frame (4 codewords at DBPSK, 340992
+samples) while a control frame is one codeword (175104 at 16-FSK-F): every robust TURN_REQUEST and
+TURNOVER cost 3.5 s, the round trip 17.2 s instead of 10.1 s. Fix: a control-frame stage first
+(CHANGELOG 2026-11-27). BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY (data frames) stays open.
+
 ### BUG-TURN-REQUEST-OFDM-AT-FLOOR (FIXED 2026-11-27, link-control rule R7) — P2: at the OFDM floor every turn waited a full retry interval for an OFDM TURN_REQUEST that was not answered
 TNC pingpong at ITU Good 8 dB: 4 of 42 first OFDM TURN_REQUESTs answered; the one-codeword OFDM control
 frames ride ~0-3 dB in-band on a peak-limited TX and either leg is lost about half the time; each loss

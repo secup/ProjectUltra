@@ -1155,6 +1155,14 @@ private:
     // The connected MC-DPSK first-frame look-ahead: one whole compact frame at the slowest
     // constellation when compact frames are active, else the waveform's control-frame span.
     size_t mcDpskControlPeekSamples() const;
+    // BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN: the first look at a connected MC-DPSK sync is one control
+    // frame at the configured rung (getMinSamplesForCWCount(1)); only when its first codeword does
+    // not decode to a frame header does the decoder wait for the longest data frame (the slice
+    // above). A control frame at the listener's rung (every robust TURN_REQUEST / TURNOVER) ends
+    // 3.5 s before the 4-codeword DBPSK data span did. 0 when staging does not apply.
+    size_t mcDpskControlStageSamples() const;
+    // sync_position_ + 1 of the sync whose control stage already failed (0 = none).
+    size_t mc_control_stage_failed_sync_pos_ = 0;
     // A burst's first frame as a compact DATA frame, at the configured constellation then the
     // others; on success the waveform stays at the one that decoded. nullopt: not a compact frame
     // (the configured demodulation is restored for the v2 path).

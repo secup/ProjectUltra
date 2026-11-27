@@ -10,6 +10,29 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(rx): an MC-DPSK control frame decodes at the end of its own span, not the longest data frame's
+
+**Broken (BUG-MCDPSK-CONTROL-WAITS-DATA-SPAN):** in a compact MC-DPSK session (and on the MC-DPSK decoder of a
+dual-listen OFDM session) the first slice after a chirp was sized for the longest compact DATA frame the
+peer may send (`mcDpskControlPeekSamples`: 4 codewords at DBPSK, 340992 samples). A robust control
+frame (TURN_REQUEST retry, TURNOVER on the request's waveform, DISCONNECT) is one v2 codeword at the
+listener's rung, 175104 samples at 16-FSK-F; it was decoded 3.5 s after it ended. TNC Good 8 dB: every
+robust TURN_REQUEST -> TURNOVER round trip measured 17.2 s.
+
+**Changed:** `StreamingDecoder::mcDpskControlStageSamples` (streaming_ofdm_decode.cpp): the first slice
+of a connected compact MC-DPSK sync is one control frame at the configured rung
+(`getMinSamplesForCWCount(1)`); `decodeCurrentFrame` tries its first codeword
+(`mcDpskCw0IsFrameHeader`). A frame header goes on to the v2 path and is delivered; anything else
+marks the sync (`mc_control_stage_failed_sync_pos_`) and waits for the data-frame span exactly as
+before. A control frame at another rung, or a data frame, loses nothing but one LDPC decode.
+
+**Verified:** ctest 134/134. Robust round trip (R7's measurement) 17.2 s -> 10.1 s. TNC pingpong A/B vs
+f0a3d6fb (sum of elapsed seconds, base -> fix): Good 8 seeds 61-66 2651 -> 2262, AWGN 3 61-63 1584 ->
+1127, Good 15 61-63 561 -> 534, Good 3 61-63 1546 -> 1670; base 14/15 PASS (Good 3 seed 62 FAIL), fix
+15/15, total 6342 -> 5593 s. GUI file gate (2 KB) vs f0a3d6fb: AWGN -5 dB seeds 61-63 422/422/422 s
+both arms (MC-DPSK data unchanged), Good 3 dB 1341 -> 1507 s (seed 61 462 -> 583; the stage fired 0
+times in that run, so fade divergence, not the change).
+
 ## 2026-11-27 — fix(protocol): the first TURN_REQUEST rides the waveform that has been answering it this session (link-control rule R7)
 
 **Broken (BUG-TURN-REQUEST-OFDM-AT-FLOOR):** TNC pingpong, ITU Good 8 dB (baseline 7bbe78e8, 42 turns): getting
