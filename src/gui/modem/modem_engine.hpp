@@ -814,6 +814,8 @@ private:
     // lead_in_fill (optional): settling fill written over the END of the lead-in (key-up
     // airtime unchanged); see StreamingEncoder::settlingLeadInFill.
     void applyPeakControl(std::vector<float>& samples) const;
+    // The wideband coherent OFDM clip at the headroom of rung (mod, rate).
+    void applyOfdmPeakControl(std::vector<float>& samples, Modulation mod, CodeRate rate) const;
     void applyControlPeakControl(std::vector<float>& samples) const;
     std::vector<float> postProcessTx(const std::vector<float>& samples,
                                      int lead_in_ms = -1, int tail_ms = -1,

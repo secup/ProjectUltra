@@ -435,6 +435,8 @@ std::vector<float> StreamingEncoder::encodeFrame(const Bytes& frame_data, bool p
                    : streaming_control_profile::profileForDataMode(modulation_);
     Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
     CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
+    last_frame_mod_ = tx_mod;
+    last_frame_rate_ = tx_rate;
 
     if (force_full_preamble_once_ && is_ofdm) {
         force_full_preamble_once_ = false;
@@ -513,6 +515,8 @@ std::vector<float> StreamingEncoder::encodeFrameLight(const Bytes& frame_data) {
                    : streaming_control_profile::profileForDataMode(modulation_);
     Modulation tx_mod = use_control_profile ? control_profile.modulation : modulation_;
     CodeRate tx_rate = use_control_profile ? control_profile.rate : code_rate_;
+    last_frame_mod_ = tx_mod;
+    last_frame_rate_ = tx_rate;
 
     if (use_control_profile) {
         LOG_MODEM(INFO, "[%s] control profile TX(light): %s %s (data=%s %s)",

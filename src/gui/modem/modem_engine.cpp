@@ -512,6 +512,16 @@ std::vector<float> ModemEngine::transmit(const Bytes& data) {
     const bool constant_envelope = streaming_encoder_->lastFrameWasHandshakeMfsk() ||
                                    isMfskModulation(tx_modulation);
     if (!is_ofdm && !constant_envelope) applyControlPeakControl(processed);
+    // BUG-OFDM-SINGLE-FRAME-LINEAR-TX: a wideband OFDM frame sent alone (a one-frame data round, a
+    // TURN_REQUEST / TURNOVER / MODE_CHANGE / DISCONNECT) left linear while every burst was clipped:
+    // on a peak-limited transmitter it rode ~6 dB (crest 8.3 -> 2.6 dB at QPSK R1/4) below the
+    // bursts. TNC AWGN 6 dB: the peer read singletons at LTS signal ~350 against 730-820 for the
+    // bursts and lost 9 of 11. It gets the clip of the rung it is encoded at (the control profile's
+    // for a control frame), the same per-rung headroom as a burst.
+    if (tx_waveform_mode == protocol::WaveformMode::OFDM_CHIRP) {
+        applyOfdmPeakControl(processed, streaming_encoder_->lastFrameModulation(),
+                             streaming_encoder_->lastFrameCodeRate());
+    }
     if (is_ofdm && streaming_decoder_) {
         const size_t turn_samples =
             static_cast<size_t>(48000ULL * static_cast<uint64_t>(turnaround_delay_ms_) / 1000ULL);
@@ -790,11 +800,14 @@ void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
         }
         return;
     }
-    if (waveform_mode_ != protocol::WaveformMode::OFDM_CHIRP ||
-        !ofdm_link_adaptation::isCoherentModulation(data_modulation_)) {
-        return;
-    }
-    const uint8_t rung = protocol::coherentRungIndexFor(data_modulation_, data_code_rate_);
+    if (waveform_mode_ != protocol::WaveformMode::OFDM_CHIRP) return;
+    applyOfdmPeakControl(samples, data_modulation_, data_code_rate_);
+}
+
+void ModemEngine::applyOfdmPeakControl(std::vector<float>& samples, Modulation mod,
+                                       CodeRate rate) const {
+    if (!peak_control::enabled() || !ofdm_link_adaptation::isCoherentModulation(mod)) return;
+    const uint8_t rung = protocol::coherentRungIndexFor(mod, rate);
     if (rung == protocol::kRungIdxNone) return;
     const auto choice = peak_control::chooseHeadroom(protocol::evmDecodeThresholdDb(rung));
     if (choice.h_db < 0.0f) return;
@@ -806,9 +819,8 @@ void ModemEngine::applyPeakControl(std::vector<float>& samples) const {
                                        lo, hi);
     if (r.applied) {
         LOG_MODEM(INFO, "[%s] Peak control %s %s: h=%.0f dB crest %.2f -> %.2f dB (predicted %+.2f dB, D %.1f dB)",
-                  log_prefix_.c_str(), modulationToString(data_modulation_),
-                  codeRateToString(data_code_rate_), choice.h_db, r.pre_crest_db, r.post_crest_db,
-                  choice.gain_db, choice.sdr_db);
+                  log_prefix_.c_str(), modulationToString(mod), codeRateToString(rate),
+                  choice.h_db, r.pre_crest_db, r.post_crest_db, choice.gain_db, choice.sdr_db);
     }
 }
 

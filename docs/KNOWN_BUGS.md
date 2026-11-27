@@ -2967,6 +2967,12 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-OFDM-SINGLE-FRAME-LINEAR-TX (FIXED 2026-11-27) — P1: OFDM control frames and one-frame rounds left ~6 dB below the bursts
+Peak control clipped OFDM bursts only; a frame sent through `ModemEngine::transmit()` (one-frame data,
+TURN_REQUEST, TURNOVER, MODE_CHANGE, DISCONNECT) stayed linear and, scaled to the same peak, rode ~6 dB
+below the data. TNC AWGN 6 dB: singletons lost 9 of 11, the session flapped OFDM <-> MC-DPSK. Fix:
+the rung's clip on every OFDM_CHIRP frame (CHANGELOG 2026-11-27); TNC pingpong -39 %, GUI -9 %.
+
 ### BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY (FIXED 2026-11-27, opened 2026-11-12) — P3: a one-frame DQPSK burst is acknowledged 2.6 s late
 
 A receiver buffers a whole frame at the slowest MC-DPSK constellation (DBPSK) before decoding a

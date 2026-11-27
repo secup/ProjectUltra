@@ -10,6 +10,31 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(tx): a wideband OFDM frame sent alone gets its rung's peak control
+
+**Broken (BUG-OFDM-SINGLE-FRAME-LINEAR-TX):** peak control (default on since 2026-11-21) ran only on bursts
+(`transmitBurst` -> `applyPeakControl`). Every OFDM frame sent through `ModemEngine::transmit()` - a
+one-frame data round and every OFDM control frame (TURN_REQUEST, TURNOVER, MODE_CHANGE, DISCONNECT, ACK)
+- stayed linear; `transmit()` clipped MC-DPSK only. On a peak-limited transmitter each burst is scaled
+to the same peak, so these frames rode ~6 dB (crest 8.3 -> 2.6 dB at QPSK R1/4) below the bursts around
+them. TNC pingpong AWGN 6 dB: ALPHA read BRAVO's singletons at LTS signal ~350 / in-band 0 dB against
+730-820 / 4-6 dB for ALPHA's bursts in the other direction, and lost 9 of 11; the session flapped
+between OFDM and MC-DPSK all run, and a 9-byte message waited 87 s. The same gap is the likely cause
+of BUG-TURN-REQUEST-OFDM-AT-FLOOR's "OFDM control frames arrive at 0-3 dB".
+
+**Changed:** `ModemEngine::applyOfdmPeakControl(samples, mod, rate)` (the OFDM half of `applyPeakControl`,
+headroom from the rung's EVM threshold); `transmit()` applies it to every OFDM_CHIRP frame at the
+rung the encoder sent it at (`StreamingEncoder::lastFrameModulation/CodeRate`: the data mode, or the
+hardened control profile for a control frame - h = 0 at QPSK R1/4, as a burst of that rung). The
+EVM rate selector only observes burst groups, so no reading changes its scale.
+
+**Verified:** ctest 134/134. TNC pingpong vs 6f3ac57d (10 cases): 3416 -> 2076 s, all PASS (AWGN 6 seeds
+61/62 362/347 -> 149/133 s, Good 5 448/417 -> 260/248, Poor 12 528/542 -> 499/249, Moderate 15
+250/202 -> 128/159, AWGN 10 194 -> 124, Moderate 20 126 -> 127). GUI file gate, paired, 22/22 PASS:
+AWGN 20 3890 bps and Good 20 2490 bps both arms; Good 8 seeds 61-63 130/226/138 -> 117/247/158 s;
+AWGN 3 308/336/388 -> 316/282/333; Moderate 15 74 -> 65; Good 5 438/240 -> 317/215; total 2452 ->
+2224 s.
+
 ## 2026-11-27 — fix(protocol): an unanswered MC-DPSK TURN_REQUEST steps the rung down (link-control rule R8)
 
 **Broken (BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG):** TNC pingpong, AWGN 0 dB, peak-limited TX, base 420185c4:
