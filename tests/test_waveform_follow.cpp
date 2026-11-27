@@ -1313,9 +1313,14 @@ void test_ofdm_single_frame_ends_its_turn() {
     for (int narrow = 0; narrow < 2; ++narrow) {
         Connection c;
         std::vector<Bytes> sent;
-        c.setTransmitCallback([&](const Bytes& frame) { sent.push_back(frame); });
+        size_t burst_frames = 0;  // frames of the latest burst callback (0 = a single frame)
+        c.setTransmitCallback([&](const Bytes& frame) {
+            sent.push_back(frame);
+            burst_frames = 0;
+        });
         c.setTransmitBurstCallback([&](const std::vector<Bytes>& frames, uint16_t, uint8_t) {
             for (const auto& f : frames) sent.push_back(f);
+            burst_frames = frames.size();
         });
         if (narrow) {
             ConnectionAdaptiveTestAccess::makeConnectedNarrowOFDM(c);
@@ -1335,7 +1340,14 @@ void test_ofdm_single_frame_ends_its_turn() {
         const size_t before = sent.size();
         for (int ms = 0; ms < 120000 && sent.size() == before; ms += 100) c.tick(100);
         CHECK(sent.size() > before, "the retransmission timeout resends it");
-        if (sent.size() > before) {
+        if (sent.size() > before && !narrow) {
+            // Wide QPSK R1/2 is above the bottom rung: the resend after a silent round is a
+            // two-frame group (frame + addressed-away pad) so a descriptor carries it
+            // (BUG-LATENT-CRATER-ONE-RUNG); the burst encoder stamps that group's end.
+            CHECK(burst_frames == 2 &&
+                      v2::isOFDMBurstPadHeader(v2::parseHeader(sent.back())),
+                  std::string(which) + ": the one-frame resend leaves as a padded group");
+        } else if (sent.size() > before) {
             const auto resend = v2::DataFrame::deserialize(sent.back());
             CHECK(resend && (resend->flags & v2::Flags::PHYSICAL_BURST_END) != 0,
                   std::string(which) + ": the one-frame resend carries the end-of-turn marker");

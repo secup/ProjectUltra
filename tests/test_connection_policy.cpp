@@ -2002,6 +2002,25 @@ void test_silent_ack_repeat_is_explicit_opt_in() {
           "malformed repeat delays must fail closed");
 }
 
+void test_silent_singleton_carries_descriptor_policy() {
+    using ultra::protocol::connection_policy::silentSingletonCarriesDescriptor;
+    using ultra::protocol::kRungIdxQpskR14;
+    using ultra::protocol::kRungIdxQpskR23;
+    using ultra::protocol::kRungIdxQam8R23;
+    CHECK(silentSingletonCarriesDescriptor(true, 1, kRungIdxQpskR23, 1),
+          "a QPSK R2/3 singleton after a silent round carries a descriptor");
+    CHECK(silentSingletonCarriesDescriptor(true, 1, kRungIdxQam8R23, 3),
+          "and after several");
+    CHECK(!silentSingletonCarriesDescriptor(true, 1, kRungIdxQpskR23, 0),
+          "a singleton on a heard link stays descriptor-less");
+    CHECK(!silentSingletonCarriesDescriptor(true, 1, kRungIdxQpskR14, 2),
+          "the bottom rung's silence is the down-crossing's evidence");
+    CHECK(!silentSingletonCarriesDescriptor(true, 2, kRungIdxQpskR23, 2),
+          "a group already carries one");
+    CHECK(!silentSingletonCarriesDescriptor(false, 1, kRungIdxQpskR23, 2),
+          "MC-DPSK / narrow / no burst transport: unchanged");
+}
+
 void test_anchored_backstop_payload_evidence_forbids_fake_crater() {
     CHECK(shouldGradeAnchoredBackstopAsCrater(/*payload_seen=*/false),
           "an anchored timeout with no decoded payload may retain zero-progress recovery");
@@ -2151,6 +2170,7 @@ int main() {
     test_anchored_backstop_reconfirm_fit();
     test_silent_ack_repeat_is_explicit_opt_in();
     test_anchored_backstop_payload_evidence_forbids_fake_crater();
+    test_silent_singleton_carries_descriptor_policy();
     test_scripted_disconnect_quit_requires_protocol_completion();
 
     if (tests_failed != 0) {

@@ -1796,6 +1796,7 @@ private:
     void setExperimentalLongLDPCTransferProfilesActive(bool psk8_active,
                                                        bool qpsk_r34_active);
     void appendExperimentalLongLDPCTailPad(std::vector<Bytes>& frames) const;
+    void appendSilentSingletonDescriptorPad(std::vector<Bytes>& frames) const;
     size_t currentDataPayloadCapacity() const;
     // Apply a new data mode. cw_count: 0 = compute via recommendCWCount(rate),
     // 1..8 = explicit (used when MODE_CHANGE wire byte specifies a value).

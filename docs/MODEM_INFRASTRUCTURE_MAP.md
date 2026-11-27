@@ -228,6 +228,13 @@ CTest `CliLoopback`.
   group assembly (`burst_transport_rx_` collector, default `true` → `onBurstGroupReceived` →
   `processArqFrame` → `endGroupReceiveAndAck`) that **`arq_` drives**. ACK is a **tone-burst**
   (`connection.cpp` `setEmitToneBurstSackCallback` + `onToneBurstAck`). 🟢
+- **Silent-singleton descriptor pad** (2026-11-26, BUG-LATENT-CRATER-ONE-RUNG): a wide-OFDM one-frame
+  DATA round sent after a retransmission timeout with the peer unheard (`rto_rounds_since_peer_ack_
+  >= 1`), at a coherent rung above QPSK R1/4, gets the addressed-away ULPAD frame and leaves as a
+  two-frame descriptor-bearing group (`Connection::appendSilentSingletonDescriptorPad`, policy
+  `connection_policy::silentSingletonCarriesDescriptor`; called from `flushBurstBuffer` and
+  `transmitFrameBatch` after the RTO accounting). The receiver can then grade the crater and command
+  the rung; a heard link and the bottom rung keep descriptor-less singletons. No knob. 🟢
 - **Physical-turn end marker** `Flags::PHYSICAL_BURST_END` (DATA-only reuse of the legacy URGENT
   bit, CRC-protected): stamped by the sender on the LAST frame of a physical DATA turn —
   non-interleaved OFDM bursts (`encodeBurstLight` →

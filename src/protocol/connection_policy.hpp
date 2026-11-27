@@ -3113,6 +3113,26 @@ inline constexpr bool shouldGradeAnchoredBackstopAsCrater(bool payload_seen) {
     return !payload_seen;
 }
 
+// A one-frame round after a silent one carries a descriptor (BUG-LATENT-CRATER-ONE-RUNG). A
+// descriptor-less singleton that fails to decode leaves the receiver nothing to grade: no descriptor
+// says a group was there, and the anchored-burst backstop (14.6 s after the anchor) is later than
+// the singleton's resend (~8.7 s), so it is withheld (BUG-BACKSTOP-RACES-RTO). The sender, holding
+// the rung on silence (escapeHasPeerEvidence: "the peer still hears the rung-independent descriptor
+// and answers"), repeated the frame it could not get through until the follow's 60 s patience. With
+// the addressed-away pad frame the round becomes a two-frame group: the descriptor decodes on the
+// control profile well below any data rung, the receiver grades the crater and commands its rung,
+// and a rung switch can ride the next descriptor. Only after a silent round (a lost ACK on a clean
+// link costs one pad frame per lost ACK), and not at the bottom coherent rung, where silence is the
+// down-crossing's evidence and an empty group's ACK would hold it off.
+inline constexpr bool silentSingletonCarriesDescriptor(bool wide_ofdm_burst_transport,
+                                                       std::size_t physical_frames,
+                                                       uint8_t rung_idx,
+                                                       int rto_rounds_since_peer_ack) {
+    return wide_ofdm_burst_transport && physical_frames == 1 &&
+           rto_rounds_since_peer_ack >= 1 && rung_idx > kRungIdxQpskR14 &&
+           rung_idx < kRungIdxCount;
+}
+
 inline uint32_t computeNarrowOFDMAckTimeoutMs(
         Modulation mod,
         CodeRate rate,

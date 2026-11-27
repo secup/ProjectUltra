@@ -7131,6 +7131,31 @@ void Connection::setExperimentalLongLDPCTransferProfilesActive(
               selectBurstLiftingZ());
 }
 
+void Connection::appendSilentSingletonDescriptorPad(std::vector<Bytes>& frames) const {
+    const bool data_singleton = frames.size() == 1 && [&] {
+        const auto header = v2::parseHeader(frames.front());
+        return header.valid && !header.is_control;
+    }();
+    if (!data_singleton ||
+        !connection_policy::silentSingletonCarriesDescriptor(
+            negotiated_mode_ == WaveformMode::OFDM_CHIRP && on_transmit_burst_ != nullptr,
+            frames.size(), coherentRungIndexFor(data_modulation_, data_code_rate_),
+            rto_rounds_since_peer_ack_)) {
+        return;
+    }
+    const int cw = physicalDataFrameCodewords();
+    const int z = selectBurstLiftingZ();
+    frames.push_back(v2::makeFixedDataFrame(
+        local_call_, v2::kOFDMBurstPadCallsign, v2::kOFDMBurstPadSeq,
+        makeOFDMBurstPadPayload(data_code_rate_, cw, /*pad_index=*/0, z),
+        data_code_rate_, cw, z).serialize());
+    LOG_MODEM(INFO,
+              "Connection: singleton after %d silent round(s) padded 1 -> 2 frames so a "
+              "descriptor carries it (%s %s)",
+              rto_rounds_since_peer_ack_, modulationToString(data_modulation_),
+              codeRateToString(data_code_rate_));
+}
+
 void Connection::appendExperimentalLongLDPCTailPad(
     std::vector<Bytes>& frames) const {
     if (!usesExperimentalLongLDPC() || !on_transmit_burst_ ||
@@ -9475,6 +9500,7 @@ void Connection::flushBurstBuffer(bool retransmission_required,
     // logical FINAL/tail as well as a one-hole selective retry; the added pad
     // is addressed away and exists only to preserve the physical wire group.
     appendExperimentalLongLDPCTailPad(burst_tx_buffer_);
+    appendSilentSingletonDescriptorPad(burst_tx_buffer_);
 
     // This is the first point where the physical round geometry is exact: optional
     // interleave padding has been appended, and nothing else below changes the frame
@@ -9799,6 +9825,8 @@ void Connection::transmitFrameBatch(const std::vector<Bytes>& frame_data_list,
     if (account_rto_round) {
         noteArqRoundOutcome(0, "rto");
     }
+    // After the accounting: this resend is itself the answer to a silent round.
+    appendSilentSingletonDescriptorPad(physical_frames);
     const bool burst_capable_mode =
         isOFDMMode(negotiated_mode_) || negotiated_mode_ == WaveformMode::MC_DPSK;
     const bool force_full_group_start =

@@ -4374,9 +4374,10 @@ void test_timeout_batch_waits_for_post_tick_flush_and_discards_obsolete_geometry
     committed_frames.clear();
     committed.tick(1);
     CHECK(ConnectionAdaptiveTestAccess::stagedArqTimeoutFrames(committed) == 0 &&
-              committed_bursts == 0 && committed_standalone == 1 &&
+              committed_bursts == 1 && committed_standalone == 0 &&
               committed_ack_arms == 1,
-          "unchanged geometry should commit exactly one singleton timeout egress");
+          "unchanged geometry should commit exactly one timeout egress (a silent singleton "
+          "above the bottom rung leaves as a padded two-frame group, BUG-LATENT-CRATER-ONE-RUNG)");
     CHECK(committed.getStats().arq.timeouts == 1 &&
               committed.getStats().arq.retransmissions_timeout == 1 &&
               ConnectionAdaptiveTestAccess::arqMaxInFlightRetryCount(committed) == 1,
@@ -4434,6 +4435,46 @@ void test_timeout_batch_waits_for_post_tick_flush_and_discards_obsolete_geometry
               obsolete.getStats().arq.retransmissions == 0 &&
               obsolete.getStats().arq.failed == 0,
           "pending MODE_CHANGE must not repeatedly regenerate or consume canceled intents");
+}
+
+void test_silent_singleton_resend_carries_descriptor() {
+    // BUG-LATENT-CRATER-ONE-RUNG: a lone frame resent after a silent round goes out as a
+    // two-frame group (frame + addressed-away pad), so the receiver hears a descriptor and can
+    // grade the crater; at the bottom coherent rung it stays a singleton (silence feeds the
+    // down-crossing there).
+    for (const bool bottom : {false, true}) {
+        Connection c;
+        std::vector<Bytes> singles;
+        std::vector<std::vector<Bytes>> bursts;
+        c.setTransmitCallback([&](const Bytes& frame) { singles.push_back(frame); });
+        c.setTransmitBurstCallback(
+            [&](const std::vector<Bytes>& frames, uint16_t, uint8_t) { bursts.push_back(frames); });
+        const CodeRate rate = bottom ? CodeRate::R1_4 : CodeRate::R2_3;
+        ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, rate, 8.0f, 0.30f, Modulation::QPSK);
+        ConnectionAdaptiveTestAccess::setArqMaxRetries(c, 4);
+        CHECK(ConnectionAdaptiveTestAccess::sendFixedData(c, Bytes{0x51}, v2::Flags::FINAL),
+              "silent-singleton fixture should seed one live DATA identity");
+        CHECK(singles.size() == 1 && bursts.empty(),
+              "the first round of one frame is a descriptor-less singleton");
+        const std::vector<Bytes> identity = singles;
+        singles.clear();
+        ConnectionAdaptiveTestAccess::stageArqTimeoutBatch(c, identity);
+        ConnectionAdaptiveTestAccess::flushStagedArqTimeoutBatch(c);
+        if (bottom) {
+            CHECK(singles.size() == 1 && bursts.empty(),
+                  "at QPSK R1/4 the timeout resend stays one frame");
+        } else {
+            CHECK(bursts.size() == 1 && bursts.front().size() == 2 && singles.empty(),
+                  "above the bottom rung the timeout resend is a two-frame group");
+            if (bursts.size() == 1 && bursts.front().size() == 2) {
+                const auto first = v2::parseHeader(bursts.front()[0]);
+                const auto pad = v2::parseHeader(bursts.front()[1]);
+                CHECK(first.valid && !v2::isOFDMBurstPadHeader(first) &&
+                          pad.valid && v2::isOFDMBurstPadHeader(pad),
+                      "the group is the live frame followed by the addressed-away pad");
+            }
+        }
+    }
 }
 
 void test_timeout_repair_batch_is_capped_before_retry_commit() {
@@ -5615,11 +5656,18 @@ void test_fragment_tail_hole_repairs_immediately_and_uses_one_frame_rto() {
     CHECK(c.getStats().arq.timeouts == 0 && standalone_frames.size() == 1,
           "repair must not time out before its exact one-frame deadline");
     c.tick(1);
-    CHECK(c.getStats().arq.timeouts == 1 && standalone_frames.size() == 2,
+    // The retry follows a silent round, so it carries a descriptor: frame + pad
+    // (BUG-LATENT-CRATER-ONE-RUNG).
+    CHECK(c.getStats().arq.timeouts == 1 && standalone_frames.size() == 1 &&
+              bursts.size() == 2 && bursts[1].size() == 2 &&
+              v2::isOFDMBurstPadHeader(v2::parseHeader(bursts[1][1])),
           "lost repair ACK should retry exactly at the one-frame deadline");
-    CHECK(ack_monitor_windows.size() == 3 &&
-              ack_monitor_windows[2] == one_frame_monitor_window,
-          "one-frame RTO repair should exact-rearm the same short monitor window");
+    // The padded resend is a full-anchor two-frame round: its monitor window is that round's.
+    CHECK(ack_monitor_windows.size() == 3 && bursts.size() == 2 &&
+              ack_monitor_windows[2] ==
+                  std::max<uint32_t>(8000u, ConnectionAdaptiveTestAccess::physicalRoundTimeout(
+                                                c, bursts[1], /*force_full_group_start=*/true)),
+          "the padded RTO repair should exact-rearm its own round's monitor window");
 
     ToneBurstAckDetection complete_ack;
     complete_ack.payload.group_seq =
@@ -7571,6 +7619,7 @@ int main() {
     test_move_epoch_rebase_drops_stale_message_prefix();
     test_timeout_batch_waits_for_post_tick_flush_and_discards_obsolete_geometry();
     test_timeout_repair_batch_is_capped_before_retry_commit();
+    test_silent_singleton_resend_carries_descriptor();
     test_arq_control_feedback_does_not_arm_data_ack_monitor();
     test_data_ack_monitor_arms_before_synchronous_transport_callback();
     test_full_repair_timing_uses_encoder_samples_and_respects_ceiling();

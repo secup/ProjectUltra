@@ -10,6 +10,39 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — fix(arq): a one-frame round after a silent one carries a descriptor (BUG-LATENT-CRATER-ONE-RUNG)
+
+**Broken:** above the bottom coherent rung, a wide-OFDM one-frame round that failed to decode drew no
+answer. A singleton has no descriptor, so the receiver saw no group to grade; its anchored-burst
+backstop (14.6 s after the anchor) is later than the singleton's resend (~8.7 s) and is withheld
+(BUG-BACKSTOP-RACES-RTO). The sender holds its rung on silence by design (`escapeHasPeerEvidence`:
+"the peer still hears the rung-independent descriptor and answers") - but a singleton carries none,
+so it repeated an undecodable frame until the follow's 60 s patience crossed to MC-DPSK. GUI main,
+ITU Good: chains of 7-8 silent singleton resends at QPSK R1/2 in 4 of 14 runs (~55-60 s each).
+
+**Changed:** `Connection::appendSilentSingletonDescriptorPad` (policy
+`connection_policy::silentSingletonCarriesDescriptor`): after a retransmission timeout with the peer
+unheard (`rto_rounds_since_peer_ack_ >= 1`), a wide-OFDM one-frame DATA round at a rung above QPSK
+R1/4 gets the existing addressed-away ULPAD frame and leaves as a two-frame group with a descriptor
+(full anchor on the RTO path). Called from `flushBurstBuffer` and from `transmitFrameBatch` after the
+RTO accounting. The descriptor decodes on the control profile well below the data rung, so the
+receiver grades the crater and commands its rung, and a switch can ride the descriptor. A heard link
+keeps descriptor-less singletons (no cost on clean channels); the bottom rung too (there silence is
+the down-crossing's evidence, and an empty group's ACK would hold it off).
+
+**Verified:** GUI gate, two trees side by side (main 97e64340 vs candidate), 7.3 Hz dial, seeds 61-67:
+- ITU Good 20 -> 6 dB drop at 35 s, 12 KB: main 2438 s vs 1769 s (-27 %), 7/7 PASS both. Main's
+  singleton chains: 7, 7, 8 rounds (seeds 61, 63, 64); candidate: none longer than one round.
+- ITU Good 8 dB, 8 KB: 866 s vs 813 s (-6 %); main seed 65 had a 7-round chain (193 s vs 122 s).
+- The pad fired twice in 14 runs; each time the receiver answered the padded round (7.4 s later in
+  good8 s65) and the transfer went on.
+- High speed, paired: AWGN 20 dB 3850/3850/3850 vs 3850/3850/3840 bps; ITU Good 20 dB 2400/2540/1900 vs
+  2400/2540/1890 bps (seeds 42-44, 21 KB).
+- ctest: `ConnectionAdaptive` (ULTRA_FAST=0) 937/937, `ConnectionPolicy`, `WaveformFollow` pass; three
+  tests that pinned a one-frame resend above the bottom rung now expect the padded group.
+
+---
+
 ## 2026-11-26 — test: StreamingMCDPSK listener-gate check keeps feeding audio after the turn
 
 CI Sanitizer (linux), main push of 97e64340: `StreamingMCDPSK` failed "OFDM listener gate on an

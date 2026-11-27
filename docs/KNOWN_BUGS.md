@@ -262,26 +262,13 @@ little while it takes the clip's distortion. Not verified on the GUI gate (the 2
 MC-DPSK at 0 dB "transferred" without an A/B). Next: GUI A/B `ULTRA_PEAK_CONTROL=0` vs default at an AWGN
 -4..-6 dB MC-DPSK session, and the clip's reference over the payload span only. 16-FSK bursts are not clipped.
 
-### BUG-LATENT-CRATER-ONE-RUNG (open, 2026-11-12) — P2: after a sudden drop the receiver commands one rung down per crater, and singletons cannot carry a switch
+### BUG-LATENT-CRATER-ONE-RUNG — singleton part FIXED 2026-11-26 (see Fixed Bugs); open part: one rung per crater
 
-GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
-decision-directed EVM of 6.5 dB, and the latent controller's posterior moved only to mean 15.6 dB
-(x_p25 14.0), commanding QPSK R2/3 - still far above the channel. A 0/M crater says "x below this
-rung's theta" but the likelihood is flat far below it, so x walks down one rung per crater; after that
-the sender's rounds were single frames at QPSK R2/3 that never decoded, a single frame carries no
-descriptor (no DESC-SWITCH), RTO resends keep the rung by design ("timeouts are no evidence against
-the rung"), and the receiver had no frame to answer - six silent rounds until the follow's 60 s
-patience fell back to MC-DPSK. Directions (rate control - needs the rig A/B, not the seeded sim): feed
-the failed group's EVM reading into the latent posterior as a likelihood (the EVM decode thresholds
-are per-rung and class-independent, docs/EVM_RATE_SELECTION_2026_11_08.md), and/or let a singleton
-carry a descriptor so its rung can change. (Part of what the seed-45 rounds looked like - the
-group whose era-head frame failed while the rest decoded drew no ACK at all - was
-BUG-ERA-HEAD-LOST-SILENCE, fixed 2026-11-12; the single-frame rounds that follow remain.) A related
-gap on the receiver: a failed single frame is
-answered only by the anchored-burst backstop, 14.6 s after its anchor (the longest physical turn,
-because a failed chirp-anchored codeword may be a group resend's descriptor), which is always later
-than a singleton's resend (~8.7 s) and so is withheld (BUG-BACKSTOP-RACES-RTO) - the receiver says
-nothing while the sender repeats a frame it cannot decode.
+The silent-singleton half is fixed (a one-frame round after a silent one carries a descriptor). Still
+open: a 0/M crater moves the latent posterior only one rung (its likelihood is flat far below the
+rung's theta), so a sudden 20 -> 5 dB drop walks down one rung per round. Direction: feed the failed
+group's EVM reading into the posterior as a likelihood (EVM decode thresholds are per-rung and
+class-independent, docs/EVM_RATE_SELECTION_2026_11_08.md).
 
 ### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
 
@@ -3022,6 +3009,32 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-LATENT-CRATER-ONE-RUNG, silent singleton (FIXED 2026-11-26)
+
+GUI ITU Good drop 20 -> 5 dB (seed 45, g12): the first post-drop group cratered 0/4 at 8PSK R2/3 with a
+decision-directed EVM of 6.5 dB, and the latent controller's posterior moved only to mean 15.6 dB
+(x_p25 14.0), commanding QPSK R2/3 - still far above the channel. A 0/M crater says "x below this
+rung's theta" but the likelihood is flat far below it, so x walks down one rung per crater; after that
+the sender's rounds were single frames at QPSK R2/3 that never decoded, a single frame carries no
+descriptor (no DESC-SWITCH), RTO resends keep the rung by design ("timeouts are no evidence against
+the rung"), and the receiver had no frame to answer - six silent rounds until the follow's 60 s
+patience fell back to MC-DPSK. Directions (rate control - needs the rig A/B, not the seeded sim): feed
+the failed group's EVM reading into the latent posterior as a likelihood (the EVM decode thresholds
+are per-rung and class-independent, docs/EVM_RATE_SELECTION_2026_11_08.md), and/or let a singleton
+carry a descriptor so its rung can change. (Part of what the seed-45 rounds looked like - the
+group whose era-head frame failed while the rest decoded drew no ACK at all - was
+BUG-ERA-HEAD-LOST-SILENCE, fixed 2026-11-12; the single-frame rounds that follow remain.) A related
+gap on the receiver: a failed single frame is
+answered only by the anchored-burst backstop, 14.6 s after its anchor (the longest physical turn,
+because a failed chirp-anchored codeword may be a group resend's descriptor), which is always later
+than a singleton's resend (~8.7 s) and so is withheld (BUG-BACKSTOP-RACES-RTO) - the receiver says
+nothing while the sender repeats a frame it cannot decode.
+- **Fix 2026-11-26:** after a retransmission timeout with the peer unheard, a wide-OFDM one-frame
+  round above QPSK R1/4 carries the addressed-away pad and a descriptor
+  (`Connection::appendSilentSingletonDescriptorPad`). GUI ITU Good, seeds 61-67: 20 -> 6 dB drop
+  2438 -> 1769 s, 8 dB 866 -> 813 s; main's 7-8-round silent chains (4/14 runs) gone; high speed
+  unchanged. CHANGELOG 2026-11-26.
 
 ### Tone-ACK length on fading, 2026-11-26 (TNC short, ITU Good 8/15 dB, seeds 501-524; CHANGELOG 2026-11-26)
 
