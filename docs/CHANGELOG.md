@@ -32,7 +32,7 @@ the session back up with the 6 dB margin test. CTest LinkControlPlan `rule8_...`
 
 ## 2026-11-27 — fix(rx): a compact MC-DPSK first frame decodes at the end of its own span
 
-**Broken (BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY, part):** after the control stage failed, a connected
+**Broken (BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY, closed in KNOWN_BUGS the same day: no DBPSK-configured decoder seen in the A/B logs):** after the control stage failed, a connected
 compact MC-DPSK receiver waited for the longest first frame the peer may send (4 codewords at DBPSK,
 340992 samples) before decoding a data frame at any rung; a 16-FSK-F 3-codeword frame (259072) waited
 1.7 s past its end, a DQPSK one longer.

@@ -346,30 +346,6 @@ Good +3 dB): rate changes 10/3/8 vs 7/2/0 (follow off), 17 vs 5 in one follow-on
 rung's break-even FER (the up-step already prices a failed probe), so the window and the rate
 decision stop interacting.
 
-### BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY (open, 2026-11-12) — P3: a one-frame DQPSK burst is acknowledged 2.6 s late
-
-A receiver buffers a whole frame at the slowest MC-DPSK constellation (DBPSK) before decoding a
-burst's first frame, because it cannot know which one the sender used (the compact first-frame
-decode then tries the configured constellation and the other). For a one-frame burst at DQPSK that
-delays the decode - and the end-of-turn ACK - by 5184 - 2624 = 2560 ms (GUI 2026-11-12: burst end
-122.0 s, decode 124.83 s; DBPSK bursts decode 0.33 s after their end). Multi-frame bursts recover
-(frame 2 is already buffered when frame 1 decodes). Costs: ~2.6 s per one-frame DQPSK turn, and a
-timeout guard that must allow it (`mcDpskFirstFrameLookaheadMs`, ULTRA_MCDPSK_MEASURED_RTO).
-Root cause (engine trace, 2026-11-12): after a crossing to MC-DPSK the decoder that hears the
-burst is the former listener slot, still configured at DBPSK (the follow's down target), and the
-receiver never reconfigures it to the DQPSK it commands - so every DQPSK first frame waits a
-DBPSK-length slice and decodes through the other-constellation retry ("decodes at DQPSK (configured
-DBPSK)"). Direction: configure the MC-DPSK decoder at the constellation this receiver commands, and
-size the first slice at it, waiting the slowest-rung length only when that decode fails (the second
-stage keeps a sender's rung fallback decodable). A two-stage slice alone does nothing while the
-decoder stays at DBPSK (tried and backed out; patch kept in the session scratchpad).
-**Partly fixed 2026-11-27 (data stage):** in a compact session the first slice now grows control
-frame -> one compact data frame at the configured rung -> the longest first frame
-(`mcDpskFirstFrameStages`); a compact frame at the configured rung decodes at the end of its own span
-(TNC log: "compact first frame decoded from a 259072-sample span", 16-FSK-F 3 CW, against 340992).
-Still open: whether the post-crossing decoder is configured at the rung this receiver commands -
-while it is at DBPSK the data stage equals the full span and changes nothing (not re-measured).
-
 ### BUG-HANDSHAKE-DBPSK-AT-HIGH-SNR (open, 2026-11-12) — P3, efficiency: CONNECT and CONNECT_ACK always go at DBPSK R1/4
 
 GUI AWGN 20 dB, seed 44: the modem's handshake takes 14.4 s from the PING (7.03 s) to the decoded
@@ -2990,6 +2966,32 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-FIRST-FRAME-LOOKAHEAD-LATENCY (FIXED 2026-11-27, opened 2026-11-12) — P3: a one-frame DQPSK burst is acknowledged 2.6 s late
+
+A receiver buffers a whole frame at the slowest MC-DPSK constellation (DBPSK) before decoding a
+burst's first frame, because it cannot know which one the sender used (the compact first-frame
+decode then tries the configured constellation and the other). For a one-frame burst at DQPSK that
+delays the decode - and the end-of-turn ACK - by 5184 - 2624 = 2560 ms (GUI 2026-11-12: burst end
+122.0 s, decode 124.83 s; DBPSK bursts decode 0.33 s after their end). Multi-frame bursts recover
+(frame 2 is already buffered when frame 1 decodes). Costs: ~2.6 s per one-frame DQPSK turn, and a
+timeout guard that must allow it (`mcDpskFirstFrameLookaheadMs`, ULTRA_MCDPSK_MEASURED_RTO).
+Root cause (engine trace, 2026-11-12): after a crossing to MC-DPSK the decoder that hears the
+burst is the former listener slot, still configured at DBPSK (the follow's down target), and the
+receiver never reconfigures it to the DQPSK it commands - so every DQPSK first frame waits a
+DBPSK-length slice and decodes through the other-constellation retry ("decodes at DQPSK (configured
+DBPSK)"). Direction: configure the MC-DPSK decoder at the constellation this receiver commands, and
+size the first slice at it, waiting the slowest-rung length only when that decode fails (the second
+stage keeps a sender's rung fallback decodable). A two-stage slice alone does nothing while the
+decoder stays at DBPSK (tried and backed out; patch kept in the session scratchpad).
+**Partly fixed 2026-11-27 (data stage):** in a compact session the first slice now grows control
+frame -> one compact data frame at the configured rung -> the longest first frame
+(`mcDpskFirstFrameStages`); a compact frame at the configured rung decodes at the end of its own span
+(TNC log: "compact first frame decoded from a 259072-sample span", 16-FSK-F 3 CW, against 340992).
+Closed 2026-11-27: the DBPSK-configured decoder no longer occurs - in the 12 TNC runs of the R8 A/B
+(6f3ac57d) and the GUI AWGN -5 dB runs no first frame decoded with "(configured DBPSK)"; the
+other-rung decodes left (0-7 per run) are rung changes (R8 step-downs, tone-ACK steps), one frame each.
+
 
 ### BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG (FIXED 2026-11-27, link-control rule R8) — P1: an MC-DPSK TURN_REQUEST retried at a rung that never carried it
 TNC pingpong, AWGN 0 dB (peak-limited TX), 420185c4: 6 of 6 runs stalled at turn 4. ALPHA re-sent its
