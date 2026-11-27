@@ -1,3 +1,5 @@
+#include <thread>
+#include <chrono>
 #include "gui/modem/streaming_frame_policy.hpp"
 #include "gui/modem/streaming_decoder.hpp"
 #include "gui/modem/streaming_encoder.hpp"
@@ -903,7 +905,7 @@ bool runConnectedOFDMHalfOpenConnectFallback() {
 // anchor). Only the OFDM decoder ever cleared it, so every MC-DPSK end-of-turn ACK waited out the
 // gate's budget (TNC ITU Good 8 dB seed 511: ~6 s of a 14.8 s one-frame round). The MC-DPSK decoder's
 // completed turn now clears it (ModemEngine -> notePeerTurnCompletedElsewhere).
-bool runListenerGateClearedByCompletedTurn(bool clear_on_turn_end = true) {
+bool runListenerGateClearedByCompletedTurn(bool clear_on_turn_end = true, int feed_pause_ms = 0) {
     const uint32_t alpha = v2::hashCallsign("ALPHA");
     const uint32_t bravo = v2::hashCallsign("BRAVO");
     StreamingEncoder encoder;
@@ -973,6 +975,12 @@ bool runListenerGateClearedByCompletedTurn(bool clear_on_turn_end = true) {
         listener.feedAudio(src, len);
         mc.processBuffer();
         listener.processBuffer();
+        // A feed that falls behind real time (ASAN CI, a decode backlog): every chunk of the
+        // turn arrives feed_pause_ms of wall time after the last. Late audio is not absent audio -
+        // the decoders must not drop the frames they wait for.
+        if (feed_pause_ms > 0 && in_audio) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(feed_pause_ms));
+        }
         if (turn_end) {
             after = listener.burstAirSamplesRemaining();  // the ACK's decision, right after
             break;
@@ -980,7 +988,8 @@ bool runListenerGateClearedByCompletedTurn(bool clear_on_turn_end = true) {
     }
     const bool ok = turn_end && held_at_turn_end > 0 && (clear_on_turn_end ? after == 0 : after > 0);
     std::cout << (ok ? "" : "FAIL: ") << "OFDM listener gate on an MC-DPSK turn"
-              << (clear_on_turn_end ? "" : " (not cleared)") << ": turn_end=" << turn_end << ", "
+              << (clear_on_turn_end ? "" : " (not cleared)")
+              << (feed_pause_ms > 0 ? " (feed 5x behind real time)" : "") << ": turn_end=" << turn_end << ", "
               << held_at_turn_end << " samples held at the turn's end, " << after << " after\n";
     return ok;
 }
@@ -1024,6 +1033,9 @@ int main() {
     if (!runLostFrameReport()) return 1;
     if (!runListenerGateClearedByCompletedTurn(false)) return 1;  // the defect, reproduced
     if (!runListenerGateClearedByCompletedTurn(true)) return 1;
+    // The ASAN CI failure (turn_end=0, nothing held): a feed 5x behind real time (the first
+    // frame's 7.1 s wait took > its 9.1 s wall-clock budget, three times over).
+    if (!runListenerGateClearedByCompletedTurn(true, 500)) return 1;
     if (!runCompactBurst("compact burst", Modulation::DBPSK, false)) return 1;
     if (!runCompactBurst("compact burst, middle frame lost", Modulation::DBPSK, true)) return 1;
     if (!runCompactBurst("compact DQPSK burst at a DBPSK receiver", Modulation::DQPSK, false)) return 1;

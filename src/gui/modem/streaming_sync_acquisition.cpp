@@ -600,8 +600,18 @@ void StreamingDecoder::searchForSync() {
             const size_t start_abs =
                 external_anchor_abs_ > kHintLead ? external_anchor_abs_ - kHintLead : 0;
             const size_t end_abs = external_anchor_abs_ + kHintTail;
-            const bool consumed = sync_controller_.ring_.search_floor_abs_valid_ &&
-                                  sync_controller_.ring_.search_floor_abs_ > external_anchor_abs_;
+            // Decoded already: behind the search floor, or inside the span of the last group this
+            // decoder delivered (its descriptor's anchor included). The burst path moves only the
+            // correlation cursor, never the floor, so a structure-acquired group left the floor
+            // short of its own anchor and the late hint replayed it: the group delivered twice,
+            // two ACKs, the outcome counted twice (BUG-HINT-REPLAYS-DECODED-BURST).
+            const bool in_delivered_group =
+                delivered_group_hi_abs_ > delivered_group_lo_abs_ &&
+                external_anchor_abs_ >= delivered_group_lo_abs_ &&
+                external_anchor_abs_ < delivered_group_hi_abs_;
+            const bool consumed = in_delivered_group ||
+                                  (sync_controller_.ring_.search_floor_abs_valid_ &&
+                                   sync_controller_.ring_.search_floor_abs_ > external_anchor_abs_);
             if (consumed || start_abs < oldest_abs) {
                 external_anchor_valid_ = false;  // decoded already, or no longer in the ring
             } else if (total >= end_abs) {
@@ -1217,6 +1227,8 @@ void StreamingDecoder::searchForSync() {
         sync_gap_error_samples_ = sync_result.gap_error_samples;
         sync_chirp_cfo_hz_ = sync_result.cfo_hz;
         sync_start_time_ = std::chrono::steady_clock::now();
+        sync_wait_fed_ = sync_controller_.ring_.total_fed_;
+        sync_fed_at_sync_ = sync_wait_fed_;
         pending_total_cw_ = 0;
         sync_from_warm_timed_window_ = used_warm_timed_window;
         sync_from_full_anchor_fallback_ = used_full_anchor_fallback;
@@ -1301,7 +1313,12 @@ void StreamingDecoder::checkIfReadyToDecode() {
 
     // Check elapsed time after selecting the sample requirement. Large variable
     // OFDM frames can be longer than the legacy 5s fixed-frame wait.
+    // Wall time since the feed last ADVANCED: late audio is not absent audio.
     auto now = std::chrono::steady_clock::now();
+    if (const size_t fed = sync_controller_.ring_.total_fed_; fed != sync_wait_fed_) {
+        sync_wait_fed_ = fed;
+        sync_start_time_ = now;
+    }
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - sync_start_time_).count();
 
@@ -1401,7 +1418,13 @@ void StreamingDecoder::checkIfReadyToDecode() {
     const int required_audio_ms = static_cast<int>(
         (requirement.samples * 1000 + kAudioSampleRateHz - 1) / kAudioSampleRateHz);
     const int frame_timeout_ms = std::max(FRAME_TIMEOUT_MS, required_audio_ms + 2000);
-    if (decode_policy::frameWaitTimedOut(available, requirement.samples, elapsed,
+    // The same bound in audio time: the timeout's worth of audio has ARRIVED since the sync and
+    // the frame still is not there (it can only be a requirement the ring never holds).
+    const size_t fed_since_sync = sync_controller_.ring_.total_fed_ - sync_fed_at_sync_;
+    const long long audio_elapsed_ms =
+        static_cast<long long>(fed_since_sync) * 1000 / kAudioSampleRateHz;
+    if (decode_policy::frameWaitTimedOut(available, requirement.samples,
+                                         std::max<long long>(elapsed, audio_elapsed_ms),
                                          frame_timeout_ms)) {
         LOG_MODEM(WARN, "[%s] Frame timeout after %lld ms (need=%zu samples, timeout=%d ms)",
                   log_prefix_.c_str(), (long long)elapsed, requirement.samples, frame_timeout_ms);

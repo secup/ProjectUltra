@@ -1885,6 +1885,8 @@ void StreamingDecoder::reset(bool reset_doppler_coherence) {
     mc_burst_pending_frame_ = false;
     mc_mfsk_lookahead_pending_ = false;
     external_anchor_valid_ = false;  // its absolute position belongs to the rewound clock
+    delivered_group_lo_abs_ = 0;
+    delivered_group_hi_abs_ = 0;
     mc_burst_pending_soft_bits_.clear();
     constellation_cache_.clear();
     constellation_cache_time_ = std::chrono::steady_clock::time_point{};

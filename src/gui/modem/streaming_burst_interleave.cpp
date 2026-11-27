@@ -1485,6 +1485,26 @@ void StreamingDecoder::computeBurstLevelVerdict() {
 }
 
 void StreamingDecoder::finalizeBurstGroup(int exact_physical_group_size) {
+    {
+        // The group's air span, for the dual-listen chirp hint (BUG-HINT-REPLAYS-DECODED-BURST):
+        // back from the cursor after its last member by its N members and two full anchors - the
+        // first member's own (a group start that carries the dual chirp) and the descriptor's
+        // (its chirp, then its one-symbol frame, under one anchor's length) - where the MC-DPSK
+        // detector reports a training start. The sender keys nothing else that close before a
+        // group. From the geometry: the start stamps (burst_data_start_abs_,
+        // last_group_start_abs_) are refreshed per member and name a later one.
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        const size_t end = sync_controller_.ring_.ringPosToAbsoluteLocked(burst_next_pos_);
+        const size_t members = static_cast<size_t>(
+            exact_physical_group_size > 0 ? exact_physical_group_size
+                                          : std::max(2, burst_group_size_));
+        const size_t span = members * burst_min_block_ +
+                            2 * protocol::connection_policy::kWideOFDMFullAnchorExtraSamples;
+        if (burst_min_block_ > 0 && end > 0) {
+            delivered_group_lo_abs_ = end > span ? end - span : 0;
+            delivered_group_hi_abs_ = end;
+        }
+    }
     // ULTRA_ITERATIVE_CHEST: a data-aided observation is only valid inside one
     // continuous acquisition. The group is over — drop the retained grid and the
     // carried history so nothing leaks into the next group's estimate. No-op when

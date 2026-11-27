@@ -1180,6 +1180,86 @@ StructureMemberResult runStructureMemberAnchorTrial() {
     return r;
 }
 
+// BUG-HINT-REPLAYS-DECODED-BURST (2026-11-27): a group that starts with a full chirp anchor and is
+// acquired by frame structure (the production default) was decoded a SECOND time when the
+// dual-listen MC-DPSK decoder's chirp lock on the same anchor arrived after the group was
+// delivered: the hint's "already decoded" test read only the search floor, which the burst path
+// does not advance. GUI ITU Good 8 dB seed 64: one 4-frame group delivered twice 80 ms apart (two
+// ACKs, the outcome counted twice); TNC Good 10 dB: the duplicate's ACK overlapped the sender's
+// next group, which was lost. A hint inside a delivered group's span is consumed.
+struct HintReplayResult {
+    int group_callbacks = 0;
+    bool hint_sent = false;
+    bool reentered_delivered_audio = false;  // a burst re-armed inside the delivered group's air
+};
+
+HintReplayResult runHintAfterDeliveredGroupTrial(bool send_hint, bool full_group_start) {
+    constexpr int kGroup = 4;
+    constexpr int kCw = 4;
+    ModemConfig geom = presets::balanced();
+    geom.modulation = Modulation::QPSK;
+    geom.code_rate = CodeRate::R1_2;
+    geom.use_pilots = true;
+    geom.pilot_spacing =
+        ofdm_link_adaptation::recommendedPilotSpacing(Modulation::QPSK, CodeRate::R1_2);
+
+    StreamingEncoder enc;
+    enc.setMode(protocol::WaveformMode::OFDM_CHIRP);
+    enc.setOFDMConfig(geom);
+    enc.setDataMode(Modulation::QPSK, CodeRate::R1_2);
+    enc.setFixedFrameCodewords(kCw);
+    enc.setBurstInterleave(true);
+    enc.setBurstInterleaveGroupSize(kGroup);
+    enc.setBurstDescriptorEnabled(true);
+    enc.setBurstDescriptorIdentity("ALPHA", "BRAVO");
+    auto frames = makeGroupFrames(kGroup, CodeRate::R1_2, kCw);
+    {
+        auto tail = v2::DataFrame::deserialize(frames.back());
+        EXPECT(tail.has_value());
+        if (tail) {
+            tail->flags |= v2::Flags::PHYSICAL_BURST_END;
+            frames.back() = tail->serialize();
+        }
+    }
+    const auto burst = enc.encodeBurstLight(
+        frames, BurstAnchorOptions{full_group_start, /*keep_skip_streak=*/false});
+    const auto audio = withSilence(burst);
+    constexpr size_t kLead = 48000;  // withSilence's lead-in: the anchor's first chirp starts here
+
+    StreamingDecoder dec;
+    dec.setConnectedOFDMMode(protocol::WaveformMode::OFDM_CHIRP, geom, Modulation::QPSK,
+                             CodeRate::R1_2);
+    dec.setFixedFrameCodewords(kCw);
+    dec.setBurstInterleave(true);
+    dec.setBurstInterleaveGroupSize(kGroup);
+    dec.applyPendingConfigForTesting();
+
+    HintReplayResult r;
+    dec.setBurstGroupCallback([&](uint16_t, const std::vector<Bytes>&, bool, float, uint16_t,
+                                  bool, uint8_t, bool) { ++r.group_callbacks; });
+    constexpr size_t kChunk = 4800;
+    size_t fed = 0;
+    for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
+        const size_t len = std::min(kChunk, audio.size() - pos);
+        dec.feedAudio(audio.data() + pos, len);
+        fed += len;
+        dec.processBuffer();
+        if (send_hint && !r.hint_sent && r.group_callbacks == 1) {
+            // The MC-DPSK decoder's lock on the anchor's dual chirp (training after the two
+            // 28800-sample chirps), reported late as in the logs.
+            // The floor alone must not be what drops it: the burst path does not advance it.
+            dec.clearSearchFloorForTesting();
+            const size_t training_abs = kLead + 57600;
+            dec.noteExternalChirpAnchor(fed - training_abs);
+            r.hint_sent = true;
+        } else if (r.hint_sent) {
+            const uint64_t start = dec.burstDataStartAbsForTesting();
+            if (start != 0 && start < kLead + burst.size()) r.reentered_delivered_audio = true;
+        }
+    }
+    return r;
+}
+
 FailedAnchorGateResult runFailedAnchorResetGateTrial() {
     constexpr int kCw = 4;
     auto frame = v2::makeFixedDataFrame(
@@ -1303,6 +1383,22 @@ int main(int argc, char** argv) {
         EXPECT(sm.member_air_remaining > 0);
         EXPECT(sm.tail_callbacks == 1);
         EXPECT(sm.tail_turn_complete);
+        // Both wire layouts: the GUI case (the group start carries the dual chirp) and the TNC
+        // case (the descriptor ahead of a light group start carries it).
+        for (const bool full_start : {true, false}) {
+            const HintReplayResult no_hint = runHintAfterDeliveredGroupTrial(false, full_start);
+            const HintReplayResult late_hint = runHintAfterDeliveredGroupTrial(true, full_start);
+            std::fprintf(stderr,
+                         "late chirp hint after a structure-acquired group (%s): groups without "
+                         "hint=%d, with hint=%d (hint sent=%d, re-entered delivered audio=%d)\n",
+                         full_start ? "chirp at group start" : "chirp on descriptor",
+                         no_hint.group_callbacks, late_hint.group_callbacks,
+                         late_hint.hint_sent ? 1 : 0, late_hint.reentered_delivered_audio ? 1 : 0);
+            EXPECT(no_hint.group_callbacks == 1);
+            EXPECT(late_hint.hint_sent);
+            EXPECT(late_hint.group_callbacks == 1);
+            EXPECT(!late_hint.reentered_delivered_audio);
+        }
         std::fprintf(stderr, "%s\n", g_failures == 0 ? "PASS" : "FAIL");
         return g_failures == 0 ? 0 : 1;
     }

@@ -10,6 +10,43 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(rx): a late chirp hint no longer replays a delivered group; frame waits time out on stopped audio, not slow audio
+
+**Broken (1, BUG-HINT-REPLAYS-DECODED-BURST):** the dual-listen chirp hint (the MC-DPSK decoder's
+lock on a dual chirp, handed to the OFDM decoder) arrived after the OFDM decoder had already
+delivered the group that chirp anchored. Its "already decoded" test read only the search floor,
+which the burst path never advances (it moves the correlation cursor), so a structure-acquired
+group was decoded and delivered a SECOND time: two ACKs, the outcome counted twice by the latent
+and EVM rate windows. GUI ITU Good 8 dB seed 64 (one 4-frame group delivered twice 80 ms apart);
+TNC marathon Good 10 dB seed 43 (the duplicate's ACK overlapped the sender's next group, which was
+lost: ~20 s). 4 of 917 GUI bursts and 1 of ~240 TNC bursts in the recent A/B logs.
+
+**Broken (2):** the decoders' frame waits timed out on WALL time: after a sync,
+`max(5 s, airtime + 2 s)`; in an MC-DPSK burst continuation, airtime + 1 s. A feed slower than real
+time (a decode backlog; ASAN CI) is late audio, not absent audio, and both decoders dropped the
+frames they were waiting for: the Sanitizer job's StreamingMCDPSK listener-gate check failed
+`turn_end=0, 0 samples held` (CI run 45951001275).
+
+**Changed:** (1) `finalizeBurstGroup` records the delivered group's air span (N members + two
+full anchors back from the cursor after its last member: the group start's own chirp and the
+descriptor's) in `delivered_group_lo_abs_/hi_abs_`; `searchForSync` drops a hint inside it as well
+as one behind the floor. (2) Both waits measure wall time from the last time the feed ADVANCED
+(`sync_wait_fed_`, `mcBurstAudioStalled`), and the frame wait also times out once its budget's
+worth of AUDIO has arrived. In real time the feed advances every block, so live behaviour is
+unchanged; a stopped feed (end of a file, a stalled device) still ends the wait.
+
+**Verified:** CTest `BurstStructureMemberAnchor` (new: a late hint into a delivered group, chirp at
+the group start and chirp on the descriptor, the floor cleared) fails before (the decoder re-armed
+a burst inside the delivered audio) and passes after; `StreamingMCDPSK` (new: the listener-gate
+check with the feed 5x behind real time) reproduces the CI failure before (`turn_end=0, 0 held`) and
+passes after. Full CTest 134/134. GUI gate, paired trees (d063b121 vs hint fix), seeds 61-67, 7.3 Hz:
+AWGN 20 505 / 506 s, Good 20 671 / 681, Good 15 484 / 506, Good 8 897 / 884, Good 20 -> 6 dB drop
+1396 / 1773 with one FAIL (seed 65: link lost after the crossing to 16-FSK-F, BUG-DROP6-MFSK-UNHEARD);
+seed 65 re-run twice per arm: hint 175 / 200 s PASS, main 301 / 186 s PASS - fade alignment, not the
+fix. No duplicate group in either arm (the event is ~1 in 200 groups). Both fixes together vs d063b121,
+seeds 61-63, 21/21 PASS each: AWGN 3 342 / 321 s, Good 5 447 / 390, Good 8 331 / 316, Good 15 219 / 219,
+Good 20 272 / 277, AWGN 20 218 / 216, drop 525 / 584.
+
 ## 2026-11-27 — tools: the TNC marathon's watchdog fits five sessions on a slow channel
 
 **Broken:** `tools/tnc_scenario.py --scenario marathon` killed every ITU Good 10 dB run at the 1500 s

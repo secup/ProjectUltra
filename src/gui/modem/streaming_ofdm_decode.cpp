@@ -409,6 +409,25 @@ uint64_t StreamingDecoder::absoluteForSyncPosition() {
         sync_controller_.ring_.ringPosToAbsoluteLocked(sync_position_));
 }
 
+bool StreamingDecoder::mcBurstAudioStalled(size_t samples_needed) {
+    const auto now = std::chrono::steady_clock::now();
+    const size_t fed = sync_controller_.ring_.total_fed_;
+    if (fed != mc_burst_wait_fed_) {
+        mc_burst_wait_fed_ = fed;
+        mc_burst_wait_start_time_ = now;
+        return false;
+    }
+    // (In real time the feed advances every block, so this is the old wall-clock bound measured
+    // across a stopped feed; a feed behind real time never trips it.)
+    const auto elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - mc_burst_wait_start_time_)
+            .count();
+    constexpr long long kRateHz = 48000;  // the decoder's fixed audio rate
+    const long long needed_ms =
+        (static_cast<long long>(samples_needed) * 1000 + kRateHz - 1) / kRateHz;
+    return elapsed_ms > needed_ms + 1000;
+}
+
 void StreamingDecoder::seedRungGeometryForTesting(Modulation mod, CodeRate rate,
                                                  int cw, int lifting_z) {
     learnRungGeometry(mod, rate, cw, lifting_z);
@@ -3830,6 +3849,7 @@ void StreamingDecoder::startMCDPSKBurstContinuation(size_t next_pos, size_t next
     mc_burst_pending_soft_bits_.clear();
     mc_burst_compact_ = false;
     mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+    mc_burst_wait_fed_ = sync_controller_.ring_.total_fed_;
     state_ = DecoderState::MCDPSK_BURST_CONTINUING;
 
     LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst: waiting for data-only continuation at pos=%zu",
@@ -3892,11 +3912,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
     };
 
     auto timedOutWaitingFor = [&](size_t samples_needed) -> bool {
-        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - mc_burst_wait_start_time_).count();
-        const int needed_ms = static_cast<int>(
-            (samples_needed * 1000 + kSampleRateHz - 1) / kSampleRateHz);
-        return elapsed_ms > needed_ms + 1000;
+        return mcBurstAudioStalled(samples_needed);
     };
 
     auto deliverContinuationResult = [&](DecodeResult& result) {
@@ -4028,6 +4044,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
         mc_burst_next_pos_ = sync_controller_.ring_.wrapRingIndexLocked(mc_burst_next_pos_ + one_cw_samples);
         mc_burst_next_abs_ += one_cw_samples;
         mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+        mc_burst_wait_fed_ = sync_controller_.ring_.total_fed_;
     }
 
     const size_t remaining_samples =
@@ -4087,6 +4104,7 @@ void StreamingDecoder::continueMCDPSKBurst() {
     mc_burst_pending_soft_bits_.clear();
     mc_burst_frames_decoded_++;
     mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+    mc_burst_wait_fed_ = sync_controller_.ring_.total_fed_;
 
     LOG_MODEM(INFO, "[%s] MC-DPSK continuous burst frame %d decoded: %s %d/%d CW",
               log_prefix_.c_str(), mc_burst_frames_decoded_,
@@ -4614,11 +4632,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
                   sync_controller_.ring_.write_pos_;
     }
     if (available < frame_samples) {
-        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - mc_burst_wait_start_time_).count();
-        const long long needed_ms =
-            static_cast<long long>((frame_samples * 1000 + kSampleRateHz - 1) / kSampleRateHz);
-        if (elapsed_ms > needed_ms + 1000) {
+        if (mcBurstAudioStalled(frame_samples)) {
             LOG_MODEM(INFO, "[%s] MC-DPSK compact burst ended after %d frame(s) (no more audio)",
                       log_prefix_.c_str(), mc_burst_frames_decoded_);
             finishMCDPSKCompactBurst();
@@ -4676,6 +4690,7 @@ void StreamingDecoder::continueMCDPSKCompactBurst() {
     mc_burst_next_abs_ += frame_samples;
     mc_burst_frames_decoded_++;
     mc_burst_wait_start_time_ = std::chrono::steady_clock::now();
+    mc_burst_wait_fed_ = sync_controller_.ring_.total_fed_;
 
     if (decoded.ok) {
         DecodeResult result = makeMcDpskCompactResult(std::move(decoded.v2_frame), mc_burst_snr_,

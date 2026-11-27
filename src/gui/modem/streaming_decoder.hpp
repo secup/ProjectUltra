@@ -791,6 +791,13 @@ public:
     // (same audio stream, the other slot's clock): the next search pass runs this decoder's own
     // chirp+LTS detector on the window around it. Any thread.
     void noteExternalChirpAnchor(size_t samples_ago);
+    // Test seam: forget the search floor (as reset() does), so a test can pin that a hint into a
+    // delivered group is dropped on the group's span alone.
+    void clearSearchFloorForTesting() {
+        std::lock_guard<std::mutex> lock(sync_controller_.ring_.buffer_mutex_);
+        sync_controller_.ring_.search_floor_abs_ = 0;
+        sync_controller_.ring_.search_floor_abs_valid_ = false;
+    }
     // Whether a failed MC-DPSK first frame may wait for a 16-FSK frame's span (the bottom rung).
     // Off for a dual-listen listener (BUG-LISTENER-MFSK-LOOKAHEAD-BLIND): a sender leaving OFDM
     // lands on 16-FSK-F (the listener's rung), never on 16-FSK, while every OFDM frame's dual chirp
@@ -1281,6 +1288,11 @@ private:
     std::atomic<bool> mfsk_lookahead_allowed_{true};
     bool external_anchor_valid_ = false;
     size_t external_anchor_abs_ = 0;
+    // The air span [lo, hi) of the last burst group this decoder delivered, from one full anchor
+    // ahead of its first member (the descriptor's dual chirp) to the end of its last: a chirp hint
+    // inside it points at audio already decoded. Guarded by ring_.buffer_mutex_.
+    size_t delivered_group_lo_abs_ = 0;
+    size_t delivered_group_hi_abs_ = 0;
 
     // BUG-HALFOPEN-CONNECT: CONNECT and the first connected OFDM burst share the
     // full dual-chirp timing anchor.  If CONNECT_ACK was lost, an OFDM-only
@@ -1940,12 +1952,26 @@ private:
     size_t mc_burst_pending_consumed_samples_ = 0;
     std::vector<float> mc_burst_pending_soft_bits_;
     std::chrono::steady_clock::time_point mc_burst_wait_start_time_;
+    // The audio fed when mc_burst_wait_start_time_ was last stamped. The continuation's "no more
+    // audio" timeout runs from the last time the feed ADVANCED, not from when the wait began: a
+    // feed running slower than real time (a decode backlog, ASAN CI) is late audio, not absent
+    // audio, and ended the burst before its last frame arrived (StreamingMCDPSK listener-gate
+    // check, turn_end=0 under ASAN). A stopped feed (end of a file, a stalled device) still ends it.
+    size_t mc_burst_wait_fed_ = 0;
+    // True when the feed has not advanced for the airtime of `samples_needed` + 1 s of wall time
+    // (restarts the clock whenever it has). Decode thread.
+    bool mcBurstAudioStalled(size_t samples_needed);
     static constexpr int MC_DPSK_MAX_BURST_FRAMES = 8;  // >= connection_policy::kMCDPSKMaxBurstFrames
 
     // Pending frame state for multi-codeword frames
     // After reading header, if more codewords needed, wait for more samples
     int pending_total_cw_ = 0;                // Total codewords expected (0 = unknown)
-    std::chrono::steady_clock::time_point sync_start_time_;  // When sync was found
+    // When sync was found - restamped whenever the feed advances (sync_wait_fed_), so the frame
+    // wait times out on audio that STOPPED arriving, not on audio fed slower than real time (a
+    // decode backlog; ASAN CI starved both decoders of a StreamingMCDPSK check past the timeout).
+    std::chrono::steady_clock::time_point sync_start_time_;
+    size_t sync_wait_fed_ = 0;
+    size_t sync_fed_at_sync_ = 0;  // the feed when sync was found: the wait's audio-time bound
     static constexpr int FRAME_TIMEOUT_MS = 5000;  // Give up after 5 seconds
 
     // Constants - Buffer sizes

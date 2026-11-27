@@ -265,6 +265,18 @@ little while it takes the clip's distortion. Not verified on the GUI gate (the 2
 MC-DPSK at 0 dB "transferred" without an A/B). Next: GUI A/B `ULTRA_PEAK_CONTROL=0` vs default at an AWGN
 -4..-6 dB MC-DPSK session, and the clip's reference over the payload span only. 16-FSK bursts are not clipped.
 
+### BUG-DROP6-MFSK-UNHEARD (open, 2026-11-27) — P2: after an escape to 16-FSK-F on the Good 20 -> 6 dB drop neither side heard the other for 180 s
+GUI ITU Good `--snr-profile 0:20,35:20,37:6`, seed 65, hint-fix candidate (1 of 7 runs; the same seed
+passed twice on each arm on re-run, so fade alignment decides whether the session takes this path).
+ALPHA crossed to MC-DPSK 16-FSK-F at 119 s (4 OFDM rounds without progress), sent 2 x 16-FSK-F then
+2 x 16-FSK; BRAVO's MC-DPSK listener locked each one badly (corr 0.11, CFO sanity read -98 Hz, sync
+SNR -1.2 dB, training SNR -16 dB) and decoded nothing, while BRAVO kept sending OFDM-session tone
+ACKs (group_seq=10) that ALPHA's monitor never detected; ALPHA declared the link lost at 236 s. 16-FSK
+has a GUI floor of -8 dB on Good, so a 6 dB channel should carry it: suspect the listener's chirp lock
+(a false/late peak) or the drop profile's level against the PEP scale. Logs:
+scratchpad ab_hint/hint_drop6_s65 (alpha.log, bravo.log). Needs: the listener's sync position vs
+ALPHA's TX time, and a 16-FSK-F decode of that recording offline.
+
 ### BUG-ESCAPE-MODECHANGE-ON-HEARD-LINK (open, 2026-11-27) — P3: the sender's escape-drop handshakes even when the peer is heard
 
 `executeEscapeDrop` always goes through `requestModeChange` (comment: escapes "fire on zero-ACK
@@ -3014,6 +3026,20 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-HINT-REPLAYS-DECODED-BURST (FIXED 2026-11-27) — P2: a late dual-listen chirp hint decoded a delivered group a second time
+The OFDM decoder dropped a hint only behind its search floor, which the burst path never advances;
+a structure-acquired group whose chirp the MC-DPSK listener reported after delivery was delivered
+again (two ACKs, the outcome counted twice; TNC: the sender's next group lost). Fixed: the delivered
+group's air span (`delivered_group_lo_abs_/hi_abs_`, `finalizeBurstGroup`) drops a hint inside it.
+CTest `BurstStructureMemberAnchor`. See CHANGELOG 2026-11-27.
+
+### BUG-FRAME-WAIT-WALL-CLOCK (FIXED 2026-11-27) — P2: frame waits timed out on slow audio
+The post-sync frame wait and the MC-DPSK burst continuation timed out on wall time since the wait
+began, so a feed behind real time (decode backlog, ASAN CI) dropped frames that were only late
+(StreamingMCDPSK `turn_end=0` on the Sanitizer job). Fixed: wall time since the feed last advanced,
+plus an audio-time bound. CTest `StreamingMCDPSK` (feed 5x behind real time).
+
 
 ### BUG-LATENT-CRATER-ONE-RUNG, one rung per crater (FIXED 2026-11-26)
 - A 0/M crater moves the latent posterior about one rung; after a sudden drop the receiver held a
