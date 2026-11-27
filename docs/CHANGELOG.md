@@ -10,6 +10,19 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — tools: the TNC marathon's watchdog fits five sessions on a slow channel
+
+**Broken:** `tools/tnc_scenario.py --scenario marathon` killed every ITU Good 10 dB run at the 1500 s
+whole-scenario watchdog in session 4-5 (seeds 43-45, `RESULT=FAIL ... whole-scenario watchdog`)
+although no step had stalled: five sessions there take ~2400 s.
+
+**Changed:** `--timeout` defaults per scenario: 4000 s for marathon, 1500 s for the rest (an explicit
+value still wins). The per-message/per-bulk timeouts remain the stall detectors.
+
+**Verified:** seed 43, Good 10 dB, `--timeout 3200`: PASS, 5/5 sessions, 2436 s. The same run closed
+BUG-FOLLOW-STAYS-MCDPSK-ON-GOOD-10DB as not reproduced (KNOWN_BUGS). High-speed spot check on main
+d063b121: AWGN 20 3860 bps (seeds 45-46), Good 20 2760 / 3060 bps.
+
 ## 2026-11-26 — fix(rate): hold must pay - the EVM window demotes a held rung a lower one out-delivers
 
 **Broken:** under `ULTRA_RATE_EVM` climb mode the window's measured frames could lift the latent

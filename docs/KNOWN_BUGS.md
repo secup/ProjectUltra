@@ -225,12 +225,15 @@ Fixed/obsolete historical deep dives belong in `docs/CHANGELOG.md`.
   designed). The up-crossing pick is too optimistic on Moderate (R2/3 at a 16 dB reading), and a
   crossing the link forced should perhaps not count against the message's regrid budget. PHY rate
   policy: needs a multi-seed GUI look (with BUG-FOLLOW-STAYS-MCDPSK-ON-GOOD-10DB).
-- **BUG-FOLLOW-STAYS-MCDPSK-ON-GOOD-10DB** (P2, throughput): TNC marathon ITU Good 10 dB seed 43,
-  session 4 (connected on 16-FSK-F in a fade): the receiver's follow pick read a selection SNR of 8-14 dB
-  on every clean burst and still picked Robust-Mid 16-FSK-F, so the session ran MC-DPSK at ~105 bps for
-  >10 min where sessions 1-3 on the same channel ran OFDM. Suspect the fading class (Moderate floor
-  14 dB) plus the PAPR correction; the pick log now prints both (`fading`, `papr`). Needs a multi-seed
-  GUI-gate look before any threshold change.
+- **BUG-FOLLOW-STAYS-MCDPSK-ON-GOOD-10DB** (NOT REPRODUCED on main d063b121, 2026-11-27; kept for
+  watch): TNC marathon ITU Good 10 dB seed 43, session 4 (connected on 16-FSK-F in a fade) once read a
+  selection SNR of 8-14 dB on every clean burst and still picked Robust-Mid 16-FSK-F (~105 bps for
+  >10 min). Re-run on d063b121 (7.3 Hz): seed 43 full marathon PASS 5/5 sessions in 2436 s, seeds 44-45
+  four sessions each; every MC-DPSK spell crossed up on its first clean burst ("COMMAND OFDM (run 1)",
+  fading 0.15-0.34, sel 0.4-6.8 dB), none picked an MC-DPSK rung. Mechanism if it returns: a session
+  that CONNECTS on MC-DPSK has no OFDM spell, so `sessionLadderPick` classifies on the handshake's
+  pooled fading index (a fade at connect can read Moderate -> 14 dB floor) - read `fading` in the pick
+  log first.
 - **Interactive turn cost** (P2, by design for now): a direction change costs the TNC's 1.5 s
   bulk-quiet staging + the TURN_REQUEST/TURNOVER exchange (two full-anchor control frames) + the data-turn
   guard: a short reply takes ~10 s (AWGN 10 dB, TNC ping-pong) against ~4 s for a same-direction message.

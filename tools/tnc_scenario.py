@@ -712,7 +712,8 @@ def run_one(args, name):
     rig = Rig(args, outdir)
     result, reason = "PASS", ""
     t0 = time.monotonic()
-    watchdog = threading.Timer(args.timeout, lambda: os.kill(os.getpid(), signal.SIGALRM))
+    timeout = args.timeout if args.timeout is not None else (4000 if name == "marathon" else 1500)
+    watchdog = threading.Timer(timeout, lambda: os.kill(os.getpid(), signal.SIGALRM))
     try:
         rig.start()
         watchdog.start()
@@ -750,7 +751,9 @@ def main():
     p.add_argument("--tx-model", choices=("hardware", "sim"), default="hardware")
     p.add_argument("--msg-timeout", type=float, default=240, help="per short message (s)")
     p.add_argument("--bulk-timeout", type=float, default=600, help="per bulk body (s)")
-    p.add_argument("--timeout", type=float, default=1500, help="whole scenario (s)")
+    p.add_argument("--timeout", type=float, default=None,
+                   help="whole scenario (s); default 1500, 4000 for marathon (five sessions at "
+                        "ITU Good 10 dB take ~2400 s; the per-step timeouts catch a stall)")
     p.add_argument("--out", required=True)
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--bin-dir", default=None,
