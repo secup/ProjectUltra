@@ -364,36 +364,6 @@ size the first slice at it, waiting the slowest-rung length only when that decod
 stage keeps a sender's rung fallback decodable). A two-stage slice alone does nothing while the
 decoder stays at DBPSK (tried and backed out; patch kept in the session scratchpad).
 
-### BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (open, 2026-11-12) — P2, low SNR: an MC-DPSK session's tone ACK never lengthens
-
-`app.cpp` sizes the tone-burst ACK by the staircase (`symbolMsForSNR`: 12/25/50/100 ms symbols by
-SNR, with a fading column) only when the cached SNR source is IDLE_IN_BAND or OFDM_BROADBAND
-("only a trusted physical in-band source shortens"). An MC-DPSK session reports MCDPSK_IN_BAND, so
-it always sends the 25 ms baseline (850 ms) - the guard meant to stop an untrusted source from
-SHORTENING the ACK also stops it from LENGTHENING it, at exactly the SNRs where that matters. And
-MC-DPSK measures no fading index (the cached value read 0.44 on AWGN and 0.35 on ITU Good), so the
-fading column could not be chosen anyway. GUI 2026-11-12 (1 KB, MC-DPSK DBPSK): 6 of 80 end-of-turn
-ACKs lost on Good 0 dB, 1 of ~100 on AWGN -5 dB, 0 of 48 on AWGN -3 dB; each loss cost a full
-retransmission timeout (43.6 s today) plus a duplicate burst.
-
-Not changed yet, because the trade is not free: a 100 ms ACK adds 2.55 s to an 18.4 s DBPSK cycle
-(-12 %), a 50 ms ACK 0.85 s. `measure_ack_staircase` (300 trials, 7.3 Hz, prior) puts the 25 ms
-AWGN edge 2 dB higher than the table (-2 dB, 60.7 % at -4 dB) while the GUI decodes 25 ms ACKs
-~99 % at a session SNR of -5 dB: the tool's SNR and the session's are not on the same scale for
-the ACK, which has to be settled before any edge is trusted here. Direction: (1) a calibrated
-source may lengthen (never shorten) the ACK; (2) choose the length that minimises
-T_ack + P_loss x C_loss with MC-DPSK's own C_loss (the measured timeout, ULTRA_MCDPSK_MEASURED_RTO,
-cuts C_loss ~2x and moves the optimum toward shorter ACKs); (3) a fading indicator for MC-DPSK
-(frame-to-frame SNR spread). With ULTRA_MCDPSK_MEASURED_RTO, a lengthened ACK must stay inside the
-timeout's guard (one ACK airtime, 1.92 s at DBPSK: covers 25 -> 50 ms, not 25 -> 100 ms).
-
-**ITU Good, measured** (`measure_ack_staircase 300 0 -8 2 1 0 7.3 0 3`, success per symbol length):
-0 dB: 25 ms 85.3 %, 50 ms 93.0 %, 100 ms 96.7 %; +2 dB: 92.7 / 98.0 / 98.3 %. The GUI's 7.5 % loss
-at a 0 dB session matches the tool's +2 dB row (the ~2 dB scale offset above). Per 18.4 s DBPSK
-cycle at that point, 25 ms costs 0.85 s + 0.073 C_loss and 50 ms 1.70 s + 0.020 C_loss: with
-today's timeout (C_loss ~44 s) 50 ms saves ~1.5 s a cycle, with the measured one (~22 s) ~0.3 s;
-on AWGN -5 dB (25 ms ~1 % loss) 25 ms is cheaper. The choice needs the fading indicator of (3).
-
 ### BUG-HANDSHAKE-DBPSK-AT-HIGH-SNR (open, 2026-11-12) — P3, efficiency: CONNECT and CONNECT_ACK always go at DBPSK R1/4
 
 GUI AWGN 20 dB, seed 44: the modem's handshake takes 14.4 s from the PING (7.03 s) to the decoded
@@ -3014,6 +2984,14 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-MCDPSK-ACK-STAIRCASE-BYPASSED (FIXED 2026-11-22, entry closed 2026-11-27) — P2: an MC-DPSK session's tone ACK never lengthened
+`app.cpp` sized the tone ACK by the staircase only for an IDLE_IN_BAND or OFDM_BROADBAND reading, so
+an MC-DPSK session always sent the 25 ms baseline. Fixed in 376e89ca: the shared
+`gui/modem/tone_ack_staircase.hpp` lets an MCDPSK_IN_BAND reading lengthen (never shorten) the ACK,
+in the AWGN column (the data-aided reading already carries the fade loss), with the 200 ms floor read
+on the channel scale. The A/B logs of 2026-11-27 show MC-DPSK readings of -4..-1 dB keying 25-50 ms
+ACKs and 0-1 dB keying up to 200 ms.
 
 ### BUG-DROP6-MFSK-UNHEARD (FIXED 2026-11-27) — P2: on the Good 20 -> 6 dB drop the sender keyed its resend over a 6.8 s tone ACK and the link died
 GUI ITU Good `--snr-profile 0:20,35:20,37:6`, seed 65: BRAVO delivered a failed 4-frame group 3.9 s
