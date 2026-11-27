@@ -10,6 +10,29 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — fix(rate): hold must pay - the EVM window demotes a held rung a lower one out-delivers
+
+**Broken:** under `ULTRA_RATE_EVM` climb mode the window's measured frames could lift the latent
+pick (climb), refuse an upward move that delivers less (climb must pay) and veto a DEAD rung (P <
+0.10), but a held rung that was bad and not dead stayed: a 0/M crater moves the latent posterior about
+one rung, so after a sudden drop the receiver kept commanding it. GUI ITU Good 20 -> 6 dB drop, seed
+63 (candidate tree of 84e66262): seven QPSK R1/2 groups at 0-1/4 from 105 s while the window put R1/2
+at P 0.29-0.31; the posterior went 12.2 -> 7.0 dB mean and held R1/2 until the sender's own escape
+at 226 s, whose MODE_CHANGE then timed out four times (60 s) before the follow crossed to MC-DPSK.
+
+**Changed:** `EvmRateSelector::demoteIfLowerPays` (evm_rate_selector.hpp), used as the last branch
+of the climb-mode decision in `Connection` (after the dead-rung veto): when the window predicts a
+rung below the latent pick to deliver more (long-run rate, success capped at kCapProb, dead rungs
+excluded), command it. The same metric as climb-must-pay, so the two rules cannot flap.
+
+**Verified:** GUI gate, paired trees (84e66262 vs candidate), 7.3 Hz, seeds 61-67, 70/70 PASS:
+Good 20 -> 6 dB drop 1514 -> 1423 s (-6 %), Good 8 dB 798 -> 853 s (seed 66 alone +64 s; the rule did
+not fire in it - fade alignment), Good 15 496 / 497 s, Good 20 667 / 647 s, AWGN 20 504 / 505 s. The
+rule fired 10 times, all in drop runs, plus once at Good 8 (seed 62, 121 vs 119 s); never at 15-20 dB.
+`EvmRateSelector` test `test_hold_must_pay_demotes_to_a_lower_rung_that_delivers_more`.
+
+---
+
 ## 2026-11-26 — fix(arq): a one-frame round after a silent one carries a descriptor (BUG-LATENT-CRATER-ONE-RUNG)
 
 **Broken:** above the bottom coherent rung, a wide-OFDM one-frame round that failed to decode drew no

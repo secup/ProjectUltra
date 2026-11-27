@@ -345,6 +345,25 @@ public:
         return pick;
     }
 
+    // HOLD MUST PAY: the rung below `incumbent` that the window predicts to deliver MORE than
+    // the incumbent (long-run rate, success capped at kCapProb, dead rungs excluded), or
+    // kRungIdxNone. The mirror of the climb rule, on the same metric, so the two cannot flap.
+    uint8_t demoteIfLowerPays(const LatentRateController::RungGeometryTable& geometry,
+                              uint8_t incumbent) const {
+        if (incumbent <= kRungIdxQpskR14 || incumbent >= kRungIdxCount ||
+            !geometry[incumbent].valid()) {
+            return kRungIdxNone;
+        }
+        const auto goodput = [&](uint8_t r) {
+            return geometry[r].useful_bytes_per_frame *
+                   static_cast<float>(geometry[r].frames_per_cycle) *
+                   std::min(successProb(r), LatentRateController::kCapProb) / geometry[r].cycle_s;
+        };
+        const auto lower = best(geometry, static_cast<uint8_t>(incumbent - 1), 0.0f);
+        if (lower.rung == kRungIdxNone || lower.rung >= incumbent) return kRungIdxNone;
+        return goodput(lower.rung) > goodput(incumbent) ? lower.rung : kRungIdxNone;
+    }
+
     // EXPECTED TIME TO DELIVER n FRAMES at success p, `per_round` frames per round, each round
     // lasting round_s(m) for its m frames. Exact for independent frame outcomes:
     //     T(n) = [ round_s(m) + sum_{k=1..m} Binom(k; m, p) T(n-k) ] / (1 - (1-p)^m),

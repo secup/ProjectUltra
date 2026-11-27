@@ -262,14 +262,6 @@ little while it takes the clip's distortion. Not verified on the GUI gate (the 2
 MC-DPSK at 0 dB "transferred" without an A/B). Next: GUI A/B `ULTRA_PEAK_CONTROL=0` vs default at an AWGN
 -4..-6 dB MC-DPSK session, and the clip's reference over the payload span only. 16-FSK bursts are not clipped.
 
-### BUG-LATENT-CRATER-ONE-RUNG — singleton part FIXED 2026-11-26 (see Fixed Bugs); open part: one rung per crater
-
-The silent-singleton half is fixed (a one-frame round after a silent one carries a descriptor). Still
-open: a 0/M crater moves the latent posterior only one rung (its likelihood is flat far below the
-rung's theta), so a sudden 20 -> 5 dB drop walks down one rung per round. Direction: feed the failed
-group's EVM reading into the posterior as a likelihood (EVM decode thresholds are per-rung and
-class-independent, docs/EVM_RATE_SELECTION_2026_11_08.md).
-
 ### BUG-ENTRY-PROBE-COST (open, 2026-11-12) — P3: every session's first OFDM group runs at QPSK R1/2 whatever the connect pick
 
 `capRxAuthorityInitialRung` (waveform_selection.hpp) sends the first coherent group at QPSK R1/2
@@ -3009,6 +3001,12 @@ Current blockers:
 - None identified for `0.2.1-alpha` default ladder.
 
 ## Fixed Bugs
+
+### BUG-LATENT-CRATER-ONE-RUNG, one rung per crater (FIXED 2026-11-26)
+- A 0/M crater moves the latent posterior about one rung; after a sudden drop the receiver held a
+  rung its EVM window measured at P ~0.3 (GUI Good 20 -> 6 dB, seed 63: seven QPSK R1/2 groups at
+  0-1/4). Fix: hold must pay (`EvmRateSelector::demoteIfLowerPays`) - the window demotes when a lower
+  rung is predicted to deliver more. GUI 70/70 PASS, drop -6 %, other cells within noise. CHANGELOG.
 
 ### BUG-LATENT-CRATER-ONE-RUNG, silent singleton (FIXED 2026-11-26)
 

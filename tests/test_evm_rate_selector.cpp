@@ -237,6 +237,29 @@ void test_climb_mode_only_takes_reliable_rungs() {
           "no rung qualifies on faded frames: the latent decision stands");
 }
 
+void test_hold_must_pay_demotes_to_a_lower_rung_that_delivers_more() {
+    const auto geometry = productionGeometry();
+    // Frames between QPSK R1/4's and R1/2's thresholds: R1/2 mostly fails, R1/4 decodes.
+    const float t14 = evmDecodeThresholdDb(kRungIdxQpskR14);
+    const float t12 = evmDecodeThresholdDb(kRungIdxQpskR12);
+    CHECK(t12 > t14 + 0.5f, "QPSK R1/2 sits above R1/4");
+    EvmRateSelector drop;
+    const float between = 0.5f * (t14 + t12);
+    for (int g = 0; g < 4; ++g) drop.observeGroup(kRungIdxQpskR12, frames(between, 5), 1, 5);
+    CHECK(drop.successProb(kRungIdxQpskR12) < 0.5f && drop.successProb(kRungIdxQpskR14) > 0.7f,
+          "fixture: R1/2 bad, R1/4 good (P " << drop.successProb(kRungIdxQpskR12) << " / "
+                                              << drop.successProb(kRungIdxQpskR14) << ")");
+    CHECK(drop.demoteIfLowerPays(geometry, kRungIdxQpskR12) == kRungIdxQpskR14,
+          "a held R1/2 the window prices below R1/4 is demoted to R1/4");
+    // Frames well above R1/2's threshold: holding R1/2 pays, nothing moves.
+    EvmRateSelector clean;
+    for (int g = 0; g < 4; ++g) clean.observeGroup(kRungIdxQpskR12, frames(t12 + 4.0f, 5), 5, 5);
+    CHECK(clean.demoteIfLowerPays(geometry, kRungIdxQpskR12) == kRungIdxNone,
+          "a reliable incumbent is never demoted");
+    CHECK(drop.demoteIfLowerPays(geometry, kRungIdxQpskR14) == kRungIdxNone,
+          "nothing below the bottom rung");
+}
+
 void test_thresholds_are_ordered() {
     // Within a modulation, a higher code rate needs more EVM; across the ladder the densest
     // enabled rung needs the most.
@@ -327,6 +350,7 @@ int main() {
     test_climb_mode_only_takes_reliable_rungs();
     test_multi_rung_climb_needs_two_groups();
     test_thresholds_are_ordered();
+    test_hold_must_pay_demotes_to_a_lower_rung_that_delivers_more();
     test_thresholds_carried_between_constellations();
     std::cout << (tests_failed == 0 ? "PASS" : "FAIL") << ": "
               << (tests_run - tests_failed) << "/" << tests_run << " checks\n";

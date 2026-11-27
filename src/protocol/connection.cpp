@@ -3463,6 +3463,23 @@ void Connection::updateRxAuthorityCommand(bool all_ok, float quality, bool full_
                     : 0.0f;
                 evm_decided = evm_pick.rung < latent_rung;
                 if (!evm_decided) evm_pick = {};
+            } else if (latent_rung != kRungIdxNone && latent_rung > kRungIdxQpskR14 &&
+                       latent_rung < kRungIdxCount && geometry[latent_rung].valid()) {
+                // HOLD MUST PAY (BUG-LATENT-CRATER-ONE-RUNG, 2026-11-26), the climb-must-pay
+                // rule's mirror. A 0/M crater moves the posterior about one rung (its
+                // likelihood is flat far below theta), so after a sudden drop it held a rung
+                // the window's frames measured as bad but not dead: GUI ITU Good 20 -> 6 dB,
+                // seven QPSK R1/2 groups at 0-1/4 while the window put R1/2 at P 0.29-0.31,
+                // the posterior still at mean 12 -> 7 dB, until the sender's escape 120 s later.
+                // The same metric that holds an upward move delivering less moves down when a
+                // lower rung is predicted to deliver more (long-run rate, dead rungs excluded),
+                // so the two rules cannot flap against each other.
+                const uint8_t lower = evm_selector_.demoteIfLowerPays(geometry, latent_rung);
+                if (lower != kRungIdxNone) {
+                    evm_pick.rung = lower;
+                    evm_pick.goodput = evmPredictedGoodput(geometry, lower);
+                    evm_decided = true;
+                }
             }
         }
     }
