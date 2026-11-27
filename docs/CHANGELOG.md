@@ -10,6 +10,15 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-26 — test: StreamingMCDPSK listener-gate check keeps feeding audio after the turn
+
+CI Sanitizer (linux), main push of 97e64340: `StreamingMCDPSK` failed "OFDM listener gate on an
+MC-DPSK turn (not cleared): turn_end=0" - the MC-DPSK decoder never reported the turn's last frame
+inside the clip's 2 s of trailing silence (the same commit passed on the branch run; ASAN runs the
+test in 174 s). `processBuffer` works only on newly fed audio, so a decode that falls behind the feed
+stops when the clip ends. The test now keeps feeding silence (up to 20 s) until the turn completes,
+as a receiver keeps hearing audio; the assertions are unchanged. `ctest -R StreamingMCDPSK` passes.
+
 ## 2026-11-26 — gate: the GUI scenario ceiling budgets for MC-DPSK near the OFDM floor
 
 `tools/gui_qso_scenario.sh` sized its default `--exit-after` from the expected rung (16QAM R1/4) with a

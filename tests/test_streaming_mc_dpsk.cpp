@@ -960,10 +960,17 @@ bool runListenerGateClearedByCompletedTurn(bool clear_on_turn_end = true) {
     });
     constexpr size_t kChunk = 4800;
     uint64_t after = 0;
-    for (size_t pos = 0; pos < audio.size(); pos += kChunk) {
-        const size_t len = std::min(kChunk, audio.size() - pos);
-        mc.feedAudio(audio.data() + pos, len);
-        listener.feedAudio(audio.data() + pos, len);
+    // A receiver keeps hearing audio after the turn: keep feeding silence (up to 20 s) so a decode
+    // running slower than the feed (ASAN/UBSAN CI: 2 s of trailing room was not enough, turn_end=0)
+    // still reaches the turn's end. The check itself is unchanged.
+    const std::vector<float> silence(kChunk, 0.0f);
+    const size_t feed_limit = audio.size() + 200 * kChunk;
+    for (size_t pos = 0; pos < feed_limit; pos += kChunk) {
+        const bool in_audio = pos < audio.size();
+        const size_t len = in_audio ? std::min(kChunk, audio.size() - pos) : kChunk;
+        const float* src = in_audio ? audio.data() + pos : silence.data();
+        mc.feedAudio(src, len);
+        listener.feedAudio(src, len);
         mc.processBuffer();
         listener.processBuffer();
         if (turn_end) {
