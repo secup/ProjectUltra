@@ -1714,6 +1714,30 @@ private:
     uint32_t data_turn_contended_ms_ = 0;
     uint32_t data_turn_tx_guard_ms_ = 0;
     uint32_t turn_request_retransmit_ms_ = 0;
+    // This session's TURN_REQUEST outcomes by waveform (planControlTx R7,
+    // turnRequestRobustIsFaster): an attempt counts as answered when a TURNOVER arrives on its
+    // waveform, as lost when its retry comes due first.
+    struct TurnRequestRecord {
+        float ofdm_answered = 0.0f;
+        float ofdm_lost = 0.0f;
+        uint32_t ofdm_round_trip_ms = 0;
+        uint32_t robust_round_trip_ms = 0;
+        bool ofdm_outstanding = false;
+        bool robust_outstanding = false;
+        uint64_t ofdm_sent_at_ms = 0;
+        uint64_t robust_sent_at_ms = 0;
+        // Forget old outcomes at each first request (the channel moves): a run of losses fades and
+        // the prior brings the session back to try OFDM within a few turn changes.
+        void decay() {
+            constexpr float kKeep = 0.7f;
+            ofdm_answered *= kKeep;
+            ofdm_lost *= kKeep;
+        }
+    };
+    TurnRequestRecord turn_request_record_;
+    void noteTurnRequestSent(bool robust);
+    void noteTurnRequestRetryDue();
+    void noteTurnoverForRequest(bool arrived_mcdpsk);
     uint32_t turn_request_holdoff_ms_ = 0;
     uint32_t file_cancel_rx_drain_ms_ = 0;
     uint32_t file_cancel_reassert_ms_ = 0;

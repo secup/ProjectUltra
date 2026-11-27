@@ -2993,6 +2993,15 @@ in the AWGN column (the data-aided reading already carries the fade loss), with 
 on the channel scale. The A/B logs of 2026-11-27 show MC-DPSK readings of -4..-1 dB keying 25-50 ms
 ACKs and 0-1 dB keying up to 200 ms.
 
+### BUG-TURN-REQUEST-OFDM-AT-FLOOR (FIXED 2026-11-27, link-control rule R7) — P2: at the OFDM floor every turn waited a full retry interval for an OFDM TURN_REQUEST that was not answered
+TNC pingpong at ITU Good 8 dB: 4 of 42 first OFDM TURN_REQUESTs answered; the one-codeword OFDM control
+frames ride ~0-3 dB in-band on a peak-limited TX and either leg is lost about half the time; each loss
+cost the 15.8-24.8 s retry interval before R3's MC-DPSK retry (17.5 s round trip). Fix: R7 sends the
+first request on MC-DPSK when this session's measured answer rate and round trips say it gets the turn
+sooner (CHANGELOG 2026-11-27). Rejected alternative: R3 silence counted from the last decoded frame
+(slower, 3147 vs 2899 s). Residual: OFDM control frames at the floor are still weak in both directions
+(a TURNOVER answering an OFDM request rides OFDM by R1).
+
 ### BUG-DROP6-MFSK-UNHEARD (FIXED 2026-11-27) — P2: on the Good 20 -> 6 dB drop the sender keyed its resend over a 6.8 s tone ACK and the link died
 GUI ITU Good `--snr-profile 0:20,35:20,37:6`, seed 65: BRAVO delivered a failed 4-frame group 3.9 s
 after its end and keyed a 200 ms-symbol tone ACK (6.8 s) that ran past ALPHA's 15.7 s RTO; ALPHA keyed

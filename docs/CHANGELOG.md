@@ -10,6 +10,36 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(protocol): the first TURN_REQUEST rides the waveform that has been answering it this session (link-control rule R7)
+
+**Broken (BUG-TURN-REQUEST-OFDM-AT-FLOOR):** TNC pingpong, ITU Good 8 dB (baseline 7bbe78e8, 42 turns): getting
+the turn averaged 35.1 s against 23.2 s for sending the message. Only 4 of 42 first OFDM TURN_REQUESTs were
+answered. On a peak-limited transmitter the one-codeword OFDM control frames ride ~0-3 dB in-band at a
+"Good 8 dB" link (LTS in_band 0.0-3.2 dB, EVM 1.6-4.9 dB in the logs), and both legs lose about half of
+them: the request decodes and the OFDM TURNOVER is lost on the way back, or the reverse. Every lost first
+request cost a full retry interval (`turnRequestRetransmitMs()`, 15.8-24.8 s) before R3 sent the retry
+on MC-DPSK (17.5 s round trip): the recurring 33 / 43 / 49 s turns. Not the receiver's pre-LDPC false-lock
+gate: a build that bypassed it on connected OFDM decoded none of the frames it would have rejected.
+
+**Changed:** `link_control_plan.hpp` rule R7 (`turnRequestRobustIsFaster`): a first TURN_REQUEST rides
+MC-DPSK when the expected time to the turn is shorter there: with p = the OFDM answer rate
+(answered + 2) / (answered + lost + 3) (a prior that favours OFDM until it loses), OFDM costs
+p x its round trip + (1 - p) x (retry interval + MC-DPSK round trip), MC-DPSK costs its round trip.
+Only measured MC-DPSK round trips count (no estimate before the first robust answer). `Connection`
+keeps the record (`TurnRequestRecord`: an OFDM attempt with no answer by the retry is a loss, a TURNOVER
+answers the attempt on its own waveform and measures its round trip; counts decay 0.7 per first
+request, so a session that rides MC-DPSK tries OFDM again within a few turns). Reset per session.
+
+**Rejected first:** counting peer silence from the last DECODED frame for R3 (a chirp or a failed frame
+no longer reset it): Good 8 dB, 6 seeds, 3147 s vs 2899 s - it sent more retries robust and several
+sessions then stayed on MC-DPSK at ~60 s per turn.
+
+**Verified:** ctest 134/134; CTest LinkControlPlan `rule7_turn_request_on_faster_waveform` and
+WaveformFollow `test_turn_request_learns_the_faster_waveform` (both fail with the rule off). TNC pingpong
+A/B vs 7bbe78e8 (sum of elapsed seconds, base -> R7): Good 8 seeds 61-66 2899 -> 2764, Good 12 61-63
+920 -> 758, Good 15 61-69 1608 -> 1744 (61-63 532 -> 680, 64-69 1076 -> 1064), AWGN 3 61-63 1471 -> 1435;
+all 30 runs PASS both arms, total 6898 -> 6701 s. R7 fired 0-4 times per session (never on AWGN 3).
+
 ## 2026-11-27 — fix(rx): a delivered group stamps its own anchor, so the receiver's ACK-length cap holds for structure-acquired groups
 
 **Broken (BUG-DROP6-MFSK-UNHEARD):** GUI ITU Good 20 -> 6 dB, seed 65: the receiver delivered a

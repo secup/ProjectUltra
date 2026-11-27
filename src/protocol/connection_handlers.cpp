@@ -1022,6 +1022,7 @@ void Connection::handleTurnover(const v2::ControlFrame& frame, const std::string
         return;
     }
 
+    noteTurnoverForRequest(last_rx_frame_mcdpsk_);
     turn_.acquire();
     turn_request_retransmit_ms_ = 0;
     turn_request_holdoff_ms_ = 0;

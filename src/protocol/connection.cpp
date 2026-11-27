@@ -1818,15 +1818,64 @@ void Connection::sendTurnRequestIfNeeded(bool retry) {
     req.kind = retry ? ControlKind::TurnRequestRetry : ControlKind::TurnRequest;
     req.peer_silent_ms = ms_since_peer_heard_;
     req.retry_interval_ms = turnRequestRetransmitMs();
+    if (!retry) turn_request_record_.decay();
+    req.ofdm_answered = turn_request_record_.ofdm_answered;
+    req.ofdm_lost = turn_request_record_.ofdm_lost;
+    req.ofdm_round_trip_ms = turn_request_record_.ofdm_round_trip_ms;
+    req.robust_round_trip_ms = turn_request_record_.robust_round_trip_ms;
+    bool robust = false;
     if (const ControlTxPlan plan = planControlTx(linkFacts(), req);
         plan.robust_once && on_robust_control_once_) {
-        LOG_MODEM(INFO, "Connection: TURN_REQUEST retry on the robust waveform (MC-DPSK): peer "
-                        "silent %u ms", ms_since_peer_heard_);
+        if (retry) {
+            LOG_MODEM(INFO, "Connection: TURN_REQUEST retry on the robust waveform (MC-DPSK): peer "
+                            "silent %u ms", ms_since_peer_heard_);
+        } else {
+            LOG_MODEM(INFO, "Connection: TURN_REQUEST on the robust waveform (MC-DPSK): OFDM "
+                            "answered %.1f / lost %.1f, round trip OFDM %u ms vs MC-DPSK %u ms",
+                      req.ofdm_answered, req.ofdm_lost, req.ofdm_round_trip_ms,
+                      req.robust_round_trip_ms);
+        }
         on_robust_control_once_(plan.robust_mod);
+        robust = true;
     }
     transmitFrame(request.serialize());
+    noteTurnRequestSent(robust);
     turn_.setRequestPending(true);
     turn_request_retransmit_ms_ = turnRequestRetransmitMs();
+}
+
+void Connection::noteTurnRequestSent(bool robust) {
+    auto& r = turn_request_record_;
+    if (robust) {
+        r.robust_outstanding = true;
+        r.robust_sent_at_ms = connected_time_ms_;
+    } else {
+        r.ofdm_outstanding = true;
+        r.ofdm_sent_at_ms = connected_time_ms_;
+    }
+}
+
+void Connection::noteTurnRequestRetryDue() {
+    auto& r = turn_request_record_;
+    if (r.ofdm_outstanding) r.ofdm_lost += 1.0f;
+    r.ofdm_outstanding = false;  // a robust attempt stays outstanding: its answer is slower
+}
+
+void Connection::noteTurnoverForRequest(bool arrived_mcdpsk) {
+    auto& r = turn_request_record_;
+    // A reply rides its request's waveform (R1), so the arrival waveform names the attempt answered.
+    if (arrived_mcdpsk && r.robust_outstanding) {
+        r.robust_round_trip_ms =
+            static_cast<uint32_t>(std::min<uint64_t>(connected_time_ms_ - r.robust_sent_at_ms,
+                                                     UINT32_MAX));
+    } else if (!arrived_mcdpsk && r.ofdm_outstanding) {
+        r.ofdm_answered += 1.0f;
+        r.ofdm_round_trip_ms =
+            static_cast<uint32_t>(std::min<uint64_t>(connected_time_ms_ - r.ofdm_sent_at_ms,
+                                                     UINT32_MAX));
+    }
+    r.ofdm_outstanding = false;
+    r.robust_outstanding = false;
 }
 
 void Connection::armDataTurnTxGuard(uint32_t guard_ms) {
@@ -5715,6 +5764,7 @@ void Connection::tick(uint32_t elapsed_ms) {
             if (!turn_.localHolds() && hasLocalDataWaitingForTurn() && turn_.requestPending()) {
                 if (elapsed_ms >= turn_request_retransmit_ms_) {
                     turn_.setRequestPending(false);
+                    noteTurnRequestRetryDue();
                     sendTurnRequestIfNeeded(/*retry=*/true);
                 } else {
                     turn_request_retransmit_ms_ -= elapsed_ms;
@@ -9208,6 +9258,7 @@ void Connection::resetAdaptiveDecisionState() {
 void Connection::enterConnected(bool automatic_rate_allowed) {
     state_ = ConnectionState::CONNECTED;
     connected_time_ms_ = 0;
+    turn_request_record_ = {};
     notePeerHeard();  // the handshake frame that got us here; never a previous session's silence
     // Per session: a previous session released half-open left these at >= 240 s, and the next
     // session this station answered was released on its first tick.

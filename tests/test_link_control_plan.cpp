@@ -73,6 +73,42 @@ void rule3_turn_request_into_silence() {
     CHECK(!planControlTx(ofdmSession(), e).robust_once, "R3: the first request rides the session waveform");
 }
 
+// R7 BUG-TURN-REQUEST-OFDM-AT-FLOOR: the first request rides MC-DPSK only when this session's record
+// says it reaches the turn sooner there.
+void rule7_turn_request_on_faster_waveform() {
+    ControlEvent e;
+    e.kind = ControlKind::TurnRequest;
+    e.retry_interval_ms = 15800;
+    e.ofdm_round_trip_ms = 4000;
+    e.robust_round_trip_ms = 0;
+    e.ofdm_lost = 5.0f;
+    CHECK(!planControlTx(ofdmSession(), e).robust_once,
+          "R7: no measured MC-DPSK round trip, nothing to compare: OFDM");
+    e.robust_round_trip_ms = 17500;
+    e.ofdm_answered = 0.0f;
+    e.ofdm_lost = 0.0f;
+    CHECK(!planControlTx(ofdmSession(), e).robust_once,
+          "R7: no losses yet - the optimistic prior keeps OFDM");
+    e.ofdm_lost = 2.0f;
+    CHECK(planControlTx(ofdmSession(), e).robust_once,
+          "R7: OFDM requests lost (Good 8 dB) - the first request rides MC-DPSK");
+    e.ofdm_answered = 5.0f;
+    e.ofdm_lost = 1.0f;
+    CHECK(!planControlTx(ofdmSession(), e).robust_once,
+          "R7: OFDM requests mostly answered (Good 15 dB): OFDM");
+    e.ofdm_answered = 0.0f;
+    e.ofdm_lost = 0.5f;
+    CHECK(!planControlTx(ofdmSession(), e).robust_once,
+          "R7: decayed losses fade - the session tries OFDM again");
+    e.ofdm_lost = 2.0f;
+    LinkFacts f = ofdmSession();
+    f.peer_decodes_robust = false;
+    CHECK(!planControlTx(f, e).robust_once, "R7: never to a peer without an MC-DPSK decoder");
+    f = ofdmSession();
+    f.session = WaveformMode::MC_DPSK;
+    CHECK(!planControlTx(f, e).robust_once, "R7: an MC-DPSK session already rides MC-DPSK");
+}
+
 void rule4_last_disconnect_retry() {
     ControlEvent e;
     e.kind = ControlKind::DisconnectRetry;
@@ -134,6 +170,7 @@ int main() {
     rule1_reply_on_arrival_waveform();
     rule2_close_during_unconfirmed_upcross();
     rule3_turn_request_into_silence();
+    rule7_turn_request_on_faster_waveform();
     rule4_last_disconnect_retry();
     rule5_mcdpsk_close_steps_down();
     rule6_mcdpsk_reply_at_request_rung();

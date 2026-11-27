@@ -1663,6 +1663,42 @@ void test_turn_request_retry_rides_robust_waveform_only_into_silence() {
     }
 }
 
+// BUG-TURN-REQUEST-OFDM-AT-FLOOR: a session whose OFDM TURN_REQUEST went unanswered and whose robust
+// retry drew an MC-DPSK TURNOVER sends its NEXT first request on MC-DPSK (planControlTx R7).
+void test_turn_request_learns_the_faster_waveform() {
+    setenv("ULTRA_WAVEFORM_FOLLOW", "2", 1);
+    Connection c;
+    unsetenv("ULTRA_WAVEFORM_FOLLOW");
+    int robust = 0;
+    std::vector<int> robust_at_request;
+    c.setTransmitCallback([&](const Bytes& f) {
+        const auto h = v2::parseHeader(f);
+        if (h.valid && h.type == v2::FrameType::TURN_REQUEST) robust_at_request.push_back(robust);
+    });
+    c.setRobustControlOnceCallback([&](Modulation) { ++robust; });
+    ConnectionAdaptiveTestAccess::makeConnectedOFDM(c, CodeRate::R1_2, 3.0f, 0.0f, Modulation::QPSK);
+    ConnectionAdaptiveTestAccess::allowWaveformFollow(c);
+    ConnectionAdaptiveTestAccess::makeLocalIrsWaitingForTurn(c);
+    CHECK(c.sendMessage("first"), "a message queues while the peer holds the turn");
+    const uint32_t retry_ms = ConnectionAdaptiveTestAccess::turnRequestRetransmitMs(c);
+    for (int i = 0; i < 40 && robust == 0; ++i) c.tick(retry_ms / 4 + 1);
+    CHECK(robust_at_request.size() >= 2 && robust_at_request[0] == 0 && robust == 1,
+          "the OFDM request goes unanswered, its retry rides MC-DPSK");
+    c.tick(1000);  // the robust exchange's round trip
+    c.noteRxFrameMcDpsk(true);
+    c.onFrameReceived(v2::ControlFrame::makeTurnover("K2DEF", "W1ABC").serialize(), false);
+    c.noteRxFrameMcDpsk(false);
+    for (int i = 0; i < 8; ++i) c.tick(500);
+    ConnectionAdaptiveTestAccess::makeLocalIrsWaitingForTurn(c);
+    robust_at_request.clear();
+    const int robust_before = robust;
+    CHECK(c.sendMessage("second"), "the next message queues");
+    for (int i = 0; i < 40 && robust_at_request.empty(); ++i) c.tick(250);
+    CHECK(!robust_at_request.empty(), "the next request is sent");
+    CHECK(!robust_at_request.empty() && robust_at_request[0] == robust_before + 1,
+          "the next FIRST request rides MC-DPSK, the waveform that answered");
+}
+
 // BUG-REPLY-ON-WRONG-WAVEFORM: in an OFDM session a control frame that arrived on MC-DPSK is
 // answered on MC-DPSK (DISCONNECT ack, TURNOVER); one that arrived on OFDM is answered on OFDM.
 void test_control_reply_rides_the_arrival_waveform() {
@@ -1854,6 +1890,7 @@ int main() {
     test_ofdm_probe_does_not_punish_mcdpsk_rung();
     test_last_disconnect_retry_rides_robust_waveform();
     test_turn_request_retry_rides_robust_waveform_only_into_silence();
+    test_turn_request_learns_the_faster_waveform();
     test_control_reply_rides_the_arrival_waveform();
     test_message_survives_receiver_commanded_crossings();
     test_message_survives_commanded_mode_changes();

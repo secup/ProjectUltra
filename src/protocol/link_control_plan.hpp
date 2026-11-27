@@ -46,7 +46,33 @@ struct ControlEvent {
     int useful_retry_count = 0;       // DisconnectRetry: the last retry that can still be answered
     uint32_t peer_silent_ms = 0;      // TurnRequestRetry: time since anything was heard from the peer
     uint32_t retry_interval_ms = 0;   // TurnRequestRetry: the request's retry interval
+    // TurnRequest: this session's turn-request record (TurnRequestRecord, decayed counts).
+    float ofdm_answered = 0.0f;       // OFDM requests answered by an OFDM TURNOVER
+    float ofdm_lost = 0.0f;           // OFDM requests whose retry came due unanswered
+    uint32_t ofdm_round_trip_ms = 0;  // last measured OFDM request -> TURNOVER (0 = none yet)
+    uint32_t robust_round_trip_ms = 0;  // last measured MC-DPSK request -> TURNOVER (0 = none yet)
 };
+
+// BUG-TURN-REQUEST-OFDM-AT-FLOOR: whether a first TURN_REQUEST reaches the turn sooner on MC-DPSK.
+// Expected time to the TURNOVER, from this session's own record: on OFDM p x T_ofdm + (1 - p) x
+// (T_retry + T_robust) - a lost OFDM request is followed by the robust retry (R3) - against T_robust
+// on MC-DPSK (taken as answered: the same assumption R3 makes). p is the posterior mean of the OFDM
+// answer rate under a Beta(2, 1) prior: optimistic, so a session starts on OFDM and comes back to it
+// as the decayed losses fade (TurnRequestRecord::decay). Needs a measured MC-DPSK round trip: without
+// one there is nothing to compare. TNC ping-pong, ITU Good 8 dB: 4 of 42 OFDM first requests answered;
+// a lost one cost 15.8 s before the robust request's 17.5 s exchange (mean 35 s per turn change).
+inline bool turnRequestRobustIsFaster(const ControlEvent& e) {
+    if (e.robust_round_trip_ms == 0 || e.retry_interval_ms == 0) return false;
+    constexpr float kPriorAnswered = 2.0f;
+    constexpr float kPriorLost = 1.0f;
+    const float p = (e.ofdm_answered + kPriorAnswered) /
+                    (e.ofdm_answered + e.ofdm_lost + kPriorAnswered + kPriorLost);
+    const float t_robust = static_cast<float>(e.robust_round_trip_ms);
+    const float t_ofdm_first =
+        p * static_cast<float>(e.ofdm_round_trip_ms) +
+        (1.0f - p) * (static_cast<float>(e.retry_interval_ms) + t_robust);
+    return t_robust < t_ofdm_first;
+}
 
 struct ControlTxPlan {
     // The next frame rides MC-DPSK once, at robust_mod (ModemEngine::transmitNextOnRobustWaveform).
@@ -120,6 +146,9 @@ inline ControlTxPlan planControlTx(const LinkFacts& f, const ControlEvent& e) {
             }
             break;
         case ControlKind::TurnRequest:
+            if (ofdm && f.peer_decodes_robust && turnRequestRobustIsFaster(e)) {
+                robust("R7 TURN_REQUEST on the waveform that answers sooner");
+            }
             break;
         case ControlKind::TurnRequestRetry:
             // R3 BUG-TURN-CONTROL-LOST-AT-OFDM-FLOOR: a retry into a peer silent for a whole
