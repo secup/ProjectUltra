@@ -2967,6 +2967,12 @@ Current blockers:
 
 ## Fixed Bugs
 
+### BUG-MCDPSK-TURN-REQUEST-AT-DATA-RUNG (FIXED 2026-11-27, link-control rule R9) — P2: MC-DPSK first TURN_REQUESTs lost at the data rung
+First requests rode the session rung the receiver raised on turbo data; one LDPC codeword ~1 dB weaker
+lost 7 of 8 at DQPSK (16-FSK-F: 71 of 71), 18 s per loss. Fix: R7's expected-time rule between the
+session rung and the rung below (CHANGELOG 2026-11-27). Remaining: the first loss per station, before
+a robust round trip is measured.
+
 ### BUG-OFDM-SINGLE-FRAME-LINEAR-TX (FIXED 2026-11-27) — P1: OFDM control frames and one-frame rounds left ~6 dB below the bursts
 Peak control clipped OFDM bursts only; a frame sent through `ModemEngine::transmit()` (one-frame data,
 TURN_REQUEST, TURNOVER, MODE_CHANGE, DISCONNECT) stayed linear and, scaled to the same peak, rode ~6 dB

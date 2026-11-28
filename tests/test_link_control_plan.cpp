@@ -106,7 +106,9 @@ void rule7_turn_request_on_faster_waveform() {
     CHECK(!planControlTx(f, e).robust_once, "R7: never to a peer without an MC-DPSK decoder");
     f = ofdmSession();
     f.session = WaveformMode::MC_DPSK;
-    CHECK(!planControlTx(f, e).robust_once, "R7: an MC-DPSK session already rides MC-DPSK");
+    f.session_mod = Modulation::MFSK16;
+    CHECK(!planControlTx(f, e).robust_once,
+          "R7: an MC-DPSK session already rides MC-DPSK (R9 only steps a rung, none below 16-FSK)");
 }
 
 void rule4_last_disconnect_retry() {
@@ -153,6 +155,38 @@ void rule8_mcdpsk_turn_request_retry_steps_down() {
     CHECK(planControlTx(f, e).step_down_to == Modulation::AUTO, "R8: a first request keeps the rung");
 }
 
+void rule9_mcdpsk_turn_request_one_rung_down() {
+    LinkFacts f;
+    f.session = WaveformMode::MC_DPSK;
+    f.session_mod = Modulation::DQPSK;
+    ControlEvent e;
+    e.kind = ControlKind::TurnRequest;
+    e.retry_interval_ms = 18000;
+    e.ofdm_round_trip_ms = 7000;
+    e.robust_round_trip_ms = 10000;
+    e.ofdm_answered = 10.0f;
+    CHECK(!planControlTx(f, e).robust_once,
+          "R9: the session rung answers (p 0.92 > 18 / (18 + 10 - 7)): it stays");
+    e.ofdm_answered = 0.0f;
+    e.ofdm_lost = 1.0f;
+    const auto p = planControlTx(f, e);
+    CHECK(p.robust_once && p.robust_mod == Modulation::MFSK16_FAST,
+          "R9: a request lost at DQPSK - the next goes at 16-FSK-F");
+    e.robust_round_trip_ms = 0;
+    CHECK(!planControlTx(f, e).robust_once, "R9: no measured round trip below, nothing to compare");
+    e.robust_round_trip_ms = 10000;
+    f.session_mod = Modulation::MFSK16;
+    CHECK(!planControlTx(f, e).robust_once, "R9: the bottom rung has nowhere to go");
+    f.session_mod = Modulation::DQPSK;
+    e.ofdm_answered = 10.0f;
+    e.ofdm_lost = 0.5f;
+    CHECK(!planControlTx(f, e).robust_once, "R9: requests mostly answered at the session rung");
+    e.ofdm_answered = 0.0f;
+    e.ofdm_lost = 0.0f;
+    CHECK(planControlTx(f, e).robust_once,
+          "R9: the prior alone (p 2/3) loses to an 18 s retry against a 3 s longer round trip");
+}
+
 void rule6_mcdpsk_reply_at_request_rung() {
     LinkFacts f;
     f.session = WaveformMode::MC_DPSK;
@@ -194,6 +228,7 @@ int main() {
     rule4_last_disconnect_retry();
     rule5_mcdpsk_close_steps_down();
     rule8_mcdpsk_turn_request_retry_steps_down();
+    rule9_mcdpsk_turn_request_one_rung_down();
     rule6_mcdpsk_reply_at_request_rung();
     robust_targets_the_peer_decoder();
     if (failures) {

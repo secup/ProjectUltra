@@ -148,6 +148,18 @@ inline ControlTxPlan planControlTx(const LinkFacts& f, const ControlEvent& e) {
         case ControlKind::TurnRequest:
             if (ofdm && f.peer_decodes_robust && turnRequestRobustIsFaster(e)) {
                 robust("R7 TURN_REQUEST on the waveform that answers sooner");
+            } else if (f.session == WaveformMode::MC_DPSK && turnRequestRobustIsFaster(e)) {
+                // R9 BUG-MCDPSK-TURN-REQUEST-AT-DATA-RUNG: R7 inside an MC-DPSK session, between the
+                // session rung and the rung below. The receiver raises the sender's rung on turbo
+                // data frames; the request is one LDPC codeword ~1 dB weaker, so at a rung just
+                // proven for data it is lost (TNC AWGN 0 dB: 0 of 6 first requests at DQPSK
+                // answered, 71 of 71 at 16-FSK-F) and each loss costs the 18 s retry (R8).
+                const Modulation below = connection_policy::mcDpskRungBelow(f.session_mod);
+                if (below != f.session_mod && connection_policy::mcDpskRungIndexFor(below) >= 0) {
+                    p.robust_once = true;
+                    p.robust_mod = below;
+                    p.rule = "R9 MC-DPSK TURN_REQUEST one rung down when that answers sooner";
+                }
             }
             break;
         case ControlKind::TurnRequestRetry:

@@ -1830,10 +1830,10 @@ void Connection::sendTurnRequestIfNeeded(bool retry) {
             LOG_MODEM(INFO, "Connection: TURN_REQUEST retry on the robust waveform (MC-DPSK): peer "
                             "silent %u ms", ms_since_peer_heard_);
         } else {
-            LOG_MODEM(INFO, "Connection: TURN_REQUEST on the robust waveform (MC-DPSK): OFDM "
-                            "answered %.1f / lost %.1f, round trip OFDM %u ms vs MC-DPSK %u ms",
-                      req.ofdm_answered, req.ofdm_lost, req.ofdm_round_trip_ms,
-                      req.robust_round_trip_ms);
+            LOG_MODEM(INFO, "Connection: TURN_REQUEST robust (%s, %s): first-try answered %.1f / "
+                            "lost %.1f, round trip %u ms vs robust %u ms",
+                      plan.rule, modulationToString(plan.robust_mod), req.ofdm_answered,
+                      req.ofdm_lost, req.ofdm_round_trip_ms, req.robust_round_trip_ms);
         }
         on_robust_control_once_(plan.robust_mod);
         robust = true;
@@ -1843,6 +1843,7 @@ void Connection::sendTurnRequestIfNeeded(bool retry) {
                   ms_since_peer_heard_);
         data_modulation_ = plan.step_down_to;
         notifyDataModeChanged(measured_snr_db_, wireFadingIndex(), /*snr_is_wire=*/false);
+        robust = true;  // the record's robust attempt: its round trip prices R9
     }
     transmitFrame(request.serialize());
     noteTurnRequestSent(robust);
@@ -1870,6 +1871,11 @@ void Connection::noteTurnRequestRetryDue() {
 void Connection::noteTurnoverForRequest(bool arrived_mcdpsk) {
     auto& r = turn_request_record_;
     // A reply rides its request's waveform (R1), so the arrival waveform names the attempt answered.
+    // In an MC-DPSK session every reply arrives on MC-DPSK: the attempt still outstanding is the
+    // one answered (a retry clears the earlier one, noteTurnRequestRetryDue).
+    if (negotiated_mode_ == WaveformMode::MC_DPSK) {
+        arrived_mcdpsk = r.robust_outstanding;
+    }
     if (arrived_mcdpsk && r.robust_outstanding) {
         r.robust_round_trip_ms =
             static_cast<uint32_t>(std::min<uint64_t>(connected_time_ms_ - r.robust_sent_at_ms,

@@ -10,6 +10,25 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-27 — fix(protocol): an MC-DPSK first TURN_REQUEST goes one rung down when that answers sooner (R9)
+
+**Broken (BUG-MCDPSK-TURN-REQUEST-AT-DATA-RUNG):** in an MC-DPSK session every first TURN_REQUEST rode the
+session rung, which the receiver raises on turbo data frames; the request is one LDPC codeword ~1 dB
+weaker. TNC pingpong on d1605389, 12 runs: first requests at MC-DPSK DQPSK answered 1 of 8 (AWGN 0 dB:
+0 of 6), at 16-FSK-F 71 of 71; each loss cost the 18 s retry (R8 then stepped the rung down, and the
+next data turn's tone ACKs raised it again).
+
+**Changed:** `planControlTx` TurnRequest (link_control_plan.hpp): R7's expected-time rule
+(`turnRequestRobustIsFaster`) inside an MC-DPSK session, between the session rung and the rung below
+(`robust_once` at `mcDpskRungBelow`). `Connection::noteTurnoverForRequest` credits the outstanding
+attempt in an MC-DPSK session (every reply arrives on MC-DPSK); R8's step-down retry counts as the
+robust attempt, so its round trip prices the rule. The request log names the rule and rung.
+
+**Verified:** ctest 134/134 (LinkControlPlan `rule9_...`). TNC pingpong vs d1605389, seeds 61-63: AWGN 0
+1246 -> 1253 s (one DQPSK loss per station remains: the rule needs a measured robust round trip), Good 3
+1357 -> 1269, Good 8 623 -> 566, AWGN 3 910 -> 866; total 4136 -> 3954 s, 12/12 PASS both. R9 fired 8
+times; no request it sent was lost.
+
 ## 2026-11-27 — fix(tx): a wideband OFDM frame sent alone gets its rung's peak control
 
 **Broken (BUG-OFDM-SINGLE-FRAME-LINEAR-TX):** peak control (default on since 2026-11-21) ran only on bursts
