@@ -35,6 +35,12 @@ AWGN 20 3890 bps and Good 20 2490 bps both arms; Good 8 seeds 61-63 130/226/138 
 AWGN 3 308/336/388 -> 316/282/333; Moderate 15 74 -> 65; Good 5 438/240 -> 317/215; total 2452 ->
 2224 s.
 
+**Rejected alongside:** a backlog-bounded follow patience (a sender whose backlog fits one MC-DPSK
+burst crosses down after tau(n) instead of the 60 s ski-rental cap). Before this fix it gained 7 % on
+the same 10 TNC cases (3616 -> 3374 s, mixed per case); on top of it, 2076 -> 2380 s (Poor 12 seed 62
+249 -> 508). The 60 s waits it targeted were the unclipped singletons; patch kept in the session
+scratchpad, not shipped.
+
 ## 2026-11-27 — fix(protocol): an unanswered MC-DPSK TURN_REQUEST steps the rung down (link-control rule R8)
 
 **Broken (BUG-MCDPSK-TURN-REQUEST-STUCK-ON-RUNG):** TNC pingpong, AWGN 0 dB, peak-limited TX, base 420185c4:
