@@ -10,6 +10,17 @@ This log tracks all bug fixes and behavioral changes to prevent re-doing work du
 
 ---
 
+## 2026-11-28 — release: v0.6.4.2-pre-alpha
+
+Release of main at e56f5b85 (42 commits since v0.6.4.1). NOT over-the-air compatible with 0.6.4.1:
+`BINARY_OBJECT` {0x05, id} (TNC binary blocks), the transfer identity in FILE_DATA / FILE_START /
+FILE_BLOCK, and `OBJECT_RESUME` {0x06, ...} are wire changes (entries of 2026-11-23 later and
+2026-11-26 below). CMakeLists VERSION 0.6.4.2; README latest release + v0.6.4.2 tables.
+Verified (v0.6.4.1 vs v0.6.4.2, same current gate script for both, 1 seed): GUI file AWGN 20 74/75 s,
+Good 20 99/99, Good 8 186/124, Good 5 317/306, AWGN 3 437/350, Good -2 291/221, AWGN -5 247/246;
+TNC pingpong AWGN 0 / AWGN 6 / Good 3 stalled on v0.6.4.1, 417 / 168 / 409 s on v0.6.4.2, Good 8
+224/197, Moderate 15 207/187. ctest 134/134.
+
 ## 2026-11-27 — fix(protocol): an MC-DPSK first TURN_REQUEST goes one rung down when that answers sooner (R9)
 
 **Broken (BUG-MCDPSK-TURN-REQUEST-AT-DATA-RUNG):** in an MC-DPSK session every first TURN_REQUEST rode the

@@ -17,7 +17,7 @@ view.
 > versions, so both stations must run the same build. Performance is measured on software and
 > hardware HF channel simulators; it is not yet characterized over the air at scale.
 
-*Updated 2026-11-23. Latest release: [`v0.6.4.1-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.4.1-pre-alpha).*
+*Updated 2026-11-28. Latest release: [`v0.6.4.2-pre-alpha`](https://github.com/secup/ProjectUltra/releases/tag/v0.6.4.2-pre-alpha).*
 
 ---
 
@@ -50,6 +50,40 @@ view.
 All figures are goodput: file bytes delivered and CRC-verified per second of transfer, with
 retransmissions and turnarounds included. Connection setup (about 14 s since v0.6.2, 24 s before) is
 not included.
+
+### v0.6.4.2, short messages, turn changes and the TNC
+
+Not over the air compatible with v0.6.4.1 (TNC objects and file transfers carry new identity
+fields): both stations need v0.6.4.2. The largest fix: an OFDM frame sent on its own (a one-frame
+message, and every OFDM control frame) skipped peak control and went out about 6 dB below the data
+bursts on a peak-limited transmitter, so short messages and turn changes were lost at SNRs where
+file transfers worked. Also: turn requests that pick the faster waveform and rung from the
+session's own record, MC-DPSK control and data frames decoded at the end of their own span, a
+waveform crossing that resumes an in-flight message instead of restarting it, four session-CFO
+fixes, and a dozen TNC fixes. Same simulator and scale as below, 1 seed per cell, seconds.
+
+GUI file transfer:
+
+| Channel, peak SNR | File | v0.6.4.1 | v0.6.4.2 |
+|---|---:|---:|---:|
+| AWGN 20 dB | 21 KB | 74 s | 75 s |
+| ITU Good 20 dB | 21 KB | 99 s | 99 s |
+| ITU Good 8 dB | 8 KB | 186 s | 124 s |
+| ITU Good 5 dB | 4 KB | 317 s | 306 s |
+| AWGN 3 dB | 4 KB | 437 s | 350 s |
+| ITU Good -2 dB | 1 KB | 291 s | 221 s |
+| AWGN -5 dB | 1 KB | 247 s | 246 s |
+
+TNC, two `ultra_tnc` stations trading eight short messages (8-300 bytes) the way a messaging
+client does (`tools/tnc_scenario.py --scenario pingpong`):
+
+| Channel, peak SNR | v0.6.4.1 | v0.6.4.2 |
+|---|---:|---:|
+| AWGN 0 dB | stalled at message 7 | 417 s |
+| AWGN 6 dB | stalled at message 3 | 168 s |
+| ITU Good 3 dB | stalled at message 3 | 409 s |
+| ITU Good 8 dB | 224 s | 197 s |
+| ITU Moderate 15 dB | 207 s | 187 s |
 
 ### v0.6.4.1, fading fixes
 
